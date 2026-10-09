@@ -36,6 +36,8 @@
  * through this DeviceIdentity provider's storage only.
  */
 import { loadWasm } from "../wasm";
+import { base64Decode, base64Encode } from "../auth/account-id";
+import { keyResetAttestationGeneration } from "../auth/key-reset-owed";
 import { DsClient } from "../ds/client";
 import { dsAccess, registerBeforePublish, takeSigner, type ProofSigner } from "../ds/access";
 import { claimOrReset, releaseAuthority, resetWithAttestation } from "../ds/ownership";
@@ -202,6 +204,16 @@ export async function ensureDeviceGroup(
         throw new Error("ds: the DeviceGroup root is not available yet");
       }
       if (keyResetAttestB64 !== undefined) {
+        // ADR-0066 section 4.6: the new account key endorses the root that
+        // becomes the journal's (the Reset statement's signer), bound to the
+        // journal and the attested generation.
+        const rootEndorsementB64 = rootEndorsementFor(
+          wasm,
+          accountIdentitySeed,
+          groupId,
+          keyResetAttestB64,
+          authority.signer.publicKey(),
+        );
         journalReset = await resetWithAttestation(
           new DsClient(),
           groupId,
@@ -209,6 +221,7 @@ export async function ensureDeviceGroup(
           founding.epoch,
           founding.verifyingKey(),
           keyResetAttestB64,
+          rootEndorsementB64,
         );
       } else {
         await claimOrReset(new DsClient(), groupId, authority.signer, founding.epoch, founding.verifyingKey());
@@ -237,6 +250,32 @@ export async function ensureDeviceGroup(
   return journalReset === undefined
     ? { identity, group, bootstrapped: true }
     : { identity, group, bootstrapped: true, journalReset };
+}
+
+/**
+ * ADR-0066 section 4.6 - `root_endorsement_b64` for an attested DS statement:
+ * `signDsRootEndorsement(newAccountEd25519Seed, journalId, keyGeneration,
+ * rootKey)` in STANDARD base64, where the generation is read off the
+ * attestation the statement carries and `rootKey` is the key that BECOMES the
+ * root (a reset's signer, a transfer's `new_root`).
+ */
+export function rootEndorsementFor(
+  wasm: Pick<Awaited<ReturnType<typeof loadWasm>>, "Identity" | "signDsRootEndorsement">,
+  newAccountIdentitySeed: Uint8Array | undefined,
+  journalId: Uint8Array,
+  keyResetAttestB64: string,
+  rootKey: Uint8Array,
+): string {
+  if (newAccountIdentitySeed === undefined) {
+    throw new Error("ds: a root endorsement needs the new account seed");
+  }
+  const generation = keyResetAttestationGeneration(base64Decode(keyResetAttestB64));
+  const account = wasm.Identity.fromSeed(newAccountIdentitySeed);
+  try {
+    return base64Encode(wasm.signDsRootEndorsement(account.ed25519Seed, journalId, generation, rootKey));
+  } finally {
+    account.free();
+  }
 }
 
 /**

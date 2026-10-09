@@ -25,7 +25,7 @@ export const SubscriberAdmission: Component = () => {
   let running = false;
 
   const run = (): void => {
-    const identity = chats.accountIdentity();
+    const identity = chats.conversationAccountIdentity();
     if (identity === null || !channelsState.hydrated() || running) return;
     const owned = [...channelsState.keysByChannel().keys()];
     if (owned.length === 0) return;
@@ -48,7 +48,7 @@ export const SubscriberAdmission: Component = () => {
   };
 
   createEffect(() => {
-    if (chats.accountIdentity() !== null && channelsState.hydrated()) run();
+    if (chats.conversationAccountIdentity() !== null && channelsState.hydrated()) run();
   });
 
   onMount(() => {

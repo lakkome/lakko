@@ -152,6 +152,33 @@ public final class ReachCenter: ObservableObject {
         grantRevision &+= 1
     }
 
+    /// ADR-0066 section 3.5, "DS" / "Reach" — the account's keys were
+    /// rotated: every reach key and the mailbox derive from the account
+    /// seed, so they move to the new one. The setting, the version counters
+    /// and the grants this account HOLDS for other people are kept (they are
+    /// filed under the contact, not under this account's key). What was
+    /// registered was registered on the OLD mailbox: nothing is registered on
+    /// the new one yet, so the next ``sync()`` registers everything there.
+    /// The old mailbox and its keys are left as they are.
+    public func rekey(accountIdB64: String, accountIdentity: Identity) {
+        guard self.accountIdB64 == accountIdB64, accountSeed != nil else {
+            activate(accountIdB64: accountIdB64, accountIdentity: accountIdentity)
+            return
+        }
+        syncTask?.cancel()
+        syncTask = nil
+        syncAgain = false
+        accountSeed = accountIdentity.ed25519Seed()
+        ownAccountKey = accountIdentity.signaturePublicKey()
+        let signer = dsMailboxSigner(identity: accountIdentity)
+        mailboxSigner = signer
+        mailboxPseudonym = signer.mailboxPseudonym()
+        record.registeredB64 = []
+        record.registeredOpen = nil
+        persist()
+        grantRevision &+= 1
+    }
+
     /// No signed-in account (logout). The record stays on disk.
     public func deactivate() {
         syncTask?.cancel()

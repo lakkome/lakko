@@ -60,6 +60,7 @@ describe("every path that lands a device with keys stores the phrase", () => {
       "device-pairing",
       "device-restore",
       "fresh-identity",
+      "key-rotation",
     ]);
   });
 
@@ -93,13 +94,51 @@ describe("every path that lands a device with keys stores the phrase", () => {
     // (a failure there discards the generated phrase), and everything local
     // is persisted before the publishing steps, which can fail and be
     // retried with what was stored.
+    // Since ADR-0066 the part after the server's answer is one function,
+    // `adoptKeyResetOutcome`, which the reset and the recall both call.
     const start = authContext.indexOf("async mintFreshIdentity(");
     const reset = authContext.indexOf("await client.resetAccountKeys(", start);
-    const store = authContext.indexOf('"fresh-identity"', start);
-    const publish = authContext.indexOf("await retryKeyResetPublish(", start);
+    const adopt = authContext.indexOf("await adoptKeyResetOutcome(", start);
+    const end = authContext.indexOf("async confirmFreshPhraseSaved(", start);
     expect(reset).toBeGreaterThan(start);
-    expect(store).toBeGreaterThan(reset);
-    expect(publish).toBeGreaterThan(store);
+    expect(adopt).toBeGreaterThan(reset);
+    expect(adopt).toBeLessThan(end);
+
+    const adoptStart = authContext.indexOf("async function adoptKeyResetOutcome(");
+    const store = authContext.indexOf('"fresh-identity"', adoptStart);
+    const owed = authContext.indexOf("writeKeyResetOwed(", adoptStart);
+    const publish = authContext.indexOf("await retryKeyResetPublish(", adoptStart);
+    expect(adoptStart).toBeGreaterThan(0);
+    expect(store).toBeGreaterThan(adoptStart);
+    expect(owed).toBeGreaterThan(store);
+    expect(publish).toBeGreaterThan(owed);
+    // The phrase is stored in exactly one place for both.
+    expect(authContext.split('"fresh-identity"').length - 1).toBe(1);
+  });
+
+  it("a recall continues through the reset's one path, and drops its record only after the new keys are stored (ADR-0066 part 1)", () => {
+    const start = authContext.indexOf("function recallTakeBack(");
+    const end = authContext.indexOf("\n  }\n", start);
+    const body = authContext.slice(start, end);
+    // The server exchange is two calls since ADR-0066 T5 item 25 (the finish
+    // request is kept until it is answered); the adoption follows the finish.
+    const server = body.lastIndexOf("await client.recallFinish(");
+    expect(body.indexOf("await client.recallPrepare(")).toBeGreaterThan(0);
+    const adopt = body.indexOf("await adoptKeyResetOutcome(");
+    const destroy = body.indexOf("await deleteRecallRecord(");
+    expect(server).toBeGreaterThan(0);
+    expect(adopt).toBeGreaterThan(server);
+    // Inside `afterPersist`, which the shared path runs once everything
+    // local is stored.
+    expect(destroy).toBeGreaterThan(body.indexOf("afterPersist:"));
+    expect(body.includes("storeDevicePhrase(")).toBe(false);
+    expect(body.includes("publishResetIdentity(")).toBe(false);
+    const adoptStart = authContext.indexOf("async function adoptKeyResetOutcome(");
+    const persisted = authContext.indexOf("writeKeyResetOwed(", adoptStart);
+    const hook = authContext.indexOf("await ctx.afterPersist?.();", adoptStart);
+    const publish = authContext.indexOf("await retryKeyResetPublish(", adoptStart);
+    expect(hook).toBeGreaterThan(persisted);
+    expect(publish).toBeGreaterThan(hook);
   });
 
   it("lets nothing but the helper and the backup bootstrap write the phrase store", () => {

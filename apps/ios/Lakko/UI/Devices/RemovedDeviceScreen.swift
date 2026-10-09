@@ -9,11 +9,9 @@ import SwiftUI
 ///
 /// Replaces the whole signed-in app once another device of the account has
 /// removed this one, or reset the account's keys: no chat list behind it,
-/// no dismiss, no retry. In the removed variant the one button is Settings'
-/// "Forget this device" (``AppServices/forgetThisDevice()``): this device's
-/// keys and local history for the account go, then the login screen. In the
-/// reset variant the deletion starts by itself; the one button, "Sign in",
-/// appears once it is done. The mismatch variant (the directory publishes
+/// no dismiss, no retry. In BOTH variants the deletion starts by itself
+/// (ADR-0066 section 2.3, UX 18.2: a removed device no longer waits for a
+/// tap); the one button, "Sign in", appears once it is done. The mismatch variant (the directory publishes
 /// other keys at the same generation, an anomaly) keeps the "Sign out"
 /// button and runs the deletion on the tap. Drawn in the anonymous screens'
 /// frame (``AuthScreen``), since where it leads is sign-in.
@@ -21,8 +19,8 @@ struct RemovedDeviceScreen: View {
 
     /// Which of the three states the screen shows.
     enum Variant: Equatable {
-        /// Another device removed this one.
-        case removed
+        /// Another device removed this one; the wipe is running or done.
+        case removed(KeysSignOutState)
         /// The keys were reset elsewhere; the wipe is running or done.
         case keysReset(KeysSignOutState)
     }
@@ -30,6 +28,10 @@ struct RemovedDeviceScreen: View {
     let variant: Variant
     /// `@name` for the reset copy; empty for a guest.
     var username: String = ""
+    /// A catalog key drawn under the body of the reset variant, or `nil`: a
+    /// recall that ended because the tries ran out or the time passed while
+    /// the form was open (UX 18.4, `devices.recall.error.*`).
+    var noticeKey: String? = nil
     let onSignOut: () -> Void
     var onSignIn: () -> Void = {}
 
@@ -39,14 +41,17 @@ struct RemovedDeviceScreen: View {
     /// Re-renders the copy on a language switch.
     @ObservedObject private var l10n = Localization.shared
 
-    init(onSignOut: @escaping () -> Void) {
-        self.variant = .removed
-        self.onSignOut = onSignOut
-    }
-
-    init(keysReset state: KeysSignOutState, username: String, onSignOut: @escaping () -> Void, onSignIn: @escaping () -> Void) {
-        self.variant = .keysReset(state)
+    init(
+        _ state: KeysSignOutState,
+        cause: DeviceSignOutCause,
+        username: String,
+        noticeKey: String? = nil,
+        onSignOut: @escaping () -> Void,
+        onSignIn: @escaping () -> Void
+    ) {
+        self.variant = RemovedDevice.variant(cause: cause, state: state)
         self.username = username
+        self.noticeKey = noticeKey
         self.onSignOut = onSignOut
         self.onSignIn = onSignIn
     }
@@ -54,16 +59,8 @@ struct RemovedDeviceScreen: View {
     var body: some View {
         AuthScreen {
             switch variant {
-            case .removed:
-                AuthTitle(
-                    title: RemovedDevice.Copy.title,
-                    subtitle: RemovedDevice.Copy.body
-                )
-                AuthPrimaryButton(title: RemovedDevice.Copy.signOut, busy: busy) {
-                    guard !busy else { return }
-                    busy = true
-                    onSignOut()
-                }
+            case .removed(let state):
+                removed(state)
             case .keysReset(let state):
                 keysReset(state)
             }
@@ -72,6 +69,44 @@ struct RemovedDeviceScreen: View {
 
     private var displayedAccount: String {
         username.isEmpty ? "" : "@\(username)"
+    }
+
+    /// UX 18.2: the deletion runs by itself, then one button. No "Was it
+    /// you?" and no way back: a removal changes no keys.
+    @ViewBuilder
+    private func removed(_ state: KeysSignOutState) -> some View {
+        switch state {
+        case .removing, .mismatch:
+            // `.mismatch` is a state of the reset variant only; a removal
+            // never waits for a tap.
+            AuthTitle(
+                title: RemovedDevice.Copy.title,
+                subtitle: RemovedDevice.Copy.bodyRemoving(account: displayedAccount)
+            )
+            .accessibilityElement(children: .combine)
+            HStack(spacing: 10) {
+                ProgressView()
+                Text(RemovedDevice.Copy.removing)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            .accessibilityElement(children: .combine)
+        case .removed:
+            AuthTitle(
+                title: RemovedDevice.Copy.title,
+                subtitle: RemovedDevice.Copy.bodyDone(account: displayedAccount)
+            )
+            .accessibilityElement(children: .combine)
+            AuthPrimaryButton(title: RemovedDevice.Copy.signIn, action: onSignIn)
+        }
+    }
+
+    /// Why a recall ended, under the body (UX 18.4): the tries ran out, or
+    /// the time passed while the form was open.
+    @ViewBuilder private var notice: some View {
+        if let noticeKey {
+            AuthHint(text: l10n.t(noticeKey), isError: true)
+        }
     }
 
     @ViewBuilder
@@ -85,6 +120,7 @@ struct RemovedDeviceScreen: View {
                 subtitle: l10n.t("devices.signed_out.body_removing", texts: ["username": displayedAccount])
             )
             .accessibilityElement(children: .combine)
+            notice
             HStack(spacing: 10) {
                 ProgressView()
                 Text(l10n.t("devices.signed_out.removing"))
@@ -98,6 +134,7 @@ struct RemovedDeviceScreen: View {
                 subtitle: l10n.t("devices.signed_out.body_removed", texts: ["username": displayedAccount])
             )
             .accessibilityElement(children: .combine)
+            notice
             AuthPrimaryButton(title: l10n.t("devices.signed_out.sign_in"), action: onSignIn)
         case .mismatch:
             AuthTitle(

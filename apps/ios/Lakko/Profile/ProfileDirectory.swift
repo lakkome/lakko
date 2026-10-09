@@ -83,7 +83,50 @@ public final class ProfileDirectory: ObservableObject {
         ownProfile = ownStore.load(accountIdB64: accountIdB64)
         // This account's own names for its contacts, never the previous one's.
         setRenames(from: AcceptedContactsStore.load(accountIdB64: accountIdB64))
+        // ADR-0066 section 3.5 — the proven-predecessor map of this account's
+        // contacts, re-read whenever the pin gate records a proven rotation.
+        provenPredecessors = ProvenPredecessorStore(ownerAccountIdB64: accountIdB64).load()
+        if predecessorObserver == nil {
+            predecessorObserver = NotificationCenter.default.addObserver(
+                forName: ProvenPredecessorStore.changed, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reloadProvenPredecessors() }
+            }
+        }
         bump()
+    }
+
+    /// ADR-0066 section 3.5 — `predecessor key -> current key` for every
+    /// contact whose key change the ADR-0016 gate accepted BY PROOF. The same
+    /// person under two keys: a name known under either resolves for both.
+    /// Never fed by an unproven change.
+    private var provenPredecessors = ProvenPredecessors()
+    private var predecessorObserver: NSObjectProtocol?
+
+    private func reloadProvenPredecessors() {
+        guard let accountIdB64 else { return }
+        let next = ProvenPredecessorStore(ownerAccountIdB64: accountIdB64).load()
+        guard next != provenPredecessors else { return }
+        provenPredecessors = next
+        bump()
+    }
+
+    /// Replace the proven-predecessor map (tests).
+    func setProvenPredecessors(_ map: ProvenPredecessors) {
+        guard map != provenPredecessors else { return }
+        provenPredecessors = map
+        bump()
+    }
+
+    /// The other key of the same person, across a proven rotation, that
+    /// something is known under: a local rename first, then a received
+    /// profile. `nil` when `keyB64` itself is known, or nothing is.
+    private func provenAlias(of keyB64: String) -> String? {
+        guard !provenPredecessors.isEmpty,
+              renames[keyB64] == nil, received.profile(signatureKeyB64: keyB64) == nil else { return nil }
+        let others = provenPredecessors.allKeys(of: keyB64).filter { $0 != keyB64 }
+        return others.first { renames[$0] != nil }
+            ?? others.first { received.profile(signatureKeyB64: $0) != nil }
     }
 
     /// No active account (logout). Stored data stays on disk.
@@ -345,6 +388,12 @@ public final class ProfileDirectory: ObservableObject {
         if renames[keyB64] == nil, received.profile(signatureKeyB64: keyB64) == nil,
            let previous = aliases[keyB64], let previousKey = Data(base64Encoded: previous) {
             return resolve(signatureKey: previousKey)
+        }
+        // ADR-0066 section 3.5 — a key nothing is known under that is the
+        // same person as a known key across a PROVEN rotation resolves as
+        // that person. Nothing is shown about the rotation itself.
+        if let alias = provenAlias(of: keyB64), let aliasKey = Data(base64Encoded: alias) {
+            return resolve(signatureKey: aliasKey)
         }
         let profile = received.profile(signatureKeyB64: keyB64)
         var state: UsernameVerificationState?

@@ -56,6 +56,16 @@ pub(crate) struct AuthenticatedAccount(pub(crate) [u8; 16]);
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SessionKeyGeneration(pub(crate) u64);
 
+/// The device the session token names (ADR-0066 section 0.4): the device's
+/// conversation leaf signature key, which is the `device_id` of the KeyPackage
+/// directory. All zero for a session that names no device yet. Asserted by
+/// the client when the session landed at auth, not proven; what it buys here
+/// is that a session can only publish the device it was issued for, so a
+/// removed device's still-valid token cannot publish under a fresh device
+/// key. A property of the credential, hence its own extension.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SessionDevice(pub(crate) [u8; 32]);
+
 /// Middleware factory. Apply via
 /// `.route_layer(axum::middleware::from_fn_with_state(state.clone(), require_session))`.
 ///
@@ -91,7 +101,7 @@ pub(crate) async fn require_session(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
 
-    // The key generation the v2 token carries (ADR-0065) is not compared
+    // The key generation the v3 token carries (ADR-0065) is not compared
     // here: discovery's stateless verify accepts any generation within the
     // expiry. It is handed on, and the two identity writes apply the floor
     // of their own row (`key_reset::floor_refuses`).
@@ -109,5 +119,8 @@ pub(crate) async fn require_session(
     request
         .extensions_mut()
         .insert(SessionKeyGeneration(verified.key_generation));
+    request
+        .extensions_mut()
+        .insert(SessionDevice(verified.device_id));
     Ok(next.run(request).await)
 }

@@ -13,17 +13,25 @@ import Foundation
 /// device compares with the one the directory publishes
 /// (``KeyResetLanding``) and what a `401 key-generation-superseded` is about.
 public struct SessionPair: Equatable, Codable, Sendable {
-    /// The `v2` access token.
+    /// The `v3` access token.
     public let sessionToken: String
     /// Absolute unix-millisecond expiry of ``sessionToken``.
     public let sessionExpiresAtMs: Int64
-    /// The `r1` refresh credential. Empty for a session that cannot renew
+    /// The `r2` refresh credential. Empty for a session that cannot renew
     /// (a test fixture); the provider then never refreshes it.
     public let refreshToken: String
     /// Absolute unix-millisecond expiry of ``refreshToken``.
     public let refreshExpiresAtMs: Int64
     /// The key generation the pair was issued under (1 = never reset).
     public let keyGeneration: UInt64
+    /// ADR-0066 section 0.4 — the device id this pair was issued for, as THIS
+    /// CLIENT asserted it (`device_id_b64` at a landing, or
+    /// `POST /auth/session/bind-device`): standard base64 of the 32-byte
+    /// conversation leaf key. `nil` for a pair that names no device yet. A
+    /// client-side note only: the tokens stay opaque and the server never
+    /// sends this field, so it is not a coding key of the wire shape; a
+    /// refresh keeps the device and so the provider carries the note over.
+    public var deviceIdB64: String? = nil
 
     public init(
         sessionToken: String,
@@ -50,6 +58,18 @@ public struct SessionPair: Equatable, Codable, Sendable {
             refreshExpiresAtMs: 0,
             keyGeneration: 1
         )
+    }
+
+    /// The same pair, noted as issued for `deviceId` (`nil` clears the note).
+    public func naming(deviceId: Data?) -> SessionPair {
+        naming(deviceIdB64: deviceId.map { $0.base64EncodedString() })
+    }
+
+    /// The same pair with the device note set to `deviceIdB64`.
+    public func naming(deviceIdB64: String?) -> SessionPair {
+        var copy = self
+        copy.deviceIdB64 = deviceIdB64
+        return copy
     }
 
     /// Whether the refresh credential can still be presented at `nowMs`.

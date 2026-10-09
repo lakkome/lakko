@@ -115,6 +115,7 @@ use crate::introduction::{
     try_unwrap_introduction_offer, try_unwrap_introductions, IntroductionError, IntroductionRecord,
     IntroductionsBundle,
 };
+use crate::key_rotation::{try_unwrap_key_rotation, KeyRotation, KeyRotationError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
 use crate::pin::{try_unwrap_pin, PinError, PinOp};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
@@ -299,6 +300,16 @@ pub enum IncomingEnvelope<'a> {
         /// The recreated group's id, or `None` when closed without one.
         successor_group_id: Option<[u8; SUCCESSOR_GROUP_ID_LEN]>,
     },
+    /// The account's keys are being changed by another of its devices, and
+    /// this is the new recovery-phrase entropy with the proof that the old
+    /// account key authorised it (ADR-0066 section 3.3). Never a chat
+    /// bubble, and meaningful ONLY in the account's own DeviceGroup: a
+    /// client that meets one in any other group drops it. **The caller must
+    /// not adopt this on receipt:** check the proof against the account key
+    /// it holds and the entropy against the proof's new key (one call on
+    /// both FFI surfaces), store it as pending, and adopt only once the
+    /// server-side change is visible. See [`crate::key_rotation`].
+    KeyRotation(KeyRotation),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -369,6 +380,10 @@ pub enum DispatchError {
     /// The group-closed domain (ADR-0065 phase 2) with a malformed payload.
     #[error(transparent)]
     GroupClosed(#[from] GroupClosedError),
+    /// The key-rotation domain (ADR-0066 section 3.3) with a malformed
+    /// payload.
+    #[error(transparent)]
+    KeyRotation(#[from] KeyRotationError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -449,6 +464,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
             closed_at_ms: closed.closed_at_ms,
             successor_group_id: closed.successor_group_id,
         });
+    }
+    // 7h. Key rotation — ADR-0066 section 3.3.
+    if let Some(rotation) = try_unwrap_key_rotation(plaintext)? {
+        return Ok(IncomingEnvelope::KeyRotation(rotation));
     }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {

@@ -564,6 +564,7 @@ mod tests {
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
+            crate::key_rotation::KEY_ROTATION_ENVELOPE_DOMAIN_V1,
             crate::registrar_seed::REGISTRAR_SEED_ENVELOPE_DOMAIN_V1,
             crate::introduction::INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
             crate::introduction::INTRODUCTIONS_ENVELOPE_DOMAIN_V1,

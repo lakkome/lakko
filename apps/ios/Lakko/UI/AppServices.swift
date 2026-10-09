@@ -31,6 +31,12 @@ final class AppServices {
     /// The Feed's "Couldn't check for new messages." state, fed by every
     /// check. In memory, per account.
     let feedRefresh: FeedRefreshCenter
+    /// ADR-0066 section 2.3 — removing another device of the account, with
+    /// its owed record.
+    let deviceRemoval: DeviceRemovalRunner
+    /// ADR-0066 section 3.2 — "It was lost or stolen": remove a device AND
+    /// change the account keys, with its owed record.
+    let keyRotation: KeyRotationRunner
 
     init(
         authRepository: AuthRepository,
@@ -41,7 +47,9 @@ final class AppServices {
         linkCallHost: LinkCallHost,
         deviceGroupSync: DeviceGroupSyncRepository,
         inviteIntake: InviteIntake,
-        feedRefresh: FeedRefreshCenter
+        feedRefresh: FeedRefreshCenter,
+        deviceRemoval: DeviceRemovalRunner,
+        keyRotation: KeyRotationRunner
     ) {
         self.authRepository = authRepository
         self.contactsRepository = contactsRepository
@@ -52,6 +60,8 @@ final class AppServices {
         self.deviceGroupSync = deviceGroupSync
         self.inviteIntake = inviteIntake
         self.feedRefresh = feedRefresh
+        self.deviceRemoval = deviceRemoval
+        self.keyRotation = keyRotation
     }
 }
 
@@ -92,6 +102,14 @@ extension AppServices {
         wipeAccountLocalData(accountIdB64: accountIdB64)
     }
 
+    /// ADR-0066 section 1.1 — the STAGED wipe of a device whose account keys
+    /// were reset elsewhere: the same runtimes let go and the same stores
+    /// are removed, except the recall record, which is what "Was it you?"
+    /// needs to take the account back.
+    func stagedWipeAfterKeyReset(accountIdB64: String) {
+        wipeAccountLocalData(accountIdB64: accountIdB64, keeping: [.recallRecord])
+    }
+
     /// Forget device and Delete account, after their server-side part: remove
     /// every piece of the account's local data on this device and end the
     /// session. The one path both flows take; Log out does not come here.
@@ -103,7 +121,7 @@ extension AppServices {
     ///
     /// - Parameter accountIdB64: the account to wipe; `nil` (no session to
     ///   name one) falls back to the persisted session record.
-    func wipeAccountLocalData(accountIdB64: String?) {
+    func wipeAccountLocalData(accountIdB64: String?, keeping: Set<AccountLocalDataWipe.Kept> = []) {
         PushAccountBindingStore.live.clear()
         AuthRepository.removeAllDeliveredNotifications()
         let target = accountIdB64 ?? SessionStore().load()?.accountIdB64
@@ -114,7 +132,7 @@ extension AppServices {
         deviceGroupSync.clear()
         feedRefresh.reset()
         if let target {
-            AccountLocalDataWipe.wipe(accountIdB64: target)
+            AccountLocalDataWipe.wipe(accountIdB64: target, keeping: keeping)
         } else {
             NSLog("[account-wipe] WARN no account to wipe: no session and no session record")
         }

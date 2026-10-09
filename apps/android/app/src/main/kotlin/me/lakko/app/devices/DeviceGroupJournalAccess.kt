@@ -9,7 +9,8 @@ import me.lakko.app.ds.FfiDsJournalSigner
 import me.lakko.app.ds.DsStatementSigning
 import me.lakko.app.ds.FfiDsStatementSigning
 import me.lakko.app.ds.registerEpochBeforePublish
-import me.lakko.app.ds.withKeyResetAttestation
+import me.lakko.app.ds.KeyResetRootEvidence
+import me.lakko.app.ds.withKeyResetEvidence
 import uniffi.lakko_ffi_uniffi.DeviceGroup
 import uniffi.lakko_ffi_uniffi.Identity
 
@@ -114,7 +115,7 @@ internal object DeviceGroupJournalAccess {
                     statements = root,
                     refounded = true,
                     put = { make -> ds.putStatement(make) },
-                    keyResetAttestationB64 = pendingResetAttestationB64(context, accountIdB64),
+                    keyResetEvidence = { rootKey -> pendingResetEvidence(context, accountIdB64, groupId, rootKey) },
                 )
                 if (outcome != me.lakko.app.ds.JournalClaimOutcome.ALREADY_CLAIMED) {
                     onJournalRootLanded(context, accountIdB64)
@@ -126,13 +127,21 @@ internal object DeviceGroupJournalAccess {
     }
 
     /**
-     * ADR-0065 section 5 — the key-reset attestation (standard base64) a
-     * founding of this account's DeviceGroup must carry on its `Reset`,
-     * because the journal's chain on the DS belongs to the OLD root: present
-     * while a reset's DS step is still owed and the attestation is within
-     * its 30-day bound. `null` otherwise (an ordinary same-root re-founding).
+     * ADR-0065 section 5 / ADR-0066 T5 item 21 - what a founding of this
+     * account's DeviceGroup must carry on its `Reset`, because the journal's
+     * chain on the DS belongs to the OLD root: the key-reset attestation and
+     * the NEW account key's endorsement of [rootKey] (the reset's signer).
+     * Present while a reset's DS step is still owed and the attestation is
+     * within its 30-day bound. `null` otherwise (an ordinary same-root
+     * re-founding), and `null` when the new seed is not on this device (the
+     * DS then answers the uniform 401 and the step stays owed).
      */
-    fun pendingResetAttestationB64(context: android.content.Context, accountIdB64: String): String? {
+    fun pendingResetEvidence(
+        context: android.content.Context,
+        accountIdB64: String,
+        journalId: ByteArray,
+        rootKey: ByteArray,
+    ): KeyResetRootEvidence? {
         val owed = me.lakko.app.auth.KeyResetOwedStore.onDevice(context).load(accountIdB64) ?: return null
         if (owed.deviceGroupReset) return null
         val age = me.lakko.app.auth.attestationAgeAt(
@@ -141,8 +150,40 @@ internal object DeviceGroupJournalAccess {
             signedInAgainMs = null,
         )
         if (age != me.lakko.app.auth.AttestationAge.Fresh) return null
-        return owed.attestationB64
+        val seed = me.lakko.app.auth.AccountIdentitySeedStore.getAccountIdentitySeed(context, accountIdB64)
+            ?: return null
+        return try {
+            rootEvidence(seed, owed.attestationB64, owed.keyGeneration, journalId, rootKey)
+        } finally {
+            seed.fill(0)
+        }
     }
+
+    /**
+     * The attestation with the endorsement of [rootKey] by the account
+     * identity [accountIdentitySeed] derives (the key the attestation
+     * names). `null` when the endorsement cannot be signed.
+     */
+    fun rootEvidence(
+        accountIdentitySeed: ByteArray,
+        attestationB64: String,
+        keyGeneration: Long,
+        journalId: ByteArray,
+        rootKey: ByteArray,
+    ): KeyResetRootEvidence? =
+        try {
+            val endorsement = Identity.fromSeed(accountIdentitySeed).use { identity ->
+                val ed = identity.ed25519Seed()
+                try {
+                    uniffi.lakko_ffi_uniffi.signDsRootEndorsement(ed, journalId, keyGeneration.toULong(), rootKey)
+                } finally {
+                    ed.fill(0)
+                }
+            }
+            KeyResetRootEvidence(attestationB64, me.lakko.app.auth.base64Encode(endorsement))
+        } catch (_: Throwable) {
+            null
+        }
 
     /** A claim or an attested reset of this account's DeviceGroup journal
      *  answered 204: the reset's DS step, when one was owed, is done. */
@@ -161,7 +202,7 @@ internal object DeviceGroupJournalAccess {
      * unaffected), and re-root the journal with a `Reset` signed by the NEW
      * root carrying the attestation. The founding stays unconfirmed until the
      * reset answers 204 (no Welcome may leave before that); a later open claims
-     * again with the stored attestation ([pendingResetAttestationB64]).
+     * again with the stored attestation ([pendingResetEvidence]).
      *
      * Returns what the DS said; nothing is minted again on any outcome.
      * [accountIdentitySeed] is the NEW phrase seed (read, never kept).
@@ -172,6 +213,7 @@ internal object DeviceGroupJournalAccess {
         accountIdB64: String,
         accountIdentitySeed: ByteArray,
         attestationB64: String,
+        keyGeneration: Long,
         ds: DsClient,
     ): me.lakko.app.auth.KeyResetStepOutcome {
         val deviceSeed = me.lakko.app.auth.DeviceIdentityStore.ensureDeviceIdentitySeed(context, accountIdB64)
@@ -191,10 +233,14 @@ internal object DeviceGroupJournalAccess {
                 ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the DeviceGroup access key could not be derived")
             val root = rootOfSeed(accountIdentitySeed, groupId)
                 ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the DeviceGroup root could not be derived")
+            // ADR-0066 T5 item 21 - the DS refuses the attestation without
+            // the new account key's endorsement of the resetting root.
+            val evidence = rootEvidence(accountIdentitySeed, attestationB64, keyGeneration, groupId, root.publicKey)
+                ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the root endorsement could not be signed")
             val error: Throwable? = try {
                 ds.putStatement {
                     root.reset(groupId, signer.epoch, signer.verifyingKey)
-                        .withKeyResetAttestation(attestationB64)
+                        .withKeyResetEvidence(evidence)
                 }
                 null
             } catch (cancel: kotlinx.coroutines.CancellationException) {

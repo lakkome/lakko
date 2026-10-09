@@ -331,7 +331,10 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
         XCTAssertTrue(bound, "a restored session binds the login handle")
         await settle()
 
-        let requests = NameRouteStub.requests(host)
+        // ADR-0066: a landing also records the account key at auth (and binds
+        // the device when the pair can refresh); this test is about the
+        // handle, so it reads the handle requests.
+        let requests = binds(host)
         XCTAssertEqual(requests.map { "\($0.method) \($0.path)" }, ["PUT /auth/login-handle"])
         XCTAssertEqual(requests.first?.authorization, "Bearer tok-restored")
         let expected = base64UrlEncodeNoPad(try loginHandle(username: "alice"))
@@ -349,7 +352,7 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
         XCTAssertEqual(repo.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "")))
         XCTAssertNotNil(repo.identitySecrets)
         await settle()
-        XCTAssertTrue(NameRouteStub.requests(host).isEmpty, "a guest has no handle to bind")
+        XCTAssertTrue(binds(host).isEmpty, "a guest has no handle to bind")
     }
 
     func testATakenHandleChangesNothing() async {

@@ -301,3 +301,92 @@ internal fun decodePendingRequests(raw: String): List<IncomingContactRequest>? =
     } catch (_: Exception) {
         null
     }
+
+// =============================================================================
+// ADR-0066 part 3 - which mailbox the inbox cursor belongs to
+// =============================================================================
+
+/**
+ * A mailbox's message ids are its own, and the account's mailbox follows its
+ * published key: after a rotation of the account keys the cursor this device
+ * kept belongs to the PREVIOUS key's mailbox, and reading the new mailbox
+ * from it would skip everything below it. This remembers which key the kept
+ * cursor belongs to and keeps a cursor per later mailbox.
+ */
+public class InboxMailboxStore(private val storage: me.lakko.app.auth.MarkerStorage) {
+    /** The key (standard base64) whose mailbox the account's kept cursor
+     *  reads, or `null` before the first poll recorded it. */
+    public fun ownerKey(accountIdB64: String): String? = try {
+        storage.get(OWNER_PREFIX + accountIdB64)
+    } catch (_: Throwable) {
+        null
+    }
+
+    public fun setOwnerKey(accountIdB64: String, keyB64: String) {
+        try {
+            storage.set(OWNER_PREFIX + accountIdB64, keyB64)
+        } catch (_: Throwable) {
+            // Recorded at the next poll.
+        }
+    }
+
+    /** The cursor of a LATER mailbox of the account (0 when never read). */
+    public fun cursor(accountIdB64: String, keyB64: String): Long = try {
+        storage.get(CURSOR_PREFIX + accountIdB64 + ":" + keyB64)?.toLongOrNull() ?: 0L
+    } catch (_: Throwable) {
+        0L
+    }
+
+    /** Move a later mailbox's cursor forward (never backwards). */
+    public fun advance(accountIdB64: String, keyB64: String, cursor: Long) {
+        if (cursor <= cursor(accountIdB64, keyB64)) return
+        try {
+            storage.set(CURSOR_PREFIX + accountIdB64 + ":" + keyB64, cursor.toString())
+        } catch (_: Throwable) {
+            // Read again from the old cursor next time.
+        }
+    }
+
+    public companion object {
+        public const val PREFS_NAME: String = "lakko-inbox-mailbox"
+        private const val OWNER_PREFIX: String = "owner-v1:"
+        private const val CURSOR_PREFIX: String = "cursor-v1:"
+
+        /** Drop every row of [accountIdB64] (the wipe). */
+        public fun deleteAccount(context: android.content.Context, accountIdB64: String) {
+            val prefs = context.applicationContext
+                .getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            val doomed = prefs.all.keys.filter {
+                it == OWNER_PREFIX + accountIdB64 || it.startsWith("$CURSOR_PREFIX$accountIdB64:")
+            }
+            if (doomed.isEmpty()) return
+            val edit = prefs.edit()
+            for (key in doomed) edit.remove(key)
+            edit.commit()
+        }
+    }
+}
+
+/** Where one poll of the account's mailbox reads from. */
+public data class InboxRead(
+    /** The cursor to read after. */
+    val after: Long,
+    /** The kept (pre-rotation) cursor is this mailbox's own. */
+    val usesKeptCursor: Boolean,
+    /** The key whose mailbox the kept cursor belongs to, when it is NOT the
+     *  one being read: the previous identity's mailbox continues from the
+     *  kept cursor. */
+    val keptCursorOwnerB64: String?,
+)
+
+/**
+ * The pure rule: the kept cursor is used for the mailbox it was made in (a
+ * device that never saw another key simply records the current one); any
+ * other mailbox of the account has its own cursor, starting at 0.
+ */
+public fun inboxReadFor(ownerKeyB64: String?, currentKeyB64: String, keptCursor: Long, laterCursor: Long): InboxRead =
+    if (ownerKeyB64 == null || ownerKeyB64 == currentKeyB64) {
+        InboxRead(after = keptCursor, usesKeptCursor = true, keptCursorOwnerB64 = null)
+    } else {
+        InboxRead(after = laterCursor, usesKeptCursor = false, keptCursorOwnerB64 = ownerKeyB64)
+    }

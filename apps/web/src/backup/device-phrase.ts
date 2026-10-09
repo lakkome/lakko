@@ -49,6 +49,9 @@ export const PHRASE_LANDING_PATHS = [
   "device-restore",
   /** `mintFreshIdentity`: a new identity and a new phrase. */
   "fresh-identity",
+  /** ADR-0066 part 3: the account keys were changed with the devices kept
+   *  (on this device, or adopted from another one). */
+  "key-rotation",
 ] as const;
 
 export type PhraseLandingPath = (typeof PHRASE_LANDING_PATHS)[number];

@@ -18,13 +18,27 @@ final class RemovedDeviceTests: XCTestCase {
     func testCopyRendersTheCatalogMessages() {
         let pairs: [(String, String)] = [
             (RemovedDevice.Copy.title, "devices.removed.title"),
-            (RemovedDevice.Copy.body, "devices.removed.body"),
             (RemovedDevice.Copy.signOut, "devices.removed.sign_out"),
         ]
         for (text, key) in pairs {
             XCTAssertEqual(text, Localization.text(key))
             XCTAssertNotEqual(text, key, "\(key) is missing from the catalog")
         }
+    }
+
+    /// UX 18.6: the two bodies name the account (`{name}`); a guest account
+    /// reads "this account", never an empty gap.
+    func testTheTwoBodiesNameTheAccount() {
+        for key in [RemovedDevice.Copy.bodyRemovingKey, RemovedDevice.Copy.bodyDoneKey] {
+            XCTAssertNotEqual(Localization.text(key, texts: ["name": "x"]), key, "\(key) is missing from the catalog")
+        }
+        let removing = RemovedDevice.Copy.bodyRemoving(account: "@alice")
+        let done = RemovedDevice.Copy.bodyDone(account: "@alice")
+        XCTAssertTrue(removing.contains("@alice"))
+        XCTAssertTrue(done.contains("@alice"))
+        XCTAssertNotEqual(removing, done)
+        XCTAssertTrue(RemovedDevice.Copy.bodyDone(account: "")
+            .contains(Localization.text("devices.signed_out.this_account")))
     }
 
     // MARK: - Reading isActive

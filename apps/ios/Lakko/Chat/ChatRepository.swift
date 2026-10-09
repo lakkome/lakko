@@ -140,6 +140,23 @@ public final class ChatRepository: ObservableObject {
     /// capabilities (issuer key) and their revocation.
     private var accountIdentity: Identity?
 
+    /// ADR-0066 section 3.1 (Stage A) — the account identity this device's
+    /// conversation leaves are BOUND to when that is not the current one: the
+    /// account rotated its keys and the leaves keep their bindings under the
+    /// old key until Stage B. `nil` when the binding names the current key
+    /// (an account that never rotated here).
+    private var predecessorAccountIdentity: Identity?
+
+    /// The account identity the CONVERSATION layer knows this person by: the
+    /// key the device binding names, hence the key the role tables, the
+    /// registrar-seed and root-handover envelopes and the invite issuers
+    /// carry. During Stage A that is the old key, everywhere; what derives
+    /// from the seed OUTSIDE MLS (journal roots, the mailbox, the reach keys,
+    /// channel owner keys) uses ``accountIdentity``.
+    private var conversationAccountIdentity: Identity? {
+        predecessorAccountIdentity ?? accountIdentity
+    }
+
     /// Account id (base64) of the session that bootstrapped this
     /// repository.
     private var currentAccountIdB64: String?
@@ -179,12 +196,24 @@ public final class ChatRepository: ObservableObject {
                 try self.persistSnapshotDurableOrThrow()
             },
             upload: { upload in
-                try await DiscoveryClient(sessionToken: upload.sessionToken)
-                    .uploadKeyPackage(
-                        accountId: upload.accountId,
-                        deviceId: upload.deviceId,
-                        keyPackageBytes: upload.keyPackage
-                    )
+                do {
+                    try await DiscoveryClient(sessionToken: upload.sessionToken)
+                        .uploadKeyPackage(
+                            accountId: upload.accountId,
+                            deviceId: upload.deviceId,
+                            keyPackageBytes: upload.keyPackage
+                        )
+                } catch {
+                    // ADR-0066 section 2.2 — discovery's `403 device-revoked`
+                    // is NOT proof of removal: auth is asked (a refresh), and
+                    // its answer is what the session layer acts on. A
+                    // `device-mismatch` is a session that does not name this
+                    // device yet; the bind re-requests the publish.
+                    if KeyPackagePublishRefusal.of(error) == .deviceRevoked {
+                        _ = await SessionTokenProvider.shared.refresh()
+                    }
+                    throw error
+                }
             }
         )
     )
@@ -660,6 +689,9 @@ public final class ChatRepository: ObservableObject {
         // ADR-0050 — the chats run on the DEVICE identity.
         let device = deviceIdentityInstaller(newAccountIdB64, account)
         let identity = device ?? account
+        // ADR-0066 Stage A — a binding kept under the account's own old key.
+        let predecessor = Self.boundPredecessor(
+            accountIdB64: newAccountIdB64, device: device, account: account)
 
         let restored: Bool
         do {
@@ -694,6 +726,7 @@ public final class ChatRepository: ObservableObject {
 
         canonicalIdentity = identity
         accountIdentity = account
+        predecessorAccountIdentity = predecessor
         currentAccountIdB64 = newAccountIdB64
         // Ongoing group calls this device observed before the relaunch; records
         // past the max age are dropped on load.
@@ -762,11 +795,13 @@ public final class ChatRepository: ObservableObject {
         currentAccountIdB64 = nil
         canonicalIdentity = nil
         accountIdentity = nil
+        predecessorAccountIdentity = nil
         state = ChatRepositoryState()
     }
 
     private func wipeInMemoryState() {
         accountIdentity = nil
+        predecessorAccountIdentity = nil
         groups.removeAll()
         groupCalls.removeAll()
         unreadCounts.removeAll()
@@ -842,6 +877,20 @@ public final class ChatRepository: ObservableObject {
                     if bound.accountPublicKey() == account.signaturePublicKey() {
                         return bound
                     }
+                    // ADR-0066 section 3.1 (Stage A) — after a rotation of the
+                    // account keys a device does NOT re-bind: its leaves stay
+                    // under the old key, and a binding minted under the new
+                    // key would make this device a different account to every
+                    // gate, and misjudge its own standing. A binding under
+                    // one of the account's OWN predecessor keys is kept. (A
+                    // reset keeps no predecessor, so it still re-mints.)
+                    if let boundKey = bound.accountPublicKey(),
+                       OwnAccountKeys.bindingIsOwn(
+                        bindingAccountKey: boundKey,
+                        currentAccountKey: account.signaturePublicKey(),
+                        predecessorKeys: OwnAccountKeys.predecessorPublicKeys(accountIdB64: accountIdB64)) {
+                        return bound
+                    }
                     NSLog("ChatRepository: stored device binding names another account key; re-minting")
                 } catch {
                     NSLog("ChatRepository: stored device binding rejected; re-minting")
@@ -859,6 +908,88 @@ public final class ChatRepository: ObservableObject {
         } catch {
             NSLog("ChatRepository: device identity install failed; chats fall back to the account identity: \(error)")
             return nil
+        }
+    }
+
+    /// ADR-0066 Stage A — the account's own predecessor identity the device
+    /// binding names, or `nil` when the binding names the current key (or
+    /// there is no device identity).
+    static func boundPredecessor(accountIdB64: String, device: Identity?, account: Identity) -> Identity? {
+        guard let boundKey = device?.accountPublicKey(), boundKey != account.signaturePublicKey() else {
+            return nil
+        }
+        return KeychainOwnPredecessorStore().load(accountIdB64: accountIdB64)
+            .compactMap { try? Identity.fromSeed(seed: $0) }
+            .first { $0.signaturePublicKey() == boundKey }
+    }
+
+    /// ADR-0066 section 3.2 step 6 / section 3.3 — the account's keys were
+    /// rotated and this device holds the new ones. Nothing of the
+    /// conversations changes: the device identity, its binding and every
+    /// group stay. What moves is the ACCOUNT identity used outside MLS (the
+    /// journal roots this account holds, its mailbox), and the old identity
+    /// becomes the one the conversation layer answers to.
+    public func adoptRotatedAccount(secrets: IdentitySecrets, predecessorSeed: Data) {
+        guard currentAccountIdB64 == base64Encode(secrets.accountId),
+              let rotated = try? Identity.fromSeed(seed: secrets.accountIdentitySeed) else { return }
+        currentSessionToken = secrets.sessionToken
+        if predecessorAccountIdentity == nil,
+           let old = try? Identity.fromSeed(seed: predecessorSeed),
+           let boundKey = canonicalIdentity?.accountPublicKey(), boundKey == old.signaturePublicKey() {
+            predecessorAccountIdentity = old
+        }
+        accountIdentity = rotated
+        // The new mailbox (its pseudonym follows the new key).
+        claimOwnMailboxes()
+    }
+
+    /// ADR-0066 section 3.5, "DS" — for every group journal this account
+    /// roots (it is the ADR-0022 owner), hand the root from the OLD seed's
+    /// root to the new seed's: the old root seed is kept as the pending
+    /// takeover seed and the ADR-0057 takeover runs, exactly as after an
+    /// ownership handover (the `root` transfer signed by the old root, then
+    /// the registrar set replaced and the registrar seeds re-sent). Durable:
+    /// a takeover that does not land is retried by the receive loop. Returns
+    /// how many journals were scheduled.
+    ///
+    /// Call after ``adoptRotatedAccount(secrets:predecessorSeed:)``: the new
+    /// root is derived from the account identity it installed.
+    @discardableResult
+    public func transferOwnedJournalRoots(predecessorSeed: Data) throws -> Int {
+        guard let accountIdB64 = currentAccountIdB64 else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        var oldAccountSeed = try Identity.fromSeed(seed: predecessorSeed).ed25519Seed()
+        defer { RootHandover.wipe(&oldAccountSeed) }
+        var scheduled = 0
+        for (groupIdHex, record) in groups where isJournalOwner(record: record) {
+            if registrarSeeds.pendingRootSeed(accountIdB64: accountIdB64, groupIdHex: groupIdHex) == nil {
+                let rootSeed = try dsJournalRootSeed(
+                    accountIdentitySeed: oldAccountSeed, journalId: record.groupId)
+                registrarSeeds.putPendingRootSeed(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex, seed: rootSeed)
+            }
+            scheduleRootTakeover(groupIdHex: groupIdHex)
+            scheduled += 1
+        }
+        NSLog("ADR-0066: %d owned journal root transfer(s) scheduled", scheduled)
+        return scheduled
+    }
+
+    /// ADR-0066 section 3.5 — re-publish this device's KeyPackage after a
+    /// rotation: every row of the account was deleted by the directory, the
+    /// device id stays, and the binding is NOT re-minted (it stays under the
+    /// old key). Throws when the publish did not upload, so the rotation
+    /// keeps the step owed.
+    public func republishKeyPackageAfterKeyRotation() async throws {
+        let before = keyPackageRepublisher.outcomes.count
+        await republishKeyPackage().value
+        guard keyPackageRepublisher.outcomes.count > before,
+              keyPackageRepublisher.outcomes.last == .uploaded else {
+            throw KeyResetPublishFailed(
+                step: KeyRotationPlan.Step.keyPackage.rawValue,
+                underlying: DiscoveryClientError.argument(
+                    "keypackage republish did not upload: \(String(describing: keyPackageRepublisher.outcomes.last))"))
         }
     }
 
@@ -3411,7 +3542,9 @@ public final class ChatRepository: ObservableObject {
     /// rule refuses fails the mint rather than minting a link that says
     /// something else.
     public func createGroupInviteLink(groupIdHex: String) async throws -> String {
-        guard let identity = accountIdentity else {
+        // ADR-0066 Stage A — the issuer is the key the roster knows this
+        // person by.
+        guard let identity = conversationAccountIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
         guard let record = groups[groupIdHex] else {
@@ -3509,7 +3642,7 @@ public final class ChatRepository: ObservableObject {
     /// revocable; an inline link has no ledger row. Returns `true` when a ledger
     /// row was revoked, `false` for an inline / malformed link (nothing to do).
     public func revokeGroupInviteLink(link: String) async throws -> Bool {
-        guard let identity = accountIdentity else {
+        guard let identity = conversationAccountIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
         // The slug ends where the fragment begins: the link key after `#` is
@@ -5202,12 +5335,19 @@ public final class ChatRepository: ObservableObject {
     /// creates includes the person's other devices from the first epoch.
     /// Best-effort: a directory failure yields an empty list, and the
     /// re-admission arm adds the missing devices later.
+    ///
+    /// ADR-0066 section 2.3 — only devices in the account's DeviceGroup: a
+    /// removed device that put a directory row back is not added.
     private func ownOtherDevices(identity: Identity) async -> [DeviceKeyPackage] {
         guard let accountId = currentAccountId else { return [] }
         let ownKey = identity.signaturePublicKey()
         do {
             let list = try await discovery.fetchKeyPackages(accountId: accountId) ?? []
-            return list.filter { $0.deviceId != ownKey }
+            let roster = ownDeviceGroupRosterB64()
+            return list.filter {
+                $0.deviceId != ownKey && DeviceReadmission.ownDeviceAdmissible(
+                    deviceKeyB64: base64Encode($0.deviceId), ownDeviceGroupRoster: roster)
+            }
         } catch {
             NSLog("ADR-0050: own devices lookup failed; adding this device only: \(error)")
             return []
@@ -5218,12 +5358,25 @@ public final class ChatRepository: ObservableObject {
     /// KeyPackage) to a group this device is in. Self-service on the core side:
     /// a member may add a leaf of its own account or of an account already in
     /// the group. `nil` when a leaf with that key is already in the roster.
+    ///
+    /// ADR-0066 section 2.3 — a device of THIS account is admitted only when
+    /// its key is a leaf of the account's DeviceGroup; otherwise `nil`, like
+    /// a device already in the roster. Every own-device add path comes
+    /// through here (the pairing fan-out, the re-admission arm).
     func admitDeviceToGroup(groupIdHex: String, keyPackage: Data) async throws -> MembershipOutcome? {
         let deviceKey = try keyPackageSignatureKey(keyPackage: keyPackage)
         return try await withCommitLock(groupIdHex: groupIdHex) { [self] in
             // Checked under the lock: a poll may have applied the very commit
             // that admitted this device while we waited.
             guard let record = groups[groupIdHex] else { return nil }
+            if let own = AuthorIdentity.own(group: record.group),
+               let account = try? keyPackageAccountKey(keyPackage: keyPackage),
+               base64Encode(account) == own,
+               !DeviceReadmission.ownDeviceAdmissible(
+                deviceKeyB64: base64Encode(deviceKey), ownDeviceGroupRoster: ownDeviceGroupRosterB64()) {
+                NSLog("ADR-0066: a device of this account that is not in its DeviceGroup was not admitted")
+                return nil
+            }
             if (try? record.group.members())?.contains(where: { $0.signaturePublicKey == deviceKey }) ?? false {
                 return nil
             }
@@ -5319,8 +5472,11 @@ public final class ChatRepository: ObservableObject {
     }
 
     /// ADR-0050 section 2.10 — retire a device just removed from the
-    /// DeviceGroup from EVERY chat this device is in (its one leaf per chat),
-    /// then delete its directory KeyPackage.
+    /// DeviceGroup from EVERY chat this device is in (its one leaf per chat).
+    /// The directory row is NOT deleted here any more:
+    /// ADR-0066 section 2.3 deletes it first, with the account statement
+    /// (``DeviceRemovalRunner``), because that delete is what closes the
+    /// directory.
     @discardableResult
     public func retireDevice(deviceKey: Data) async -> DeviceFanOut {
         var tally = DeviceFanOut()
@@ -5344,14 +5500,24 @@ public final class ChatRepository: ObservableObject {
                 NSLog("ADR-0050 retire device: chat \(groupIdHex) skipped: \(error)")
             }
         }
-        // The directory row last: a peer that fetched it meanwhile only
-        // produced a Welcome nobody will open.
-        await deleteDirectoryKeyPackage(deviceKey: deviceKey)
         return tally
     }
 
-    /// ADR-0050 section 2.10 — delete one device's directory KeyPackage with
-    /// this session's bearer token. Best-effort; logged on failure.
+    /// ADR-0066 section 2.3 — the leaf keys (base64) of the account's own
+    /// DeviceGroup, or `nil` when they cannot be read. Wired by the
+    /// composition root from the DeviceGroup sync runtime; the default reads
+    /// nothing, which admits no own device.
+    var ownDeviceGroupRosterProvider: @MainActor () -> [Data]? = { nil }
+
+    private func ownDeviceGroupRosterB64() -> Set<String>? {
+        ownDeviceGroupRosterProvider().map { Set($0.map { base64Encode($0) }) }
+    }
+
+    /// ADR-0050 section 2.10 — delete THIS device's own directory KeyPackage
+    /// with this session's bearer token (Forget this device). Best-effort;
+    /// logged on failure. The row is tombstoned for 30 days (ADR-0066), which
+    /// is why the wipe that follows also deletes this device's identity seed:
+    /// the next setup mints a new device key.
     public func deleteDirectoryKeyPackage(deviceKey: Data) async {
         guard let token = currentSessionToken, !token.isEmpty else { return }
         do {
@@ -5446,6 +5612,7 @@ public final class ChatRepository: ObservableObject {
             ownPersonKeyB64: ownPerson,
             accounts: accounts,
             removed: DeviceReadmissionMemory.removed(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
+            ownDeviceGroupRoster: ownDeviceGroupRosterB64(),
             suppressAdmit: readmissionSuppressedPersons(identityFacts))
         guard !plan.admit.isEmpty || !plan.retire.isEmpty else { return }
         var proposed = 0
@@ -7253,8 +7420,10 @@ public final class ChatRepository: ObservableObject {
     /// Everything else is dropped without a trace in the timeline.
     /// Synchronous: the apply region stays non-suspending.
     func receiveRegistrarSeed(groupIdHex: String, plaintext: Data, senderLeaf: UInt32?) {
+        // ADR-0066 Stage A — a seed envelope is addressed and sealed to the
+        // account key the group knows this person by.
         guard let record = groups[groupIdHex], let accountIdB64 = currentAccountIdB64,
-              let accountIdentity,
+              let accountIdentity = conversationAccountIdentity,
               let decoded = try? decodeRegistrarSeedEnvelope(plaintext: plaintext) else { return }
         let owner = (try? record.group.groupRoles())?.owner
         let senderAccountKey = senderLeaf.flatMap { leaf in
@@ -7329,7 +7498,7 @@ public final class ChatRepository: ObservableObject {
     /// other change is ignored.
     private func noteOwnerTransition(groupIdHex: String, before: Data?, after: Data?) {
         guard RootHandover.ownerMovedAwayFrom(
-            own: accountIdentity?.signaturePublicKey(), before: before, after: after) != nil,
+            own: conversationAccountIdentity?.signaturePublicKey(), before: before, after: after) != nil,
               let accountIdB64 = currentAccountIdB64 else { return }
         registrarSeeds.markHandoverOwed(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         registrarSeeds.forgetDelivered(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
@@ -7412,7 +7581,7 @@ public final class ChatRepository: ObservableObject {
     /// Seal this account's root seed to the live owner and post it.
     private func sendRootHandoverEnvelope(groupIdHex: String, groupId: Data) async -> RootHandover.SendOutcome {
         await RootHandover.send(
-            ownAccountKey: { [weak self] in self?.accountIdentity?.signaturePublicKey() },
+            ownAccountKey: { [weak self] in self?.conversationAccountIdentity?.signaturePublicKey() },
             liveOwner: { [weak self] in self?.roleTableOwner(groupIdHex: groupIdHex) },
             ownerX25519: { [weak self] accountKey in
                 await self?.memberX25519PublicKey(accountKey: accountKey)

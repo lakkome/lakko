@@ -21,6 +21,12 @@
  * chat is remembered per chat and never re-admitted by it; a removal that
  * happened before this client joined is invisible to it, and the device would
  * be re-admitted — recorded in the ADR as the arm's known limit.
+ *
+ * ADR-0066 section 2.3: for the OWN account that limit is closed by a second
+ * test. A device of this account is admitted only when it is in the
+ * account's DeviceGroup roster (`devices/own-device-roster.ts`), so a device
+ * that was removed and publishes itself again is not put back; the per-chat
+ * memory stays as defence in depth.
  */
 
 /** A device row from the directory, as fetched. */
@@ -57,6 +63,15 @@ export function planReadmission(input: {
   readonly ownPersonKeyB64: string;
   readonly accounts: readonly AccountDevices[];
   readonly removed: ReadonlySet<string>;
+  /**
+   * ADR-0066 section 2.3 — the leaf keys (standard base64) of the account's
+   * current DeviceGroup roster, or `null` when it is not known. A device of
+   * THIS account is admitted only when it is in it: a removed device is not,
+   * whatever the directory lists for it. `null` admits no own device (the
+   * next check, with the roster loaded, does). Contacts' devices are not
+   * affected.
+   */
+  readonly ownDeviceGroup: ReadonlySet<string> | null;
 }): ReadmissionPlan {
   const rosterKeys = new Set(input.roster.map((l) => l.leafKeyB64));
   const admit: DirectoryDevice[] = [];
@@ -64,10 +79,12 @@ export function planReadmission(input: {
   const seen = new Set<string>();
   for (const account of input.accounts) {
     if (account.devices === null) continue;
+    const own = account.personKeyB64 === input.ownPersonKeyB64;
     const listed = new Set(account.devices.map((d) => d.deviceKeyB64));
     for (const d of account.devices) {
       if (rosterKeys.has(d.deviceKeyB64)) continue;
       if (input.removed.has(d.deviceKeyB64)) continue;
+      if (own && (input.ownDeviceGroup === null || !input.ownDeviceGroup.has(d.deviceKeyB64))) continue;
       if (seen.has(d.deviceKeyB64)) continue;
       seen.add(d.deviceKeyB64);
       admit.push(d);

@@ -4402,8 +4402,132 @@
       "text": "配对二维码",
       "status": "machine"
     },
+    "devices.recall.body": {
+      "text": "{name} 的密钥已于 {date} 在另一台设备上重置。此设备已退出登录，其上保存的聊天和联系人已被删除。",
+      "status": "machine"
+    },
+    "devices.recall.checking": {
+      "text": "正在检查能否取回账号...",
+      "status": "machine"
+    },
+    "devices.recall.done": {
+      "text": "你已取回账号。请重新添加通行密钥和其他设备。",
+      "status": "machine"
+    },
+    "devices.recall.error.closed": {
+      "text": "已无法再从此设备取回账号。",
+      "status": "machine"
+    },
+    "devices.recall.error.exhausted": {
+      "text": "密码错误次数过多。已无法再从此设备取回账号。",
+      "status": "machine"
+    },
+    "devices.recall.error.tries_left": {
+      "text": "{count, plural, other {还剩 # 次尝试机会}}",
+      "status": "machine"
+    },
+    "devices.recall.error.wrong_password": {
+      "text": "这不是此账号在重置前使用的密码。如果你在过去一个月内修改过密码，请输入修改前的密码。",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_factors": {
+      "text": "通行密钥和身份验证器验证码会被移除。之后请重新添加。",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_keys": {
+      "text": "账号会获得新的密钥和新的恢复短语。",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_messages": {
+      "text": "重置之后发送给此账号的消息没有发送给你，且无法恢复。",
+      "status": "machine"
+    },
+    "devices.recall.form.lede": {
+      "text": "请输入此账号在重置前使用的密码，并设置一个新密码。重置密钥的人将被退出登录。",
+      "status": "machine"
+    },
+    "devices.recall.form.new_password": {
+      "text": "新密码",
+      "status": "machine"
+    },
+    "devices.recall.form.old_password": {
+      "text": "重置前的密码",
+      "status": "machine"
+    },
+    "devices.recall.form.repeat_password": {
+      "text": "再次输入新密码",
+      "status": "machine"
+    },
+    "devices.recall.form.submit": {
+      "text": "取回账号",
+      "status": "machine"
+    },
+    "devices.recall.form.title": {
+      "text": "取回账号",
+      "status": "machine"
+    },
+    "devices.recall.form.working": {
+      "text": "正在取回账号...",
+      "status": "machine"
+    },
+    "devices.recall.no": {
+      "text": "不是，取回账号",
+      "status": "machine"
+    },
+    "devices.recall.question": {
+      "text": "是你本人操作的吗？",
+      "status": "machine"
+    },
+    "devices.recall.until": {
+      "text": "在 {date} 之前，你可以从此设备取回账号。",
+      "status": "machine"
+    },
+    "devices.recall.yes": {
+      "text": "是，是我本人",
+      "status": "machine"
+    },
+    "devices.recall.yes.back": {
+      "text": "返回",
+      "status": "machine"
+    },
+    "devices.recall.yes.confirm": {
+      "text": "此账号保存在此设备上的其余内容将被删除。要在这里再次使用此账号，请登录，然后从重置密钥的那台设备获取密钥。",
+      "status": "machine"
+    },
+    "devices.recall.yes.delete": {
+      "text": "删除并登录",
+      "status": "machine"
+    },
+    "devices.remove.done": {
+      "text": "设备已移除并退出登录。",
+      "status": "machine"
+    },
+    "devices.remove.error.not_revoked": {
+      "text": "无法让该设备退出登录，因此未移除任何内容。请重试。",
+      "status": "machine"
+    },
+    "devices.remove.error.try_later": {
+      "text": "此设备仍在设置账号。请一分钟后重试。",
+      "status": "machine"
+    },
+    "devices.remove.finish": {
+      "text": "完成移除",
+      "status": "machine"
+    },
+    "devices.remove.pending": {
+      "text": "正在移除...",
+      "status": "machine"
+    },
     "devices.removed.body": {
       "text": "已在另一台设备上将它从你的账户中移除。新消息不再发送到这台设备。如果你想继续使用，请退出登录后重新登录。",
+      "status": "machine"
+    },
+    "devices.removed.body_done": {
+      "text": "它已在另一台设备上从账号 {name} 中移除并退出登录。该账号保存在这里的所有内容已删除。",
+      "status": "machine"
+    },
+    "devices.removed.body_removing": {
+      "text": "它已在另一台设备上从账号 {name} 中移除并退出登录。此账号保存在此设备上的所有内容正在删除：聊天、联系人、密钥和恢复短语。",
       "status": "machine"
     },
     "devices.removed.sign_out": {
@@ -4412,6 +4536,74 @@
     },
     "devices.removed.title": {
       "text": "此设备已被移除",
+      "status": "machine"
+    },
+    "devices.rotate.confirm": {
+      "text": "移除并更换密钥",
+      "status": "machine"
+    },
+    "devices.rotate.done": {
+      "text": "你的账号密钥已更换。你的其他设备会在下次连接时获得新密钥。",
+      "status": "machine"
+    },
+    "devices.rotate.effect_contacts": {
+      "text": "与你聊天的人无需做任何事。",
+      "status": "machine"
+    },
+    "devices.rotate.effect_devices": {
+      "text": "你的其他设备会保留聊天，并自动获得新密钥。",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "你的通行密钥仍可用于登录。“使用此通行密钥恢复密钥”已关闭，直到你重新开启。",
+      "status": "machine"
+    },
+    "devices.rotate.effect_phrase": {
+      "text": "你会得到一个新的恢复短语。旧的将失效。",
+      "status": "machine"
+    },
+    "devices.rotate.error.not_started": {
+      "text": "设备已移除，但你的账号密钥未更换。",
+      "status": "machine"
+    },
+    "devices.rotate.lede": {
+      "text": "丢失的设备上仍保存着你的账号密钥。更换密钥后，它保存的内容将毫无用处。",
+      "status": "machine"
+    },
+    "devices.rotate.not_now": {
+      "text": "暂不",
+      "status": "machine"
+    },
+    "devices.rotate.retry": {
+      "text": "重试",
+      "status": "machine"
+    },
+    "devices.rotate.step_devices": {
+      "text": "正在更新你的其他设备",
+      "status": "machine"
+    },
+    "devices.rotate.step_keys": {
+      "text": "正在更换你的账号密钥",
+      "status": "machine"
+    },
+    "devices.rotate.step_remove": {
+      "text": "正在移除设备",
+      "status": "machine"
+    },
+    "devices.rotate.title": {
+      "text": "移除此设备并更换账号密钥",
+      "status": "machine"
+    },
+    "devices.rotated.notice": {
+      "text": "你的账号密钥已在另一台设备上更换。此设备已获得新密钥。",
+      "status": "machine"
+    },
+    "devices.rotated.show_phrase": {
+      "text": "显示新短语",
+      "status": "machine"
+    },
+    "devices.rotated.updating": {
+      "text": "正在更新密钥...",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -6266,6 +6458,18 @@
       "text": "改用密码",
       "status": "machine"
     },
+    "proof.remove_device.cancelled": {
+      "text": "已取消。设备未移除。",
+      "status": "machine"
+    },
+    "proof.remove_device.help": {
+      "text": "请输入密码以移除此设备。",
+      "status": "machine"
+    },
+    "proof.remove_device.wrong_password": {
+      "text": "密码错误。设备未移除。",
+      "status": "machine"
+    },
     "proof.reset.cancelled": {
       "text": "已取消。没有重置任何内容。",
       "status": "machine"
@@ -6862,6 +7066,10 @@
       "text": "“退出登录”会将你的数据保留在此设备上。“忘记此设备”会移除这些数据；之后只能通过另一台已登录的设备、可恢复账号密钥的通行密钥或恢复短语回来。“删除账号”会清除服务器上的账号并清空此设备；此操作无法撤销。",
       "status": "machine"
     },
+    "settings.account.delete.blocked": {
+      "text": "账号密钥最近被重置过。在 {date} 之前无法删除账号。",
+      "status": "machine"
+    },
     "settings.account.delete.body": {
       "text": "这会清除你在服务器上的身份信息——用户名、密钥、恢复方式和备份——并在所有设备上退出登录。此设备上的本地消息也会被清除。此操作无法撤销。",
       "status": "machine"
@@ -7079,15 +7287,31 @@
       "status": "machine"
     },
     "settings.devices.remove.body": {
-      "text": "从那一刻起，此设备将无法访问你的消息。可能会要求你使用通行密钥。",
+      "text": "它现已退出登录。下次连接时，此账号保存在其上的所有内容都会被删除：聊天、联系人、密钥和恢复短语。",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm": {
+      "text": "移除设备",
       "status": "machine"
     },
     "settings.devices.remove.confirm_named": {
       "text": "移除{device}",
       "status": "machine"
     },
+    "settings.devices.remove.reason_stolen": {
+      "text": "它已丢失或被盗",
+      "status": "machine"
+    },
+    "settings.devices.remove.reason_unused": {
+      "text": "我不再使用它了",
+      "status": "machine"
+    },
     "settings.devices.remove.title": {
       "text": "移除{device}？",
+      "status": "machine"
+    },
+    "settings.devices.remove.working": {
+      "text": "正在移除...",
       "status": "machine"
     },
     "settings.devices.removed_change_password": {

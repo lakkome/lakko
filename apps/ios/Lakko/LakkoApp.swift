@@ -320,6 +320,7 @@ struct LakkoApp: App {
                 )
             )
         ))
+        let deviceRemoval = DeviceRemovalRunner(ports: .live(auth: auth, chat: chat, sync: sync))
         let services = AppServices(
             authRepository: auth,
             contactsRepository: contacts,
@@ -329,14 +330,65 @@ struct LakkoApp: App {
             linkCallHost: linkHost,
             deviceGroupSync: sync,
             inviteIntake: intake,
-            feedRefresh: feedRefresh
+            feedRefresh: feedRefresh,
+            deviceRemoval: deviceRemoval,
+            keyRotation: KeyRotationRunner(
+                ports: .live(auth: auth, chat: chat, sync: sync, removal: deviceRemoval))
         )
         self.services = services
+        // ADR-0066 section 3.3 — a kept device: the account's own
+        // `key-rotation` envelope arrives in the DeviceGroup and nowhere
+        // else, and is kept as pending until the server side shows its key
+        // as the account's.
+        sync.onKeyRotationEnvelope = { [weak auth] envelope in
+            auth?.receiveKeyRotationEnvelope(envelope, arrival: .ownDeviceGroup)
+        }
+        // A superseded device with no pending envelope reads its DeviceGroup
+        // journal to the head once before it treats the change as a reset.
+        auth.readDeviceGroupJournalToHead = { [weak sync] _ in
+            await sync?.waitForJournalHead() ?? false
+        }
+        // ADR-0066 sections 3.2 step 6, 3.3 — the account's keys were
+        // rotated and this device holds the new ones: what derives from the
+        // account seed outside MLS moves (the reach keys and the mailbox, the
+        // journal roots the chat repository derives); every conversation, the
+        // device identity and its binding stay.
+        let keyRotation = services.keyRotation
+        auth.onAccountKeysRotated = { [weak auth, weak chat] secrets, predecessorSeed in
+            let accountIdB64 = base64Encode(secrets.accountId)
+            if let rotated = try? Identity.fromSeed(seed: secrets.accountIdentitySeed) {
+                ReachCenter.shared.rekey(accountIdB64: accountIdB64, accountIdentity: rotated)
+            }
+            chat?.adoptRotatedAccount(secrets: secrets, predecessorSeed: predecessorSeed)
+            ReachCenter.shared.sync()
+            // The rotating device publishes in its own order (the directory
+            // upload deletes every KeyPackage row first). A KEPT device has
+            // nothing else to wait for: its row goes back under the same
+            // device id, and the channels it created follow the new key.
+            guard keyRotation.stage == nil else { return }
+            Task { @MainActor in
+                do {
+                    try await chat?.republishKeyPackageAfterKeyRotation()
+                } catch {
+                    NSLog("ADR-0066: the KeyPackage re-publish after adopting the new keys is retried at the next session start")
+                }
+                if let auth {
+                    try? await KeyRotationChannels.handOverAll(
+                        auth: auth, keyGeneration: secrets.session.keyGeneration)
+                }
+                NotificationCenter.default.post(name: .lakkoAccountKeysRotated, object: nil)
+            }
+        }
         // ADR-0065 section 3.5 — the signed-out screen's automatic wipe is the
         // full forget-device wipe: the runtimes let go first, then every
         // store, then the session ends (``AppServices/wipeAccountLocalData``).
         auth.wipeAfterKeyReset = { [weak services] accountIdB64 in
             services?.wipeAfterKeyReset(accountIdB64: accountIdB64)
+        }
+        // ADR-0066 section 1.1 — the staged wipe of a device whose account
+        // keys were reset elsewhere: the same, except the recall record.
+        auth.stagedWipeAfterKeyReset = { [weak services] accountIdB64 in
+            services?.stagedWipeAfterKeyReset(accountIdB64: accountIdB64)
         }
         // ADR-0065 section 2.3 step 5 — after a reset this device's KeyPackage
         // is re-published from the chat repository's long-lived identity,
@@ -344,6 +396,20 @@ struct LakkoApp: App {
         auth.keyResetHooks.republishOwnKeyPackage = { [weak chat] secrets in
             guard let chat else { throw SessionNotReady() }
             try await chat.republishKeyPackageAfterKeyReset(secrets: secrets)
+        }
+        // ADR-0066 section 2.2 — a KeyPackage publish needs a session that
+        // names this device; once the bind landed, publish again.
+        auth.onSessionDeviceBound = { [weak chat] in
+            chat?.republishKeyPackage()
+        }
+        // ADR-0066 section 2.3 — the account's own DeviceGroup is the record
+        // the conversations' own-device admission is filtered by: the live
+        // handle's roster, else the snapshot it persists.
+        chat.ownDeviceGroupRosterProvider = { [weak sync, weak auth] in
+            if let live = sync?.rosterDeviceKeys() { return live }
+            guard let secrets = auth?.identitySecrets else { return nil }
+            return DeviceRemoval.rosterKeys(
+                accountIdBytes: secrets.accountId, accountIdB64: base64Encode(secrets.accountId))
         }
     }
 
@@ -575,6 +641,10 @@ struct AppRoot: View, Equatable {
             }
             .onReceive(services.deviceGroupSync.$deviceRemoved.removeDuplicates()) { removed in
                 if deviceRemoved != removed { deviceRemoved = removed }
+                // ADR-0066 section 2.3 — this device's own DeviceGroup turned
+                // inactive: proof of removal by a device of the account. The
+                // removed screen comes up and the wipe runs by itself.
+                if removed { authRepository.deviceGroupReportedRemoval() }
             }
             // ADR-0037 §6 (G-11) — a rolled-back / tampered backup was refused
             // at restore. User-visible alarm; the served (older / altered) state
@@ -626,8 +696,10 @@ struct AppRoot: View, Equatable {
             // app, whatever the auth state behind it: the wipe runs by itself
             // (or on the tap for the mismatch anomaly), then "Sign in".
             RemovedDeviceScreen(
-                keysReset: signOut,
+                signOut,
+                cause: authRepository.keysSignOutCause,
                 username: authRepository.keysSignOutUsername,
+                noticeKey: authRepository.keysSignOutNoticeKey,
                 onSignOut: { authRepository.signOutAfterKeysMismatch() },
                 onSignIn: { authRepository.dismissKeysSignOut() }
             )
@@ -637,6 +709,18 @@ struct AppRoot: View, Equatable {
                 services.groupCallHost.reset()
                 services.linkCallHost.reset()
             }
+        } else if let recall = authRepository.recall {
+            // ADR-0066 section 1.1 / UX 18.4 — "Was it you?": the keys were
+            // reset elsewhere, what the account kept here is deleted, and
+            // this device can still take the account back. Instead of the
+            // app, at launch too; driven by the recall record.
+            RecallScreen(authRepository: authRepository, state: recall)
+                .onAppear {
+                    services.deviceGroupSync.clear()
+                    services.callHost.reset()
+                    services.groupCallHost.reset()
+                    services.linkCallHost.reset()
+                }
         } else {
             authContent
         }
@@ -717,10 +801,11 @@ struct AppRoot: View, Equatable {
             .id(account.accountIdB64)
 
         case .session where deviceRemoved:
-            // docs/ux/second-device.md section 3.1 — another device removed
-            // this one. The removed screen replaces the whole signed-in app:
-            // no tabs, no banners, no call overlay behind it.
-            RemovedDeviceScreen(onSignOut: { services.forgetThisDevice() })
+            // UX 18.2 — another device removed this one. `content` shows the
+            // removed screen the moment the repository took the signal; this
+            // is the frame before it, with nothing of the app behind it.
+            Color.lakkoBackground
+                .ignoresSafeArea()
 
         case .session where authRepository.newPasswordOffered:
             // A forgot-password route succeeded on a device that holds the
@@ -1084,6 +1169,16 @@ private struct SessionRoot: View, Equatable {
                         push(.chatFolders(reorder: reorder), on: .chats)
                     },
                     onOpenDevices: { openDevices() },
+                    recalledNotice: RecalledNoticeBanner(
+                        authRepository: authRepository,
+                        // UX 18.3 — `Show new phrase` opens Settings >
+                        // Security > Recovery, which asks for the proof as it
+                        // always does.
+                        onShowNewPhrase: {
+                            selectedTab = .settings
+                            settingsPath = [.recoveryFactors]
+                        }),
+                    keysUpdatingLabel: KeysUpdatingLabel(authRepository: authRepository),
                     peopleSearch: PeopleSearchActions(
                         search: { [contactsRepository, chatRepository] query in
                             // Local first (web `localPeople`): contacts and
@@ -1223,6 +1318,14 @@ private struct SessionRoot: View, Equatable {
             guard requested else { return }
             NewDeviceNoticeCenter.shared.openDevicesRequested = false
             openDevices()
+        }
+        // ADR-0066 section 3.5 — after a rotation of the account keys the
+        // channels this device created follow the new owner key; the
+        // session's key generation moves with them, so none reads as
+        // orphaned by a reset.
+        .onReceive(NotificationCenter.default.publisher(for: .lakkoAccountKeysRotated)) { _ in
+            channelsState.keysRotated(
+                currentKeyGeneration: authRepository.identitySecrets?.session.keyGeneration)
         }
         .onChange(of: inviteIntake.pendingSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingGroupJoinSlug) { _, _ in pushPendingDeepLinks() }
@@ -1381,6 +1484,19 @@ private struct SessionRoot: View, Equatable {
                 // poll loop starts at the same moment the chat
                 // surfaces become usable.
                 services.deviceGroupSync.bootstrap(secrets: secrets)
+                // ADR-0066 section 2.3 — a device removal that was signed out
+                // at the server but not finished (a crash, an offline step)
+                // is retried at every landing, after the chats are loaded.
+                let removal = services.deviceRemoval
+                // ADR-0066 section 3.2 — a key rotation that committed and
+                // still owes its publish steps finishes here too.
+                let rotation = services.keyRotation
+                Task { @MainActor in
+                    removal.reload()
+                    await removal.resumeOwed()
+                    rotation.reload()
+                    await rotation.resumeOwed()
+                }
             }
         }
     }
@@ -1609,22 +1725,17 @@ private struct SessionRoot: View, Equatable {
         case .devices:
             DevicesScreen(
                 authRepository: authRepository,
+                removal: services.deviceRemoval,
+                rotation: services.keyRotation,
                 onAddDevice: { push(.addDevice, on: tab) },
                 onChangePassword: { push(.password, on: tab) },
                 onDeviceRemoved: { deviceKey in
                     // UX 17.5 — removing a device that carried `New` ends its
                     // notice and raises the change-password line.
                     NewDeviceNoticeCenter.shared.removed(signaturePublicKey: deviceKey)
-                    // The removal ran on a DeviceGroup handle of its own; the
-                    // sync runtime reloads from the snapshot it persisted.
-                    if let secrets = authRepository.identitySecrets {
-                        services.deviceGroupSync.reloadAfterLocalMembershipChange(secrets: secrets)
-                    }
-                    // ADR-0050 section 2.10 — retire the removed device
-                    // from every chat, then from the directory.
-                    Task { @MainActor in
-                        await chatRepository.retireDevice(deviceKey: deviceKey)
-                    }
+                    // The removal itself (the sign-out at the server, the
+                    // directory row, the DeviceGroup, every chat) and its
+                    // retries are ``DeviceRemovalRunner``'s (ADR-0066 2.3).
                 }
             )
         case .addDevice:

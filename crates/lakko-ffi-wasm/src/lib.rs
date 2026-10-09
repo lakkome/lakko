@@ -68,6 +68,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod account_statement;
 pub mod anon_token;
 pub mod attachments;
 pub mod auth;
@@ -81,6 +82,7 @@ pub mod ds_proof;
 pub mod ds_statement;
 pub mod feed;
 pub mod key_reset;
+pub mod key_rotation;
 pub mod l10n;
 pub mod mls;
 pub mod mnemonic;

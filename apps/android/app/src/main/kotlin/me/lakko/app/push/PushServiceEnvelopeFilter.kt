@@ -301,6 +301,14 @@ private fun isServiceEnvelopeOtherThanCall(
     // files it when it next reads the journal.
     if (me.lakko.app.discover.looksLikeSharedChannelsEnvelope(payload)) return true
 
+    // Kind 11 — ADR-0066 part 3, the `key-rotation` envelope. It means
+    // something ONLY in the account's own DeviceGroup, which this path never
+    // reads; anywhere else it is dropped. The NUL-terminated-prefix peek
+    // (`lakko/key-rotation/v1`) is a complete classification, and the bytes
+    // behind it (the account's new entropy) are never decoded, logged or
+    // previewed here.
+    if (me.lakko.app.devices.looksLikeKeyRotationEnvelope(payload)) return true
+
     return false
 }
 

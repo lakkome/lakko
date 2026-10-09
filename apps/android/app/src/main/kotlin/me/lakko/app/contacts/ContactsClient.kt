@@ -124,6 +124,14 @@ public class ContactsClient(
     private val transparencyClientFactory: () -> TransparencyClient? = {
         TransparencyClient.forOptionalConfig()
     },
+    /**
+     * ADR-0066 section 3.5 - told once the gate re-pinned an account to a
+     * key a supersession proof authorised: `(accountIdB64, oldKeyB64,
+     * newKeyB64)`, standard base64. The old key is then that account's
+     * proven predecessor ([ProvenPredecessors]). Never called for a change
+     * the gate refused, and never for a first observation.
+     */
+    private val onProvenRotation: (String, String, String) -> Unit = { _, _, _ -> },
 ) : AutoCloseable {
 
     override fun close() {
@@ -673,6 +681,16 @@ public class ContactsClient(
                     "marker backwards (an older successor) — refusing. " +
                     "Please re-verify out of band.",
             )
+        }
+        // ADR-0066 section 3.5 - a PROVEN rotation: the key pinned until
+        // now stays the binding of the conversation leaves that exist, as
+        // the same person. Nothing is flagged, closed, evicted or shown
+        // (the ADR-0065 phase-2 "keys reset" state is entered only by a
+        // refusal of this gate, which did not happen here).
+        try {
+            onProvenRotation(accountIdB64, existing.pinnedSignaturePubkeyB64, fetchedPubkeyB64)
+        } catch (cause: Throwable) {
+            Log.w("lakko-contacts", "proven predecessor not recorded: ${cause.javaClass.simpleName}")
         }
         Log.i(
             "lakko-contacts",

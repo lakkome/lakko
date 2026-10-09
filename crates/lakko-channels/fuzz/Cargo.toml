@@ -75,3 +75,10 @@ path = "fuzz_targets/member_card_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "owner_handover_body"
+path = "fuzz_targets/owner_handover_body.rs"
+test = false
+doc = false
+bench = false

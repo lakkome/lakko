@@ -62,6 +62,10 @@ export interface StoredSecretsProbe {
   /** The AccountIdentity seed decrypted under the device key. `false` when
    *  absent or undecryptable — the two are handled identically. */
   readonly identitySeedPresent: boolean;
+  /** ADR-0066 section 2.3: a logout on this device has not reached the
+   *  server yet (`logout-owed.ts`). The stored pair is then only what the
+   *  retry signs out with, never a session to restore. Absent = `false`. */
+  readonly logoutOwed?: boolean;
   readonly nowMs: number;
 }
 
@@ -85,6 +89,8 @@ export function decideSilentRestore(
     username: cached.username,
   };
   if (!probe.deviceKeyPresent) return fallback;
+  // The person logged out; only the server has not heard yet.
+  if (probe.logoutOwed === true) return fallback;
   const pair = probe.sessionPair;
   // No pair: either a logout deleted it (logout intent must survive a
   // reload) or the credential expired. Both mean a password (or passkey)

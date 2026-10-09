@@ -537,8 +537,9 @@ describe("the grant stays in memory and reaches every gated route", () => {
 
   it("the three minting routes feed the holder; the other landings do not", () => {
     const ctx = read("./AuthContext.tsx");
-    expect(ctx.match(/freshGrants\.put\(/g)?.length).toBe(5);
-    // login, signup, passkey sign-in, and the two proof routes.
+    expect(ctx.match(/freshGrants\.put\(/g)?.length).toBe(6);
+    // login, signup, passkey sign-in, the two proof routes, and the recall
+    // (ADR-0066: `recall/finish` answers a grant; the old password proved it).
     for (const landing of ["async recoverWithTotp(", "async recoverWithThreeWords("]) {
       const start = ctx.indexOf(landing);
       const end = ctx.indexOf("\n    async ", start + 10);

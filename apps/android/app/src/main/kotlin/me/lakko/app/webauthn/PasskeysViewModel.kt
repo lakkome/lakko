@@ -419,7 +419,7 @@ public class PasskeysViewModel(
         is java.io.IOException -> UiText("common.error.offline")
         is WebauthnHttpError -> {
             Log.w("PasskeysViewModel", "WARN delete account refused: ${e.status}")
-            if (e.status == 429) UiText("common.error.too_many_attempts") else UiText("settings.account.delete.error.generic")
+            deleteAccountRefusalText(e.status, e.body, me.lakko.app.l10n.Localization.strings.value.language)
         }
         else -> {
             Log.w("PasskeysViewModel", "WARN delete account failed: ${e.javaClass.simpleName}")
@@ -538,3 +538,26 @@ private data class ExportDoc(
     val server: AccountExport,
     val note: String,
 )
+
+/**
+ * The sentence for a `DELETE /account` the server refused. ADR-0066 section
+ * 1.3: while the account can still be taken back after a key reset the
+ * server answers `409 recall-window-open` with the date, and the dialog says
+ * until when ([me.lakko.app.auth.deleteBlockedUntilMs]); the date is the
+ * platform's medium date in the interface [language].
+ */
+internal fun deleteAccountRefusalText(status: Int, body: String?, language: String): UiText {
+    val blockedUntilMs = me.lakko.app.auth.deleteBlockedUntilMs(status, body)
+    return when {
+        blockedUntilMs != null -> UiText(
+            "settings.account.delete.blocked",
+            texts = mapOf(
+                "date" to java.text.DateFormat
+                    .getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
+                    .format(java.util.Date(blockedUntilMs)),
+            ),
+        )
+        status == 429 -> UiText("common.error.too_many_attempts")
+        else -> UiText("settings.account.delete.error.generic")
+    }
+}

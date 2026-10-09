@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "HMAC-SHA256 session access tokens + refresh credentials, the lakko-svc-auth to verifier contract (Phase 1.5b, ADR-0065 v2)"
+description = "HMAC-SHA256 session access tokens + refresh credentials, the lakko-svc-auth to verifier contract (Phase 1.5b, ADR-0065, ADR-0066 v3 / r2)"
 
 [lints]
 workspace = true

@@ -44,7 +44,7 @@ import {
   type JSX,
 } from "solid-js";
 import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
-import { useAuth } from "../auth/AuthContext";
+import { conversationSeedOf, useAuth } from "../auth/AuthContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as hexOf } from "../devices/sync/state";
 import { useCallHost } from "../calls/CallHostContext";
@@ -1828,7 +1828,7 @@ function ChatView(props: {
     try {
       const secrets = props.requireIdentity();
       const wasm = await loadWasmForCalls();
-      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+      const identity = wasm.Identity.fromSeed(conversationSeedOf(secrets));
       try {
         return await readPushRotationRole(props.entry.group, identity);
       } finally {

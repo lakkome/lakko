@@ -62,6 +62,11 @@
 //!   filter question for the ADR-0052 shared-pin envelope. Decode returns the
 //!   operation (to word a preview); nothing here composes, orders or persists
 //!   one (C-59).
+//! - [`key_rotation::is_key_rotation_envelope`] +
+//!   [`key_rotation::key_rotation_envelope_len`] — the same filter for the
+//!   ADR-0066 key-rotation envelope, with one difference: it answers yes or
+//!   no and returns NO field, because the envelope carries the account's new
+//!   recovery-phrase entropy and this process has no use for it.
 //! - [`group_closed::decode_group_closed_envelope`] +
 //!   [`group_closed::group_closed_envelope_min_len`] /
 //!   [`group_closed::group_closed_envelope_max_len`] — the same filter
@@ -103,6 +108,7 @@ pub mod committer_beacon;
 pub mod ds_proof;
 pub mod group_closed;
 pub mod group_name;
+pub mod key_rotation;
 pub mod pin;
 pub mod profile;
 pub mod profile_request;

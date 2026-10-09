@@ -268,7 +268,12 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             decodesAsSharedChannels: Self.decodesAsSharedChannels,
             sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLengths,
             decodesAsGroupClosed: Self.decodesAsGroupClosed,
-            groupClosedEnvelopeLens: Self.groupClosedEnvelopeLengths
+            groupClosedEnvelopeLens: Self.groupClosedEnvelopeLengths,
+            // ADR-0066 section 3.3 — the key-rotation envelope: a yes / no
+            // from the slim FFI, never a decode (it carries the account's
+            // next seed and this process has no use for it).
+            isKeyRotation: { isKeyRotationEnvelope(plaintext: $0) },
+            keyRotationEnvelopeLen: Int(keyRotationEnvelopeLen())
         ) {
             return nil
         }

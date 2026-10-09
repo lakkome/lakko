@@ -206,6 +206,37 @@ public object DeviceKeyStore {
         envelopeFile(context, accountIdB64).delete()
     }
 
+    /**
+     * Seal [plaintext] with the Keystore-resident wrap key (AES-256-GCM,
+     * `iv(12) | ciphertext+tag`). For the small per-device secrets that get
+     * the device root key's protection without being one (the ADR-0066
+     * recall record). The key never leaves the Keystore.
+     */
+    internal fun sealWithDeviceKey(plaintext: ByteArray): ByteArray {
+        val cipher = Cipher.getInstance(AES_GCM_NOPAD)
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateWrapKey())
+        val iv = cipher.iv
+        check(iv.size == GCM_IV_LEN) { "unexpected GCM IV length from Keystore: ${iv.size}" }
+        val ciphertext = cipher.doFinal(plaintext)
+        val out = ByteArray(GCM_IV_LEN + ciphertext.size)
+        System.arraycopy(iv, 0, out, 0, GCM_IV_LEN)
+        System.arraycopy(ciphertext, 0, out, GCM_IV_LEN, ciphertext.size)
+        return out
+    }
+
+    /** Open a blob [sealWithDeviceKey] made; `null` for a truncated one.
+     *  A blob that does not authenticate throws. */
+    internal fun openWithDeviceKey(blob: ByteArray): ByteArray? {
+        if (blob.size <= GCM_IV_LEN) return null
+        val cipher = Cipher.getInstance(AES_GCM_NOPAD)
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            getOrCreateWrapKey(),
+            GCMParameterSpec(GCM_TAG_BITS, blob.copyOfRange(0, GCM_IV_LEN)),
+        )
+        return cipher.doFinal(blob, GCM_IV_LEN, blob.size - GCM_IV_LEN)
+    }
+
     // -----------------------------------------------------------------
     // Internal: wrap-key lifecycle
     // -----------------------------------------------------------------

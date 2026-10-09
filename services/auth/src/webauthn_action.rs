@@ -1183,7 +1183,7 @@ mod action_grant_e2e_tests {
         let pk_b = register_and_store(&pool, &account_id, &hl, &mut wa).await;
 
         let token = token_secret
-            .issue(&account_id, 1, now_ms() + 3_600_000)
+            .issue(&account_id, 1, &[0u8; 32], 0, now_ms() + 3_600_000)
             .expect("mint session token");
         let bearer = format!("Bearer {token}");
 

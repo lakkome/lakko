@@ -4402,8 +4402,132 @@
       "text": "QR code de pareamento",
       "status": "machine"
     },
+    "devices.recall.body": {
+      "text": "As chaves de {name} foram redefinidas em outro dispositivo em {date}. Este dispositivo foi desconectado, e as conversas e os contatos que ele guardava foram apagados.",
+      "status": "machine"
+    },
+    "devices.recall.checking": {
+      "text": "Verificando se a conta pode ser retomada...",
+      "status": "machine"
+    },
+    "devices.recall.done": {
+      "text": "Você retomou sua conta. Adicione novamente suas chaves de acesso e seus outros dispositivos.",
+      "status": "machine"
+    },
+    "devices.recall.error.closed": {
+      "text": "A conta não pode mais ser retomada a partir deste dispositivo.",
+      "status": "machine"
+    },
+    "devices.recall.error.exhausted": {
+      "text": "Muitas senhas incorretas. A conta não pode mais ser retomada a partir deste dispositivo.",
+      "status": "machine"
+    },
+    "devices.recall.error.tries_left": {
+      "text": "{count, plural, one {Resta # tentativa} other {Restam # tentativas}}",
+      "status": "machine"
+    },
+    "devices.recall.error.wrong_password": {
+      "text": "Essa não é a senha que esta conta tinha antes da redefinição. Se você alterou sua senha no último mês, digite a que usava antes disso.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_factors": {
+      "text": "As chaves de acesso e o código do autenticador são removidos. Adicione-os novamente depois.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_keys": {
+      "text": "A conta recebe novas chaves e uma nova frase de recuperação.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_messages": {
+      "text": "As mensagens enviadas à conta desde a redefinição não foram enviadas a você e não podem ser recuperadas.",
+      "status": "machine"
+    },
+    "devices.recall.form.lede": {
+      "text": "Digite a senha que esta conta tinha antes da redefinição e escolha uma nova. Quem redefiniu as chaves será desconectado.",
+      "status": "machine"
+    },
+    "devices.recall.form.new_password": {
+      "text": "Nova senha",
+      "status": "machine"
+    },
+    "devices.recall.form.old_password": {
+      "text": "Senha anterior à redefinição",
+      "status": "machine"
+    },
+    "devices.recall.form.repeat_password": {
+      "text": "Repetir nova senha",
+      "status": "machine"
+    },
+    "devices.recall.form.submit": {
+      "text": "Retomar a conta",
+      "status": "machine"
+    },
+    "devices.recall.form.title": {
+      "text": "Retomar a conta",
+      "status": "machine"
+    },
+    "devices.recall.form.working": {
+      "text": "Retomando a conta...",
+      "status": "machine"
+    },
+    "devices.recall.no": {
+      "text": "Não, retomar a conta",
+      "status": "machine"
+    },
+    "devices.recall.question": {
+      "text": "Foi você?",
+      "status": "machine"
+    },
+    "devices.recall.until": {
+      "text": "Você pode retomar a conta a partir deste dispositivo até {date}.",
+      "status": "machine"
+    },
+    "devices.recall.yes": {
+      "text": "Sim, fui eu",
+      "status": "machine"
+    },
+    "devices.recall.yes.back": {
+      "text": "Voltar",
+      "status": "machine"
+    },
+    "devices.recall.yes.confirm": {
+      "text": "O restante do que esta conta guardava neste dispositivo será apagado. Para usar a conta aqui de novo, entre e obtenha as chaves do dispositivo que as redefiniu.",
+      "status": "machine"
+    },
+    "devices.recall.yes.delete": {
+      "text": "Apagar e entrar",
+      "status": "machine"
+    },
+    "devices.remove.done": {
+      "text": "Dispositivo removido e desconectado.",
+      "status": "machine"
+    },
+    "devices.remove.error.not_revoked": {
+      "text": "Não foi possível desconectar o dispositivo, então nada foi removido. Tente novamente.",
+      "status": "machine"
+    },
+    "devices.remove.error.try_later": {
+      "text": "Este dispositivo ainda está configurando a conta. Tente novamente em um minuto.",
+      "status": "machine"
+    },
+    "devices.remove.finish": {
+      "text": "Concluir remoção",
+      "status": "machine"
+    },
+    "devices.remove.pending": {
+      "text": "Removendo...",
+      "status": "machine"
+    },
     "devices.removed.body": {
       "text": "Ele foi removido da sua conta em outro dispositivo. Novas mensagens não chegam mais a ele. Saia e entre novamente se quiser usá-lo.",
+      "status": "machine"
+    },
+    "devices.removed.body_done": {
+      "text": "Ele foi removido da conta {name} em outro dispositivo e desconectado. Tudo o que a conta guardava aqui foi apagado.",
+      "status": "machine"
+    },
+    "devices.removed.body_removing": {
+      "text": "Ele foi removido da conta {name} em outro dispositivo e desconectado. Tudo o que esta conta guardava neste dispositivo está sendo apagado: conversas, contatos, chaves e frase de recuperação.",
       "status": "machine"
     },
     "devices.removed.sign_out": {
@@ -4412,6 +4536,74 @@
     },
     "devices.removed.title": {
       "text": "Este dispositivo foi removido",
+      "status": "machine"
+    },
+    "devices.rotate.confirm": {
+      "text": "Remover e trocar as chaves",
+      "status": "machine"
+    },
+    "devices.rotate.done": {
+      "text": "As chaves da sua conta foram trocadas. Seus outros dispositivos recebem as novas na próxima vez que se conectarem.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_contacts": {
+      "text": "As pessoas com quem você conversa não precisam fazer nada.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_devices": {
+      "text": "Seus outros dispositivos mantêm as conversas e recebem as novas chaves sozinhos.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Suas chaves de acesso continuam permitindo entrar. \"Restaurar chaves com esta chave de acesso\" fica desativado até você ativar de novo.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_phrase": {
+      "text": "Você recebe uma nova frase de recuperação. A antiga deixa de funcionar.",
+      "status": "machine"
+    },
+    "devices.rotate.error.not_started": {
+      "text": "O dispositivo foi removido, mas as chaves da sua conta não foram trocadas.",
+      "status": "machine"
+    },
+    "devices.rotate.lede": {
+      "text": "Um dispositivo perdido ainda guarda as chaves da sua conta. Trocá-las torna inútil o que ele guarda.",
+      "status": "machine"
+    },
+    "devices.rotate.not_now": {
+      "text": "Agora não",
+      "status": "machine"
+    },
+    "devices.rotate.retry": {
+      "text": "Tentar novamente",
+      "status": "machine"
+    },
+    "devices.rotate.step_devices": {
+      "text": "Atualizando seus outros dispositivos",
+      "status": "machine"
+    },
+    "devices.rotate.step_keys": {
+      "text": "Trocando as chaves da sua conta",
+      "status": "machine"
+    },
+    "devices.rotate.step_remove": {
+      "text": "Removendo o dispositivo",
+      "status": "machine"
+    },
+    "devices.rotate.title": {
+      "text": "Remover este dispositivo e trocar as chaves da sua conta",
+      "status": "machine"
+    },
+    "devices.rotated.notice": {
+      "text": "As chaves da sua conta foram trocadas em outro dispositivo. Este dispositivo já tem as novas.",
+      "status": "machine"
+    },
+    "devices.rotated.show_phrase": {
+      "text": "Mostrar nova frase",
+      "status": "machine"
+    },
+    "devices.rotated.updating": {
+      "text": "Atualizando chaves...",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -6266,6 +6458,18 @@
       "text": "Usar sua senha",
       "status": "machine"
     },
+    "proof.remove_device.cancelled": {
+      "text": "Cancelado. O dispositivo não foi removido.",
+      "status": "machine"
+    },
+    "proof.remove_device.help": {
+      "text": "Digite sua senha para remover este dispositivo.",
+      "status": "machine"
+    },
+    "proof.remove_device.wrong_password": {
+      "text": "Senha incorreta. O dispositivo não foi removido.",
+      "status": "machine"
+    },
     "proof.reset.cancelled": {
       "text": "Cancelado. Nada foi redefinido.",
       "status": "machine"
@@ -6862,6 +7066,10 @@
       "text": "Sair mantém seus dados neste dispositivo. Esquecer este dispositivo os remove; você só consegue voltar com outro dispositivo conectado, uma chave de acesso que restaura as chaves da conta ou sua frase de recuperação. Excluir conta apaga a conta no servidor e limpa este dispositivo; não é possível desfazer.",
       "status": "machine"
     },
+    "settings.account.delete.blocked": {
+      "text": "As chaves da conta foram redefinidas recentemente. A conta não pode ser excluída até {date}.",
+      "status": "machine"
+    },
     "settings.account.delete.body": {
       "text": "Isso apaga sua identidade no servidor — nome de usuário, chaves, fatores de recuperação e backup — e encerra sua sessão em todos os lugares. Suas mensagens locais também são apagadas deste dispositivo. Não é possível desfazer.",
       "status": "machine"
@@ -7079,15 +7287,31 @@
       "status": "machine"
     },
     "settings.devices.remove.body": {
-      "text": "Este dispositivo vai perder o acesso às suas mensagens a partir desse momento. Sua chave de acesso pode ser solicitada.",
+      "text": "Ele já foi desconectado. Na próxima vez que se conectar, tudo o que esta conta guardava nele será apagado: conversas, contatos, chaves e a frase de recuperação.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm": {
+      "text": "Remover dispositivo",
       "status": "machine"
     },
     "settings.devices.remove.confirm_named": {
       "text": "Remover {device}",
       "status": "machine"
     },
+    "settings.devices.remove.reason_stolen": {
+      "text": "Foi perdido ou roubado",
+      "status": "machine"
+    },
+    "settings.devices.remove.reason_unused": {
+      "text": "Não uso mais",
+      "status": "machine"
+    },
     "settings.devices.remove.title": {
       "text": "Remover {device}?",
+      "status": "machine"
+    },
+    "settings.devices.remove.working": {
+      "text": "Removendo...",
       "status": "machine"
     },
     "settings.devices.removed_change_password": {

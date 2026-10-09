@@ -64,12 +64,27 @@ enum AccountLocalDataWipe {
     /// Temporary directory of decrypted attachments handed to a share sheet.
     static let sharedAttachmentsDirectoryName = "shared-attachments"
 
+    /// What a wipe may leave in place.
+    enum Kept: Hashable {
+        /// ADR-0066 section 1.1 — the STAGED wipe a device runs when the
+        /// account's keys were reset elsewhere: everything goes except the
+        /// recall record (``RecallRecord``), which is what lets the person
+        /// take the account back from this device. Every other caller wipes
+        /// it with the rest.
+        case recallRecord
+    }
+
     /// Remove every local store of `accountIdB64`.
     ///
-    /// - Parameter removeDeliveredNotifications: injectable for tests.
+    /// - Parameters:
+    ///   - keeping: empty for the full wipe (Forget device, Delete account,
+    ///     a removed device, the end of a recall); `[.recallRecord]` for the
+    ///     staged wipe. The staged wipe is the full list minus that one step.
+    ///   - removeDeliveredNotifications: injectable for tests.
     @discardableResult
     static func wipe(
         accountIdB64: String,
+        keeping: Set<Kept> = [],
         removeDeliveredNotifications: () -> Void = AuthRepository.removeAllDeliveredNotifications
     ) -> Report {
         var report = Report()
@@ -114,6 +129,27 @@ enum AccountLocalDataWipe {
         step("recovery-phrase") { try PhraseStore().deletePhrase(accountIdB64: accountIdB64) }
         step("three-words-budget") { ThreeWordsBudgetStore().clearAll(accountIdB64: accountIdB64) }
         step("recovery-markers") { RecoveryMarkers().clear(accountIdB64: accountIdB64) }
+        // ADR-0066 — the "account key recorded at auth" mark and the owed
+        // device removals belong to the account's data on this device.
+        step("identity-key-record") { IdentityKeyRecordMarks().clear(accountIdB64: accountIdB64) }
+        step("device-removal-owed") { DeviceRemovalStore().clear(accountIdB64: accountIdB64) }
+        // ADR-0066 part 3 — the owed key rotation, the pending rotation
+        // envelopes of a kept device, the account's own predecessor seed and
+        // the "keys were changed" line.
+        step("key-rotation-owed") { KeyRotationStore().clear(accountIdB64: accountIdB64) }
+        step("key-rotation-pending") { KeychainKeyRotationPendingStore().clear(accountIdB64: accountIdB64) }
+        step("own-predecessor-seed") { KeychainOwnPredecessorStore().clear(accountIdB64: accountIdB64) }
+        step("keys-rotated-notice") { KeysRotatedNoticeStore().clear(accountIdB64: accountIdB64) }
+        step("predecessor-inbox-cursor") {
+            PredecessorMailbox.CursorStore().clear(accountIdB64: accountIdB64)
+        }
+        // ADR-0066 section 1.1 — the recall record: the one step the staged
+        // wipe skips.
+        if !keeping.contains(.recallRecord) {
+            step(recallRecordStepName) {
+                KeychainRecallRecordStore().clear(accountIdB64: accountIdB64)
+            }
+        }
         step("backup-floor") { BackupFloorStore.deleteFloor(accountIdB64: accountIdB64) }
         step("auto-backup") { AutoBackupStore.clear(accountIdB64: accountIdB64) }
         step("export-key") { ExportKeyStore.deleteExportKey(accountIdB64: accountIdB64) }
@@ -193,6 +229,7 @@ enum AccountLocalDataWipe {
         step("contacts-inbox") { ContactsInboxStore().clear(accountIdB64: accountIdB64) }
         step("accepted-contacts") { AcceptedContactsStore.clear(accountIdB64: accountIdB64) }
         step("peer-pins") { PeerPinStore.clear(ownerAccountIdB64: accountIdB64) }
+        step("proven-predecessors") { ProvenPredecessorStore.clear(ownerAccountIdB64: accountIdB64) }
         step("pairing-known-groups") { StateBundle.clearKnownGroupIds(accountIdB64: accountIdB64) }
 
         // 6. Channels. The founding marks of the account's own channels are
@@ -267,6 +304,7 @@ enum AccountLocalDataWipe {
 
         // 9. Whatever still names the account is a store this list missed.
         report.leftovers = AccountDataInventory.remaining(accountIdB64: accountIdB64)
+            .filter { !(keeping.contains(.recallRecord) && AccountDataInventory.isRecallRecord($0)) }
         if !report.leftovers.isEmpty {
             let byPlace = Dictionary(grouping: report.leftovers, by: { $0.place })
             for (place, items) in byPlace.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
@@ -278,6 +316,9 @@ enum AccountLocalDataWipe {
               report.failedSteps.count, report.leftovers.count)
         return report
     }
+
+    /// The name of the one step ``Kept/recallRecord`` skips.
+    static let recallRecordStepName = "recall-record"
 
     private static func removeKeys(in defaults: UserDefaults, withPrefix prefix: String) {
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
@@ -315,6 +356,12 @@ enum AccountDataInventory {
         let place: Place
         let name: String
         var description: String { "\(place.rawValue): \(name)" }
+    }
+
+    /// Whether `item` is the recall record's Keychain item
+    /// (``KeychainRecallRecordStore``): the one item the staged wipe leaves.
+    static func isRecallRecord(_ item: Item) -> Bool {
+        item.place == .keychain && item.name.hasPrefix(KeychainRecallRecordStore.serviceTag + " | ")
     }
 
     /// The encodings of `accountIdB64` a store may use.

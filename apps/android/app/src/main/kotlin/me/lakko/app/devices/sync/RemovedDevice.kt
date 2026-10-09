@@ -4,7 +4,6 @@
 package me.lakko.app.devices.sync
 
 import kotlinx.coroutines.CancellationException
-import me.lakko.app.l10n.UiText
 
 /**
  * "This device was removed" (docs/ux/second-device.md section 3.1).
@@ -14,20 +13,15 @@ import me.lakko.app.l10n.UiText
  * Another device of the account removed this one: once this device applies
  * that commit its DeviceGroup is inactive (`DeviceGroup.isActive()` is
  * `false`), frozen for good, and nothing new decrypts. The sync runtime then
- * stops polling, persists nothing more, and the signed-in root shows one
- * full-screen state instead of the app.
+ * stops polling, persists nothing more, and the app root shows one
+ * full-screen state instead of the app and wipes the account's data by
+ * itself (ADR-0066 section 2.3; the screen and its copy are
+ * `KeysResetSignedOutScreen` and `RemovalCopy`).
  *
  * The decisions live here, apart from [DeviceGroupSyncRepository], so a host
  * JVM test runs them without a Delivery Service or the native library.
  */
 internal object RemovedDevice {
-
-    /** The copy of the removed-device screen, as catalog messages (ADR-0061). */
-    val TITLE: UiText = UiText("devices.removed.title")
-
-    val BODY: UiText = UiText("devices.removed.body")
-
-    val SIGN_OUT: UiText = UiText("devices.removed.sign_out")
 
     /**
      * Whether the DeviceGroup handle reports this device still in the

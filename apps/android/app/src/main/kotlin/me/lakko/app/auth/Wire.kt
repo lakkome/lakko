@@ -97,6 +97,10 @@ data class SignupFinishRequest(
     val account_id: String,
     val password_upload: String,
     val recovery_upload: String? = null,
+    /** ADR-0066 - base64url (no padding) of this device's 32-byte id (its
+     *  conversation leaf signature key, the id of its directory row). Absent
+     *  = the session names no device yet (bound later). */
+    val device_id_b64: String? = null,
 )
 
 /** `POST /signup/finish` response body. */
@@ -152,6 +156,10 @@ data class LoginFinishRequest(
     val session_id: String,
     /** base64(CredentialFinalization). */
     val finalize: String,
+    /** ADR-0066 - base64url (no padding) of this device's 32-byte id (its
+     *  conversation leaf signature key, the id of its directory row). Absent
+     *  = the session names no device yet (bound later). */
+    val device_id_b64: String? = null,
 )
 
 /** Shared by `/login/finish` and `/recovery/login/finish`. */
@@ -217,6 +225,10 @@ data class PasswordResetFinishRequest(
     val recovery_finalize: String,
     /** base64(RegistrationUpload) — the new password envelope. */
     val new_password_upload: String,
+    /** ADR-0066 - base64url (no padding) of this device's 32-byte id (its
+     *  conversation leaf signature key, the id of its directory row). Absent
+     *  = the session names no device yet (bound later). */
+    val device_id_b64: String? = null,
 )
 
 /** `POST /password/reset/finish` response body. */
@@ -268,6 +280,10 @@ data class DeviceAuthorizeRedeemRequest(
      *  received over the rendezvous channel. The grant alone names
      *  the account (ADR-0056); the response carries its id. */
     val grant_token_b64: String,
+    /** ADR-0066 - base64url (no padding) of this device's 32-byte id (its
+     *  conversation leaf signature key, the id of its directory row). Absent
+     *  = the session names no device yet (bound later). */
+    val device_id_b64: String? = null,
 )
 
 /** `POST /device/authorize/redeem` response body — the same
@@ -351,6 +367,10 @@ data class TotpRecoverRequest(
     val handle: String,
     /** Current 6-digit authenticator code. */
     val code: String,
+    /** ADR-0066 - base64url (no padding) of this device's 32-byte id (its
+     *  conversation leaf signature key, the id of its directory row). Absent
+     *  = the session names no device yet (bound later). */
+    val device_id_b64: String? = null,
 )
 
 /** `POST /totp/recover` response body — the same `(account_id,
@@ -401,6 +421,10 @@ data class LoginHandleRemovedResponse(
 @Serializable
 data class SessionRefreshRequest(
     val refresh_token: String,
+    /** ADR-0066 section 3.3: an account statement of kind 4 by the CURRENT
+     *  account key over this credential (URL-safe base64, no padding). Read
+     *  only when the credential is of a lower generation; absent otherwise. */
+    val key_statement_b64: String? = null,
 )
 
 /** `POST /auth/session/refresh` 200 body: the new session pair. */
@@ -445,6 +469,22 @@ data class KeyResetFinishRequest(
     val new_signature_pubkey_b64: String,
 )
 
+/** `POST /account/keys/rotate/finish` (bearer, ADR-0066 section 3.4): the
+ *  reset's finish with the old key's proof and the devices to revoke. */
+@Serializable
+data class KeyRotateFinishRequest(
+    val fresh_grant: String,
+    /** base64(RegistrationUpload) for the new recovery credential. */
+    val recovery_upload: String,
+    /** base64url (no padding) of the NEW AccountIdentity public key. */
+    val new_signature_pubkey_b64: String,
+    /** base64url (no padding) of the 145-byte supersession proof, the
+     *  recorded account key over the new one. */
+    val supersession_proof_b64: String,
+    /** base64url (no padding) device ids, at most 8. */
+    val revoke_device_ids_b64: List<String> = emptyList(),
+)
+
 /** `POST /account/keys/reset/finish` 200 body: the attestation and the pair
  *  issued at the new generation (the caller's old pair is superseded). */
 @Serializable
@@ -456,6 +496,79 @@ data class KeyResetFinishResponse(
     val session_expires_at_ms: Long,
     val refresh_token: String,
     val refresh_expires_at_ms: Long,
+)
+
+// -----------------------------------------------------------------
+// ADR-0066 part 1: taking the account back (anonymous routes)
+// -----------------------------------------------------------------
+
+/** `POST /account/recall/status`. */
+@Serializable
+data class RecallStatusRequest(
+    /** base64url (no padding) of a 138-byte account statement of kind
+     *  `recall-status`, signed by the OLD account identity key. */
+    val statement_b64: String,
+)
+
+@Serializable
+data class RecallStatusResponse(
+    val anchor_seq: Long,
+    val expires_at_ms: Long,
+    val changed_at_ms: Long,
+    val attempts_remaining: Int,
+)
+
+/** `POST /account/recall/start`. Each accepted start is one password attempt. */
+@Serializable
+data class RecallStartRequest(
+    val account_id_b64: String,
+    val anchor_seq: Long,
+    /** Kind `recall-start`: `anchor_seq | BLAKE3(login_request)`. */
+    val statement_b64: String,
+    /** base64(CredentialRequest) of a login with the password BEFORE the reset. */
+    val login_request: String,
+    /** base64(RegistrationRequest) for the NEW password. */
+    val password_request: String,
+    /** base64(RegistrationRequest) for the NEW recovery credential. */
+    val recovery_request: String,
+)
+
+@Serializable
+data class RecallStartResponse(
+    val session_id: String,
+    val login_response: String,
+    val password_response: String,
+    val recovery_response: String,
+    /** base64url (no padding) of 32 bytes the finish statement binds. */
+    val server_nonce_b64: String,
+)
+
+/** `POST /account/recall/finish`. */
+@Serializable
+data class RecallFinishRequest(
+    val session_id: String,
+    val account_id_b64: String,
+    val anchor_seq: Long,
+    val login_finish: String,
+    val password_upload: String,
+    val recovery_upload: String,
+    val new_signature_pubkey_b64: String,
+    val device_id_b64: String? = null,
+    /** Kind `recall`, signed by the OLD account identity key. */
+    val statement_b64: String,
+)
+
+/** The key reset's answer plus a fresh-auth grant. */
+@Serializable
+data class RecallFinishResponse(
+    val key_reset_attest_b64: String,
+    val key_generation: Long,
+    val session_token: String,
+    val session_expires_at_ms: Long,
+    val refresh_token: String,
+    val refresh_expires_at_ms: Long,
+    val fresh_grant: String? = null,
+    val fresh_grant_expires_at_ms: Long? = null,
 )
 
 // -----------------------------------------------------------------
@@ -495,4 +608,29 @@ data class PasskeyVaultDeleteResponse(
 @Serializable
 data class PasskeyVaultListResponse(
     val credential_ids_b64: List<String> = emptyList(),
+)
+
+// ---------------------------------------------------------------------
+// ADR-0066 - logout, device binding, device removal
+// ---------------------------------------------------------------------
+
+/** `POST /auth/session/bind-device` (bearer): name the device of a session
+ *  that landed before the device identity existed. Answers a session pair. */
+@Serializable
+data class BindDeviceRequest(
+    /** base64url (no padding) of the 32-byte device id. */
+    val device_id_b64: String,
+    /** The refresh credential of the SAME session as the bearer. */
+    val refresh_token: String,
+)
+
+/** `POST /account/devices/revoke` (bearer): remove ANOTHER device. `204`. */
+@Serializable
+data class DeviceRevokeRequest(
+    val fresh_grant: String,
+    /** base64url (no padding) of the removed device's 32-byte id. */
+    val device_id_b64: String,
+    /** base64url (no padding) of the 138-byte `device-revoke` account
+     *  statement, signed by the account identity key. */
+    val statement_b64: String,
 )

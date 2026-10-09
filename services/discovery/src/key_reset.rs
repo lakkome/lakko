@@ -63,6 +63,26 @@ pub(crate) const CODE_KEY_RESET_DISABLED: &str = "key-reset-disabled";
 /// window (kept as defence in depth on attested changes, ADR-0065 4.1).
 pub(crate) const CODE_COOLING_DOWN: &str = "identity-changed-too-recently";
 
+/// `400` body of an identity upload whose supersession proof does not
+/// verify (ADR-0066 section 3.5): not a proof by the key the directory holds
+/// for the account, not for the uploaded key, malformed, a validity window
+/// the format does not allow, or expired.
+pub(crate) const CODE_PROOF_INVALID: &str = "supersession-proof-invalid";
+
+/// `403` body of a KeyPackage publish whose `device_id` is not the device the
+/// session token names (ADR-0066 section 2.2), an unbound session included.
+pub(crate) const CODE_DEVICE_MISMATCH: &str = "device-mismatch";
+
+/// `403` body of a KeyPackage publish under a device id that was deleted
+/// from the directory within the tombstone window (ADR-0066 section 2.2).
+/// Auth answers a `401` with the same code to the removed device's session.
+pub(crate) const CODE_DEVICE_REVOKED: &str = "device-revoked";
+
+/// `403` body of a delete of ANOTHER device's KeyPackage that carries no
+/// statement signed by the account's published identity key (ADR-0066
+/// section 2.2).
+pub(crate) const CODE_ACCOUNT_KEY_REQUIRED: &str = "account-key-required";
+
 /// An error of the two identity writes: the plain-text refusals those routes
 /// always had, or one of the JSON `{"error": code}` codes above. Kept small
 /// (not a built `Response`) so it rides in a `Result` without clippy's
@@ -378,7 +398,7 @@ mod route_tests {
                 .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
             self.state
                 .session_token_secret
-                .issue(account, generation, now + 60_000)
+                .issue(account, generation, &[0u8; 32], 0, now + 60_000)
                 .unwrap()
         }
 
@@ -441,10 +461,20 @@ mod route_tests {
             generation: u64,
             device: u8,
         ) -> (StatusCode, String) {
+            // ADR-0066: a KeyPackage is published by a session that names the
+            // device.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+            let token = self
+                .state
+                .session_token_secret
+                .issue(account, generation, &[device; 32], now, now + 60_000)
+                .unwrap();
             self.call(
                 "POST",
                 "/discovery/keypackage",
-                Some(&self.token(account, generation)),
+                Some(&token),
                 serde_json::json!({
                     "account_id": B64.encode(account),
                     "device_id": B64.encode([device; 32]),
@@ -505,6 +535,10 @@ mod route_tests {
         };
         let c = Client::new(pool.clone(), true, 0);
         let acct = fresh_account(0x65);
+        // The key the last reset installs is a real one: the rotation below
+        // is proven by it.
+        let k3_signing = SigningKey::from_seed(&[0x73; 32]);
+        let k3 = k3_signing.verifying_key().to_bytes();
 
         // Genesis publish at generation 1, two devices in the directory.
         let (status, text) = c.publish(&acct, 1, K1, serde_json::json!({})).await;
@@ -590,7 +624,7 @@ mod route_tests {
             .publish(
                 &acct,
                 2,
-                K3,
+                k3,
                 serde_json::json!({ "key_reset_attest": att2 }),
             )
             .await;
@@ -600,8 +634,8 @@ mod route_tests {
             .publish(
                 &acct,
                 2,
-                K3,
-                serde_json::json!({ "key_reset_attest": attestation(&acct, 2, K3) }),
+                k3,
+                serde_json::json!({ "key_reset_attest": attestation(&acct, 2, k3) }),
             )
             .await;
         assert_eq!(status, StatusCode::CONFLICT, "{text}");
@@ -614,8 +648,8 @@ mod route_tests {
             .publish(
                 &acct,
                 3,
-                K3,
-                serde_json::json!({ "key_reset_attest": attestation(&acct, 3, K3) }),
+                k3,
+                serde_json::json!({ "key_reset_attest": attestation(&acct, 3, k3) }),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{text}");
@@ -633,13 +667,14 @@ mod route_tests {
 
         // A token of a HIGHER generation than the row is accepted and raises
         // nothing: the row's generation moves only with an attestation.
-        let (status, text) = c.publish(&acct, 5, K3, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 5, k3, serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         assert_eq!(c.fetch(&acct).await["key_generation"], 3);
 
-        // The supersession-proof path is unchanged: a key change carrying a
-        // proof (opaque here) applies with no attestation and leaves the
-        // generation alone.
+        // The supersession-proof path (ADR-0016): a key change carrying a
+        // proof by the published key applies with no attestation and leaves
+        // the generation alone. Since ADR-0066 the proof is VERIFIED: bytes
+        // that are not a proof, and a proof by another key, change nothing.
         let (status, text) = c
             .publish(
                 &acct,
@@ -648,11 +683,23 @@ mod route_tests {
                 serde_json::json!({ "supersession_proof": B64.encode([0x99u8; 145]) }),
             )
             .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert_eq!(error_code(&text), CODE_PROOF_INVALID);
+        assert_eq!(c.fetch(&acct).await["signature_pubkey"], B64.encode(k3));
+        let proof = B64.encode(rotation_tests::proof(&k3_signing, &K4));
+        let (status, text) = c
+            .publish(
+                &acct,
+                3,
+                K4,
+                serde_json::json!({ "supersession_proof": proof }),
+            )
+            .await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let fetched = c.fetch(&acct).await;
         assert_eq!(fetched["signature_pubkey"], B64.encode(K4));
         assert_eq!(fetched["key_generation"], 3);
-        assert_eq!(fetched["supersession_proof"], B64.encode([0x99u8; 145]));
+        assert_eq!(fetched["supersession_proof"], proof);
 
         sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?")
             .bind(&acct[..])
@@ -706,14 +753,16 @@ mod route_tests {
         };
         let c = Client::new(pool.clone(), true, 3600);
         let acct = fresh_account(0x67);
+        let k2_signing = SigningKey::from_seed(&[0x72; 32]);
+        let k2 = k2_signing.verifying_key().to_bytes();
         let (status, text) = c.publish(&acct, 1, K1, serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let (status, text) = c
             .publish(
                 &acct,
                 2,
-                K2,
-                serde_json::json!({ "key_reset_attest": attestation(&acct, 2, K2) }),
+                k2,
+                serde_json::json!({ "key_reset_attest": attestation(&acct, 2, k2) }),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{text}");
@@ -730,14 +779,16 @@ mod route_tests {
         assert_eq!(error_code(&text), CODE_COOLING_DOWN);
         assert_eq!(c.fetch(&acct).await["key_generation"], 2);
         // A same-key retry and a proven rotation are never gated.
-        let (status, text) = c.publish(&acct, 2, K2, serde_json::json!({})).await;
+        let (status, text) = c.publish(&acct, 2, k2, serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let (status, text) = c
             .publish(
                 &acct,
                 2,
                 K4,
-                serde_json::json!({ "supersession_proof": B64.encode([0x98u8; 145]) }),
+                serde_json::json!({
+                    "supersession_proof": B64.encode(rotation_tests::proof(&k2_signing, &K4)),
+                }),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{text}");
@@ -746,5 +797,347 @@ mod route_tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    /// ADR-0066 section 3.5: the supersession proof is verified, and a proof
+    /// together with an attestation is a proven rotation.
+    mod rotation_tests {
+        use super::*;
+        use lakko_transparency::SupersessionProof;
+
+        fn now_secs() -> i64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        }
+
+        /// A proof `old -> new`, valid 14 days from now.
+        pub(in super::super) fn proof(old: &SigningKey, new: &[u8; 32]) -> Vec<u8> {
+            let now = now_secs();
+            SupersessionProof::new(old.verifying_key().to_bytes(), *new, now, now + 14 * 86_400)
+                .sign(old)
+                .to_vec()
+        }
+
+        fn key(seed: u8) -> (SigningKey, [u8; 32]) {
+            let signing = SigningKey::from_seed(&[seed; 32]);
+            let public = signing.verifying_key().to_bytes();
+            (signing, public)
+        }
+
+        async fn tombstones(pool: &MySqlPool, account: &[u8; 16]) -> i64 {
+            sqlx::query_scalar("SELECT COUNT(*) FROM keypackage_tombstones WHERE account_id = ?")
+                .bind(&account[..])
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+
+        async fn cleanup(pool: &MySqlPool, account: &[u8; 16]) {
+            for statement in [
+                "DELETE FROM identity_bundles WHERE account_id = ?",
+                "DELETE FROM keypackages WHERE account_id = ?",
+                "DELETE FROM keypackage_tombstones WHERE account_id = ?",
+            ] {
+                sqlx::query(statement)
+                    .bind(&account[..])
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        /// The account changes its own keys: proof + attestation. The key
+        /// and the generation move, the old generation is gated, the
+        /// KeyPackage rows go and a kept device lists itself again under its
+        /// own device id, the removed device's tombstone stays, and no
+        /// cool-down is started or applied.
+        #[tokio::test]
+        #[allow(clippy::too_many_lines)]
+        async fn a_proven_rotation_moves_the_generation_and_keeps_the_tombstones() {
+            let Some(pool) = test_pool("a_proven_rotation_moves_the_generation").await else {
+                return;
+            };
+            // A long cool-down: a rotation must neither meet nor start one.
+            let c = Client::new(pool.clone(), true, 3600);
+            let acct = fresh_account(0x71);
+            let (k1_signing, k1) = key(0x81);
+            let (k2_signing, k2) = key(0x82);
+            let (_, k3) = key(0x83);
+
+            let (status, text) = c.publish(&acct, 1, k1, serde_json::json!({})).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            for device in [0xD1, 0xD2] {
+                let (status, text) = c.publish_keypackage(&acct, 1, device).await;
+                assert_eq!(status, StatusCode::OK, "{text}");
+            }
+            // The stolen device 0xD3 was removed before the rotation.
+            sqlx::query(
+                "INSERT INTO keypackage_tombstones (account_id, device_id, deleted_at_ms) \
+                 VALUES (?, ?, ?)",
+            )
+            .bind(&acct[..])
+            .bind(&[0xD3u8; 32][..])
+            .bind(now_secs() * 1000)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let proof12 = B64.encode(proof(&k1_signing, &k2));
+            let (status, text) = c
+                .publish(
+                    &acct,
+                    2,
+                    k2,
+                    serde_json::json!({
+                        "supersession_proof": proof12,
+                        "key_reset_attest": attestation(&acct, 2, k2),
+                    }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            let fetched = c.fetch(&acct).await;
+            assert_eq!(fetched["signature_pubkey"], B64.encode(k2));
+            assert_eq!(fetched["key_generation"], 2);
+            assert_eq!(fetched["supersession_proof"], proof12);
+            assert!(stored_attestation(&pool, &acct).await.is_some());
+            // The log leaf of this change is authorised by the proof.
+            let leaf_auth: Option<Vec<u8>> =
+                sqlx::query_scalar("SELECT leaf_auth FROM identity_bundles WHERE account_id = ?")
+                    .bind(&acct[..])
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(leaf_auth, Some(B64.decode(&proof12).unwrap()));
+            // Not an unproven change: no cool-down marker.
+            let marked: i64 = sqlx::query_scalar(
+                "SELECT CAST(last_unproven_key_change_at IS NOT NULL AS SIGNED) \
+                 FROM identity_bundles WHERE account_id = ?",
+            )
+            .bind(&acct[..])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(marked, 0, "a proven rotation starts no cool-down");
+
+            // The directory: rows of the old generation gone, the tombstone
+            // of the removed device kept.
+            assert_eq!(keypackage_rows(&pool, &acct).await, 0);
+            assert_eq!(tombstones(&pool, &acct).await, 1);
+            // A session of the old generation publishes nothing any more.
+            let (status, text) = c.publish_keypackage(&acct, 1, 0xD1).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
+            assert_eq!(error_code(&text), CODE_KEY_GENERATION_SUPERSEDED);
+            let (status, text) = c.publish(&acct, 1, k1, serde_json::json!({})).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
+            // A kept device, with a session of the new generation, lists
+            // itself again under the SAME device id.
+            let (status, text) = c.publish_keypackage(&acct, 2, 0xD1).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            assert_eq!(keypackage_rows(&pool, &acct).await, 1);
+            // The removed device does not come back, even on a session of
+            // the new generation (someone signed in afresh on it).
+            let (status, text) = c.publish_keypackage(&acct, 2, 0xD3).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+            assert_eq!(error_code(&text), CODE_DEVICE_REVOKED);
+
+            // A retry of the same upload (a lost answer): same key, applied.
+            let (status, text) = c
+                .publish(
+                    &acct,
+                    2,
+                    k2,
+                    serde_json::json!({
+                        "supersession_proof": proof12,
+                        "key_reset_attest": attestation(&acct, 2, k2),
+                    }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            assert_eq!(
+                keypackage_rows(&pool, &acct).await,
+                1,
+                "a retry deletes nothing"
+            );
+
+            // A replay of the rotation at a generation that is not newer.
+            let (status, text) = c
+                .publish(
+                    &acct,
+                    2,
+                    k3,
+                    serde_json::json!({
+                        "supersession_proof": B64.encode(proof(&k2_signing, &k3)),
+                        "key_reset_attest": attestation(&acct, 2, k3),
+                    }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{text}");
+            assert_eq!(error_code(&text), CODE_GENERATION_NOT_NEWER);
+
+            // A second rotation straight away: no cool-down in its way.
+            let (status, text) = c
+                .publish(
+                    &acct,
+                    3,
+                    k3,
+                    serde_json::json!({
+                        "supersession_proof": B64.encode(proof(&k2_signing, &k3)),
+                        "key_reset_attest": attestation(&acct, 3, k3),
+                    }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            assert_eq!(c.fetch(&acct).await["key_generation"], 3);
+            // And an attested RESET after it is not held back by a
+            // cool-down the rotations never started; it clears the
+            // tombstones, as a reset does.
+            let (status, text) = c
+                .publish(
+                    &acct,
+                    4,
+                    K4,
+                    serde_json::json!({ "key_reset_attest": attestation(&acct, 4, K4) }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            assert_eq!(tombstones(&pool, &acct).await, 0);
+            cleanup(&pool, &acct).await;
+        }
+
+        /// Every proof that is not the published key signing the uploaded
+        /// key is refused with one code and changes nothing: with or without
+        /// an attestation beside it, on a key change and on a re-upload.
+        #[tokio::test]
+        #[allow(clippy::too_many_lines)]
+        async fn a_forged_or_wrong_key_proof_changes_nothing() {
+            let Some(pool) = test_pool("a_forged_or_wrong_key_proof_changes_nothing").await else {
+                return;
+            };
+            let c = Client::new(pool.clone(), true, 0);
+            let acct = fresh_account(0x72);
+            let (k1_signing, k1) = key(0x91);
+            let (k2_signing, k2) = key(0x92);
+            let (stranger, stranger_pub) = key(0x93);
+
+            // A first publish that carries bytes which are not a proof.
+            let (status, text) = c
+                .publish(
+                    &acct,
+                    1,
+                    k1,
+                    serde_json::json!({ "supersession_proof": B64.encode([0x99u8; 145]) }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+            assert_eq!(error_code(&text), CODE_PROOF_INVALID);
+            let (status, text) = c.publish(&acct, 1, k1, serde_json::json!({})).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            let (status, text) = c.publish_keypackage(&acct, 1, 0xD1).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+
+            let now = now_secs();
+            // The published key named as the old key, signed by a stranger.
+            let forged = SupersessionProof::new(k1, k2, now, now + 60)
+                .sign(&stranger)
+                .to_vec();
+            // A real proof by a key that is not the published one.
+            let by_stranger = proof(&stranger, &k2);
+            // A real proof by the published key, for another new key.
+            let for_another = proof(&k1_signing, &stranger_pub);
+            // Expired, and a window longer than the format allows.
+            let expired = SupersessionProof::new(k1, k2, now - 120, now - 60)
+                .sign(&k1_signing)
+                .to_vec();
+            let too_long = SupersessionProof::new(k1, k2, now, now + 31 * 86_400)
+                .sign(&k1_signing)
+                .to_vec();
+            let mut flipped = proof(&k1_signing, &k2);
+            flipped[40] ^= 1;
+            let short = proof(&k1_signing, &k2)[..144].to_vec();
+
+            for (what, bytes) in [
+                ("forged signature", forged),
+                ("a stranger's proof", by_stranger),
+                ("a proof for another key", for_another),
+                ("expired", expired),
+                ("window too long", too_long),
+                ("a flipped byte", flipped),
+                ("truncated", short),
+                ("garbage", vec![0x99u8; 145]),
+            ] {
+                for attested in [false, true] {
+                    let mut extra = serde_json::json!({ "supersession_proof": B64.encode(&bytes) });
+                    if attested {
+                        extra["key_reset_attest"] = serde_json::json!(attestation(&acct, 2, k2));
+                    }
+                    let (status, text) = c.publish(&acct, 2, k2, extra).await;
+                    assert_eq!(
+                        status,
+                        StatusCode::BAD_REQUEST,
+                        "{what} / {attested}: {text}"
+                    );
+                    assert_eq!(error_code(&text), CODE_PROOF_INVALID, "{what} / {attested}");
+                }
+            }
+            let fetched = c.fetch(&acct).await;
+            assert_eq!(fetched["signature_pubkey"], B64.encode(k1));
+            assert_eq!(fetched["key_generation"], 1);
+            assert!(fetched["supersession_proof"].is_null());
+            assert_eq!(keypackage_rows(&pool, &acct).await, 1, "no row was deleted");
+            assert!(stored_attestation(&pool, &acct).await.is_none());
+
+            // The real one, proof-only (ADR-0016): the key changes, the
+            // generation and the KeyPackage rows do not.
+            let real = B64.encode(proof(&k1_signing, &k2));
+            let (status, text) = c
+                .publish(
+                    &acct,
+                    1,
+                    k2,
+                    serde_json::json!({ "supersession_proof": real }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            let fetched = c.fetch(&acct).await;
+            assert_eq!(fetched["signature_pubkey"], B64.encode(k2));
+            assert_eq!(fetched["key_generation"], 1);
+            assert_eq!(keypackage_rows(&pool, &acct).await, 1);
+
+            // A re-upload of the same key cannot swap the stored proof for
+            // bytes that are not the proof of the rotation that produced it.
+            for bytes in [
+                vec![0x98u8; 145],
+                proof(&stranger, &k2),
+                proof(&k2_signing, &stranger_pub),
+            ] {
+                let (status, text) = c
+                    .publish(
+                        &acct,
+                        1,
+                        k2,
+                        serde_json::json!({ "supersession_proof": B64.encode(&bytes) }),
+                    )
+                    .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+                assert_eq!(error_code(&text), CODE_PROOF_INVALID);
+            }
+            assert_eq!(c.fetch(&acct).await["supersession_proof"], real);
+            // The same proof again, and a plain re-upload: both fine, the
+            // proof is preserved.
+            let (status, text) = c
+                .publish(
+                    &acct,
+                    1,
+                    k2,
+                    serde_json::json!({ "supersession_proof": real }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            let (status, text) = c.publish(&acct, 1, k2, serde_json::json!({})).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            assert_eq!(c.fetch(&acct).await["supersession_proof"], real);
+            cleanup(&pool, &acct).await;
+        }
     }
 }

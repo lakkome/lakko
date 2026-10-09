@@ -87,7 +87,7 @@ fn now_ms() -> i64 {
 
 fn bearer(secret: &lakko_auth_token::TokenSecret, account: [u8; 16]) -> String {
     let token = secret
-        .issue(&account, 1, now_ms() + 3_600_000)
+        .issue(&account, 1, &[0u8; 32], 0, now_ms() + 3_600_000)
         .expect("issue session token");
     format!("Bearer {token}")
 }

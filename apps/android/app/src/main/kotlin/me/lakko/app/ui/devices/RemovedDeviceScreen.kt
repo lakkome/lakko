@@ -6,6 +6,7 @@ package me.lakko.app.ui.devices
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.CircularProgressIndicator
@@ -23,43 +24,12 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import me.lakko.app.auth.KeyResetSignOut
-import me.lakko.app.devices.sync.RemovedDevice
+import me.lakko.app.devices.RemovalCopy
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.ui.auth.AuthScaffold
 import me.lakko.app.ui.auth.BusyButton
 import me.lakko.app.ui.auth.Lead
-
-/**
- * "This device was removed" (docs/ux/second-device.md section 3.1).
- *
- * Replaces the whole signed-in app once another device of the account has
- * removed this one: no chat list behind it, no dismiss, no retry. The one
- * button is Settings' "Forget this device" ([onSignOut]): this device's keys
- * and local history for the account go, then the login screen. Drawn in the
- * auth screens' frame, since where it leads is sign-in.
- */
-@Composable
-internal fun RemovedDeviceScreen(
-    onSignOut: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var busy by remember { mutableStateOf(false) }
-    AuthScaffold(title = RemovedDevice.TITLE.text(), onBack = null, modifier = modifier) {
-        Lead(RemovedDevice.BODY.text())
-        Spacer(Modifier.height(24.dp))
-        BusyButton(
-            label = RemovedDevice.SIGN_OUT.text(),
-            busy = busy,
-            onClick = {
-                if (!busy) {
-                    busy = true
-                    onSignOut()
-                }
-            },
-        )
-    }
-}
 
 /**
  * "Your account keys were reset" (docs/ux/identity-recovery.md section
@@ -72,6 +42,9 @@ internal fun RemovedDeviceScreen(
  *     The deletion runs by itself ("Removing..." with a progress indicator,
  *     [KeyResetSignOut.Phase.Removing]); once done, the one button is
  *     **Sign in** ([onSignIn]), which goes to the anonymous sign-in screen.
+ *   * [KeyResetSignOut.Kind.Removed] (ADR-0066, UX 18.2): another device of
+ *     the account removed this one. "This device was removed", the same
+ *     self-starting deletion, then **Sign in**.
  *   * [KeyResetSignOut.Kind.Mismatch]: the directory publishes other keys of
  *     the same generation (an anomaly, not a known reset). The second line
  *     says so and the one button is the removed screen's **Sign out**
@@ -90,8 +63,38 @@ internal fun KeysResetSignedOutScreen(
 ) {
     var busy by remember { mutableStateOf(false) }
     val name = if (signOut.username.isBlank()) t("devices.signed_out.this_account") else "@${signOut.username}"
-    AuthScaffold(title = t("devices.signed_out.title"), onBack = null, modifier = modifier) {
+    val title = when (signOut.kind) {
+        KeyResetSignOut.Kind.Removed -> t(RemovalCopy.REMOVED_TITLE)
+        KeyResetSignOut.Kind.Reset, KeyResetSignOut.Kind.Mismatch -> t("devices.signed_out.title")
+    }
+    AuthScaffold(title = title, onBack = null, modifier = modifier) {
         when (signOut.kind) {
+            // ADR-0066 / UX 18.2 - another device removed this one. The
+            // deletion starts by itself; there is no button to tap first,
+            // no "Was it you?" and no way back (a removal changes no keys).
+            KeyResetSignOut.Kind.Removed -> when (signOut.phase) {
+                KeyResetSignOut.Phase.Removing, KeyResetSignOut.Phase.AwaitingTap -> {
+                    Lead(t(RemovalCopy.REMOVED_BODY_REMOVING, mapOf("name" to name)))
+                    Spacer(Modifier.height(24.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(t(RemovalCopy.REMOVED_PROGRESS), style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                KeyResetSignOut.Phase.Removed -> {
+                    Lead(t(RemovalCopy.REMOVED_BODY_DONE, mapOf("name" to name)))
+                    Spacer(Modifier.height(24.dp))
+                    BusyButton(
+                        label = t(RemovalCopy.REMOVED_SIGN_IN),
+                        busy = false,
+                        onClick = onSignIn,
+                    )
+                }
+            }
             KeyResetSignOut.Kind.Reset -> when (signOut.phase) {
                 KeyResetSignOut.Phase.Removing, KeyResetSignOut.Phase.AwaitingTap -> {
                     Lead(t("devices.signed_out.body_removing", mapOf("username" to name)))
@@ -107,6 +110,18 @@ internal fun KeysResetSignedOutScreen(
                 }
                 KeyResetSignOut.Phase.Removed -> {
                     Lead(t("devices.signed_out.body_removed", mapOf("username" to name)))
+                    // ADR-0066 / UX 18.4 - why the account could not be
+                    // taken back, when the form was open as that was learned.
+                    signOut.notice?.let { notice ->
+                        Text(
+                            notice.text(),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier
+                                .padding(top = 12.dp)
+                                .semantics { liveRegion = LiveRegionMode.Polite },
+                        )
+                    }
                     Spacer(Modifier.height(24.dp))
                     BusyButton(
                         label = t("devices.signed_out.sign_in"),
@@ -125,7 +140,7 @@ internal fun KeysResetSignedOutScreen(
                         onClick = onSignIn,
                     )
                     KeyResetSignOut.Phase.Removing, KeyResetSignOut.Phase.AwaitingTap -> BusyButton(
-                        label = RemovedDevice.SIGN_OUT.text(),
+                        label = t("devices.removed.sign_out"),
                         busy = busy || signOut.phase == KeyResetSignOut.Phase.Removing,
                         onClick = {
                             if (!busy) {

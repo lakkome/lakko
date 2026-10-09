@@ -53,6 +53,8 @@ import { createLongPress } from "../ui/long-press";
 import { currentLanguage, t } from "../l10n";
 import { FolderBar, type FolderTab } from "./folders/FolderBar";
 import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
+import { RecallDoneNotice } from "../devices/RecallDoneNotice";
+import { KeysRotatedNotice } from "../devices/KeysRotatedNotice";
 import { AddToFolderItems } from "./folders/AddToFolderMenu";
 import {
   deleteFolder,
@@ -450,6 +452,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       </label>
       {/* docs/ux/identity-recovery.md 17.5: a device joined the account. */}
       <DeviceAddedBanner />
+      {/* docs/ux/identity-recovery.md 18.4: the account was taken back here. */}
+      <RecallDoneNotice />
+      <KeysRotatedNotice />
       {/* `docs/ux/chat-folders.md` section 2: the folder bar, once one folder
           exists. Hidden while searching - a search covers everything. */}
       <Show when={folders().length > 0 && !searching() && orderedRows().length > 0}>

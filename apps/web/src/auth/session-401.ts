@@ -9,11 +9,22 @@
  *
  *   - `key-generation-superseded` (auth's bearer middleware, the refresh
  *     route, discovery's two identity writes): the account's keys were reset
- *     on another device. This device is signed out and wipes itself; nothing
- *     is retried and nothing is published first.
+ *     on another device. This device is signed out and runs the staged
+ *     wipe, keeping only the recall record (ADR-0066 section 1.1; a device
+ *     that never held the keys keeps nothing); nothing is retried and
+ *     nothing is published first.
+ *   - `device-revoked` (auth's bearer middleware and the refresh route,
+ *     ADR-0066 section 0.4; the server reads the key generation FIRST, so
+ *     only a credential of the current generation is ever told this):
+ *     this device was removed from the account on another device. It is
+ *     signed out and wipes everything by itself, with no recall record;
+ *     nothing is retried. Only a `401` carries it: discovery's
+ *     `403 device-revoked` on a KeyPackage publish is not proof of removal
+ *     and reads as any other refusal here.
  *   - `refresh-invalid` (the refresh route only): the credential is bad,
- *     expired or names no account. The device lands on the sign-in screen,
- *     nothing wiped: the keys are still this account's.
+ *     expired or names no account, or this device logged out. The device
+ *     lands on the sign-in screen, nothing wiped: the keys are still this
+ *     account's. A logout never answers `device-revoked`.
  *   - a plain `401` from a bearer route: the access token expired (or never
  *     verified). One refresh, then one retry; a second `401` is reported as
  *     it always was.
@@ -25,6 +36,7 @@
 /** The two codes the server names a refusal with. */
 export const CODE_KEY_GENERATION_SUPERSEDED = "key-generation-superseded";
 export const CODE_REFRESH_INVALID = "refresh-invalid";
+export const CODE_DEVICE_REVOKED = "device-revoked";
 
 /** The `error` code of a `{"error": "<code>", ...}` body, or `null`. */
 export function errorCodeOf(body: string | null | undefined): string | null {
@@ -43,6 +55,9 @@ export type BearerRefusal =
   | "pass"
   /** The keys were reset elsewhere: sign out and wipe, never retry. */
   | "superseded"
+  /** This device was removed from the account: sign out and wipe, never
+   *  retry. */
+  | "device-revoked"
   /** Refresh once, then send the request once more with the new token. */
   | "refresh-and-retry"
   /** Report the `401` to the caller as it is. */
@@ -65,6 +80,13 @@ export function bearerRefusal(input: {
   readonly refreshAvailable: boolean;
 }): BearerRefusal {
   if (input.status !== 401) return "pass";
+  // The two codes never arrive together and neither outranks the other
+  // here: the server reads the generation before the device floor (ADR-0066
+  // "T3 as built", item 1), so a credential of an older generation is always
+  // told `key-generation-superseded` (the staged wipe and the recall record)
+  // and only one of the current generation `device-revoked` (the full wipe,
+  // no recall record).
+  if (input.errorCode === CODE_DEVICE_REVOKED) return "device-revoked";
   if (input.errorCode === CODE_KEY_GENERATION_SUPERSEDED) return "superseded";
   if (input.retried || !input.refreshAvailable) return "report";
   return "refresh-and-retry";
@@ -74,11 +96,14 @@ export function bearerRefusal(input: {
 export type RefreshRefusal =
   /** The keys were reset elsewhere: sign out and wipe. */
   | "superseded"
-  /** Bad, expired or unknown credential: the sign-in screen, nothing wiped.
-   *  Any `401` that is not the superseded code reads this way, so a body the
-   *  client cannot parse never wipes a device. */
+  /** This device was removed from the account: sign out and wipe. */
+  | "device-revoked"
+  /** Bad, expired or unknown credential, or a logout: the sign-in screen,
+   *  nothing wiped. Any `401` that is neither of the two codes above reads
+   *  this way, so a body the client cannot parse never wipes a device. */
   | "invalid";
 
 export function refreshRefusal(errorCode: string | null): RefreshRefusal {
+  if (errorCode === CODE_DEVICE_REVOKED) return "device-revoked";
   return errorCode === CODE_KEY_GENERATION_SUPERSEDED ? "superseded" : "invalid";
 }

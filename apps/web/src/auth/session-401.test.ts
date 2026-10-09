@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   bearerRefusal,
+  CODE_DEVICE_REVOKED,
   CODE_KEY_GENERATION_SUPERSEDED,
   CODE_REFRESH_INVALID,
   errorCodeOf,
@@ -71,5 +72,51 @@ describe("refreshRefusal", () => {
     expect(refreshRefusal(CODE_REFRESH_INVALID)).toBe("invalid");
     expect(refreshRefusal(null)).toBe("invalid");
     expect(refreshRefusal("unknown-code")).toBe("invalid");
+  });
+});
+
+// ADR-0066 section 0.4: the removed device, against a logout and a reset.
+describe("the two wiping codes do not depend on an order", () => {
+  // ADR-0066 "T3 as built", item 1: the server reads the generation before
+  // the device floor. Each code alone decides; the staged wipe and the
+  // recall record follow `superseded`, the full wipe `device-revoked`.
+  it("maps each code to its own refusal on both routes", () => {
+    const base = { status: 401, retried: false, refreshAvailable: true };
+    expect(bearerRefusal({ ...base, errorCode: CODE_KEY_GENERATION_SUPERSEDED })).toBe("superseded");
+    expect(bearerRefusal({ ...base, errorCode: CODE_DEVICE_REVOKED })).toBe("device-revoked");
+    expect(refreshRefusal(CODE_KEY_GENERATION_SUPERSEDED)).toBe("superseded");
+    expect(refreshRefusal(CODE_DEVICE_REVOKED)).toBe("device-revoked");
+  });
+});
+
+describe("device-revoked", () => {
+  const base = { status: 401, errorCode: CODE_DEVICE_REVOKED, retried: false, refreshAvailable: true };
+
+  it("signs a removed device out from any bearer route, whatever else is true", () => {
+    for (const retried of [false, true]) {
+      for (const refreshAvailable of [false, true]) {
+        expect(bearerRefusal({ ...base, retried, refreshAvailable })).toBe("device-revoked");
+      }
+    }
+  });
+
+  it("is told apart from a reset and from an expired token", () => {
+    expect(bearerRefusal({ ...base, errorCode: CODE_KEY_GENERATION_SUPERSEDED })).toBe("superseded");
+    expect(bearerRefusal({ ...base, errorCode: null })).toBe("refresh-and-retry");
+    expect(bearerRefusal({ ...base, errorCode: CODE_REFRESH_INVALID })).toBe("refresh-and-retry");
+  });
+
+  it("is only ever a 401: discovery's 403 device-revoked is not proof of removal", () => {
+    expect(bearerRefusal({ ...base, status: 403 })).toBe("pass");
+  });
+
+  it("wipes on the refresh route's device-revoked and on nothing a logout answers", () => {
+    expect(refreshRefusal(CODE_DEVICE_REVOKED)).toBe("device-revoked");
+    // A logout answers the refresh with `refresh-invalid`: the sign-in
+    // screen, nothing wiped.
+    expect(refreshRefusal(CODE_REFRESH_INVALID)).toBe("invalid");
+    expect(refreshRefusal(CODE_KEY_GENERATION_SUPERSEDED)).toBe("superseded");
+    expect(refreshRefusal(null)).toBe("invalid");
+    expect(refreshRefusal("something-else")).toBe("invalid");
   });
 });

@@ -658,6 +658,10 @@ class MultiJoinerCall private constructor(
             // where the chat receive loop checks the sender's role. A relay
             // payload closes nothing; dropped.
             FfiIncomingEnvelopeKind.GROUP_CLOSED -> Unit
+            // ADR-0066 part 3 - a key-rotation envelope means something ONLY
+            // in the account's own DeviceGroup. A relay payload changes no
+            // keys; dropped, and never rendered.
+            FfiIncomingEnvelopeKind.KEY_ROTATION -> Unit
         }
     }
 

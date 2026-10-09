@@ -35,6 +35,8 @@ pub(crate) async fn delete_account(
         "DELETE FROM usernames WHERE account_id = ?",
         "DELETE FROM identity_bundles WHERE account_id = ?",
         "DELETE FROM keypackages WHERE account_id = ?",
+        // ADR-0066 - the tombstones of device ids deleted from the directory.
+        "DELETE FROM keypackage_tombstones WHERE account_id = ?",
         // ADR-0060 - the name search terms of a person in Everyone.
         "DELETE FROM display_names WHERE account_id = ?",
         // ADR-0060 - the public record published beside them.

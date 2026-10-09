@@ -10,7 +10,8 @@
  * that may still hold its data. Another account's data on this browser and
  * the genuine device settings stay.
  *
- * {@link wipeAccountLocalData} is the only list. `AuthProvider.forgetDevice`
+ * {@link wipeAccountLocalData} is the only list (the staged wipe of ADR-0066
+ * is that list minus two named steps, never a second list). `AuthProvider.forgetDevice`
  * (which Delete account calls after the server-side deletion) releases the
  * push wake binding and this app's delivered notifications first, then calls
  * it; nothing else keeps a private partial list. Each step is best effort: a
@@ -40,6 +41,8 @@ import { deleteSessionToken } from "./session-token-store";
 import { deleteExportKey } from "./export-key-store";
 import { deleteDeviceIdentitySeed } from "./device-identity-store";
 import { deleteAccountIdentitySeed } from "./account-identity-seed-store";
+import { deleteKeyRotationState } from "./key-rotation-store";
+import { clearRotatedNotice, clearRotation } from "../devices/key-rotation";
 import { clearSignupPhraseOwed } from "./phrase-gate";
 import { clearPersistedAccountFor } from "./persisted-account";
 import { deleteDeviceGroupSnapshot } from "../devices/device-group-snapshot-store";
@@ -73,6 +76,7 @@ import { deleteCallLogRow } from "../calls/call-log-idb";
 import { clearGroupCallsForAccount } from "../calls/group-call-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
 import { clearOrphanedByResetForAccount } from "../channels/orphaned-by-reset";
+import { clearOwnerMoved } from "../channels/owner-moved";
 import { clearRotationStatesForAccount } from "../channels/rotation-state-store";
 import { clearUnconfirmedFoundingsForAccount } from "../channels/composer";
 import { deleteProfileRow } from "../profile/profile-idb";
@@ -93,6 +97,10 @@ import { clearRootHeldAll } from "../ds/root-held";
 import { deletePhrase } from "../backup/phrase-store";
 import { clearBudget, clearThreeWordsSuspended } from "./recover/three-words";
 import { clearKeyResetOwed } from "./key-reset-owed";
+import { clearGenesisRecorded, clearKnownDeviceId } from "./session-device";
+import { clearLogoutOwed } from "./logout-owed";
+import { clearRemovals } from "../devices/removal";
+import { deleteRecallRecord } from "./recall-record";
 import { deleteFloor } from "../backup/floor-store";
 import { clearAutoBackupState } from "../backup/auto-backup";
 import { clearGroupRoutingForAccount } from "../push/group-routing-store";
@@ -151,6 +159,11 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
   return [
     // --- the device root key first (see the module doc) -------------------
     { name: "device-key", run: () => deleteDeviceKey(accountIdB64) },
+    // ADR-0066 section 1.1: the recall record a device keeps after the
+    // account's keys were reset elsewhere. Sealed under the key above, so it
+    // is unreadable from here on; the row goes too. The full wipe never
+    // leaves one (a removed device has nothing to take back).
+    { name: "recall-record", run: () => deleteRecallRecord(accountIdB64) },
     // --- IndexedDB, one row (or row set) per account ----------------------
     { name: "mls-snapshot", run: () => deleteMlsSnapshot(accountIdB64) },
     { name: "commit-outbox", run: () => deleteOutboxForAccount(accountIdB64) },
@@ -164,6 +177,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // keys since reset. Its own step: a plain localStorage row that must go
     // whether or not the channel log's IndexedDB delete did.
     { name: "channels-orphaned", run: () => clearOrphanedByResetForAccount(accountIdB64) },
+    // ADR-0066 section 3.5: which channels' owner key moved to the key of a
+    // rotated identity.
+    { name: "channels-owner-moved", run: () => clearOwnerMoved(accountIdB64) },
     { name: "profiles", run: () => deleteProfileRow(accountIdB64) },
     { name: "group-names", run: () => deleteGroupNameRow(accountIdB64) },
     { name: "group-closed", run: () => deleteGroupClosedRow(accountIdB64) },
@@ -218,6 +234,25 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       name: "key-reset-owed",
       run: () => clearKeyResetOwed(storage, accountIdB64),
     },
+    // ADR-0066: the id of the device identity wiped above (the next setup
+    // mints a NEW device key; the old id is tombstoned in the directory once
+    // its row was deleted), the "account key recorded at auth" mark, the
+    // logout still owed to the server, and the device removals this device
+    // was finishing (they need the account seed, which is gone).
+    { name: "known-device-id", run: () => clearKnownDeviceId(storage, accountIdB64) },
+    { name: "genesis-recorded", run: () => clearGenesisRecorded(storage, accountIdB64) },
+    { name: "logout-owed", run: () => clearLogoutOwed(storage, accountIdB64) },
+    { name: "device-removals-owed", run: () => clearRemovals(storage, accountIdB64) },
+    // ADR-0066 part 3: a key rotation this device was finishing, the "keys
+    // were changed on another device" line, and the sealed row holding the
+    // predecessor seeds, the pending envelopes and a prepared rotation.
+    { name: "key-rotation-owed", run: () => clearRotation(storage, accountIdB64) },
+    { name: "key-rotation-notice", run: () => clearRotatedNotice(storage, accountIdB64) },
+    { name: "key-rotation-state", run: () => deleteKeyRotationState(accountIdB64) },
+    {
+      name: "predecessor-mailbox-cursor",
+      run: () => removeLocal(`lakko.contacts.predecessor-mailbox.v1.${accountIdB64}`),
+    },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },
     { name: "own-requests", run: () => clearOwnRequestsForAccount(accountIdB64) },
@@ -264,12 +299,39 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
 }
 
 /**
+ * What the STAGED wipe keeps (ADR-0066 section 1.1, UX 18.4): the recall
+ * record, and the device root key it is sealed under. Everything else the
+ * full wipe deletes, the staged wipe deletes.
+ */
+export const STAGED_WIPE_KEEPS: readonly string[] = ["device-key", "recall-record"];
+
+/** The steps of the staged wipe: the full list minus {@link STAGED_WIPE_KEEPS},
+ *  in the same order. */
+export function stagedWipeSteps(accountIdB64: string): WipeStep[] {
+  return accountWipeSteps(accountIdB64).filter((step) => !STAGED_WIPE_KEEPS.includes(step.name));
+}
+
+/**
  * Remove every piece of `accountIdB64`'s local data on this device. Never
  * throws; the report names the steps that failed (each is logged too).
  */
-export async function wipeAccountLocalData(accountIdB64: string): Promise<WipeReport> {
+export function wipeAccountLocalData(accountIdB64: string): Promise<WipeReport> {
+  return runWipe(accountWipeSteps(accountIdB64));
+}
+
+/**
+ * The staged wipe of a device whose account keys were reset elsewhere:
+ * everything {@link wipeAccountLocalData} removes except the recall record
+ * and its device key. The caller writes the record BEFORE this runs (the
+ * account seed it is made from is among what this deletes). Never throws.
+ */
+export function wipeAccountStaged(accountIdB64: string): Promise<WipeReport> {
+  return runWipe(stagedWipeSteps(accountIdB64));
+}
+
+async function runWipe(steps: readonly WipeStep[]): Promise<WipeReport> {
   const failed: string[] = [];
-  for (const step of accountWipeSteps(accountIdB64)) {
+  for (const step of steps) {
     try {
       await step.run();
     } catch (err) {

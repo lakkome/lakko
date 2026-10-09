@@ -2281,6 +2281,15 @@ pub enum WasmIncomingEnvelopeKind {
     /// the receiver's role-table check (owner / admin only), then
     /// `groupClosedIsNewer` for that group.
     GroupClosed = 17,
+    /// Another device of this account is changing the account keys
+    /// (ADR-0066 section 3.3). The decoded envelope rides the `keyRotation`
+    /// getter; `payload` is empty. Never render it. Meaningful ONLY in the
+    /// account's own DeviceGroup: met anywhere else, drop it. There, pass
+    /// the original plaintext to `verifyKeyRotationEnvelope` with the
+    /// account key this device holds, store the result as pending, and
+    /// adopt it only once the server-side change is visible. It carries the
+    /// new account's entropy: never log it.
+    KeyRotation = 18,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2303,6 +2312,7 @@ pub struct WasmIncomingEnvelope {
     reach_state: Option<ReachState>,
     committer_delegation: Option<CommitterDelegationEnvelope>,
     group_closed: Option<WasmGroupClosed>,
+    key_rotation: Option<crate::key_rotation::WasmKeyRotation>,
 }
 
 impl WasmIncomingEnvelope {
@@ -2324,6 +2334,7 @@ impl WasmIncomingEnvelope {
             committer_delegation: None,
             shared_channels: None,
             group_closed: None,
+            key_rotation: None,
         }
     }
 }
@@ -2439,6 +2450,13 @@ impl WasmIncomingEnvelope {
     pub fn group_closed(&self) -> Option<WasmGroupClosed> {
         self.group_closed.clone()
     }
+
+    /// Set only for `KeyRotation` (ADR-0066): the decoded envelope, shape
+    /// only. `undefined` for every other kind.
+    #[wasm_bindgen(getter, js_name = keyRotation)]
+    pub fn key_rotation(&self) -> Option<crate::key_rotation::WasmKeyRotation> {
+        self.key_rotation.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -2551,6 +2569,10 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
                 successor_group_id,
             }),
             ..WasmIncomingEnvelope::of(K::GroupClosed)
+        },
+        IncomingEnvelope::KeyRotation(rotation) => WasmIncomingEnvelope {
+            key_rotation: Some(rotation.into()),
+            ..WasmIncomingEnvelope::of(K::KeyRotation)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),

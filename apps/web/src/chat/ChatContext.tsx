@@ -111,6 +111,16 @@ export interface ChatApi {
    *  than a leaf: contact requests and acks, invite capabilities, the
    *  discovery bundle, the safety number. `identity()` is the device. */
   readonly accountIdentity: Accessor<WasmIdentity | null>;
+  /** ADR-0066 section 3.5 — after a proven key rotation, the identity of the
+   *  account key the conversation leaves are still bound to (the proven
+   *  predecessor this device holds); `null` when the account never rotated.
+   *  Its mailbox is where peers address this account's leaves. */
+  readonly predecessorAccountIdentity: Accessor<WasmIdentity | null>;
+  /** The account identity for everything that is about this account INSIDE a
+   *  conversation (the role table, the journal ownership, an envelope sealed
+   *  to the member): the predecessor while one is held, else the account
+   *  identity. Never for the directory, statements or the safety number. */
+  readonly conversationAccountIdentity: Accessor<WasmIdentity | null>;
   /** Look up a group by its base64-encoded `group_id`. Returns
    *  `undefined` if the group isn't in the registry — the UI
    *  surfaces a "group not found, please re-create" panel. */
@@ -129,6 +139,14 @@ export interface ChatApi {
   setIdentity(identity: WasmIdentity | null): void;
   /** Replace the account identity (ADR-0050). Frees the previous one. */
   setAccountIdentity(identity: WasmIdentity | null): void;
+  /** Replace the predecessor identity (ADR-0066). Frees the previous one. */
+  setPredecessorAccountIdentity(identity: WasmIdentity | null): void;
+  /** ADR-0066 section 3.5 — a proven key rotation in a LIVE session: `next`
+   *  becomes the account identity. When no predecessor is held yet, the
+   *  identity that was the account's becomes the predecessor AS THE SAME
+   *  OBJECT (never freed, never rebuilt): its MLS provider holds the
+   *  account's PublisherGroups, which must survive the rotation. */
+  rotateAccountIdentity(next: WasmIdentity): void;
   /** Capture the canonical Identity's provider storage, encrypt
    *  under the device root key for `accountIdB64`, and write
    *  the resulting blob to the `mls-store` IDB row.
@@ -216,6 +234,24 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     installMailboxAccess("account", next);
   }
 
+  const [predecessorIdentity, setPredecessorIdentitySig] =
+    createSignal<WasmIdentity | null>(null);
+
+  function replacePredecessorIdentity(next: WasmIdentity | null): void {
+    const prev = predecessorIdentity();
+    if (prev !== null && prev !== next) {
+      try {
+        prev.free();
+      } catch {
+        // eslint-disable-next-line no-console
+        console.warn("ChatProvider: free() on a stale predecessor Identity threw");
+      }
+    }
+    setPredecessorIdentitySig(next);
+    // ADR-0066 section 3.5 — the mailbox the conversation leaves name.
+    installMailboxAccess("predecessor", next);
+  }
+
   function replaceIdentity(next: WasmIdentity | null): void {
     const prev = identity();
     // Free the prior allocation when it's actually different —
@@ -259,6 +295,24 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     identity,
     accountIdentity,
     setAccountIdentity(next) {
+      replaceAccountIdentity(next);
+    },
+    predecessorAccountIdentity: predecessorIdentity,
+    conversationAccountIdentity: () => predecessorIdentity() ?? accountIdentity(),
+    setPredecessorAccountIdentity(next) {
+      replacePredecessorIdentity(next);
+    },
+    rotateAccountIdentity(next) {
+      const previous = accountIdentity();
+      if (predecessorIdentity() === null && previous !== null && previous !== next) {
+        // Moved, not freed: set the signal first so `replaceAccountIdentity`
+        // finds another object in its slot.
+        setPredecessorIdentitySig(previous);
+        installMailboxAccess("predecessor", previous);
+        setAccountIdentitySig(next);
+        installMailboxAccess("account", next);
+        return;
+      }
       replaceAccountIdentity(next);
     },
     get(groupIdB64) {
@@ -445,6 +499,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       setGroups([]);
       replaceIdentity(null);
       replaceAccountIdentity(null);
+      replacePredecessorIdentity(null);
       clearDsAccess();
     },
   };

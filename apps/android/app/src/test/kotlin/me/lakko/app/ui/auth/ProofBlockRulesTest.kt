@@ -177,6 +177,7 @@ class ProofBlockRulesTest {
             ProofSurface.AddDeviceScan to "proof.add_device.scan.wrong_password",
             ProofSurface.AddPasskey to "restore_identity.reset.error.wrong_password",
             ProofSurface.ChangePassword to "restore_identity.reset.error.wrong_password",
+            ProofSurface.RemoveDevice to "proof.remove_device.wrong_password",
         )
         for ((surface, key) in expected) {
             val before = ProofBlockState(phase = ProofPhase.Checking, password = "typo")
@@ -196,6 +197,7 @@ class ProofBlockRulesTest {
             ProofSurface.AddDeviceScan to "proof.add_device.scan.cancelled",
             ProofSurface.AddPasskey to "proof.add_passkey.cancelled",
             ProofSurface.ChangePassword to "proof.change_password.cancelled",
+            ProofSurface.RemoveDevice to "proof.remove_device.cancelled",
         )
         assertEquals(ProofSurface.entries.toSet(), expected.keys)
         for ((surface, key) in expected) {

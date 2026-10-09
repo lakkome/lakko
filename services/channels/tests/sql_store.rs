@@ -94,6 +94,40 @@ async fn create_keeps_the_first_owner_key() {
 }
 
 #[tokio::test]
+async fn replace_owner_is_a_compare_and_swap() {
+    let Some(s) = store("replace_owner_is_a_compare_and_swap").await else {
+        return;
+    };
+    let c = channel();
+    assert!(matches!(
+        s.replace_owner(c, OWNER, [8; 32]).await,
+        Err(StorageError::UnknownChannel)
+    ));
+    s.create(c, OWNER).await.unwrap();
+    // Not the current key: nothing changes.
+    assert!(!s.replace_owner(c, [9; 32], [8; 32]).await.unwrap());
+    assert_eq!(s.owner_pubkey(c).await.unwrap(), Some(OWNER));
+    // Of two handovers under the same key, exactly one lands.
+    let (a, b) = tokio::join!(
+        s.replace_owner(c, OWNER, [8; 32]),
+        s.replace_owner(c, OWNER, [7; 32])
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert!(a ^ b, "exactly one handover wins: {a} {b}");
+    let now = s.owner_pubkey(c).await.unwrap().unwrap();
+    assert_eq!(now, if a { [8; 32] } else { [7; 32] });
+    // The displaced key hands nothing over any more, and cannot re-create.
+    assert!(!s.replace_owner(c, OWNER, [6; 32]).await.unwrap());
+    assert_eq!(s.owner_pubkey(c).await.unwrap(), Some(now));
+    assert!(matches!(
+        s.create(c, OWNER).await,
+        Err(StorageError::OwnerMismatch)
+    ));
+    // The subscribers, the epoch and the co-publishers are untouched.
+    assert_eq!(s.current_epoch(c).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn an_owner_nonce_is_accepted_once_and_pruned() {
     let Some(s) = store("an_owner_nonce_is_accepted_once_and_pruned").await else {
         return;

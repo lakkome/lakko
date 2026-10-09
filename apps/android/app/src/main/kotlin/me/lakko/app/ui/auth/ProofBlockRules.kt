@@ -26,6 +26,9 @@ public enum class ProofSurface {
     AddDeviceScan,
     AddPasskey,
     ChangePassword,
+
+    /** ADR-0066 / UX 18.1 - remove another device (Settings > Devices). */
+    RemoveDevice,
 }
 
 /** The per-surface lines of the block (UX 17.2-17.4). */
@@ -79,6 +82,13 @@ public fun proofCopy(surface: ProofSurface): ProofCopy = when (surface) {
         wrongPassword = "restore_identity.reset.error.wrong_password",
         cancelled = "proof.change_password.cancelled",
         generic = "recovery.new_password.error.generic",
+    )
+    // UX 18.6.
+    ProofSurface.RemoveDevice -> ProofCopy(
+        helper = "proof.remove_device.help",
+        wrongPassword = "proof.remove_device.wrong_password",
+        cancelled = "proof.remove_device.cancelled",
+        generic = "devices.remove.error.not_revoked",
     )
 }
 

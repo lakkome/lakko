@@ -110,7 +110,7 @@ vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
 vi.mock("../auth/AuthContext", () => ({
   // `anon` keeps the persisted log out: `reloadLog` returns before the device
   // key, so the sort key is the `createdAtMs` below and nothing else.
-  useAuth: () => ({ state: () => ({ kind: "anon" }) }),
+  useAuth: () => ({ state: () => ({ kind: "anon" }), recallDone: () => false }),
 }));
 vi.mock("../calls/CallHostContext", () => ({
   useCallHost: () => ({

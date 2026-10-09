@@ -13,11 +13,17 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -29,7 +35,6 @@ import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -68,6 +73,12 @@ import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
 import me.lakko.app.devices.DeviceRemoval
+import me.lakko.app.devices.DeviceRemovalRunner
+import me.lakko.app.devices.RemovalCopy
+import me.lakko.app.devices.RemovalSheetOutcome
+import me.lakko.app.devices.removalGate
+import me.lakko.app.devices.removalGateLine
+import me.lakko.app.devices.removalSheetOutcome
 import me.lakko.app.auth.UniffiLoginHandleSource
 import me.lakko.app.devices.PAIRING_FAILED_COPY
 import me.lakko.app.devices.PAIRING_NO_USERNAME_COPY
@@ -182,9 +193,9 @@ public fun DevicesScreen(
             }
 
             DevicesList(
+                authRepository = authRepository,
                 accountIdBytes = secrets.accountId,
                 accountIdB64 = account.accountIdB64,
-                sessionToken = secrets.sessionToken,
                 chatRepository = chatRepository,
             )
 
@@ -849,18 +860,33 @@ internal fun deviceRowLabel(isSelf: Boolean, index: Int): UiText =
 
 @Composable
 private fun DevicesList(
+    authRepository: AuthRepository,
     accountIdBytes: ByteArray,
     accountIdB64: String,
-    sessionToken: String?,
     chatRepository: me.lakko.app.chat.ChatRepository?,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var state: DevicesListUi by remember { mutableStateOf(DevicesListUi.Loading) }
-    var removingLeaf: UInt? by remember { mutableStateOf(null) }
     var confirming: Pair<DeviceRemoval.DeviceListItem, String>? by remember { mutableStateOf(null) }
+    // ADR-0066 - the devices already signed out at auth whose removal is
+    // still finishing: their rows read `Removing...` and carry no control.
+    var pending: Set<String> by remember { mutableStateOf(emptySet()) }
+    // Of those, the ones whose owed step waits on the person's passkey:
+    // their rows also carry `Finish removing`.
+    var waitingOnPerson: Set<String> by remember { mutableStateOf(emptySet()) }
+    var finishing: String? by remember { mutableStateOf(null) }
+    // `Device removed and signed out.` after a removal whose every step answered.
+    var removedDone by remember { mutableStateOf(false) }
+    // `Your account keys were changed...` after "remove and change keys".
+    var rotatedDone by remember { mutableStateOf(false) }
+    // Non-null while the new phrase screen is up; the value says whether
+    // the words are withheld (the publish is still owed).
+    var rotatedPhrase: Boolean? by remember { mutableStateOf(null) }
     // UX 17.5 - which rows carry `New`.
     val notice by me.lakko.app.devices.NewDeviceNotices.state.collectAsStateWithLifecycle()
+
+    fun runner(): DeviceRemovalRunner? = DeviceRemovalRunner.onDevice(context, authRepository, chatRepository)
 
     fun refresh() {
         state = DevicesListUi.Loading
@@ -870,6 +896,9 @@ private fun DevicesList(
                 accountIdBytes = accountIdBytes,
                 accountIdB64 = accountIdB64,
             )
+            val active = runner()
+            pending = active?.pendingDeviceIds().orEmpty()
+            waitingOnPerson = active?.waitingOnPersonDeviceIds().orEmpty()
             state = DevicesListUi.Ready(list.devices)
         } catch (cause: Throwable) {
             Log.w(TAG, "WARN device list failed: ${cause.javaClass.simpleName}")
@@ -877,61 +906,25 @@ private fun DevicesList(
         }
     }
 
-    LaunchedEffect(Unit) { refresh() }
-
-    fun remove(device: DeviceRemoval.DeviceListItem) {
-        val leaf = device.leafIndex
-        val signaturePublicKey = device.signaturePublicKey
-        // Read BEFORE the removal: the roster that follows drops the key.
-        val deviceKey = me.lakko.app.devices.newDeviceKey(signaturePublicKey)
-        val wasNew = me.lakko.app.devices.isNewDevice(notice, deviceKey)
-        removingLeaf = leaf
-        scope.launch {
+    LaunchedEffect(Unit) {
+        refresh()
+        // A removal an earlier session left unfinished is finished now (it
+        // is also retried at every landing by the app root).
+        val resumed = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                // G-13 (ADR-0014): gate the eviction on a fresh passkey gesture
-                // cryptographically bound to the removed leaf, but only if the
-                // account actually has a passkey. Accounts without one (a 404
-                // from the ceremony start) fall through on session-token auth
-                // alone. A cancelled gesture or any other failure aborts the
-                // removal (fail-closed).
-                // G-13 (ADR-0015): the ceremony yields an attestation bound to the
-                // removed leaf; it rides with the Remove commit so peers verify it.
-                var attestation: ByteArray? = null
-                if (sessionToken != null) {
-                    WebauthnClient().use { wc ->
-                        wc.setSessionToken(sessionToken)
-                        try {
-                            val actionHashB64 = actionHashForRemoveDevice(signaturePublicKey)
-                            val result = wc.assertAction(
-                                context = context,
-                                actionHashB64 = actionHashB64,
-                            )
-                            attestation = base64UrlDecodeNoPad(result.attestationB64)
-                        } catch (e: WebauthnHttpError) {
-                            if (e.status != 404) throw e
-                        }
-                    }
-                }
-
-                DeviceRemoval.removeDeviceAt(
-                    context = context,
-                    accountIdBytes = accountIdBytes,
-                    accountIdB64 = accountIdB64,
-                    leafIndex = leaf,
-                    attestation = attestation,
-                )
-                // ADR-0050 section 2.10 — out of every chat and out of the
-                // directory.
-                chatRepository?.requestRetireDevice(signaturePublicKey)
-                // UX 17.5 - a removed `New` device: the line that replaces
-                // the banner.
-                me.lakko.app.devices.NewDeviceNotices.onRemovedHere(deviceKey, wasNew)
-                removingLeaf = null
-                refresh()
+                runner()?.resume().orEmpty()
             } catch (cause: Throwable) {
-                removingLeaf = null
-                Log.w(TAG, "WARN device removal failed: ${cause.javaClass.simpleName}")
-                state = DevicesListUi.Error(UiText("settings.devices.error.remove"))
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                emptyMap()
+            }
+        }
+        if (resumed.isNotEmpty()) refresh()
+        // A rotation that passed its commit finishes by itself too.
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                me.lakko.app.devices.KeyRotationDevice.runner(context, authRepository, chatRepository)?.resume()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
             }
         }
     }
@@ -953,11 +946,18 @@ private fun DevicesList(
                     notice,
                     me.lakko.app.devices.newDeviceKey(device.signaturePublicKey),
                 )
+                val deviceIdB64Url = me.lakko.app.auth.base64UrlEncodeNoPad(device.signaturePublicKey)
+                val isPending = !device.isSelf && deviceIdB64Url in pending
+                val needsFinish = isPending && deviceIdB64Url in waitingOnPerson
                 ListItem(
                     headlineContent = { Text(label, fontWeight = FontWeight.Medium) },
                     supportingContent = when {
                         device.isSelf -> {
                             { Text(t("settings.devices.this_device.sub")) }
+                        }
+                        // Signed out at auth; the rest finishes by itself.
+                        isPending -> {
+                            { Text(t(RemovalCopy.ROW_PENDING)) }
                         }
                         // A text label, never colour alone.
                         isNew -> {
@@ -978,22 +978,66 @@ private fun DevicesList(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     },
-                    trailingContent = if (device.isSelf) {
+                    trailingContent = if (needsFinish) {
+                        {
+                            // The owed step needs the passkey again (after a
+                            // relaunch, or once the attestation aged out):
+                            // the gesture, then the steps still owed.
+                            TextButton(
+                                enabled = finishing == null,
+                                onClick = {
+                                    finishing = deviceIdB64Url
+                                    scope.launch {
+                                        try {
+                                            val attestation =
+                                                removalAttestation(context, authRepository, device.signaturePublicKey)
+                                            val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                runner()?.remove(device.signaturePublicKey, attestation)
+                                            }
+                                            if (result == me.lakko.app.devices.RemovalResult.Done) removedDone = true
+                                        } catch (cause: Throwable) {
+                                            if (cause is kotlinx.coroutines.CancellationException) throw cause
+                                            // A dismissed gesture, or no
+                                            // answer: the row keeps its button.
+                                            Log.w(TAG, "WARN finishing a device removal: ${cause.javaClass.simpleName}")
+                                        } finally {
+                                            finishing = null
+                                            refresh()
+                                        }
+                                    }
+                                },
+                            ) { Text(t(RemovalCopy.ROW_FINISH)) }
+                        }
+                    } else if (device.isSelf || isPending) {
                         null
                     } else {
                         {
-                            TextButton(
-                                onClick = { confirming = device to label },
-                                enabled = removingLeaf == null,
-                            ) {
-                                Text(
-                                    if (removingLeaf == device.leafIndex) t("common.removing") else t("common.remove"),
-                                    color = MaterialTheme.colorScheme.error,
-                                )
+                            TextButton(onClick = { confirming = device to label }) {
+                                Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
                             }
                         }
                     },
                     colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
+                )
+            }
+            if (rotatedDone) {
+                Text(
+                    t(me.lakko.app.devices.RotationCopy.DONE),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+            if (removedDone) {
+                Text(
+                    t(RemovalCopy.DONE),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
         }
@@ -1011,22 +1055,473 @@ private fun DevicesList(
         }
     }
 
-    confirming?.let { (device, label) ->
-        AlertDialog(
-            onDismissRequest = { confirming = null },
-            title = { Text(t("settings.devices.remove.title", mapOf("device" to label))) },
-            text = { Text(t("settings.devices.remove.body")) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirming = null
-                        remove(device)
-                    },
-                ) { Text(t("settings.devices.remove.confirm_named", mapOf("device" to label)), color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirming = null }) { Text(t("common.cancel")) }
+    // ADR-0066 part 3 - the new recovery phrase after "remove and change
+    // keys" (withheld while the publish is owed), then the done line.
+    rotatedPhrase?.let { withheld ->
+        RotatedPhraseScreen(
+            authRepository = authRepository,
+            chatRepository = chatRepository,
+            initiallyWithheld = withheld,
+            onClosed = {
+                rotatedPhrase = null
+                rotatedDone = true
+                refresh()
             },
         )
+    }
+
+    confirming?.let { (device, label) ->
+        RemoveDeviceSheet(
+            authRepository = authRepository,
+            chatRepository = chatRepository,
+            onRotated = { withheld ->
+                confirming = null
+                rotatedPhrase = withheld
+            },
+            device = device,
+            label = label,
+            runner = ::runner,
+            wasNew = me.lakko.app.devices.isNewDevice(
+                notice,
+                me.lakko.app.devices.newDeviceKey(device.signaturePublicKey),
+            ),
+            onClosed = { removedOrPending, done ->
+                confirming = null
+                if (done) removedDone = true
+                if (removedOrPending) refresh()
+            },
+        )
+    }
+}
+
+/**
+ * `Remove this device?` (`docs/ux/identity-recovery.md` section 18.1; ADR-0066
+ * section 2.3): the app's own modal, with the proof block. The main button
+ * runs the whole removal as one operation ([DeviceRemovalRunner]): the proof,
+ * the sign-out at auth, the directory row, the device list, the chats.
+ *
+ * Nothing is removed unless the sign-out at auth answered; from there on the
+ * rest finishes by itself, now or the next time this device is online.
+ *
+ * The radio pair of 18.1 chooses between the plain removal and "It was lost
+ * or stolen": remove AND change the account keys, keeping the other devices
+ * ([me.lakko.app.devices.KeyRotationRunner], ADR-0066 part 3).
+ */
+@Composable
+private fun RemoveDeviceSheet(
+    authRepository: AuthRepository,
+    chatRepository: me.lakko.app.chat.ChatRepository?,
+    /** "Remove and change keys" changed the keys: close the sheet and show
+     *  the new phrase ([withheld] while the publish is owed). */
+    onRotated: (withheld: Boolean) -> Unit,
+    device: DeviceRemoval.DeviceListItem,
+    label: String,
+    runner: () -> DeviceRemovalRunner?,
+    wasNew: Boolean,
+    onClosed: (removedOrPending: Boolean, done: Boolean) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val proof = me.lakko.app.ui.auth.rememberProofController(
+        authRepository,
+        me.lakko.app.ui.auth.ProofSurface.RemoveDevice,
+        key = device.leafIndex,
+    )
+    var removing by remember { mutableStateOf(false) }
+    var line: UiText? by remember { mutableStateOf(null) }
+    // UX 18.1 - the radio pair; neither is selected at first and the main
+    // button is disabled until one is.
+    var reason: me.lakko.app.devices.RemovalReason? by remember { mutableStateOf(null) }
+    // "Remove and change keys": the active line of the step list.
+    var rotationStep: me.lakko.app.devices.RotationUiStep? by remember { mutableStateOf(null) }
+    // The device WAS removed and the keys were not changed: Try again / Not now.
+    var notStarted by remember { mutableStateOf(false) }
+    val view = proof.view()
+    val working = removing || view.working
+    val stolen = reason == me.lakko.app.devices.RemovalReason.Stolen
+
+    fun rotationRunner(attestation: ByteArray?): me.lakko.app.devices.KeyRotationRunner? =
+        me.lakko.app.devices.KeyRotationDevice.runner(
+            context = context,
+            authRepository = authRepository,
+            chatRepository = chatRepository,
+            deviceId = device.signaturePublicKey,
+            attestation = attestation,
+            onStep = { step -> rotationStep = step },
+        )
+
+    val rotate: () -> Unit = rotate@{
+        if (removing || !proof.view().mainEnabled) return@rotate
+        removalGateLine(
+            removalGate(holdsAccountKeys = true, keyResetPublishOwed = authRepository.publishOwed()),
+        )?.let {
+            line = it
+            return@rotate
+        }
+        removing = true
+        line = null
+        scope.launch {
+            try {
+                // The proof FIRST: the removal and the key change both need it.
+                if (!proof.ensure(context)) return@launch
+                val deviceKey = device.signaturePublicKey
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    authRepository.ensureIdentityKeyRecorded()
+                }
+                // The passkey gesture for the device list's removal comes
+                // before anything is sent, as for a plain removal. A retry of
+                // a rotation whose device is already out of the list needs none.
+                val removalAlreadyWon = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    rotationRunner(null)?.owed()?.removalWon == true
+                }
+                val attestation = if (removalAlreadyWon) null else removalAttestation(context, authRepository, deviceKey)
+                val (result, withheld) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val active = rotationRunner(attestation) ?: throw IllegalStateException("no session")
+                    val result = active.rotate(deviceKey)
+                    result to (active.owed()?.let { me.lakko.app.devices.rotationWithholdsPhrase(it) } == true)
+                }
+                when (val outcome = me.lakko.app.devices.rotationSheetOutcome(result, withheld)) {
+                    is me.lakko.app.devices.RotationSheetOutcome.ShowPhrase -> {
+                        me.lakko.app.devices.NewDeviceNotices.onRemovedHere(
+                            me.lakko.app.devices.newDeviceKey(deviceKey),
+                            wasNew,
+                        )
+                        proof.clear()
+                        onRotated(outcome.withheld)
+                    }
+                    me.lakko.app.devices.RotationSheetOutcome.ShowProofBlock -> proof.onProofRefused()
+                    is me.lakko.app.devices.RotationSheetOutcome.NothingRemoved -> line = outcome.text
+                    is me.lakko.app.devices.RotationSheetOutcome.NotStarted -> {
+                        notStarted = true
+                        line = outcome.extra
+                    }
+                }
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                // Thrown before anything was sent (the passkey gesture, a
+                // missing session): nothing was removed.
+                Log.w(TAG, "WARN key rotation not started: ${cause.javaClass.simpleName}")
+                line = UiText(RemovalCopy.ERROR_NOT_REVOKED)
+            } finally {
+                removing = false
+                rotationStep = null
+            }
+        }
+    }
+
+    val remove: () -> Unit = remove@{
+        if (removing || !proof.view().mainEnabled) return@remove
+        // A reset's publish still owed: auth holds the new key and the
+        // directory the old one, so a removal waits for it (existing copy).
+        removalGateLine(
+            removalGate(holdsAccountKeys = true, keyResetPublishOwed = authRepository.publishOwed()),
+        )?.let {
+            line = it
+            return@remove
+        }
+        removing = true
+        line = null
+        scope.launch {
+            try {
+                // The proof FIRST; a failure leaves its line on the block
+                // and nothing has been sent.
+                if (!proof.ensure(context)) return@launch
+                val deviceKey = device.signaturePublicKey
+                // Auth must hold the account's identity key before it will
+                // take a removal; an account that never recorded one does so
+                // now (idempotent).
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    authRepository.ensureIdentityKeyRecorded()
+                }
+                // G-13 (ADR-0015): when the account has a passkey, the device
+                // list accepts the removal only with an attestation bound to
+                // the removed leaf. The gesture comes BEFORE the sign-out at
+                // auth, so a cancelled gesture removes nothing. A 404 = no
+                // passkey. (On the caller's dispatcher: it opens the
+                // credential sheet.)
+                val attestation = removalAttestation(context, authRepository, deviceKey)
+                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val active = runner() ?: throw IllegalStateException("no session")
+                    active.remove(deviceKey, attestation)
+                }
+                when (val outcome = removalSheetOutcome(result)) {
+                    RemovalSheetOutcome.Close -> {
+                        // UX 17.5 - a removed `New` device: the line that
+                        // replaces the banner.
+                        me.lakko.app.devices.NewDeviceNotices.onRemovedHere(
+                            me.lakko.app.devices.newDeviceKey(deviceKey),
+                            wasNew,
+                        )
+                        proof.clear()
+                        onClosed(true, result == me.lakko.app.devices.RemovalResult.Done)
+                    }
+                    RemovalSheetOutcome.ShowProofBlock -> proof.onProofRefused()
+                    is RemovalSheetOutcome.Line -> line = outcome.text
+                }
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                // Thrown before the sign-out at auth (the passkey gesture, a
+                // missing session): nothing was removed.
+                Log.w(TAG, "WARN device removal not started: ${cause.javaClass.simpleName}")
+                line = UiText(RemovalCopy.ERROR_NOT_REVOKED)
+            } finally {
+                removing = false
+            }
+        }
+    }
+
+    val main: () -> Unit = if (stolen) rotate else remove
+    me.lakko.app.ui.components.LakkoModal(
+        onDismissRequest = { if (!working) onClosed(notStarted, false) },
+        title = if (stolen) {
+            t(me.lakko.app.devices.RotationCopy.TITLE)
+        } else {
+            t(RemovalCopy.SHEET_TITLE, mapOf("device" to label))
+        },
+        actions = {
+            if (notStarted) {
+                // The device was removed; the keys were not changed.
+                TextButton(
+                    enabled = !working,
+                    onClick = {
+                        scope.launch {
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                rotationRunner(null)?.abandon()
+                            }
+                            proof.clear()
+                            onClosed(true, false)
+                        }
+                    },
+                ) { Text(t(me.lakko.app.devices.RotationCopy.NOT_NOW)) }
+                TextButton(onClick = rotate, enabled = view.mainEnabled && !working) {
+                    Text(t(me.lakko.app.devices.RotationCopy.RETRY))
+                }
+            } else {
+                TextButton(
+                    onClick = {
+                        proof.clear()
+                        onClosed(false, false)
+                    },
+                    // UX 18.1: Cancel is disabled from the first step.
+                    enabled = !removing,
+                ) { Text(t("common.cancel")) }
+                TextButton(onClick = main, enabled = reason != null && view.mainEnabled && !working) {
+                    Text(
+                        when {
+                            removing && !stolen -> t(RemovalCopy.WORKING)
+                            view.working -> t("common.checking")
+                            stolen -> t(me.lakko.app.devices.RotationCopy.CONFIRM)
+                            else -> t(RemovalCopy.CONFIRM)
+                        },
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+    ) {
+        if (notStarted) {
+            Text(
+                t(me.lakko.app.devices.RotationCopy.NOT_STARTED),
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        } else if (stolen) {
+            Text(t(me.lakko.app.devices.RotationCopy.LEDE))
+        } else {
+            Text(t(RemovalCopy.SHEET_BODY))
+        }
+        val activeStep = rotationStep
+        if (stolen && removing && activeStep != null) {
+            // The step list replaces the bullets, one line active at a time.
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                for ((step, key) in me.lakko.app.devices.ROTATION_STEP_LINES) {
+                    val active = step == activeStep
+                    Text(
+                        t(key),
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (active) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        // Each step is announced once, when it becomes active.
+                        modifier = if (active) {
+                            Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                        } else {
+                            Modifier
+                        },
+                    )
+                }
+            }
+        } else if (stolen && !notStarted) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                for (key in me.lakko.app.devices.RotationCopy.EFFECTS) {
+                    Text("- " + t(key), style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
+        if (!notStarted && !removing) {
+            RemovalReasonPair(selected = reason, onSelect = { reason = it })
+        }
+        me.lakko.app.ui.auth.ProofBlock(
+            controller = proof,
+            onSubmit = main,
+            onPasskey = { scope.launch { proof.provePasskey(context) } },
+        )
+        line?.let {
+            Text(
+                it.text(),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+    }
+}
+
+/** UX 18.1 - the two reasons as ONE radio group; neither selected at first. */
+@Composable
+private fun RemovalReasonPair(
+    selected: me.lakko.app.devices.RemovalReason?,
+    onSelect: (me.lakko.app.devices.RemovalReason) -> Unit,
+) {
+    val groupLabel = t(RemovalCopy.SHEET_BODY)
+    Column(
+        modifier = Modifier
+            .selectableGroup()
+            .semantics { contentDescription = groupLabel },
+    ) {
+        for (
+            (reason, key) in listOf(
+                me.lakko.app.devices.RemovalReason.Unused to me.lakko.app.devices.RotationCopy.REASON_UNUSED,
+                me.lakko.app.devices.RemovalReason.Stolen to me.lakko.app.devices.RotationCopy.REASON_STOLEN,
+            )
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .selectable(
+                        selected = selected == reason,
+                        onClick = { onSelect(reason) },
+                        role = androidx.compose.ui.semantics.Role.RadioButton,
+                    )
+                    .padding(vertical = 8.dp),
+            ) {
+                androidx.compose.material3.RadioButton(selected = selected == reason, onClick = null)
+                Text(t(key), modifier = Modifier.padding(start = 12.dp))
+            }
+        }
+    }
+}
+
+/**
+ * The new recovery phrase after "remove and change keys" (UX 18.1 "Done":
+ * section 9.1's screen, unchanged). While the publish of the new keys is
+ * still owed the words are withheld with 15.4's copy and `Try again`
+ * repeats only the steps that did not land.
+ */
+@Composable
+private fun RotatedPhraseScreen(
+    authRepository: AuthRepository,
+    chatRepository: me.lakko.app.chat.ChatRepository?,
+    initiallyWithheld: Boolean,
+    onClosed: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var withheld by remember { mutableStateOf(initiallyWithheld) }
+    var retrying by remember { mutableStateOf(false) }
+    var phrase: String? by remember { mutableStateOf(null) }
+    LaunchedEffect(withheld) {
+        if (!withheld) {
+            phrase = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { authRepository.devicePhrase() }
+        }
+    }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = {},
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        androidx.compose.material3.Surface(modifier = Modifier.fillMaxSize()) {
+            val words = phrase
+            if (withheld) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.padding(24.dp),
+                ) {
+                    Text(t(me.lakko.app.devices.RotationCopy.PHRASE_TITLE), style = MaterialTheme.typography.headlineSmall)
+                    Text(
+                        t(me.lakko.app.devices.RotationCopy.PUBLISH_OWED),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                    OutlinedButton(
+                        enabled = !retrying,
+                        onClick = {
+                            retrying = true
+                            scope.launch {
+                                try {
+                                    val still = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        val runner = me.lakko.app.devices.KeyRotationDevice
+                                            .runner(context, authRepository, chatRepository)
+                                        runner?.resume()
+                                        runner?.owed()?.let { me.lakko.app.devices.rotationWithholdsPhrase(it) } == true
+                                    }
+                                    withheld = still
+                                } catch (cause: Throwable) {
+                                    if (cause is kotlinx.coroutines.CancellationException) throw cause
+                                    Log.w(TAG, "WARN key rotation publish retry: ${cause.javaClass.simpleName}")
+                                } finally {
+                                    retrying = false
+                                }
+                            }
+                        },
+                    ) { Text(if (retrying) t("common.checking") else t(me.lakko.app.devices.RotationCopy.RETRY)) }
+                    TextButton(onClick = onClosed, enabled = !retrying) {
+                        Text(t(me.lakko.app.devices.RotationCopy.NOT_NOW))
+                    }
+                }
+            } else if (words != null) {
+                me.lakko.app.ui.auth.RecoveryPhraseOnboarding(
+                    phrase = words,
+                    onDone = onClosed,
+                    title = t(me.lakko.app.devices.RotationCopy.PHRASE_TITLE),
+                    lead = t("devices.rotate.effect_phrase") + "\n\n" + t("devices.rotate.effect_devices"),
+                )
+            } else {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(24.dp),
+                ) {
+                    CircularProgressIndicator()
+                    Text(t("common.loading"))
+                }
+            }
+        }
+    }
+}
+
+/** The ADR-0015 removal attestation for [deviceKey], or `null` when the
+ *  account has no passkey. A cancelled or failed gesture throws. */
+private suspend fun removalAttestation(
+    context: android.content.Context,
+    authRepository: AuthRepository,
+    deviceKey: ByteArray,
+): ByteArray? {
+    val sessionToken = authRepository.identitySecrets.value?.sessionToken ?: return null
+    return WebauthnClient().use { wc ->
+        wc.setSessionToken(sessionToken)
+        try {
+            val result = wc.assertAction(
+                context = context,
+                actionHashB64 = actionHashForRemoveDevice(deviceKey),
+            )
+            base64UrlDecodeNoPad(result.attestationB64)
+        } catch (e: WebauthnHttpError) {
+            if (e.status != 404) throw e
+            null
+        }
     }
 }

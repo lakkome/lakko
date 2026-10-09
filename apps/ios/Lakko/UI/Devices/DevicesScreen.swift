@@ -22,20 +22,29 @@ public struct DevicesScreen: View {
     /// UX 17.5 — `Change password` on the line shown after a `New` device
     /// was removed.
     public var onChangePassword: () -> Void
-    /// ADR-0050 section 2.10 — called with a device's 32-byte key once it was
-    /// removed from the DeviceGroup; the composition root retires it from
-    /// every chat.
+    /// Called with a device's 32-byte key once it was signed out at the
+    /// server (ADR-0066 section 2.3); the removal itself, with its owed
+    /// steps, is the runner's.
     public var onDeviceRemoved: (Data) -> Void
+    /// ADR-0066 section 2.3 — the removal flow and its owed records.
+    private let removal: DeviceRemovalRunner
+    /// ADR-0066 section 3.2 — "It was lost or stolen": remove the device and
+    /// change the account keys. `nil` offers the plain removal only.
+    private let rotation: KeyRotationRunner?
 
     @ObservedObject private var l10n = Localization.shared
 
     public init(
         authRepository: AuthRepository,
+        removal: DeviceRemovalRunner,
+        rotation: KeyRotationRunner? = nil,
         onAddDevice: @escaping () -> Void = {},
         onChangePassword: @escaping () -> Void = {},
         onDeviceRemoved: @escaping (Data) -> Void = { _ in }
     ) {
         self.authRepository = authRepository
+        self.removal = removal
+        self.rotation = rotation
         self.onChangePassword = onChangePassword
         self.onAddDevice = onAddDevice
         self.onDeviceRemoved = onDeviceRemoved
@@ -72,6 +81,9 @@ public struct DevicesScreen: View {
                     }
                 }
                 DevicesListView(
+                    authRepository: authRepository,
+                    removal: removal,
+                    rotation: rotation,
                     accountIdBytes: session.accountIdBytes,
                     accountIdB64: session.accountIdB64,
                     sessionToken: session.sessionToken,
@@ -583,18 +595,30 @@ private struct ScanView: View {
 
 private struct DevicesListView: View {
 
+    let authRepository: AuthRepository
+    /// ADR-0066 section 2.3 — the removal flow; its pending set marks the
+    /// rows whose device is signed out and still being removed.
+    @ObservedObject var removal: DeviceRemovalRunner
+    /// ADR-0066 section 3.2 — the "remove and change keys" flow and what a
+    /// stored record of it asks of this screen.
+    let rotation: KeyRotationRunner?
+    /// What the stored rotation record asks for (re-read when the screen
+    /// opens and after the sheet closes).
+    @State private var rotationResume: KeyRotationPlan.Resume = .nothing
+    /// The new words of a rotation that finished after the sheet was closed.
+    @State private var rotatedWords: RotatedWords?
     let accountIdBytes: Data
     let accountIdB64: String
-    /// Bearer token for the action-binding ceremony (G-13). The
-    /// device-removal gate is conditional: it only runs when the
-    /// account has a passkey, so the token is enough to drive the
-    /// authed `/auth/action/start` probe.
+    /// Bearer token for the ADR-0015 action-binding ceremony.
     let sessionToken: String
-    /// ADR-0050 section 2.10 — the removal fan-out over every chat.
+    /// The device was signed out at the server.
     let onDeviceRemoved: (Data) -> Void
 
     @State private var state: ListState = .loading
-    @State private var removingLeaf: UInt32?
+    /// The device whose remove sheet is open.
+    @State private var removing: RemoveTarget?
+    /// The line under the list after a removal or a `Finish removing`.
+    @State private var note: DeviceRemovalNote?
     @ObservedObject private var l10n = Localization.shared
     /// UX 17.5 — which rows carry `New`.
     @ObservedObject private var notice = NewDeviceNoticeCenter.shared
@@ -603,6 +627,73 @@ private struct DevicesListView: View {
         case loading
         case ready([DeviceRemoval.DeviceListItem])
         case error(UiText)
+    }
+
+    private struct RemoveTarget: Identifiable {
+        let key: Data
+        let title: String
+        /// Open straight on "It was lost or stolen" (`Try again`).
+        var stolen = false
+        var id: Data { key }
+    }
+
+    private struct RotatedWords: Identifiable {
+        let phrase: String
+        var id: String { phrase }
+    }
+
+    /// UX 18.1 — what a rotation that did not finish in its sheet leaves on
+    /// this screen: "the device was removed, but your account keys were not
+    /// changed" with `Try again` / `Not now`; the owed publish (it retries by
+    /// itself); or the new words still to be confirmed.
+    @ViewBuilder private var rotationFooter: some View {
+        switch rotationResume {
+        case .nothing:
+            EmptyView()
+        case .removedNotRotated:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(l10n.t(RotateDeviceCopy.notStarted))
+                    .foregroundStyle(Color.lakkoDanger)
+                HStack(spacing: 12) {
+                    Button(l10n.t(RotateDeviceCopy.retry)) {
+                        if let key = rotation?.storedTargetDeviceId() {
+                            removing = RemoveTarget(
+                                key: key,
+                                // The second choice's title names no device.
+                                title: "",
+                                stolen: true)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    Button(l10n.t(RotateDeviceCopy.notNow)) {
+                        rotation?.abandonUnstarted()
+                        refreshRotation()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+        case .commitLandedUnseen, .finishOwed:
+            Text(l10n.t(RotateDeviceCopy.publishOwed))
+                .foregroundStyle(Color.lakkoDanger)
+        case .showWords:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(l10n.t(RotateDeviceCopy.done))
+                Button(l10n.t(KeysRotatedCopy.showPhrase)) {
+                    if let phrase = rotation?.wordsToShow() {
+                        rotatedWords = RotatedWords(phrase: phrase)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private func refreshRotation() {
+        rotation?.reload()
+        rotationResume = rotation?.resume ?? .nothing
     }
 
     var body: some View {
@@ -616,10 +707,11 @@ private struct DevicesListView: View {
                 // "This device" / "Device N" rather than showing its key.
                 // The record carries no added date either, so none is shown.
                 ForEach(Array(devices.enumerated()), id: \.element.id) { index, device in
+                    let title = DeviceRowPresentation.title(isSelf: device.isSelf, position: index + 1)
                     HStack(spacing: 12) {
                         Image(systemName: device.isSelf ? "iphone" : "laptopcomputer.and.iphone")
                             .foregroundStyle(Color.lakkoTextMuted)
-                        Text(DeviceRowPresentation.title(isSelf: device.isSelf, position: index + 1))
+                        Text(title)
                             .font(.body)
                             .foregroundStyle(Color.lakkoText)
                         if notice.isNew(signaturePublicKey: device.signaturePublicKey) {
@@ -634,17 +726,42 @@ private struct DevicesListView: View {
                                 )
                         }
                         Spacer()
-                        if !device.isSelf {
-                            Button(role: .destructive) {
-                                Task { await remove(leafIndex: device.leafIndex) }
+                        let deviceIdB64 = device.signaturePublicKey.base64EncodedString()
+                        switch DeviceRowPresentation.control(
+                            isSelf: device.isSelf,
+                            removalPending: removal.pendingDeviceIds.contains(deviceIdB64),
+                            waitingOnPerson: removal.waitingOnPersonDeviceIds.contains(deviceIdB64)) {
+                        case .none:
+                            EmptyView()
+                        case .pending:
+                            // UX 18.1 — signed out, removal still finishing:
+                            // a label and no Remove control. It finishes by
+                            // itself the next time this device is online.
+                            Text(l10n.t(RemoveDeviceCopy.pending))
+                                .font(.footnote)
+                                .foregroundStyle(Color.lakkoTextMuted)
+                        case .pendingFinish:
+                            // The owed step needs the person's passkey again
+                            // (ADR-0015): the label and the one button that
+                            // runs the gesture and completes the removal.
+                            let finishing = removal.finishingDeviceIds.contains(deviceIdB64)
+                            Text(l10n.t(RemoveDeviceCopy.pending))
+                                .font(.footnote)
+                                .foregroundStyle(Color.lakkoTextMuted)
+                            Button {
+                                finishRemoval(device.signaturePublicKey)
                             } label: {
-                                if removingLeaf == device.leafIndex {
-                                    Text(l10n.t("common.removing"))
-                                } else {
-                                    Text(l10n.t("common.remove"))
-                                }
+                                Text(l10n.t(RemoveDeviceCopy.finish))
                             }
-                            .disabled(removingLeaf != nil)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(finishing)
+                        case .remove:
+                            Button(role: .destructive) {
+                                removing = RemoveTarget(key: device.signaturePublicKey, title: title)
+                            } label: {
+                                Text(l10n.t("common.remove"))
+                            }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
                         }
@@ -665,13 +782,88 @@ private struct DevicesListView: View {
         } header: {
             Text(l10n.t("settings.devices.list.title"))
         } footer: {
-            Text(l10n.t("settings.devices.list.lede"))
+            VStack(alignment: .leading, spacing: 6) {
+                Text(l10n.t("settings.devices.list.lede"))
+                if let note {
+                    Text(l10n.t(note.key))
+                        .foregroundStyle(note.isError ? Color.lakkoDanger : Color.lakkoTextMuted)
+                }
+                rotationFooter
+            }
         }
         .onAppear { refresh() }
+        // A removal left unfinished (offline, a closed app) is retried while
+        // this screen is up; the rows follow the runner's pending set.
+        .task {
+            removal.reload()
+            await removal.resumeOwed()
+            // A rotation that committed finishes its owed steps here too.
+            refreshRotation()
+            await rotation?.resumeOwed()
+            refreshRotation()
+            refresh()
+        }
+        // The new words of a rotation whose sheet was closed before they
+        // could be shown (UX 18.1, "Keys changed, publishing still owed").
+        .sheet(item: $rotatedWords) { words in
+            RecoveryPhraseGuide(
+                phrase: words.phrase,
+                title: l10n.t(RotateDeviceCopy.phraseTitle),
+                intro: l10n.t(RotateDeviceCopy.effectPhrase),
+                extra: { EmptyView() },
+                onDone: {
+                    rotation?.acknowledgePhrase()
+                    rotatedWords = nil
+                    refreshRotation()
+                }
+            )
+        }
+        // UX 18.1 — the app's own sheet: it carries the proof block.
+        .sheet(item: $removing) { target in
+            RemoveDeviceSheet(
+                deviceTitle: target.title,
+                deviceKey: target.key,
+                sessionToken: authRepository.identitySecrets?.sessionToken ?? sessionToken,
+                authRepository: authRepository,
+                runner: removal,
+                rotation: rotation,
+                startsWithStolen: target.stolen,
+                onRemoved: { result in
+                    removing = nil
+                    note = DeviceRemovalNote.afterRemove(result)
+                    onDeviceRemoved(target.key)
+                    refresh()
+                },
+                onRotationClosed: { rotated in
+                    // The device is out either way; the keys were changed
+                    // (`devices.rotate.done`) or were not (the footer says
+                    // so, with `Try again`).
+                    removing = nil
+                    note = rotated ? RotateSheetRules.doneNote : nil
+                    onDeviceRemoved(target.key)
+                    refreshRotation()
+                    if rotation?.resume == .showWords { note = nil }
+                    refresh()
+                },
+                onClose: {
+                    removing = nil
+                    refreshRotation()
+                    refresh()
+                }
+            )
+            .presentationDetents([.medium, .large])
+        }
+    }
+
+    /// `Finish removing`: the passkey gesture, then the owed steps.
+    private func finishRemoval(_ deviceKey: Data) {
+        Task { @MainActor in
+            note = DeviceRemovalNote.afterFinish(await removal.finish(deviceId: deviceKey))
+            refresh()
+        }
     }
 
     private func refresh() {
-        state = .loading
         do {
             let list = try DeviceRemoval.listDevices(
                 accountIdBytes: accountIdBytes,
@@ -683,72 +875,6 @@ private struct DevicesListView: View {
             state = .error(.key("settings.devices.error.load"))
         }
     }
-
-    @MainActor
-    private func remove(leafIndex: UInt32) async {
-        removingLeaf = leafIndex
-        defer { removingLeaf = nil }
-        do {
-            // G-13 (ADR-0014): gate the eviction on a fresh passkey
-            // gesture cryptographically bound to the removed leaf —
-            // but only if the account actually has a passkey.
-            // OPAQUE-only accounts (no passkey) fall through on
-            // session-token auth alone: a 404 from the ceremony
-            // start signals "no credentials". A user-cancelled
-            // gesture or any other failure aborts the removal
-            // (fail-closed).
-            // G-13 (ADR-0015): the ceremony yields an attestation bound to the
-            // removed leaf; carry it with the Remove commit so peers verify it.
-            var attestation: Data?
-            let removedKey = currentDevices().first(where: { $0.leafIndex == leafIndex })?
-                .signaturePublicKey
-            if let target = currentDevices().first(where: { $0.leafIndex == leafIndex }) {
-                let wc = WebauthnClient()
-                wc.setSessionToken(sessionToken)
-                let actionHashB64 = actionHashForRemoveDevice(
-                    signaturePublicKey: target.signaturePublicKey
-                )
-                do {
-                    let result = try await wc.assertAction(actionHashB64: actionHashB64)
-                    attestation = base64UrlDecodeNoPad(result.attestation_b64)
-                } catch let error as WebauthnClientError {
-                    // 404 = the account has no passkey credential
-                    // (the server's NoCredentials path). Proceed
-                    // without the gate; any other HTTP / network /
-                    // decode failure aborts.
-                    if case .http(404, _, _) = error {
-                        // No passkey — fall through to the removal.
-                    } else {
-                        throw error
-                    }
-                }
-            }
-
-            try await DeviceRemoval.removeDeviceAt(
-                accountIdBytes: accountIdBytes,
-                accountIdB64: accountIdB64,
-                leafIndex: leafIndex,
-                attestation: attestation
-            )
-            // ADR-0050 section 2.10 — the device is out of the DeviceGroup;
-            // now out of every chat and out of the directory.
-            if let removedKey { onDeviceRemoved(removedKey) }
-            refresh()
-        } catch {
-            NSLog("[devices] WARN device not removed: \(error)")
-            state = .error(.key("settings.devices.error.remove"))
-        }
-    }
-
-    /// Snapshot of the currently-listed devices, for resolving the
-    /// removed leaf's signature public key in ``remove(leafIndex:)``.
-    private func currentDevices() -> [DeviceRemoval.DeviceListItem] {
-        if case .ready(let devices) = state {
-            return devices
-        }
-        return []
-    }
-
 }
 
 // ---- Authenticator (TOTP) enrollment — ADR-0018 factor (c) -------

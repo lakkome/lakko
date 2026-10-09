@@ -16,6 +16,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import me.lakko.app.auth.IdentitySecrets
@@ -451,6 +452,26 @@ public class DeviceGroupSyncRepository(
     }
 
     /**
+     * ADR-0066 section 2.3 — the leaf signature keys of the devices in the
+     * account's DeviceGroup, lowercase hex, as this device's live handle
+     * holds them. `null` when there is no handle, the group is inactive
+     * (this device was removed: its frozen roster proves nothing) or the
+     * read fails. The conversation side admits a device of the own account
+     * only when its key is in this set.
+     */
+    public fun deviceRosterHex(): Set<String>? {
+        val held = group.get() ?: return null
+        if (RemovedDevice.readActive { held.isActive() } != true) return null
+        return try {
+            held.devices().map { me.lakko.app.ds.DsClient.pseudonymHex(it.signaturePublicKey) }.toSet()
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
      * This device was removed from the account (docs/ux/second-device.md
      * section 3.1): stop the poll loop for good this session and the
      * persistence writer, and publish [deviceRemoved]. The handles stay held
@@ -868,6 +889,7 @@ public class DeviceGroupSyncRepository(
                 // The fetch answered, so the network works: send whatever of
                 // ours is still waiting.
                 flushPendingIfAny()
+                val drainedBatch = DeviceGroupFork.isDrained(result.messages.size, result.hasMore)
 
                 // G-13 (ADR-0015): the 32-byte verifying key peers feed to
                 // processIncomingVerifyingRemovals. Without it the batch is
@@ -924,7 +946,14 @@ public class DeviceGroupSyncRepository(
                                 processed.`data`,
                             )
                             val body = parsed.body
-                            if (body is DeviceGroupBody.ServiceEnvelope) {
+                            if (body is DeviceGroupBody.ServiceEnvelope && isKeyRotation(body.envelope)) {
+                                // ADR-0066 section 3.3 - the account's new
+                                // keys from the device that changed them.
+                                // Meaningful ONLY here, in the account's own
+                                // DeviceGroup; verified and stored as
+                                // pending by the auth side, never rendered.
+                                keyRotationSink?.invoke(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope) {
                                 // ADR-0060 section 7 — the Visibility setting and
                                 // the ReachState counters from another of this
                                 // account's devices. The reach manager dispatches
@@ -968,6 +997,11 @@ public class DeviceGroupSyncRepository(
                         )
                     }
                 }
+
+                // ADR-0066 section 3.3 - every row up to the journal's head has
+                // been applied: a superseded device waiting for a key-rotation
+                // envelope may decide now.
+                if (drainedBatch) headReads.value = headReads.value + 1
 
                 // A row in this batch removed THIS device (docs/ux/second-device.md
                 // section 3.1). The batch that carried the removal was persisted
@@ -1060,6 +1094,113 @@ public class DeviceGroupSyncRepository(
         }
     }
 
+    // ------------------------------------------------------------
+    // ADR-0066 part 3 - the key-rotation envelope
+    // ------------------------------------------------------------
+
+    /** Bumped each time a poll read the journal to its head. */
+    private val headReads: MutableStateFlow<Long> = MutableStateFlow(0L)
+
+    private fun isKeyRotation(envelope: ByteArray): Boolean =
+        try {
+            uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope(envelope).kind ==
+                uniffi.lakko_ffi_uniffi.FfiIncomingEnvelopeKind.KEY_ROTATION
+        } catch (_: Throwable) {
+            false
+        }
+
+    /** Wait until a poll that started after this call read the journal to
+     *  its head, or [timeoutMs] passed. */
+    private suspend fun awaitHead(timeoutMs: Long): Boolean {
+        val seen = headReads.value
+        return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+            // Two head reads: the first may belong to a fetch that was
+            // already waiting when this was asked.
+            headReads.first { it >= seen + 2 }
+            true
+        } ?: (headReads.value > seen)
+    }
+
+    /**
+     * Where a device stands in the account's DeviceGroup, for the rotation's
+     * "the removed device is out first" rule: whether the LIVE roster still
+     * holds [deviceKey], this handle's epoch, and the journal's newest epoch
+     * as the DS states it on a signed read.
+     */
+    public suspend fun removalStanding(deviceKey: ByteArray): me.lakko.app.devices.RemovalStanding {
+        val held = group.get()
+        val inRoster = if (held == null || RemovedDevice.readActive { held.isActive() } != true) {
+            null
+        } else {
+            try {
+                held.devices().any { it.signaturePublicKey.contentEquals(deviceKey) }
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        val localEpoch = currentLocalEpoch()
+        val journalEpoch = if (held == null) {
+            null
+        } else {
+            try {
+                DsClient().use { ds ->
+                    ds.fetchGroup(groupId = held.groupId(), after = Long.MAX_VALUE - 1, limit = 1, waitSecs = 0).latestEpoch
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        return me.lakko.app.devices.RemovalStanding(inRoster, localEpoch, journalEpoch)
+    }
+
+    /** This handle's DeviceGroup epoch when [deviceKey] is in its roster. */
+    public fun epochIfInRoster(deviceKey: ByteArray): ULong? {
+        val held = group.get() ?: return null
+        val inRoster = try {
+            held.devices().any { it.signaturePublicKey.contentEquals(deviceKey) }
+        } catch (_: Throwable) {
+            false
+        }
+        return if (inRoster) currentLocalEpoch() else null
+    }
+
+    /**
+     * Seal a `key-rotation` envelope as an application message of the
+     * DeviceGroup at its CURRENT epoch, persist the snapshot (the ratchet
+     * position is spent whether or not the publish follows), and return the
+     * wire with the epoch its framing carries. Nothing is published here:
+     * [me.lakko.app.devices.removeThenAnnounce] decides that.
+     */
+    public fun sealKeyRotation(envelope: ByteArray): Pair<ByteArray, ULong> {
+        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+        val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
+        val wire = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+        DeviceGroupLifecycle.persistSnapshot(context = applicationContext, identity = id, accountIdB64 = accountIdB64)
+        val sealedAt = uniffi.lakko_ffi_uniffi.epochOfMessage(wire)
+            ?: error("the sealed message carries no epoch")
+        return wire to sealedAt
+    }
+
+    /** Publish a message [sealKeyRotation] made into THIS account's
+     *  DeviceGroup journal - the only destination it ever has. */
+    public suspend fun publishKeyRotation(wire: ByteArray) {
+        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+        DsClient().use { ds ->
+            ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wire, null))
+        }
+    }
+
+    /** ADR-0066 section 3.5 - the account seed changed (a rotation this
+     *  device ran or adopted): the journal's root signer follows it. */
+    public fun rebindRoot(accountIdentitySeed: ByteArray) {
+        val g = group.get() ?: return
+        rootSigner = DeviceGroupJournalAccess.rootOfSeed(accountIdentitySeed, g.groupId()) ?: rootSigner
+    }
+
     /** Route the reach manager's outgoing sync envelopes through this
      *  runtime's DeviceGroup handle. */
     private fun installReachPublisher() {
@@ -1140,9 +1281,11 @@ public class DeviceGroupSyncRepository(
                     // ADR-0065 section 5 — after a reset of the account keys
                     // the chain on the DS belongs to the old root; the
                     // attestation is what lets this root reset it.
-                    keyResetAttestationB64 = if (unconfirmed && accountIdB64 != null) {
-                        me.lakko.app.devices.DeviceGroupJournalAccess
-                            .pendingResetAttestationB64(applicationContext, accountIdB64)
+                    keyResetEvidence = if (unconfirmed && accountIdB64 != null) {
+                        { rootKey ->
+                            me.lakko.app.devices.DeviceGroupJournalAccess
+                                .pendingResetEvidence(applicationContext, accountIdB64, groupId, rootKey)
+                        }
                     } else {
                         null
                     },
@@ -1230,6 +1373,29 @@ public class DeviceGroupSyncRepository(
         @Volatile
         public var active: DeviceGroupSyncRepository? = null
             private set
+
+        /** ADR-0066 section 3.3 - where a `key-rotation` envelope read from
+         *  the account's own DeviceGroup goes (the auth side verifies it and
+         *  stores it as pending). Set by the app root. */
+        @Volatile
+        public var keyRotationSink: ((ByteArray) -> Unit)? = null
+
+        /**
+         * Wait until the live runtime read its journal to the head, once.
+         * The runtime may not be up yet right after a launch: waits for it
+         * within the same [timeoutMs]. `false` when the head was not seen.
+         */
+        public suspend fun awaitHeadOnce(timeoutMs: Long): Boolean {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                val live = active?.takeIf { it.group.get() != null && it.pollJob?.isActive == true }
+                if (live != null) return live.awaitHead((deadline - System.currentTimeMillis()).coerceAtLeast(0))
+                delay(AWAIT_RUNTIME_STEP_MS)
+            }
+            return false
+        }
+
+        private const val AWAIT_RUNTIME_STEP_MS: Long = 500
 
         /**
          * A backup restore carried folded state (ADR-0058 section 5.2). The

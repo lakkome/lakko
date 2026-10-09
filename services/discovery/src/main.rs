@@ -406,7 +406,8 @@ async fn main() -> Result<()> {
     let _group_invite_pruner = group_invite::spawn_pruner(pool.clone());
     // G-discovery-ratelimit: drop idle buckets so the
     // limiters' memory ceiling stays bounded.
-    let _rate_pruner = rate_limit::spawn_pruner(Arc::clone(&rate_limits));
+    // ADR-0066: with it, the tombstones of deleted device ids (30 days).
+    let _pruners = spawn_bucket_and_tombstone_pruners(&rate_limits, &pool);
 
     // KT-log S2.5 — the transparency-log reconciliation sweep. Spawned
     // ONLY when the transparency integration is armed; best-effort +
@@ -468,7 +469,9 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
         )
         .route("/discovery/identity", post(identity_bundle::upload))
         .route("/discovery/keypackage", post(keypackage::upload))
-        // ADR-0050 — remove one device's KeyPackage (device removal).
+        // ADR-0050 — remove one device's KeyPackage (device removal). ADR-0066:
+        // under the generation floor, tombstones the id, and needs an account
+        // statement to delete another device's row.
         .route(
             "/discovery/keypackage/device/{device_id}",
             axum::routing::delete(keypackage::delete),
@@ -678,6 +681,18 @@ fn build_transparency_client() -> Option<transparency_log::TransparencyClient> {
             None
         },
     }
+}
+
+/// Spawn the rate-limit bucket pruner and the ADR-0066 device-tombstone
+/// pruner; the handles are held for the life of the process.
+fn spawn_bucket_and_tombstone_pruners(
+    rate_limits: &Arc<rate_limit::DiscoveryLimits>,
+    pool: &sqlx::MySqlPool,
+) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+    (
+        rate_limit::spawn_pruner(Arc::clone(rate_limits)),
+        keypackage::spawn_tombstone_pruner(pool.clone()),
+    )
 }
 
 /// KT-log S2.5 — spawn the transparency reconciliation sweep when both the

@@ -15,7 +15,7 @@
 //! | Route (`PUT /ds/group/{hex}/...`) | Signer | Effect |
 //! |---|---|---|
 //! | `claim` | anyone, first time | the signer becomes the root, one epoch |
-//! | `reset` | the root; or ANY signer carrying a key-reset attestation (`key_reset_attest_b64`, ADR-0065, `src/key_reset.rs`) | replaces the chain (and the registrar set when sent); attested: replaces the root too, drops the push binding, records the generation |
+//! | `reset` | the root; or ANY signer carrying a key-reset attestation (`key_reset_attest_b64`, ADR-0065) AND the attested identity key's endorsement of that signer (`root_endorsement_b64`, ADR-0066 D11; `src/key_reset.rs`) | replaces the chain (and the registrar set when sent); attested: replaces the root too, drops the push binding, records the generation |
 //! | `access` | root or registrar | appends or replaces an epoch, revokes lower ranks |
 //! | `registrars` | the root | adds, re-ranks, removes registrars |
 //! | `registrars-set` | the root | replaces the whole registrar set |
@@ -127,6 +127,7 @@ pub(crate) fn pepper_from_lookup(
 }
 
 #[derive(Deserialize)]
+#[allow(clippy::struct_field_names)] // the names are the wire's
 pub(crate) struct StatementJson {
     /// Standard base64 of the signed statement blob.
     statement_b64: String,
@@ -136,6 +137,18 @@ pub(crate) struct StatementJson {
     /// other route the field is refused (`400`).
     #[serde(default)]
     key_reset_attest_b64: Option<String>,
+    /// ADR-0066 section 4.6 (decision D11), required with
+    /// `key_reset_attest_b64` and refused without it: standard base64 of the
+    /// 64-byte root endorsement, the attested identity key signing the key
+    /// that becomes this journal's root (`src/key_reset.rs`).
+    #[serde(default)]
+    root_endorsement_b64: Option<String>,
+}
+
+/// The attestation fields of a statement body, as they arrived.
+struct AttestFields {
+    key_reset_attest_b64: String,
+    root_endorsement_b64: Option<String>,
 }
 
 fn bad_request(msg: &str) -> HandlerError {
@@ -151,18 +164,25 @@ fn conflict(msg: &str) -> HandlerError {
 }
 
 /// Parse and shape-check a statement for the route `kind` on `group_id`.
-/// The second value is the raw `key_reset_attest_b64` field, present only
-/// on the reset route.
+/// The second value is the attestation the body carries, which only the
+/// `reset` and `root` routes accept.
 fn parse_statement(
     body: &[u8],
     kind: StatementKind,
     group_id: &[u8; PSEUDONYM_LEN],
-) -> Result<(SignedStatement, Option<String>), HandlerError> {
+) -> Result<(SignedStatement, Option<AttestFields>), HandlerError> {
     let json: StatementJson = serde_json::from_slice(body)
         .map_err(|_| bad_request("body must be {\"statement_b64\": ...}"))?;
-    if json.key_reset_attest_b64.is_some() && kind != StatementKind::Reset {
+    if json.key_reset_attest_b64.is_some()
+        && !matches!(kind, StatementKind::Reset | StatementKind::RootTransfer)
+    {
         return Err(bad_request(
-            "key_reset_attest_b64 belongs to the reset route",
+            "key_reset_attest_b64 belongs to the reset and root routes",
+        ));
+    }
+    if json.root_endorsement_b64.is_some() && json.key_reset_attest_b64.is_none() {
+        return Err(bad_request(
+            "root_endorsement_b64 accompanies key_reset_attest_b64",
         ));
     }
     let blob = B64
@@ -188,7 +208,11 @@ fn parse_statement(
             format!("epoch must be at most {MAX_ACCESS_EPOCH}"),
         ));
     }
-    Ok((statement, json.key_reset_attest_b64))
+    let attest = json.key_reset_attest_b64.map(|field| AttestFields {
+        key_reset_attest_b64: field,
+        root_endorsement_b64: json.root_endorsement_b64,
+    });
+    Ok((statement, attest))
 }
 
 /// The route handlers: one statement kind each.
@@ -219,19 +243,30 @@ async fn handle(
     kind: StatementKind,
 ) -> Result<Response, HandlerError> {
     let group_id = journal::decode_pseudonym(group_hex)?;
-    let (statement, attest_field) = parse_statement(body, kind, &group_id)?;
-    // ADR-0065: the attested arm of `reset`. Shape and the pinned key first
-    // (`400` / `503`), then the signature and the journal binding (the
-    // uniform `401`), all before the statement's own signature is checked.
-    let attested = match attest_field {
+    let (statement, attest_fields) = parse_statement(body, kind, &group_id)?;
+    // ADR-0065: the attested arm. Shape and the pinned key first (`400` /
+    // `503`), then the signature and the journal binding, then the root
+    // endorsement (ADR-0066 D11: the attested identity key must name the key
+    // that becomes the root), the last two the uniform `401`; all before the
+    // statement's own signature is checked.
+    let attested = match attest_fields {
         None => None,
-        Some(field) => {
+        Some(fields) => {
             let Some(attest_key) = state.attest_key.as_ref() else {
                 return Ok(key_reset::disabled());
             };
-            Some(key_reset::verify_for_journal(
-                &field, attest_key, &group_id,
-            )?)
+            let attestation =
+                key_reset::verify_for_journal(&fields.key_reset_attest_b64, attest_key, &group_id)?;
+            let becomes_root = match &statement.body {
+                StatementBody::RootTransfer { new_root } => new_root,
+                _ => &statement.signer,
+            };
+            key_reset::verify_endorsement(
+                fields.root_endorsement_b64.as_deref(),
+                &attestation,
+                becomes_root,
+            )?;
+            Some(attestation)
         },
     };
     let pepper = if kind == StatementKind::PushBinding {
@@ -323,6 +358,7 @@ impl Standing {
 
 type Decision = Result<Result<(), HandlerError>, HandlerError>;
 
+#[allow(clippy::too_many_lines)] // one arm per statement kind, kept in one place
 async fn decide(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
@@ -421,7 +457,14 @@ async fn decide(
             manage_registrars(&mut *conn, group_id, signer, changes).await
         },
         StatementBody::RootTransfer { new_root } => {
-            transfer_root(&mut *conn, group_id, signer, new_root).await
+            transfer_root(
+                &mut *conn,
+                group_id,
+                signer,
+                new_root,
+                attested.map(|a| a.key_generation),
+            )
+            .await
         },
         StatementBody::PushBinding { push_gid } => {
             if standing == Standing::Registrar(Rank::Member) {
@@ -911,22 +954,35 @@ async fn manage_registrars(
     Ok(Ok(()))
 }
 
+/// Hand the root over. With `generation` (an attested transfer, ADR-0066
+/// section 4.6: a key ROTATION moving the account's DeviceGroup journal to
+/// the root its new seed derives) the journal's key generation is recorded
+/// too, so the attestation that rode along cannot be presented again, on
+/// this route or on `reset`. The epoch chain, the registrar set and the push
+/// binding are untouched: unlike an attested reset, a transfer cuts nobody
+/// off.
 async fn transfer_root(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     root: &[u8; KEY_LEN],
     new_root: &[u8; KEY_LEN],
+    generation: Option<u64>,
 ) -> Decision {
-    if new_root == root {
+    if new_root == root && generation.is_none() {
         return Ok(Ok(()));
     }
-    // The root is not a registrar; a key that was one stops being one.
-    delete_registrar(conn, group_id, new_root).await?;
+    if new_root != root {
+        // The root is not a registrar; a key that was one stops being one.
+        delete_registrar(conn, group_id, new_root).await?;
+    }
     sqlx::query(
-        "UPDATE ds_group_owner SET root_pk = ?, updated_at = CURRENT_TIMESTAMP(3) \
+        "UPDATE ds_group_owner SET root_pk = ?, \
+            key_generation = COALESCE(?, key_generation), \
+            updated_at = CURRENT_TIMESTAMP(3) \
          WHERE group_id = ?",
     )
     .bind(&new_root[..])
+    .bind(generation)
     .bind(&group_id[..])
     .execute(&mut *conn)
     .await

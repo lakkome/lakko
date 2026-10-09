@@ -36,24 +36,67 @@ class SessionPairTest {
         assertEquals(120_000L, SESSION_REFRESH_AHEAD_MS)
     }
 
+    private val dev = "D".repeat(43)
+
     @Test
-    fun `the account segment is read off a v2 access token only`() {
-        assertEquals("AAAAAAAAAAAAAAAAAAAAAA", accountSegmentOfAccessToken("v2.AAAAAAAAAAAAAAAAAAAAAA.3.1700000000000.tag"))
+    fun `the account segment is read off a v3 access token only`() {
+        val token = "v3.AAAAAAAAAAAAAAAAAAAAAA.3.$dev.1690000000000.1700000000000.tag"
+        assertEquals("AAAAAAAAAAAAAAAAAAAAAA", accountSegmentOfAccessToken(token))
         // A refresh credential is never an access token.
-        assertNull(accountSegmentOfAccessToken("r1.AAAAAAAAAAAAAAAAAAAAAA.3.1700000000000.tag"))
-        // Older formats and junk.
-        assertNull(accountSegmentOfAccessToken("v1.AAAA.1.tag"))
-        assertNull(accountSegmentOfAccessToken("v2.AAAA.1.tag"))
-        assertNull(accountSegmentOfAccessToken("v2..1.2.tag"))
+        assertNull(accountSegmentOfAccessToken("r2.AAAAAAAAAAAAAAAAAAAAAA.3.$dev.1.1700000000000.tag"))
+        // The flag day: the v2 / r1 shapes are gone.
+        assertNull(accountSegmentOfAccessToken("v2.AAAAAAAAAAAAAAAAAAAAAA.3.1700000000000.tag"))
+        assertNull(accountSegmentOfAccessToken("v2.AAAAAAAAAAAAAAAAAAAAAA.3.$dev.1.1700000000000.tag"))
+        // A fresh-auth grant (five segments), wrong counts and junk.
+        assertNull(accountSegmentOfAccessToken("k1.AAAA.1.2.tag"))
+        assertNull(accountSegmentOfAccessToken("v3.AAAA.1.tag"))
+        assertNull(accountSegmentOfAccessToken("v3.AAAA.1.$dev.1.2.tag.extra"))
+        assertNull(accountSegmentOfAccessToken("v3..1.$dev.1.2.tag"))
         assertNull(accountSegmentOfAccessToken(""))
-        assertNull(accountSegmentOfAccessToken("Bearer v2.a.1.2.t"))
+        assertNull(accountSegmentOfAccessToken("Bearer v3.a.1.$dev.1.2.t"))
+    }
+
+    @Test
+    fun `the device segment is read off a v3 access token only`() {
+        assertEquals(dev, deviceSegmentOfAccessToken("v3.AAAA.3.$dev.1.2.tag"))
+        assertEquals(UNBOUND_DEVICE_SEGMENT, deviceSegmentOfAccessToken("v3.AAAA.3.${"A".repeat(43)}.1.2.tag"))
+        assertNull(deviceSegmentOfAccessToken("r2.AAAA.3.$dev.1.2.tag"))
+        assertNull(deviceSegmentOfAccessToken("v2.AAAA.3.2.tag"))
+        assertNull(deviceSegmentOfAccessToken("v3.AAAA.3..1.2.tag"))
+        // The all-zero id is 32 zero bytes in base64url without padding.
+        assertEquals(base64UrlEncodeNoPad(ByteArray(32)), UNBOUND_DEVICE_SEGMENT)
+    }
+
+    // ---- ADR-0066: removed, logged out, reset: three answers, three screens ----
+
+    @Test
+    fun `device-revoked, superseded and refresh-invalid are three different refusals`() {
+        assertEquals(SessionRefusal.DeviceRevoked, sessionRefusalOf(401, "device-revoked"))
+        assertEquals(SessionRefusal.KeysReset, sessionRefusalOf(401, "key-generation-superseded"))
+        // A logout at the server: the refresh is `refresh-invalid`, a bearer
+        // route a plain `401`. Neither wipes.
+        assertEquals(SessionRefusal.RefreshInvalid, sessionRefusalOf(401, "refresh-invalid"))
+        assertEquals(SessionRefusal.Unauthorized, sessionRefusalOf(401, null))
+        // Only a `401` is a session refusal at all.
+        assertNull(sessionRefusalOf(403, "device-revoked"))
+        assertNull(sessionRefusalOf(200, null))
+    }
+
+    @Test
+    fun `discovery's 403 device-revoked is a hint to refresh at auth, never a removal`() {
+        assertTrue(deviceRevokedHintOf(403, "device-revoked"))
+        assertFalse(deviceRevokedHintOf(403, "device-mismatch"))
+        assertFalse(deviceRevokedHintOf(403, null))
+        assertFalse(deviceRevokedHintOf(401, "device-revoked"))
+        // It classifies as no session refusal: nothing is wiped on it.
+        assertNull(sessionRefusalOf(403, "device-revoked"))
     }
 
     @Test
     fun `the pair never prints its credentials`() {
-        val pair = SessionPair("v2.a.1.2.secret-access", 2L, "r1.a.1.3.secret-refresh", 3L, 1L)
+        val pair = SessionPair("v3.a.1.d.1.2.secret-access", 2L, "r2.a.1.d.1.3.secret-refresh", 3L, 1L)
         assertFalse(pair.toString().contains("secret"))
         assertTrue(pair.toString().contains("keyGeneration=1"))
-        assertEquals(pair, SessionPair("v2.a.1.2.secret-access", 2L, "r1.a.1.3.secret-refresh", 3L, 1L))
+        assertEquals(pair, SessionPair("v3.a.1.d.1.2.secret-access", 2L, "r2.a.1.d.1.3.secret-refresh", 3L, 1L))
     }
 }

@@ -112,6 +112,11 @@ export interface LoginFinishRequest {
   session_id: string;
   /** base64(CredentialFinalization). */
   finalize: string;
+  /** ADR-0066 section 0.4: this device's id (URL-safe base64, no padding,
+   *  32 bytes: its conversation leaf signature key), when the device
+   *  identity already exists. Absent = the session names no device and is
+   *  bound afterwards (`POST /auth/session/bind-device`). */
+  device_id_b64?: string;
 }
 
 /** Shared by `/login/finish` and `/recovery/login/finish`. */
@@ -165,6 +170,8 @@ export interface PasswordResetFinishRequest {
   recovery_finalize: string;
   /** base64(RegistrationUpload) — the new password envelope. */
   new_password_upload: string;
+  /** ADR-0066 section 0.4, as on `LoginFinishRequest`. */
+  device_id_b64?: string;
 }
 
 /** `POST /password/reset/finish` response body. A password reset does NOT
@@ -195,6 +202,8 @@ export interface DeviceAuthorizeRedeemRequest {
   /** URL-safe base64 (no pad) of the raw 32-byte grant token
    *  received over the rendezvous channel. */
   grant_token_b64: string;
+  /** ADR-0066 section 0.4, as on `LoginFinishRequest`. */
+  device_id_b64?: string;
 }
 
 /** `POST /device/authorize/redeem` response body — the account id plus the
@@ -236,6 +245,8 @@ export interface TotpRecoverRequest {
   handle: string;
   /** Current 6-digit authenticator code. */
   code: string;
+  /** ADR-0066 section 0.4, as on `LoginFinishRequest`. */
+  device_id_b64?: string;
 }
 
 /** `POST /totp/recover` response body — the account id plus the session
@@ -304,6 +315,83 @@ export interface KeyResetFinishResponse extends SessionPairWire {
    *  client carries to discovery (the identity upload) and to the DS (the
    *  DeviceGroup journal reset). */
   key_reset_attest_b64: string;
+}
+
+/** `POST /account/keys/rotate/finish` request body (ADR-0066 section 3.4):
+ *  the reset's, plus the proof and the devices to revoke. */
+export interface KeyRotateFinishRequest extends KeyResetFinishRequest {
+  /** URL-safe base64 (no pad) of the 145-byte supersession proof signed by
+   *  the OLD account key for the new one. */
+  supersession_proof_b64: string;
+  /** URL-safe base64 (no pad) device ids, at most 8; may be empty. */
+  revoke_device_ids_b64: string[];
+}
+
+/** `POST /auth/session/refresh` with the session-upgrade statement. */
+export interface SessionRefreshUpgradeRequest {
+  refresh_token: string;
+  /** URL-safe base64 (no pad) of the kind-4 account statement over
+   *  `BLAKE3(refresh_token)`, signed by the account's CURRENT key. */
+  key_statement_b64: string;
+}
+
+// ----------------------------------------------------------------------------
+// /account/recall/{status,start,finish}   (ADR-0066 part 1, "T3 as built")
+// ----------------------------------------------------------------------------
+//
+// Anonymous: the old device's session is superseded. `*_b64` fields are
+// URL-safe base64 without padding; the OPAQUE messages are standard base64.
+
+/** `POST /account/recall/status` request body. */
+export interface RecallStatusRequest {
+  /** The 138-byte `recall-status` account statement, signed by the OLD
+   *  account key. */
+  statement_b64: string;
+}
+
+/** `POST /account/recall/start` request body. */
+export interface RecallStartRequest {
+  account_id_b64: string;
+  anchor_seq: number;
+  /** The `recall-start` statement over the anchor seq and `login_request`. */
+  statement_b64: string;
+  /** `OpaqueLogin.startPassword(oldPassword).requestB64`. */
+  login_request: string;
+  /** `OpaqueRegister.startPassword(newPassword).requestB64`. */
+  password_request: string;
+  /** `OpaqueRegister.startRecovery(newSeed).requestB64`. */
+  recovery_request: string;
+}
+
+/** `POST /account/recall/start` response body. */
+export interface RecallStartResponse {
+  session_id: string;
+  login_response: string;
+  password_response: string;
+  recovery_response: string;
+  /** 32 bytes, URL-safe base64 without padding. */
+  server_nonce_b64: string;
+}
+
+/** `POST /account/recall/finish` request body. */
+export interface RecallFinishRequest {
+  session_id: string;
+  account_id_b64: string;
+  anchor_seq: number;
+  login_finish: string;
+  password_upload: string;
+  recovery_upload: string;
+  new_signature_pubkey_b64: string;
+  device_id_b64?: string;
+  /** The `recall` statement over the nonce, the new key and both uploads. */
+  statement_b64: string;
+}
+
+/** `POST /account/recall/finish` response body: the key reset's answer plus
+ *  a fresh-auth grant. */
+export interface RecallFinishResponse extends KeyResetFinishResponse {
+  fresh_grant?: unknown;
+  fresh_grant_expires_at_ms?: unknown;
 }
 
 // ----------------------------------------------------------------------------
@@ -456,4 +544,23 @@ export interface LoginHandlePutResponse {
 /** `DELETE /auth/login-handle` response body. */
 export interface LoginHandleDeleteResponse {
   removed: boolean;
+}
+
+/** `POST /auth/session/bind-device` request body (ADR-0066 section 0.4, T1
+ *  point 8). Bearer. The refresh credential must be the bearer's own. */
+export interface SessionBindDeviceRequest {
+  device_id_b64: string;
+  refresh_token: string;
+}
+
+/** `POST /auth/session/bind-device` response: a pair naming the device. */
+export type SessionBindDeviceResponse = SessionPairWire;
+
+/** `POST /account/devices/revoke` request body (ADR-0066 section 2.1).
+ *  Bearer. `statement_b64` is the 138-byte `device-revoke` account
+ *  statement, URL-safe base64 without padding. Answers `204`. */
+export interface DeviceRevokeRequest {
+  fresh_grant: string;
+  device_id_b64: string;
+  statement_b64: string;
 }

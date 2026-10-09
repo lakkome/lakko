@@ -48,7 +48,7 @@ export const ChannelsHydration: Component = () => {
 
   createEffect(() => {
     const account = accountId();
-    const identity = chats.accountIdentity();
+    const identity = chats.conversationAccountIdentity();
     untrack(() => {
       const key = account === null || identity === null ? null : account;
       if (key === bound) return;
@@ -83,7 +83,7 @@ export const ChannelsHydration: Component = () => {
           // Read at flush time: `null` once the session has freed the
           // identity, so a late flush keeps the last good snapshot.
           snapshotProvider: (): Uint8Array | null => {
-            const current = chats.accountIdentity();
+            const current = chats.conversationAccountIdentity();
             if (current === null || current !== identity) return null;
             try {
               return current.snapshotStorage();

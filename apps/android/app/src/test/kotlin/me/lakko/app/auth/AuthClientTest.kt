@@ -23,6 +23,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -652,5 +653,137 @@ class AuthClientTest {
         }
         assertTrue(isLoginByNameDisabled(err))
         assertNull("not a limit", authLimitCopy(err))
+    }
+
+    // ---- ADR-0066: the device id on a landing, logout, bind, removal -------
+
+    private val pairJson066 = """"session_token":"t","session_expires_at_ms":1,"refresh_token":"r","refresh_expires_at_ms":2,"key_generation":3"""
+
+    @Test
+    fun `a landing that knows its device sends device_id_b64, base64url without padding`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        val deviceId = ByteArray(32) { (0xF8 + it % 8).toByte() }
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA",$pairJson066}""",
+                HttpStatusCode.OK to """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA",$pairJson066}""",
+            ),
+            captured = captured,
+        ).use { client ->
+            client.totpRecover(ByteArray(32), "123456", deviceId = deviceId)
+            client.deviceAuthorizeRedeem("grant", deviceId = deviceId)
+        }
+        for (req in captured) {
+            val sent = req.body!!["device_id_b64"]!!.jsonPrimitive.content
+            assertEquals(base64UrlEncodeNoPad(deviceId), sent)
+            assertFalse(sent, sent.contains('=') || sent.contains('+') || sent.contains('/'))
+            assertEquals(43, sent.length)
+        }
+    }
+
+    @Test
+    fun `a landing that does not know its device sends no device_id_b64 at all`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA",$pairJson066}""",
+                HttpStatusCode.OK to """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA",$pairJson066}""",
+            ),
+            captured = captured,
+        ).use { client ->
+            client.totpRecover(ByteArray(32), "123456")
+            client.deviceAuthorizeRedeem("grant")
+        }
+        // Absent, not `null`: the server reads an absent field as "unbound".
+        for (req in captured) assertFalse(req.body!!.containsKey("device_id_b64"))
+    }
+
+    @Test
+    fun `a device id of the wrong length is refused before anything is sent`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(responses = emptyList(), captured = captured).use { client ->
+            try {
+                client.deviceAuthorizeRedeem("grant", deviceId = ByteArray(31))
+                fail("expected AuthClientArgError")
+            } catch (_: AuthClientArgError) {
+                // expected
+            }
+        }
+        assertTrue(captured.isEmpty())
+    }
+
+    @Test
+    fun `logout is a bearer POST with no body`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(responses = listOf(HttpStatusCode.NoContent to ""), captured = captured).use {
+            it.sessionLogout("access")
+        }
+        assertEquals(1, captured.size)
+        assertEquals(HttpMethod.Post, captured[0].method)
+        assertTrue(captured[0].url.endsWith("/auth/session/logout"))
+        assertEquals("Bearer access", captured[0].authorization)
+        assertNull(captured[0].body)
+    }
+
+    @Test
+    fun `bind-device sends the device id and the refresh credential and returns the new pair`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        val deviceId = ByteArray(32) { 7 }
+        val pair = client(responses = listOf(HttpStatusCode.OK to "{$pairJson066}"), captured = captured).use {
+            it.bindDevice("access", deviceId, "refresh")
+        }
+        assertTrue(captured[0].url.endsWith("/auth/session/bind-device"))
+        assertEquals("Bearer access", captured[0].authorization)
+        val body = captured[0].body!!
+        assertEquals(setOf("device_id_b64", "refresh_token"), body.keys)
+        assertEquals(base64UrlEncodeNoPad(deviceId), body["device_id_b64"]!!.jsonPrimitive.content)
+        assertEquals("refresh", body["refresh_token"]!!.jsonPrimitive.content)
+        assertEquals(SessionPair("t", 1L, "r", 2L, 3L), pair)
+    }
+
+    @Test
+    fun `bind-device refusals carry their code`() = runTest {
+        val err = try {
+            client(responses = listOf(HttpStatusCode.Conflict to """{"error":"device-already-bound"}""")).use {
+                it.bindDevice("access", ByteArray(32) { 7 }, "refresh")
+            }
+            null
+        } catch (e: AuthHttpError) {
+            e
+        }
+        assertEquals(409, err!!.status)
+        assertEquals(DEVICE_ALREADY_BOUND, err.code)
+        assertEquals(BindDeviceOutcome.AlreadyBoundElsewhere, bindDeviceOutcome(null, err))
+    }
+
+    @Test
+    fun `revoke sends the grant, the device id and the statement, base64url`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        val deviceId = ByteArray(32) { 9 }
+        val statement = ByteArray(138) { (it * 3).toByte() }
+        client(responses = listOf(HttpStatusCode.NoContent to ""), captured = captured).use {
+            it.revokeDevice("access", "grant", deviceId, statement)
+        }
+        assertTrue(captured[0].url.endsWith("/account/devices/revoke"))
+        assertEquals("Bearer access", captured[0].authorization)
+        val body = captured[0].body!!
+        assertEquals(setOf("fresh_grant", "device_id_b64", "statement_b64"), body.keys)
+        assertEquals("grant", body["fresh_grant"]!!.jsonPrimitive.content)
+        assertEquals(base64UrlEncodeNoPad(deviceId), body["device_id_b64"]!!.jsonPrimitive.content)
+        assertEquals(base64UrlEncodeNoPad(statement), body["statement_b64"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `a refused revoke surfaces the server's code`() = runTest {
+        val err = try {
+            client(responses = listOf(HttpStatusCode.Forbidden to """{"error":"account-key-required"}""")).use {
+                it.revokeDevice("access", "grant", ByteArray(32) { 9 }, ByteArray(138))
+            }
+            null
+        } catch (e: AuthHttpError) {
+            e
+        }
+        assertEquals(403, err!!.status)
+        assertEquals(ACCOUNT_KEY_REQUIRED, err.code)
     }
 }

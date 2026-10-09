@@ -1312,6 +1312,158 @@ async fn the_owner_key_is_fixed_at_creation() {
     }
 }
 
+/// ADR-0066 section 3.5: the owning account changed its keys. The key the
+/// OLD seed derives hands the channel to the key the NEW seed derives; from
+/// then on the old key is nobody, the new key owns every owner route, and
+/// nothing else about the channel moved.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn the_old_owner_key_hands_the_channel_to_a_new_one() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    let id: [u8; 16] = hex::decode(CHANNEL_HEX).unwrap().try_into().unwrap();
+    let old = owner_signer_for(CHANNEL_HEX);
+    let new = ChannelOwnerSigner::from_account_seed(&[6; 32], &id);
+    let thief = ChannelOwnerSigner::from_account_seed(&[7; 32], &id);
+    let path = format!("/v1/channels/{CHANNEL_HEX}/owner");
+    let url = format!("http://{addr}{path}");
+    let subscribers = format!("/v1/channels/{CHANNEL_HEX}/subscribers");
+    let proof_by = |signer: &ChannelOwnerSigner, method: &str, path: &str, body: &[u8]| {
+        signer
+            .sign_at(
+                &OwnerRequest {
+                    method,
+                    canonical_path: path,
+                    query: "",
+                    body,
+                },
+                now_ms(),
+                fresh_nonce(),
+            )
+            .encode()
+    };
+    let handover = |signer: &ChannelOwnerSigner, body: Vec<u8>, proof: Option<String>| {
+        let mut req = client
+            .put(&url)
+            .header("content-type", "application/octet-stream")
+            .body(body.clone());
+        let proof = proof.unwrap_or_else(|| proof_by(signer, "PUT", &path, &body));
+        req = req.header("x-lakko-channel-owner-proof", proof);
+        req.send()
+    };
+    let new_key = lakko_channels::owner_handover_body(&new.verifying_key()).to_vec();
+    let thief_key = lakko_channels::owner_handover_body(&thief.verifying_key()).to_vec();
+
+    // No proof; a proof by the would-be new owner; a proof by a stranger; a
+    // proof by the owner over ANOTHER new key than the body carries.
+    let resp = client.put(&url).body(new_key.clone()).send().await.unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(code_of(resp).await, "owner-proof-required");
+    for signer in [&new, &thief] {
+        let resp = handover(signer, thief_key.clone(), None).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+    let resp = handover(
+        &old,
+        thief_key.clone(),
+        Some(proof_by(&old, "PUT", &path, &new_key)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "the proof names the key it was made for"
+    );
+    // A signed body that is not a usable key.
+    let mut weak = vec![0u8; 32];
+    weak[0] = 1;
+    for bad in [vec![1u8; 31], vec![1u8; 33], weak, Vec::new()] {
+        let resp = handover(&old, bad, None).await.unwrap();
+        assert_eq!(resp.status(), 400);
+        assert_eq!(code_of(resp).await, "bad-owner-pubkey");
+    }
+    // An unknown channel is refused like a bad proof.
+    let other_path = format!("/v1/channels/{OTHER_CHANNEL_HEX}/owner");
+    let resp = client
+        .put(format!("http://{addr}{other_path}"))
+        .header(
+            "x-lakko-channel-owner-proof",
+            proof_by(&old, "PUT", &other_path, &new_key),
+        )
+        .body(new_key.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    // Nothing moved: the old key still reads the subscriber list.
+    let list_as = |signer: &ChannelOwnerSigner| {
+        client
+            .get(format!("http://{addr}{subscribers}"))
+            .header(
+                "x-lakko-channel-owner-proof",
+                proof_by(signer, "GET", &subscribers, &[]),
+            )
+            .send()
+    };
+    assert_eq!(list_as(&old).await.unwrap().status(), 200);
+    assert_eq!(list_as(&new).await.unwrap().status(), 401);
+
+    // The owner naming itself: a probe, nothing changes.
+    let old_key = lakko_channels::owner_handover_body(&old.verifying_key()).to_vec();
+    assert_eq!(handover(&old, old_key, None).await.unwrap().status(), 204);
+    assert_eq!(list_as(&old).await.unwrap().status(), 200);
+
+    // The handover. A replay of the very same request is refused (its nonce
+    // is spent and its signer is no longer the owner).
+    let proof = proof_by(&old, "PUT", &path, &new_key);
+    let resp = handover(&old, new_key.clone(), Some(proof.clone()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let resp = handover(&old, new_key.clone(), Some(proof)).await.unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // The old key is nobody now: no owner route, no second handover, no
+    // re-creation.
+    assert_eq!(list_as(&old).await.unwrap().status(), 401);
+    assert_eq!(
+        handover(&old, thief_key.clone(), None)
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let resp = client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&create_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(code_of(resp).await, "channel-exists");
+    // The new key owns it: it reads the list, its probe is a 204, and it can
+    // hand the channel on.
+    assert_eq!(list_as(&new).await.unwrap().status(), 200);
+    assert_eq!(
+        handover(&new, new_key.clone(), None)
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    assert_eq!(
+        handover(&new, thief_key.clone(), None)
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    assert_eq!(list_as(&thief).await.unwrap().status(), 200);
+    assert_eq!(list_as(&new).await.unwrap().status(), 401);
+}
+
 #[tokio::test]
 async fn subscribing_spends_one_channel_subscribe_token() {
     let addr = spawn().await;

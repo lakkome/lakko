@@ -140,21 +140,28 @@ public struct SignupFinishRequest: Codable, Equatable {
     public let accountId: String
     public let passwordUpload: String
     public let recoveryUpload: String?
+    /// ADR-0066 section 0.4 — URL-safe base64 (no pad) of this device's
+    /// 32-byte id (its conversation leaf key); omitted for an unbound
+    /// session.
+    public let deviceIdB64: String?
 
     public init(
         accountId: String,
         passwordUpload: String,
-        recoveryUpload: String? = nil
+        recoveryUpload: String? = nil,
+        deviceIdB64: String? = nil
     ) {
         self.accountId = accountId
         self.passwordUpload = passwordUpload
         self.recoveryUpload = recoveryUpload
+        self.deviceIdB64 = deviceIdB64
     }
 
     enum CodingKeys: String, CodingKey {
         case accountId = "account_id"
         case passwordUpload = "password_upload"
         case recoveryUpload = "recovery_upload"
+        case deviceIdB64 = "device_id_b64"
     }
 }
 
@@ -243,15 +250,22 @@ public struct LoginFinishRequest: Codable, Equatable {
     public let sessionId: String
     /// base64(CredentialFinalization).
     public let finalize: String
+    /// ADR-0066 section 0.4 — URL-safe base64 (no pad) of this device's
+    /// 32-byte id; omitted when the account (and so the device identity) is
+    /// not known before the finish. The session is then bound afterwards
+    /// (`POST /auth/session/bind-device`).
+    public let deviceIdB64: String?
 
-    public init(sessionId: String, finalize: String) {
+    public init(sessionId: String, finalize: String, deviceIdB64: String? = nil) {
         self.sessionId = sessionId
         self.finalize = finalize
+        self.deviceIdB64 = deviceIdB64
     }
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case finalize
+        case deviceIdB64 = "device_id_b64"
     }
 }
 
@@ -671,6 +685,50 @@ public struct SessionRefreshRequest: Codable, Equatable {
     }
 }
 
+/// `POST /auth/session/bind-device` request body (bearer; ADR-0066 "T1 as
+/// built" points 8 and 9): name the device a session that landed without one
+/// belongs to. The answer is a session pair naming it.
+public struct BindDeviceRequest: Codable, Equatable {
+    /// URL-safe base64 (no pad) of the 32-byte device id.
+    public let deviceIdB64: String
+    /// The refresh credential of the same session as the bearer.
+    public let refreshToken: String
+
+    public init(deviceIdB64: String, refreshToken: String) {
+        self.deviceIdB64 = deviceIdB64
+        self.refreshToken = refreshToken
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case deviceIdB64 = "device_id_b64"
+        case refreshToken = "refresh_token"
+    }
+}
+
+/// `POST /account/devices/revoke` request body (bearer; ADR-0066 section
+/// 2.1): sign ANOTHER device of the account out at the server.
+public struct DeviceRevokeRequest: Codable, Equatable {
+    /// The fresh-auth grant.
+    public let freshGrant: String
+    /// URL-safe base64 (no pad) of the removed device's 32-byte id.
+    public let deviceIdB64: String
+    /// URL-safe base64 (no pad) of the 138-byte `device-revoke` account
+    /// statement over that id.
+    public let statementB64: String
+
+    public init(freshGrant: String, deviceIdB64: String, statementB64: String) {
+        self.freshGrant = freshGrant
+        self.deviceIdB64 = deviceIdB64
+        self.statementB64 = statementB64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case freshGrant = "fresh_grant"
+        case deviceIdB64 = "device_id_b64"
+        case statementB64 = "statement_b64"
+    }
+}
+
 /// `POST /account/keys/reset/start` request body (bearer).
 public struct KeyResetStartRequest: Codable, Equatable {
     /// The fresh-auth grant a sign-in minted, verbatim. Without a
@@ -754,5 +812,63 @@ public struct KeyResetFinishResponse: Codable, Equatable, SessionPairCarrying {
         case refreshToken = "refresh_token"
         case refreshExpiresAtMs = "refresh_expires_at_ms"
         case keyGeneration = "key_generation"
+    }
+}
+
+// MARK: - ADR-0066 part 3: rotating the account keys
+
+/// `POST /account/keys/rotate/finish` request body (bearer). The start body
+/// is the reset's (``KeyResetStartRequest``) under the rotate path.
+public struct KeyRotateFinishRequest: Codable, Equatable {
+    public let freshGrant: String
+    /// base64(RegistrationUpload): the new recovery credential.
+    public let recoveryUpload: String
+    /// URL-safe base64 (no pad) of the NEW account identity key.
+    public let newSignaturePubkeyB64: String
+    /// URL-safe base64 (no pad) of the 145-byte supersession proof signed by
+    /// the OLD account key over the new one. Auth verifies it against the
+    /// key it has recorded: without it nothing rotates.
+    public let supersessionProofB64: String
+    /// URL-safe base64 (no pad) device ids (at most 8) that get a session
+    /// floor in the same transaction: a removal that raced the commit.
+    public let revokeDeviceIdsB64: [String]
+
+    public init(
+        freshGrant: String, recoveryUpload: String, newSignaturePubkeyB64: String,
+        supersessionProofB64: String, revokeDeviceIdsB64: [String]
+    ) {
+        self.freshGrant = freshGrant
+        self.recoveryUpload = recoveryUpload
+        self.newSignaturePubkeyB64 = newSignaturePubkeyB64
+        self.supersessionProofB64 = supersessionProofB64
+        self.revokeDeviceIdsB64 = revokeDeviceIdsB64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case freshGrant = "fresh_grant"
+        case recoveryUpload = "recovery_upload"
+        case newSignaturePubkeyB64 = "new_signature_pubkey_b64"
+        case supersessionProofB64 = "supersession_proof_b64"
+        case revokeDeviceIdsB64 = "revoke_device_ids_b64"
+    }
+}
+
+/// `POST /auth/session/refresh` with the session upgrade of ADR-0066 section
+/// 3.3: a refresh credential of a LOWER key generation is exchanged for a
+/// pair at the current one when `key_statement_b64` (kind `SessionUpgrade`,
+/// body `BLAKE3(refresh_token)`, URL-safe base64) verifies under the
+/// account's recorded key.
+public struct SessionUpgradeRequest: Codable, Equatable {
+    public let refreshToken: String
+    public let keyStatementB64: String
+
+    public init(refreshToken: String, keyStatementB64: String) {
+        self.refreshToken = refreshToken
+        self.keyStatementB64 = keyStatementB64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case refreshToken = "refresh_token"
+        case keyStatementB64 = "key_statement_b64"
     }
 }

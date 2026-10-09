@@ -148,6 +148,36 @@ describe("refreshOnce()", () => {
     expect(h.events).toEqual([{ kind: "superseded", accountIdB64: ACCT }]);
   });
 
+  it("ADR-0066: keeps the superseded pair for the session upgrade of a kept device, until the next install", async () => {
+    const h = harness();
+    h.provider.install(ACCT, pair(1));
+    h.refreshAnswer = () => ({ kind: "refused", status: 401, errorCode: "key-generation-superseded" });
+    await h.provider.refreshOnce();
+    // The live pair is gone (no request carries it), but the refresh
+    // credential is still at hand for the exchange with a key statement.
+    expect(h.provider.pair()).toBeNull();
+    expect(h.provider.supersededPair(ACCT)?.refreshToken).toBe(pair(1).refreshToken);
+    expect(h.provider.supersededPair("another-account")).toBeNull();
+    h.provider.install(ACCT, pair(2));
+    expect(h.provider.supersededPair(ACCT)).toBeNull();
+  });
+
+  it("ADR-0066: a bearer route's superseded keeps it too; any other refusal keeps nothing", async () => {
+    const h = harness();
+    h.provider.install(ACCT, pair(1));
+    h.provider.reportSuperseded();
+    expect(h.provider.supersededPair(ACCT)?.refreshToken).toBe(pair(1).refreshToken);
+    const other = harness();
+    other.provider.install(ACCT, pair(1));
+    other.refreshAnswer = () => ({ kind: "refused", status: 401, errorCode: "refresh-invalid" });
+    await other.provider.refreshOnce();
+    expect(other.provider.supersededPair(ACCT)).toBeNull();
+    const revoked = harness();
+    revoked.provider.install(ACCT, pair(1));
+    revoked.provider.reportDeviceRevoked();
+    expect(revoked.provider.supersededPair(ACCT)).toBeNull();
+  });
+
   it("drops the pair and raises refresh-invalid on any other 401", async () => {
     const h = harness();
     h.provider.install(ACCT, pair(1));
@@ -291,5 +321,66 @@ describe("fetch()", () => {
     await h.provider.refreshOnce();
     expect(h.events).toEqual([{ kind: "superseded", accountIdB64: ACCT }]);
     warn.mockRestore();
+  });
+});
+
+// ADR-0066 section 0.4: this device was removed from the account.
+describe("device-revoked", () => {
+  it("drops the pair and raises device-revoked when the refresh is refused with it", async () => {
+    const h = harness();
+    h.provider.install(ACCT, pair(1));
+    h.refreshAnswer = () => ({ kind: "refused", status: 401, errorCode: "device-revoked" });
+    expect(await h.provider.refreshOnce()).toBe("device-revoked");
+    expect(h.provider.pair()).toBeNull();
+    expect(h.events).toEqual([{ kind: "device-revoked", accountIdB64: ACCT }]);
+  });
+
+  it("signs out on 401 device-revoked from a bearer route, without a refresh or a retry", async () => {
+    const h = harness();
+    h.provider.install(ACCT, pair(1));
+    h.responses.push(unauthorized('{"error":"device-revoked"}'));
+    const response = await h.provider.fetch("/api/auth/x", {
+      headers: { authorization: `Bearer ${pair(1).sessionToken}` },
+    });
+    expect(response.status).toBe(401);
+    expect(h.sent).toHaveLength(1);
+    expect(h.refreshes).toEqual([]);
+    expect(h.events).toEqual([{ kind: "device-revoked", accountIdB64: ACCT }]);
+    expect(h.provider.pair()).toBeNull();
+  });
+
+  it("raises it once even when several requests see it", async () => {
+    const h = harness();
+    h.provider.install(ACCT, pair(1));
+    h.responses.push(
+      unauthorized('{"error":"device-revoked"}'),
+      unauthorized('{"error":"device-revoked"}'),
+    );
+    const init = { headers: { authorization: `Bearer ${pair(1).sessionToken}` } };
+    await Promise.all([h.provider.fetch("/a", init), h.provider.fetch("/b", init)]);
+    expect(h.events.filter((e) => e.kind === "device-revoked")).toHaveLength(1);
+  });
+
+  it("does not wipe after a logout: the refresh answers refresh-invalid", async () => {
+    const h = harness();
+    h.provider.install(ACCT, pair(1));
+    h.responses.push(unauthorized());
+    h.refreshAnswer = () => ({ kind: "refused", status: 401, errorCode: "refresh-invalid" });
+    await h.provider.fetch("/api/auth/x", {
+      headers: { authorization: `Bearer ${pair(1).sessionToken}` },
+    });
+    expect(h.events).toEqual([{ kind: "refresh-invalid", accountIdB64: ACCT }]);
+  });
+
+  it("does not act on a 403 that carries the code (discovery's publish refusal)", async () => {
+    const h = harness();
+    h.provider.install(ACCT, pair(1));
+    h.responses.push(new Response('{"error":"device-revoked"}', { status: 403 }));
+    const response = await h.provider.fetch("/api/discovery/keypackage", {
+      headers: { authorization: `Bearer ${pair(1).sessionToken}` },
+    });
+    expect(response.status).toBe(403);
+    expect(h.events).toEqual([]);
+    expect(h.provider.pair()).toEqual(pair(1));
   });
 });

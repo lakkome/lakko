@@ -4402,8 +4402,132 @@
       "text": "QR-код для прив’язування",
       "status": "machine"
     },
+    "devices.recall.body": {
+      "text": "Ключі {name} скинуто на іншому пристрої {date}. Цей пристрій вийшов з облікового запису, а чати й контакти, які на ньому зберігалися, видалено.",
+      "status": "machine"
+    },
+    "devices.recall.checking": {
+      "text": "Перевіряємо, чи можна повернути обліковий запис...",
+      "status": "machine"
+    },
+    "devices.recall.done": {
+      "text": "Ви повернули обліковий запис. Знову додайте ключі доступу та інші пристрої.",
+      "status": "machine"
+    },
+    "devices.recall.error.closed": {
+      "text": "Повернути обліковий запис із цього пристрою більше неможливо.",
+      "status": "machine"
+    },
+    "devices.recall.error.exhausted": {
+      "text": "Забагато неправильних паролів. Повернути обліковий запис із цього пристрою більше неможливо.",
+      "status": "machine"
+    },
+    "devices.recall.error.tries_left": {
+      "text": "{count, plural, one {Залишилася # спроба} few {Залишилися # спроби} many {Залишилося # спроб} other {Залишилося # спроби}}",
+      "status": "machine"
+    },
+    "devices.recall.error.wrong_password": {
+      "text": "Це не той пароль, який був в облікового запису до скидання. Якщо ви змінювали пароль за останній місяць, введіть той, що був до цього.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_factors": {
+      "text": "Ключі доступу та код з автентифікатора видаляються. Потім додайте їх знову.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_keys": {
+      "text": "Обліковий запис отримає нові ключі та нову фразу відновлення.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_messages": {
+      "text": "Повідомлення, надіслані обліковому запису після скидання, вам не доставлено, і відновити їх неможливо.",
+      "status": "machine"
+    },
+    "devices.recall.form.lede": {
+      "text": "Введіть пароль, який був в облікового запису до скидання, і задайте новий. У того, хто скинув ключі, буде виконано вихід з облікового запису.",
+      "status": "machine"
+    },
+    "devices.recall.form.new_password": {
+      "text": "Новий пароль",
+      "status": "machine"
+    },
+    "devices.recall.form.old_password": {
+      "text": "Пароль до скидання",
+      "status": "machine"
+    },
+    "devices.recall.form.repeat_password": {
+      "text": "Підтвердьте новий пароль",
+      "status": "machine"
+    },
+    "devices.recall.form.submit": {
+      "text": "Повернути обліковий запис",
+      "status": "machine"
+    },
+    "devices.recall.form.title": {
+      "text": "Повернути обліковий запис",
+      "status": "machine"
+    },
+    "devices.recall.form.working": {
+      "text": "Повертаємо обліковий запис...",
+      "status": "machine"
+    },
+    "devices.recall.no": {
+      "text": "Ні, повернути обліковий запис",
+      "status": "machine"
+    },
+    "devices.recall.question": {
+      "text": "Це були ви?",
+      "status": "machine"
+    },
+    "devices.recall.until": {
+      "text": "Повернути обліковий запис із цього пристрою можна до {date}.",
+      "status": "machine"
+    },
+    "devices.recall.yes": {
+      "text": "Так, це я",
+      "status": "machine"
+    },
+    "devices.recall.yes.back": {
+      "text": "Назад",
+      "status": "machine"
+    },
+    "devices.recall.yes.confirm": {
+      "text": "Усе інше, що цей обліковий запис зберігав на цьому пристрої, буде видалено. Щоб знову користуватися обліковим записом тут, увійдіть і отримайте ключі з пристрою, на якому їх скинули.",
+      "status": "machine"
+    },
+    "devices.recall.yes.delete": {
+      "text": "Видалити й увійти",
+      "status": "machine"
+    },
+    "devices.remove.done": {
+      "text": "Пристрій видалено, вихід на ньому виконано.",
+      "status": "machine"
+    },
+    "devices.remove.error.not_revoked": {
+      "text": "Не вдалося вийти з облікового запису на пристрої, тому нічого не видалено. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "devices.remove.error.try_later": {
+      "text": "Цей пристрій ще налаштовує обліковий запис. Спробуйте за хвилину.",
+      "status": "machine"
+    },
+    "devices.remove.finish": {
+      "text": "Завершити видалення",
+      "status": "machine"
+    },
+    "devices.remove.pending": {
+      "text": "Видалення...",
+      "status": "machine"
+    },
     "devices.removed.body": {
       "text": "Його видалили з вашого облікового запису на іншому пристрої. Нові повідомлення сюди більше не надходять. Вийдіть, а потім увійдіть знову, якщо хочете ним користуватися.",
+      "status": "machine"
+    },
+    "devices.removed.body_done": {
+      "text": "Його видалили з облікового запису {name} на іншому пристрої, вихід виконано. Усе, що обліковий запис зберігав тут, видалено.",
+      "status": "machine"
+    },
+    "devices.removed.body_removing": {
+      "text": "Його видалили з облікового запису {name} на іншому пристрої, вихід виконано. Усе, що цей обліковий запис зберігав на цьому пристрої, видаляється: чати, контакти, ключі та фраза відновлення.",
       "status": "machine"
     },
     "devices.removed.sign_out": {
@@ -4412,6 +4536,74 @@
     },
     "devices.removed.title": {
       "text": "Цей пристрій видалено",
+      "status": "machine"
+    },
+    "devices.rotate.confirm": {
+      "text": "Видалити й змінити ключі",
+      "status": "machine"
+    },
+    "devices.rotate.done": {
+      "text": "Ключі облікового запису змінено. Інші ваші пристрої отримають нові під час наступного підключення.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_contacts": {
+      "text": "Вашим співрозмовникам нічого робити не потрібно.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_devices": {
+      "text": "Інші ваші пристрої збережуть чати й самі отримають нові ключі.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Ключі доступу, як і раніше, дають змогу увійти. Функцію «Відновлювати ключі цим ключем доступу» вимкнено, доки ви не ввімкнете її знову.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_phrase": {
+      "text": "Ви отримаєте нову фразу відновлення. Стара перестане працювати.",
+      "status": "machine"
+    },
+    "devices.rotate.error.not_started": {
+      "text": "Пристрій видалено, але ключі облікового запису не змінено.",
+      "status": "machine"
+    },
+    "devices.rotate.lede": {
+      "text": "На загубленому пристрої залишаються ключі вашого облікового запису. Якщо їх змінити, те, що на ньому зберігається, стане марним.",
+      "status": "machine"
+    },
+    "devices.rotate.not_now": {
+      "text": "Не зараз",
+      "status": "machine"
+    },
+    "devices.rotate.retry": {
+      "text": "Спробувати ще раз",
+      "status": "machine"
+    },
+    "devices.rotate.step_devices": {
+      "text": "Оновлюємо інші ваші пристрої",
+      "status": "machine"
+    },
+    "devices.rotate.step_keys": {
+      "text": "Змінюємо ключі облікового запису",
+      "status": "machine"
+    },
+    "devices.rotate.step_remove": {
+      "text": "Видаляємо пристрій",
+      "status": "machine"
+    },
+    "devices.rotate.title": {
+      "text": "Видалити цей пристрій і змінити ключі облікового запису",
+      "status": "machine"
+    },
+    "devices.rotated.notice": {
+      "text": "Ключі облікового запису змінено на іншому пристрої. На цьому пристрої вже нові.",
+      "status": "machine"
+    },
+    "devices.rotated.show_phrase": {
+      "text": "Показати нову фразу",
+      "status": "machine"
+    },
+    "devices.rotated.updating": {
+      "text": "Оновлення ключів...",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -6266,6 +6458,18 @@
       "text": "Використати пароль",
       "status": "machine"
     },
+    "proof.remove_device.cancelled": {
+      "text": "Скасовано. Пристрій не видалено.",
+      "status": "machine"
+    },
+    "proof.remove_device.help": {
+      "text": "Введіть пароль, щоб видалити цей пристрій.",
+      "status": "machine"
+    },
+    "proof.remove_device.wrong_password": {
+      "text": "Неправильний пароль. Пристрій не видалено.",
+      "status": "machine"
+    },
     "proof.reset.cancelled": {
       "text": "Скасовано. Нічого не скинуто.",
       "status": "machine"
@@ -6862,6 +7066,10 @@
       "text": "«Вийти» залишає ваші дані на цьому пристрої. «Забути цей пристрій» видаляє їх; повернутися можна лише з іншого пристрою, на якому виконано вхід, з ключем доступу, який відновлює ключі облікового запису, або з фразою відновлення. «Видалити обліковий запис» стирає обліковий запис на сервері й очищає цей пристрій; цю дію неможливо скасувати.",
       "status": "machine"
     },
+    "settings.account.delete.blocked": {
+      "text": "Ключі облікового запису нещодавно скинуто. Видалити обліковий запис неможливо до {date}.",
+      "status": "machine"
+    },
     "settings.account.delete.body": {
       "text": "Буде стерто ваші дані на сервері — ім’я користувача, ключі, способи відновлення та резервну копію, — і ви вийдете на всіх пристроях. Локальні повідомлення на цьому пристрої теж буде видалено. Цю дію неможливо скасувати.",
       "status": "machine"
@@ -7079,15 +7287,31 @@
       "status": "machine"
     },
     "settings.devices.remove.body": {
-      "text": "З цього моменту пристрій втратить доступ до ваших повідомлень. Може знадобитися ключ доступу.",
+      "text": "Воно вже вийшло з облікового запису. Під час наступного підключення з нього буде видалено все, що зберігав цей обліковий запис: чати, контакти, ключі та фразу відновлення.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm": {
+      "text": "Видалити пристрій",
       "status": "machine"
     },
     "settings.devices.remove.confirm_named": {
       "text": "Видалити: {device}",
       "status": "machine"
     },
+    "settings.devices.remove.reason_stolen": {
+      "text": "Його загублено або вкрадено",
+      "status": "machine"
+    },
+    "settings.devices.remove.reason_unused": {
+      "text": "Я ним більше не користуюся",
+      "status": "machine"
+    },
     "settings.devices.remove.title": {
       "text": "Видалити: {device}?",
+      "status": "machine"
+    },
+    "settings.devices.remove.working": {
+      "text": "Видалення...",
       "status": "machine"
     },
     "settings.devices.removed_change_password": {

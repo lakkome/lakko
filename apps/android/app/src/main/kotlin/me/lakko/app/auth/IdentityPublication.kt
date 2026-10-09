@@ -137,6 +137,14 @@ internal sealed interface LandingVerdict {
     /** Another key at the same or a lower generation: an anomaly. The
      *  blocking screen; the wipe on tap. */
     data object KeyMismatch : LandingVerdict
+    /**
+     * ADR-0066 section 3.3 - the directory still serves a key this device
+     * holds as its OWN proven predecessor, at a LOWER generation than this
+     * device's session: this device adopted a rotation whose directory
+     * upload (the rotating device's, with the proof and the attestation)
+     * has not landed yet. Nothing is uploaded and nothing is reported.
+     */
+    data object OwnPredecessorPublished : LandingVerdict
 }
 
 /** The pure rule of ADR-0065 section 4.2, over a readable directory answer. */
@@ -144,9 +152,17 @@ internal fun landingVerdict(
     published: PublishedIdentityKeys?,
     ownSignaturePubkey: ByteArray,
     ownKeyGeneration: Long,
+    /** The keys of this account's own previous identities held on this
+     *  device after a rotation it adopted (empty when it never rotated). */
+    ownPredecessors: List<ByteArray> = emptyList(),
 ): LandingVerdict {
     if (published == null) return LandingVerdict.Proceed(null)
     if (published.signaturePubkey.contentEquals(ownSignaturePubkey)) return LandingVerdict.Proceed(published)
+    if (published.keyGeneration < ownKeyGeneration &&
+        ownPredecessors.any { it.contentEquals(published.signaturePubkey) }
+    ) {
+        return LandingVerdict.OwnPredecessorPublished
+    }
     return if (published.keyGeneration > ownKeyGeneration) LandingVerdict.StaleKeys else LandingVerdict.KeyMismatch
 }
 
@@ -160,6 +176,10 @@ internal interface IdentityPublicationPorts {
 
     /** The key generation of this device's session pair. */
     val ownKeyGeneration: Long
+
+    /** The keys of this account's own previous identities on this device
+     *  (ADR-0066 section 3.3); empty when it never rotated. */
+    val ownPredecessors: List<ByteArray> get() = emptyList()
 
     /** `GET /discovery/identity/{account}`; `null` on 404, throws otherwise. */
     suspend fun fetchPublished(): PublishedIdentityKeys?
@@ -208,6 +228,10 @@ internal sealed interface IdentityPublicationResult {
     /** The directory serves other keys at the same generation. Reported,
      *  nothing uploaded. */
     data object KeyMismatch : IdentityPublicationResult
+
+    /** The directory still serves this account's own previous key after a
+     *  rotation this device adopted. Nothing uploaded, nothing reported. */
+    data object AwaitingRotationPublish : IdentityPublicationResult
 }
 
 /**
@@ -241,8 +265,12 @@ internal suspend fun publishIdentity(
     }
     if (!ports.isStillCurrent()) return IdentityPublicationResult.Superseded
 
-    val verdict = landingVerdict(published, ports.signaturePubkey, ports.ownKeyGeneration)
+    val verdict = landingVerdict(published, ports.signaturePubkey, ports.ownKeyGeneration, ports.ownPredecessors)
     when (verdict) {
+        LandingVerdict.OwnPredecessorPublished -> {
+            log("the directory still serves this account's previous key; the rotation's upload has not landed", null)
+            return IdentityPublicationResult.AwaitingRotationPublish
+        }
         LandingVerdict.StaleKeys -> {
             log("the directory serves other keys at a higher generation: this device's keys are stale", null)
             ports.onStaleKeys(verdict)

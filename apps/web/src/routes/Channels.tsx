@@ -524,7 +524,7 @@ const NewChannel: Component = () => {
       // account identity's provider (ADR-0017 canonical identity), which the
       // channel log snapshots — a throwaway `Identity.fromSeed` would take
       // the group, and the seed every subscriber holds, with it.
-      const identity = chats.accountIdentity();
+      const identity = chats.conversationAccountIdentity();
       if (identity === null) {
         setError(() => t("channels.new.error.sign_in"));
         setBusy(false);
@@ -710,7 +710,7 @@ const JoinCoPublisher: Component = () => {
     // request mints, and the PublisherGroup the Welcome lands, live in its
     // provider, which the channel log snapshots. A throwaway identity would
     // lose both on the next reload.
-    const identity = chats.accountIdentity();
+    const identity = chats.conversationAccountIdentity();
     if (auth.identitySecrets() === null || identity === null) {
       setError(() => t("channels.join.error.sign_in"));
       return;
@@ -934,7 +934,7 @@ const ChannelView: Component = () => {
       setPublishError(() => t("channels.publish.error.not_publisher"));
       return;
     }
-    const identity = chats.accountIdentity();
+    const identity = chats.conversationAccountIdentity();
     if (identity === null) {
       setPublishError(() => t("channels.publish.error.sign_in"));
       return;

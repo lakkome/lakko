@@ -354,9 +354,15 @@ export async function resetWithAttestation(
   epoch: bigint,
   epochKey: Uint8Array,
   keyResetAttestB64: string,
+  /** ADR-0066 section 4.6 (T5 item 21) - the 64-byte signature by the
+   *  attested NEW account key over `(journal, generation, root.publicKey())`,
+   *  STANDARD base64. The DS refuses an attested reset without it (the
+   *  uniform 401), so a served attestation is useless to anyone but the new
+   *  identity. */
+  rootEndorsementB64: string,
 ): Promise<"reset" | "already-reset"> {
   const [path, statementBody] = readRequest(root.reset(journalId, epoch, epochKey));
-  const body = attestedResetBody(statementBody, keyResetAttestB64);
+  const body = attestedResetBody(statementBody, keyResetAttestB64, rootEndorsementB64);
   try {
     await sender.putStatement(path, body);
     return "reset";
@@ -371,15 +377,80 @@ export async function resetWithAttestation(
 /** The reset body with the attestation added beside the statement the wasm
  *  signer built. Exported for the test; throws on a body that is not the
  *  `{"statement_b64": ...}` object the signer writes. */
-export function attestedResetBody(statementBodyJson: string, keyResetAttestB64: string): string {
+export function attestedResetBody(
+  statementBodyJson: string,
+  keyResetAttestB64: string,
+  rootEndorsementB64: string,
+): string {
   const parsed = JSON.parse(statementBodyJson) as { statement_b64?: unknown };
   if (typeof parsed.statement_b64 !== "string") {
-    throw new Error("ds ownership: the reset statement body has no statement_b64");
+    throw new Error("ds ownership: the statement body has no statement_b64");
+  }
+  if (rootEndorsementB64.length === 0) {
+    // The DS answers the uniform 401 without it; refuse here so the defect
+    // is a named one.
+    throw new Error("ds ownership: an attested statement needs the root endorsement");
   }
   return JSON.stringify({
     statement_b64: parsed.statement_b64,
     key_reset_attest_b64: keyResetAttestB64,
+    root_endorsement_b64: rootEndorsementB64,
   });
+}
+
+/**
+ * ADR-0066 section 3.5 (T5 item 22) - the attested root TRANSFER of the
+ * account's DeviceGroup journal after a key rotation: the OLD root signs a
+ * `RootTransfer` naming the root derived from the new seed, and the body
+ * carries the attestation and the endorsement of that NEW root. The chain,
+ * the registrars and the push binding are kept (a kept device that lags an
+ * epoch is not cut off), and the journal records the generation.
+ *
+ * `"transferred"` on a 2xx. A `409` (the generation already landed) or the
+ * uniform `401` (the old root is no longer the root) is `"already"` only when
+ * the probe by the NEW root answers 204; otherwise the refusal is rethrown.
+ */
+export async function transferRootWithAttestation(
+  sender: StatementSender,
+  journalId: Uint8Array,
+  oldRoot: Pick<StatementSignerLike, "rootTransfer">,
+  newRoot: Pick<StatementSignerLike, "rootTransfer" | "publicKey">,
+  keyResetAttestB64: string,
+  rootEndorsementB64: string,
+): Promise<"transferred" | "already"> {
+  const [path, statementBody] = readRequest(oldRoot.rootTransfer(journalId, newRoot.publicKey()));
+  const body = attestedResetBody(statementBody, keyResetAttestB64, rootEndorsementB64);
+  try {
+    await sender.putStatement(path, body);
+    return "transferred";
+  } catch (err) {
+    if (!isStatus(err, 409) && !isStatus(err, 401)) throw err;
+    const probe = await probeRoot(sender, journalId, newRoot);
+    if (probe === "root") return "already";
+    throw err;
+  }
+}
+
+/**
+ * A plain root transfer old -> new for a journal the account owns (an owned
+ * group, a PublisherGroup) after a key rotation. `"already"` when the old
+ * root is refused and the new root's probe answers 204 (a retry).
+ */
+export async function transferRoot(
+  sender: StatementSender,
+  journalId: Uint8Array,
+  oldRoot: Pick<StatementSignerLike, "rootTransfer">,
+  newRoot: Pick<StatementSignerLike, "rootTransfer" | "publicKey">,
+): Promise<"transferred" | "already"> {
+  try {
+    await sendStatement(sender, () => oldRoot.rootTransfer(journalId, newRoot.publicKey()));
+    return "transferred";
+  } catch (err) {
+    if (!isStatus(err, 401)) throw err;
+    const probe = await probeRoot(sender, journalId, newRoot);
+    if (probe === "root") return "already";
+    throw err;
+  }
 }
 
 function readRequest(req: StatementRequestLike): [string, string] {

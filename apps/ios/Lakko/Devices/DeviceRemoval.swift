@@ -173,6 +173,51 @@ public enum DeviceRemoval {
         )
     }
 
+    /// ADR-0066 section 2.3 step 4 — remove the leaf holding `deviceKey` from
+    /// the DeviceGroup, found by KEY (a leaf index does not survive a
+    /// relaunch, and the owed record of a removal names the device).
+    ///
+    /// `.done` when the commit was published or no leaf holds the key (an
+    /// earlier run, or another device, already removed it). When the
+    /// attested-removal policy is on and no attestation is in hand, nothing
+    /// is committed and `.needsAttestation` is returned: peers refuse an
+    /// unattested Remove under the policy, so committing one would fork this
+    /// device from them.
+    public static func removeDevice(
+        accountIdBytes: Data,
+        accountIdB64: String,
+        deviceKey: Data,
+        attestation: Data?
+    ) async throws -> DeviceRemovalPlan.DeviceGroupOutcome {
+        let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
+        let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+            accountIdBytes: accountIdBytes,
+            accountIdB64: accountIdB64,
+            deviceIdentitySeed: seed
+        )
+        guard let leaf = try ensured.group.devices()
+            .first(where: { $0.signaturePublicKey == deviceKey })?.leafIndex else {
+            return .done
+        }
+        if attestation == nil, try ensured.group.requireAttestedRemovals() {
+            return .needsAttestation
+        }
+        try await removeDeviceAt(
+            accountIdBytes: accountIdBytes,
+            accountIdB64: accountIdB64,
+            leafIndex: leaf,
+            attestation: attestation
+        )
+        return .done
+    }
+
+    /// The leaf keys of the account's DeviceGroup as the persisted snapshot
+    /// has them, or `nil` when it cannot be read.
+    public static func rosterKeys(accountIdBytes: Data, accountIdB64: String) -> [Data]? {
+        (try? listDevices(accountIdBytes: accountIdBytes, accountIdB64: accountIdB64))?
+            .devices.map(\.signaturePublicKey)
+    }
+
     /// G-13 (ADR-0015): enable the attested-removal policy on the local
     /// DeviceGroup if it is not already on, broadcasting the
     /// GroupContextExtensions commit over the journal so every device enforces

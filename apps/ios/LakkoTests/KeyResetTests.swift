@@ -431,14 +431,23 @@ final class KeyResetPublishTests: XCTestCase {
     func testTheAttestedResetBodyAddsTheOneFieldBesideTheStatement() throws {
         let plain = DsStatementRequest(
             path: "/ds/group/ab/reset", bodyJson: #"{"statement_b64":"c3RtdA=="}"#)
-        let attested = try AttestedResetBody.attach(attestation: Data([1, 2, 3]), to: plain)
+        // ADR-0066 section 4.6 — the DS refuses the attestation without the
+        // root endorsement, so the two fields are only ever attached together.
+        let attested = try AttestedResetBody.attach(
+            attestation: Data([1, 2, 3]), endorsement: Data([9, 8, 7]), to: plain)
         XCTAssertEqual(attested.path, plain.path)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(attested.bodyJson.utf8)) as? [String: Any])
         XCTAssertEqual(json["statement_b64"] as? String, "c3RtdA==")
         XCTAssertEqual(json["key_reset_attest_b64"] as? String, Data([1, 2, 3]).base64EncodedString())
-        XCTAssertEqual(json.count, 2)
+        XCTAssertEqual(json["root_endorsement_b64"] as? String, Data([9, 8, 7]).base64EncodedString())
+        XCTAssertEqual(json.count, 3)
         XCTAssertThrowsError(
-            try AttestedResetBody.attach(attestation: Data(), to: DsStatementRequest(path: "/x", bodyJson: "[]")))
+            try AttestedResetBody.attach(
+                attestation: Data(), endorsement: Data([1]), to: DsStatementRequest(path: "/x", bodyJson: "[]")))
+        // An empty endorsement is refused here rather than sent: the DS would
+        // answer 400.
+        XCTAssertThrowsError(
+            try AttestedResetBody.attach(attestation: Data([1]), endorsement: Data(), to: plain))
     }
 
     func testTheDsRefusalsName503KeyResetDisabled() {
@@ -525,11 +534,13 @@ final class KeysSignOutTests: XCTestCase {
         let persistence: Persistence
         let wiped: WipeLog
         let store: SessionStore
+        let recalls: InMemoryRecallRecordStore
     }
 
     private func restoredSession(
         refresh: Result<SessionPair, Error>? = nil,
-        directory: Directory = Directory()
+        directory: Directory = Directory(),
+        holdsKeys: Bool = true
     ) -> Harness {
         let store = SessionStore(defaults: defaults("keys-signout"))
         store.save(PersistedSession(accountIdB64: accountIdB64, username: "alice"))
@@ -538,6 +549,8 @@ final class KeysSignOutTests: XCTestCase {
         let tokens = SessionTokenProvider()
         tokens.nowMs = { 1_000_000 }
         let wiped = WipeLog()
+        let recalls = InMemoryRecallRecordStore()
+        if !holdsKeys { persistence.seed = nil }
         let repository = AuthRepository(
             sessionStore: store,
             authClientFactory: { NameRouteStub.client(NameRouteStub.scope { _, _, _ in (503, "") }) },
@@ -548,14 +561,16 @@ final class KeysSignOutTests: XCTestCase {
             restoreDirectory: directory,
             markers: RecoveryMarkers(defaults: defaults("keys-signout-markers")),
             tokenProvider: tokens,
-            wipeAfterKeyReset: { account in wiped.note(account) }
+            wipeAfterKeyReset: { account in wiped.note(account) },
+            recallRecords: recalls,
+            recallOperations: .unreachable
         )
         if let refresh {
             tokens.refresher = { _ in try refresh.get() }
         }
         return Harness(
             repository: repository, tokens: tokens, directory: directory, persistence: persistence,
-            wiped: wiped, store: store)
+            wiped: wiped, store: store, recalls: recalls)
     }
 
     private func waitUntil(_ condition: @MainActor () -> Bool, timeout: TimeInterval = 5) async -> Bool {
@@ -567,16 +582,24 @@ final class KeysSignOutTests: XCTestCase {
         return condition()
     }
 
+    /// A device that never held the account's keys (signed in, keys not
+    /// restored): the existing signed-out screen and the full wipe.
     func testARefreshRefusedAsSupersededShowsTheScreenAndWipesByItself() async {
-        let h = restoredSession(refresh: .failure(AuthClientError.http(
-            status: 401, endpoint: "/auth/session/refresh", body: #"{"error":"key-generation-superseded"}"#)))
-        XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+        let h = restoredSession(
+            refresh: .failure(AuthClientError.http(
+                status: 401, endpoint: "/auth/session/refresh", body: #"{"error":"key-generation-superseded"}"#)),
+            holdsKeys: false)
+        // Without the keys the launch state is the sign-in screen; the
+        // superseded signal is delivered for the account of the record.
+        h.repository.handleKeysSuperseded(accountIdB64: accountIdB64)
         let shown = await waitUntil { h.repository.keysSignOut != nil }
-        XCTAssertTrue(shown, "the silent restore refreshes and learns of the reset at launch")
+        XCTAssertTrue(shown)
         XCTAssertEqual(h.repository.keysSignOutUsername, "alice")
         let wiped = await waitUntil { h.repository.keysSignOut == .removed }
         XCTAssertTrue(wiped)
         XCTAssertEqual(h.wiped.accounts, [accountIdB64], "the full wipe ran by itself, once")
+        XCTAssertNil(h.repository.recall, "no keys, so nothing to take the account back with")
+        XCTAssertNil(h.recalls.record)
         XCTAssertNil(h.tokens.current, "the superseded pair is gone")
         XCTAssertEqual(h.directory.uploads, 0, "nothing is published first")
         // "Sign in" dismisses the screen; the session behind it is over.
@@ -584,14 +607,31 @@ final class KeysSignOutTests: XCTestCase {
         XCTAssertNil(h.repository.keysSignOut)
     }
 
+    /// ADR-0066 section 1.1: a device that holds the keys learns of the
+    /// reset at launch, deletes what the account kept, and asks.
+    func testARefreshRefusedAsSupersededOnADeviceWithKeysAsksWasItYou() async {
+        let h = restoredSession(refresh: .failure(AuthClientError.http(
+            status: 401, endpoint: "/auth/session/refresh", body: #"{"error":"key-generation-superseded"}"#)))
+        XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+        let shown = await waitUntil { h.repository.recall != nil }
+        XCTAssertTrue(shown, "the silent restore refreshes and learns of the reset at launch")
+        XCTAssertEqual(h.repository.recall?.username, "alice")
+        XCTAssertNil(h.repository.keysSignOut)
+        let wiped = await waitUntil { h.wiped.accounts == [self.accountIdB64] }
+        XCTAssertTrue(wiped, "the staged wipe ran by itself, once")
+        XCTAssertNil(h.tokens.current, "the superseded pair is gone")
+        XCTAssertEqual(h.directory.uploads, 0, "nothing is published first")
+    }
+
     func testAPublishedHigherGenerationWithOtherKeysIsStaleKeys() async {
         let directory = Directory()
         directory.published = (Data(repeating: 0xBB, count: 32), 2)
         let h = restoredSession(directory: directory)
-        let shown = await waitUntil { h.repository.keysSignOut == .removing || h.repository.keysSignOut == .removed }
-        XCTAssertTrue(shown)
+        let shown = await waitUntil { h.repository.recall != nil }
+        XCTAssertTrue(shown, "the landing rule's stale keys lead to the same staged wipe")
         let wiped = await waitUntil { h.wiped.accounts == [accountIdB64] }
         XCTAssertTrue(wiped)
+        XCTAssertNotNil(h.recalls.record)
         XCTAssertEqual(h.directory.uploads, 0, "the old bundle is never uploaded")
     }
 

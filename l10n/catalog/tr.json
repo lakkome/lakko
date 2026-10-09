@@ -4402,8 +4402,132 @@
       "text": "Eşleştirme QR kodu",
       "status": "machine"
     },
+    "devices.recall.body": {
+      "text": "{name} için anahtarlar {date} tarihinde başka bir cihazda sıfırlandı. Bu cihazın oturumu kapatıldı; cihazda tutulan sohbetler ve kişiler silindi.",
+      "status": "machine"
+    },
+    "devices.recall.checking": {
+      "text": "Hesabın geri alınıp alınamayacağı kontrol ediliyor...",
+      "status": "machine"
+    },
+    "devices.recall.done": {
+      "text": "Hesabınızı geri aldınız. Geçiş anahtarlarınızı ve diğer cihazlarınızı yeniden ekleyin.",
+      "status": "machine"
+    },
+    "devices.recall.error.closed": {
+      "text": "Hesap artık bu cihazdan geri alınamaz.",
+      "status": "machine"
+    },
+    "devices.recall.error.exhausted": {
+      "text": "Çok fazla yanlış şifre girildi. Hesap artık bu cihazdan geri alınamaz.",
+      "status": "machine"
+    },
+    "devices.recall.error.tries_left": {
+      "text": "{count, plural, one {# deneme kaldı} other {# deneme kaldı}}",
+      "status": "machine"
+    },
+    "devices.recall.error.wrong_password": {
+      "text": "Bu, hesabın sıfırlamadan önceki şifresi değil. Şifrenizi son bir ay içinde değiştirdiyseniz ondan önceki şifrenizi girin.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_factors": {
+      "text": "Geçiş anahtarları ve kimlik doğrulayıcı kodu kaldırılır. Sonrasında yeniden ekleyin.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_keys": {
+      "text": "Hesap yeni anahtarlar ve yeni bir kurtarma ifadesi alır.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_messages": {
+      "text": "Sıfırlamadan sonra hesaba gönderilen mesajlar size gönderilmedi ve kurtarılamaz.",
+      "status": "machine"
+    },
+    "devices.recall.form.lede": {
+      "text": "Hesabın sıfırlamadan önceki şifresini girin ve yeni bir şifre seçin. Anahtarları sıfırlayan kişinin oturumu kapatılacak.",
+      "status": "machine"
+    },
+    "devices.recall.form.new_password": {
+      "text": "Yeni şifre",
+      "status": "machine"
+    },
+    "devices.recall.form.old_password": {
+      "text": "Sıfırlamadan önceki şifre",
+      "status": "machine"
+    },
+    "devices.recall.form.repeat_password": {
+      "text": "Yeni şifreyi tekrarla",
+      "status": "machine"
+    },
+    "devices.recall.form.submit": {
+      "text": "Hesabı geri al",
+      "status": "machine"
+    },
+    "devices.recall.form.title": {
+      "text": "Hesabı geri al",
+      "status": "machine"
+    },
+    "devices.recall.form.working": {
+      "text": "Hesap geri alınıyor...",
+      "status": "machine"
+    },
+    "devices.recall.no": {
+      "text": "Hayır, hesabı geri al",
+      "status": "machine"
+    },
+    "devices.recall.question": {
+      "text": "Bunu siz mi yaptınız?",
+      "status": "machine"
+    },
+    "devices.recall.until": {
+      "text": "Hesabı {date} tarihine kadar bu cihazdan geri alabilirsiniz.",
+      "status": "machine"
+    },
+    "devices.recall.yes": {
+      "text": "Evet, bendim",
+      "status": "machine"
+    },
+    "devices.recall.yes.back": {
+      "text": "Geri",
+      "status": "machine"
+    },
+    "devices.recall.yes.confirm": {
+      "text": "Bu hesabın bu cihazda tuttuğu geri kalan her şey silinecek. Hesabı burada yeniden kullanmak için giriş yapın ve anahtarları, onları sıfırlayan cihazdan alın.",
+      "status": "machine"
+    },
+    "devices.recall.yes.delete": {
+      "text": "Sil ve giriş yap",
+      "status": "machine"
+    },
+    "devices.remove.done": {
+      "text": "Cihaz kaldırıldı ve oturumu kapatıldı.",
+      "status": "machine"
+    },
+    "devices.remove.error.not_revoked": {
+      "text": "Cihazın oturumu kapatılamadı, bu yüzden hiçbir şey kaldırılmadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "devices.remove.error.try_later": {
+      "text": "Bu cihaz hâlâ hesabı kuruyor. Bir dakika sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "devices.remove.finish": {
+      "text": "Kaldırmayı bitir",
+      "status": "machine"
+    },
+    "devices.remove.pending": {
+      "text": "Kaldırılıyor...",
+      "status": "machine"
+    },
     "devices.removed.body": {
       "text": "Bu cihaz, başka bir cihazdan hesabınızdan kaldırıldı. Yeni mesajlar artık bu cihaza ulaşmıyor. Kullanmak istiyorsanız çıkış yapın, ardından tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "devices.removed.body_done": {
+      "text": "Başka bir cihazda {name} hesabından kaldırıldı ve oturumu kapatıldı. Hesabın burada tuttuğu her şey silindi.",
+      "status": "machine"
+    },
+    "devices.removed.body_removing": {
+      "text": "Başka bir cihazda {name} hesabından kaldırıldı ve oturumu kapatıldı. Bu hesabın bu cihazda tuttuğu her şey siliniyor: sohbetler, kişiler, anahtarlar ve kurtarma ifadesi.",
       "status": "machine"
     },
     "devices.removed.sign_out": {
@@ -4412,6 +4536,74 @@
     },
     "devices.removed.title": {
       "text": "Bu cihaz kaldırıldı",
+      "status": "machine"
+    },
+    "devices.rotate.confirm": {
+      "text": "Kaldır ve anahtarları değiştir",
+      "status": "machine"
+    },
+    "devices.rotate.done": {
+      "text": "Hesap anahtarlarınız değiştirildi. Diğer cihazlarınız bir sonraki bağlandıklarında yeni anahtarları alır.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_contacts": {
+      "text": "Konuştuğunuz kişilerin bir şey yapması gerekmez.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_devices": {
+      "text": "Diğer cihazlarınız sohbetlerini korur ve yeni anahtarları kendiliğinden alır.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Geçiş anahtarlarınız giriş yapmanızı sağlamaya devam eder. \"Anahtarları bu geçiş anahtarıyla geri yükle\" seçeneği, siz yeniden açana kadar kapalıdır.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_phrase": {
+      "text": "Yeni bir kurtarma ifadesi alırsınız. Eskisi artık çalışmaz.",
+      "status": "machine"
+    },
+    "devices.rotate.error.not_started": {
+      "text": "Cihaz kaldırıldı, ancak hesap anahtarlarınız değiştirilmedi.",
+      "status": "machine"
+    },
+    "devices.rotate.lede": {
+      "text": "Kayıp bir cihazda hesap anahtarlarınız hâlâ durur. Anahtarları değiştirmek, cihazdakileri işe yaramaz hâle getirir.",
+      "status": "machine"
+    },
+    "devices.rotate.not_now": {
+      "text": "Şimdi değil",
+      "status": "machine"
+    },
+    "devices.rotate.retry": {
+      "text": "Tekrar dene",
+      "status": "machine"
+    },
+    "devices.rotate.step_devices": {
+      "text": "Diğer cihazlarınız güncelleniyor",
+      "status": "machine"
+    },
+    "devices.rotate.step_keys": {
+      "text": "Hesap anahtarlarınız değiştiriliyor",
+      "status": "machine"
+    },
+    "devices.rotate.step_remove": {
+      "text": "Cihaz kaldırılıyor",
+      "status": "machine"
+    },
+    "devices.rotate.title": {
+      "text": "Bu cihazı kaldırın ve hesap anahtarlarınızı değiştirin",
+      "status": "machine"
+    },
+    "devices.rotated.notice": {
+      "text": "Hesap anahtarlarınız başka bir cihazda değiştirildi. Bu cihazda yeni anahtarlar var.",
+      "status": "machine"
+    },
+    "devices.rotated.show_phrase": {
+      "text": "Yeni ifadeyi göster",
+      "status": "machine"
+    },
+    "devices.rotated.updating": {
+      "text": "Anahtarlar güncelleniyor...",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -6266,6 +6458,18 @@
       "text": "Bunun yerine şifrenizi kullanın",
       "status": "machine"
     },
+    "proof.remove_device.cancelled": {
+      "text": "İptal edildi. Cihaz kaldırılmadı.",
+      "status": "machine"
+    },
+    "proof.remove_device.help": {
+      "text": "Bu cihazı kaldırmak için şifrenizi girin.",
+      "status": "machine"
+    },
+    "proof.remove_device.wrong_password": {
+      "text": "Şifre yanlış. Cihaz kaldırılmadı.",
+      "status": "machine"
+    },
     "proof.reset.cancelled": {
       "text": "İptal edildi. Hiçbir şey sıfırlanmadı.",
       "status": "machine"
@@ -6862,6 +7066,10 @@
       "text": "Oturumu kapat, verilerinizi bu cihazda tutar. Bu cihazı unut, onları kaldırır; yalnızca oturum açık başka bir cihazla, hesap anahtarlarını geri yükleyen bir geçiş anahtarıyla veya kurtarma ifadenizle geri dönebilirsiniz. Hesabı sil, hesabı sunucudan siler ve bu cihazı temizler; bu işlem geri alınamaz.",
       "status": "machine"
     },
+    "settings.account.delete.blocked": {
+      "text": "Hesap anahtarları yakın zamanda sıfırlandı. Hesap {date} tarihine kadar silinemez.",
+      "status": "machine"
+    },
     "settings.account.delete.body": {
       "text": "Bu işlem sunucudaki kimliğinizi — kullanıcı adı, anahtarlar, kurtarma yöntemleri ve yedek — siler ve her yerde oturumunuzu kapatır. Bu cihazdaki yerel mesajlarınız da silinir. Bu işlem geri alınamaz.",
       "status": "machine"
@@ -7079,15 +7287,31 @@
       "status": "machine"
     },
     "settings.devices.remove.body": {
-      "text": "Bu cihaz o andan itibaren mesajlarınıza erişimini kaybeder. Geçiş anahtarınız istenebilir.",
+      "text": "Oturumu şimdi kapatıldı. Bir sonraki bağlandığında bu hesabın onda tuttuğu her şey silinir: sohbetler, kişiler, anahtarlar ve kurtarma ifadesi.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm": {
+      "text": "Cihazı kaldır",
       "status": "machine"
     },
     "settings.devices.remove.confirm_named": {
       "text": "Kaldır: {device}",
       "status": "machine"
     },
+    "settings.devices.remove.reason_stolen": {
+      "text": "Kayboldu veya çalındı",
+      "status": "machine"
+    },
+    "settings.devices.remove.reason_unused": {
+      "text": "Artık kullanmıyorum",
+      "status": "machine"
+    },
     "settings.devices.remove.title": {
       "text": "{device} kaldırılsın mı?",
+      "status": "machine"
+    },
+    "settings.devices.remove.working": {
+      "text": "Kaldırılıyor...",
       "status": "machine"
     },
     "settings.devices.removed_change_password": {

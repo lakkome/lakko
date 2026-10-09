@@ -4402,8 +4402,132 @@
       "text": "QR-код для привязки",
       "status": "machine"
     },
+    "devices.recall.body": {
+      "text": "Ключи {name} сброшены на другом устройстве {date}. Это устройство вышло из аккаунта, а чаты и контакты, которые на нём хранились, удалены.",
+      "status": "machine"
+    },
+    "devices.recall.checking": {
+      "text": "Проверяем, можно ли вернуть аккаунт...",
+      "status": "machine"
+    },
+    "devices.recall.done": {
+      "text": "Вы вернули аккаунт. Снова добавьте ключи доступа и другие устройства.",
+      "status": "machine"
+    },
+    "devices.recall.error.closed": {
+      "text": "Вернуть аккаунт с этого устройства больше нельзя.",
+      "status": "machine"
+    },
+    "devices.recall.error.exhausted": {
+      "text": "Слишком много неверных паролей. Вернуть аккаунт с этого устройства больше нельзя.",
+      "status": "machine"
+    },
+    "devices.recall.error.tries_left": {
+      "text": "{count, plural, one {Осталась # попытка} few {Остались # попытки} many {Осталось # попыток} other {Осталось # попытки}}",
+      "status": "machine"
+    },
+    "devices.recall.error.wrong_password": {
+      "text": "Это не тот пароль, который был у аккаунта до сброса. Если вы меняли пароль за последний месяц, введите тот, что был до этого.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_factors": {
+      "text": "Ключи доступа и код из аутентификатора удаляются. Потом добавьте их снова.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_keys": {
+      "text": "Аккаунт получит новые ключи и новую фразу восстановления.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_messages": {
+      "text": "Сообщения, отправленные аккаунту после сброса, вам не доставлены, и восстановить их нельзя.",
+      "status": "machine"
+    },
+    "devices.recall.form.lede": {
+      "text": "Введите пароль, который был у аккаунта до сброса, и задайте новый. У того, кто сбросил ключи, будет выполнен выход из аккаунта.",
+      "status": "machine"
+    },
+    "devices.recall.form.new_password": {
+      "text": "Новый пароль",
+      "status": "machine"
+    },
+    "devices.recall.form.old_password": {
+      "text": "Пароль до сброса",
+      "status": "machine"
+    },
+    "devices.recall.form.repeat_password": {
+      "text": "Повторите новый пароль",
+      "status": "machine"
+    },
+    "devices.recall.form.submit": {
+      "text": "Вернуть аккаунт",
+      "status": "machine"
+    },
+    "devices.recall.form.title": {
+      "text": "Вернуть аккаунт",
+      "status": "machine"
+    },
+    "devices.recall.form.working": {
+      "text": "Возвращаем аккаунт...",
+      "status": "machine"
+    },
+    "devices.recall.no": {
+      "text": "Нет, вернуть аккаунт",
+      "status": "machine"
+    },
+    "devices.recall.question": {
+      "text": "Это были вы?",
+      "status": "machine"
+    },
+    "devices.recall.until": {
+      "text": "Вернуть аккаунт с этого устройства можно до {date}.",
+      "status": "machine"
+    },
+    "devices.recall.yes": {
+      "text": "Да, это я",
+      "status": "machine"
+    },
+    "devices.recall.yes.back": {
+      "text": "Назад",
+      "status": "machine"
+    },
+    "devices.recall.yes.confirm": {
+      "text": "Всё остальное, что этот аккаунт хранил на этом устройстве, будет удалено. Чтобы снова пользоваться аккаунтом здесь, войдите и получите ключи с устройства, на котором их сбросили.",
+      "status": "machine"
+    },
+    "devices.recall.yes.delete": {
+      "text": "Удалить и войти",
+      "status": "machine"
+    },
+    "devices.remove.done": {
+      "text": "Устройство удалено, выход на нём выполнен.",
+      "status": "machine"
+    },
+    "devices.remove.error.not_revoked": {
+      "text": "Не удалось выйти из аккаунта на устройстве, поэтому ничего не удалено. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "devices.remove.error.try_later": {
+      "text": "Это устройство ещё настраивает аккаунт. Попробуйте через минуту.",
+      "status": "machine"
+    },
+    "devices.remove.finish": {
+      "text": "Завершить удаление",
+      "status": "machine"
+    },
+    "devices.remove.pending": {
+      "text": "Удаление...",
+      "status": "machine"
+    },
     "devices.removed.body": {
       "text": "Его удалили из вашего аккаунта на другом устройстве. Новые сообщения сюда больше не приходят. Выйдите, а затем войдите снова, если хотите им пользоваться.",
+      "status": "machine"
+    },
+    "devices.removed.body_done": {
+      "text": "Его удалили из аккаунта {name} на другом устройстве, выход выполнен. Всё, что аккаунт хранил здесь, удалено.",
+      "status": "machine"
+    },
+    "devices.removed.body_removing": {
+      "text": "Его удалили из аккаунта {name} на другом устройстве, выход выполнен. Всё, что этот аккаунт хранил на этом устройстве, удаляется: чаты, контакты, ключи и фраза восстановления.",
       "status": "machine"
     },
     "devices.removed.sign_out": {
@@ -4412,6 +4536,74 @@
     },
     "devices.removed.title": {
       "text": "Это устройство удалено",
+      "status": "machine"
+    },
+    "devices.rotate.confirm": {
+      "text": "Удалить и сменить ключи",
+      "status": "machine"
+    },
+    "devices.rotate.done": {
+      "text": "Ключи аккаунта изменены. Другие ваши устройства получат новые при следующем подключении.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_contacts": {
+      "text": "Вашим собеседникам ничего делать не нужно.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_devices": {
+      "text": "Другие ваши устройства сохранят чаты и сами получат новые ключи.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Ключи доступа по-прежнему позволяют войти. Функция «Восстанавливать ключи этим ключом доступа» отключена, пока вы не включите её снова.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_phrase": {
+      "text": "Вы получите новую фразу восстановления. Старая перестанет работать.",
+      "status": "machine"
+    },
+    "devices.rotate.error.not_started": {
+      "text": "Устройство удалено, но ключи аккаунта не изменены.",
+      "status": "machine"
+    },
+    "devices.rotate.lede": {
+      "text": "На потерянном устройстве остаются ключи вашего аккаунта. Если их сменить, то, что на нём хранится, станет бесполезным.",
+      "status": "machine"
+    },
+    "devices.rotate.not_now": {
+      "text": "Не сейчас",
+      "status": "machine"
+    },
+    "devices.rotate.retry": {
+      "text": "Повторить",
+      "status": "machine"
+    },
+    "devices.rotate.step_devices": {
+      "text": "Обновляем другие ваши устройства",
+      "status": "machine"
+    },
+    "devices.rotate.step_keys": {
+      "text": "Меняем ключи аккаунта",
+      "status": "machine"
+    },
+    "devices.rotate.step_remove": {
+      "text": "Удаляем устройство",
+      "status": "machine"
+    },
+    "devices.rotate.title": {
+      "text": "Удалить это устройство и сменить ключи аккаунта",
+      "status": "machine"
+    },
+    "devices.rotated.notice": {
+      "text": "Ключи аккаунта изменены на другом устройстве. На этом устройстве уже новые.",
+      "status": "machine"
+    },
+    "devices.rotated.show_phrase": {
+      "text": "Показать новую фразу",
+      "status": "machine"
+    },
+    "devices.rotated.updating": {
+      "text": "Обновление ключей...",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -6266,6 +6458,18 @@
       "text": "Использовать пароль",
       "status": "machine"
     },
+    "proof.remove_device.cancelled": {
+      "text": "Отменено. Устройство не удалено.",
+      "status": "machine"
+    },
+    "proof.remove_device.help": {
+      "text": "Введите пароль, чтобы удалить это устройство.",
+      "status": "machine"
+    },
+    "proof.remove_device.wrong_password": {
+      "text": "Неверный пароль. Устройство не удалено.",
+      "status": "machine"
+    },
     "proof.reset.cancelled": {
       "text": "Отменено. Ничего не сброшено.",
       "status": "machine"
@@ -6862,6 +7066,10 @@
       "text": "«Выйти» оставляет ваши данные на этом устройстве. «Забыть это устройство» удаляет их; вернуться можно только с другого устройства, на котором выполнен вход, с ключом доступа, который восстанавливает ключи аккаунта, или с фразой восстановления. «Удалить аккаунт» стирает аккаунт на сервере и очищает это устройство; это действие нельзя отменить.",
       "status": "machine"
     },
+    "settings.account.delete.blocked": {
+      "text": "Ключи аккаунта недавно сброшены. Удалить аккаунт нельзя до {date}.",
+      "status": "machine"
+    },
     "settings.account.delete.body": {
       "text": "Будут стёрты ваши данные на сервере — имя пользователя, ключи, способы восстановления и резервная копия, — и вы выйдете на всех устройствах. Локальные сообщения на этом устройстве тоже будут удалены. Это действие нельзя отменить.",
       "status": "machine"
@@ -7079,15 +7287,31 @@
       "status": "machine"
     },
     "settings.devices.remove.body": {
-      "text": "С этого момента устройство потеряет доступ к вашим сообщениям. Может потребоваться ключ доступа.",
+      "text": "Оно уже вышло из аккаунта. При следующем подключении с него будет удалено всё, что хранил этот аккаунт: чаты, контакты, ключи и фраза восстановления.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm": {
+      "text": "Удалить устройство",
       "status": "machine"
     },
     "settings.devices.remove.confirm_named": {
       "text": "Удалить: {device}",
       "status": "machine"
     },
+    "settings.devices.remove.reason_stolen": {
+      "text": "Оно потеряно или украдено",
+      "status": "machine"
+    },
+    "settings.devices.remove.reason_unused": {
+      "text": "Я им больше не пользуюсь",
+      "status": "machine"
+    },
     "settings.devices.remove.title": {
       "text": "Удалить: {device}?",
+      "status": "machine"
+    },
+    "settings.devices.remove.working": {
+      "text": "Удаление...",
       "status": "machine"
     },
     "settings.devices.removed_change_password": {

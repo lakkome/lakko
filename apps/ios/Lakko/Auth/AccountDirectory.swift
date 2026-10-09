@@ -48,6 +48,35 @@ protocol AccountDirectory {
         keyResetAttest: Data?,
         sessionToken: String
     ) async throws
+
+    /// ADR-0066 section 3.5 — the proven-rotation upload: the new identity
+    /// bundle with the supersession proof (signed by the OLD key, which
+    /// discovery verifies against the key its row holds) AND the key-reset
+    /// attestation. `supersessionProof` is `nil` for the fallback (the row no
+    /// longer holds the key the proof was signed by); `keyResetAttest` is
+    /// `nil` only when the rotation's answer was lost.
+    func publishRotatedIdentityBundle(
+        accountId: Data,
+        signaturePubkey: Data,
+        x25519Pubkey: Data,
+        supersessionProof: Data?,
+        keyResetAttest: Data?,
+        sessionToken: String
+    ) async throws
+}
+
+extension AccountDirectory {
+    /// A directory that predates the rotation (a test fake) refuses it.
+    func publishRotatedIdentityBundle(
+        accountId: Data,
+        signaturePubkey: Data,
+        x25519Pubkey: Data,
+        supersessionProof: Data?,
+        keyResetAttest: Data?,
+        sessionToken: String
+    ) async throws {
+        throw DiscoveryClientError.argument("this directory cannot publish a rotated identity")
+    }
 }
 
 /// The production directory — a fresh ``DiscoveryClient`` per call, carrying
@@ -77,6 +106,27 @@ struct DiscoveryAccountDirectory: AccountDirectory {
             x25519Pubkey: x25519Pubkey,
             leafAuth: leafAuth,
             genesisAttest: genesisAttest,
+            keyResetAttest: keyResetAttest
+        )
+    }
+
+    func publishRotatedIdentityBundle(
+        accountId: Data,
+        signaturePubkey: Data,
+        x25519Pubkey: Data,
+        supersessionProof: Data?,
+        keyResetAttest: Data?,
+        sessionToken: String
+    ) async throws {
+        // No `leaf_auth`: discovery stores and forwards the proof as the log
+        // entry's authorisation ("T5 as built" item 19).
+        try await DiscoveryClient(sessionToken: sessionToken).uploadIdentityBundle(
+            accountId: accountId,
+            signaturePubkey: signaturePubkey,
+            x25519Pubkey: x25519Pubkey,
+            supersessionProofB64: supersessionProof.map { base64Encode($0) },
+            leafAuth: nil,
+            genesisAttest: nil,
             keyResetAttest: keyResetAttest
         )
     }

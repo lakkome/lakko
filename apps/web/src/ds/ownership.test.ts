@@ -20,6 +20,8 @@ import {
   attestedResetBody,
   bindPushRouting,
   resetWithAttestation,
+  transferRoot,
+  transferRootWithAttestation,
   claimAsOwner,
   claimOrReset,
   desiredRegistrars,
@@ -222,37 +224,108 @@ describe("ADR-0065 — the attested reset of the DeviceGroup journal after a key
     };
   }
 
-  it("the body carries the statement AND the attestation, nothing else", () => {
-    const body = JSON.parse(attestedResetBody('{"statement_b64":"c3RtdA=="}', "YXR0ZXN0")) as Record<string, string>;
-    expect(body).toEqual({ statement_b64: "c3RtdA==", key_reset_attest_b64: "YXR0ZXN0" });
-    expect(() => attestedResetBody('{"other":1}', "YXR0ZXN0")).toThrow(/statement_b64/);
+  it("the body carries the statement, the attestation AND the root endorsement, nothing else", () => {
+    const body = JSON.parse(attestedResetBody('{"statement_b64":"c3RtdA=="}', "YXR0ZXN0", "ZW5k")) as Record<string, string>;
+    expect(body).toEqual({
+      statement_b64: "c3RtdA==",
+      key_reset_attest_b64: "YXR0ZXN0",
+      root_endorsement_b64: "ZW5k",
+    });
+    expect(() => attestedResetBody('{"other":1}', "YXR0ZXN0", "ZW5k")).toThrow(/statement_b64/);
+    // ADR-0066 4.6: an attested statement without the endorsement is never sent.
+    expect(() => attestedResetBody('{"statement_b64":"c3RtdA=="}', "YXR0ZXN0", "")).toThrow(/endorsement/);
   });
 
   it("a 2xx is a reset: one PUT to .../reset with both fields", async () => {
     const s = scriptedSender([204]);
-    expect(await resetWithAttestation(s, GID, rootWithWireBody("new"), 1n, new Uint8Array(32).fill(1), "YXR0ZXN0")).toBe("reset");
+    expect(await resetWithAttestation(s, GID, rootWithWireBody("new"), 1n, new Uint8Array(32).fill(1), "YXR0ZXN0", "ZW5k")).toBe("reset");
     expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["reset"]);
     const body = JSON.parse(s.puts[0]?.body ?? "") as Record<string, string>;
     expect(body["key_reset_attest_b64"]).toBe("YXR0ZXN0");
+    expect(body["root_endorsement_b64"]).toBe("ZW5k");
     expect(parseFakeStatement(atob(body["statement_b64"] ?? "")).signer).toBe("new");
   });
 
   it("a 409 is 'already reset' only when the root probe naming this root answers 204", async () => {
     const s = scriptedSender([409, 204]);
-    expect(await resetWithAttestation(s, GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0")).toBe("already-reset");
+    expect(await resetWithAttestation(s, GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0", "ZW5k")).toBe("already-reset");
     expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["reset", "root"]);
     const raced = scriptedSender([409, 401]);
     await expect(
-      resetWithAttestation(raced, GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0"),
+      resetWithAttestation(raced, GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0", "ZW5k"),
     ).rejects.toMatchObject({ status: 409 });
   });
 
   it("a stranger's 401, a bad attestation (400) and a server without the key (503) surface as they are", async () => {
     for (const status of [401, 400, 503]) {
       await expect(
-        resetWithAttestation(scriptedSender([status]), GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0"),
+        resetWithAttestation(scriptedSender([status]), GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0", "ZW5k"),
       ).rejects.toMatchObject({ status });
     }
+  });
+});
+
+describe("ADR-0066 — the root transfers of a key rotation", () => {
+  const wireBody = (label: string, key: number) => {
+    const inner = fakeStatementSigner(label, new Uint8Array(32).fill(key));
+    return {
+      ...inner,
+      rootTransfer: (j: Uint8Array, newRoot: Uint8Array) => {
+        const built = inner.rootTransfer(j, newRoot);
+        return {
+          path: built.path,
+          bodyJson: JSON.stringify({ statement_b64: btoa(built.bodyJson) }),
+          free: () => undefined,
+        };
+      },
+    };
+  };
+
+  it("the attested transfer: the OLD root signs, naming the NEW root, with the attestation and the endorsement", async () => {
+    const s = scriptedSender([204]);
+    const out = await transferRootWithAttestation(s, GID, wireBody("old", 0x0a), wireBody("new", 0x0b), "YXR0ZXN0", "ZW5k");
+    expect(out).toBe("transferred");
+    expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["root"]);
+    const body = JSON.parse(s.puts[0]?.body ?? "") as Record<string, string>;
+    expect(body["key_reset_attest_b64"]).toBe("YXR0ZXN0");
+    expect(body["root_endorsement_b64"]).toBe("ZW5k");
+    const statement = parseFakeStatement(atob(body["statement_b64"] ?? ""));
+    expect(statement.signer).toBe("old");
+    expect(statement.newRoot).toBe("0b".repeat(32));
+  });
+
+  it("a retry: the generation already landed (409) or the old root is refused (401), and the NEW root's probe says so", async () => {
+    for (const status of [409, 401]) {
+      const s = scriptedSender([status, 204]);
+      expect(
+        await transferRootWithAttestation(s, GID, wireBody("old", 0x0a), wireBody("new", 0x0b), "YXR0ZXN0", "ZW5k"),
+      ).toBe("already");
+      expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["root", "root"]);
+      const raced = scriptedSender([status, 401]);
+      await expect(
+        transferRootWithAttestation(raced, GID, wireBody("old", 0x0a), wireBody("new", 0x0b), "YXR0ZXN0", "ZW5k"),
+      ).rejects.toMatchObject({ status });
+    }
+  });
+
+  it("is never sent without the endorsement", async () => {
+    const s = scriptedSender([204]);
+    await expect(
+      transferRootWithAttestation(s, GID, wireBody("old", 0x0a), wireBody("new", 0x0b), "YXR0ZXN0", ""),
+    ).rejects.toThrow(/endorsement/);
+    expect(s.puts).toEqual([]);
+  });
+
+  it("the plain transfer of an owned journal: old root -> new root, done when the new root already is the root", async () => {
+    const s = scriptedSender([204]);
+    expect(await transferRoot(s, GID, fakeStatementSigner("old"), fakeStatementSigner("new", new Uint8Array(32).fill(0x0b)))).toBe("transferred");
+    expect(parseFakeStatement(s.puts[0]?.body ?? "").signer).toBe("old");
+    const again = scriptedSender([401, 204]);
+    expect(await transferRoot(again, GID, fakeStatementSigner("old"), fakeStatementSigner("new"))).toBe("already");
+    const stranger = scriptedSender([401, 401]);
+    await expect(transferRoot(stranger, GID, fakeStatementSigner("old"), fakeStatementSigner("new"))).rejects.toMatchObject({
+      status: 401,
+    });
   });
 });
 

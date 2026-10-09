@@ -4402,8 +4402,132 @@
       "text": "کد QR اتصال",
       "status": "machine"
     },
+    "devices.recall.body": {
+      "text": "کلیدهای {name} در تاریخ {date} روی دستگاه دیگری بازنشانی شد. این دستگاه از حساب خارج شد و گفتگوها و مخاطبانی که نگه داشته بود حذف شدند.",
+      "status": "machine"
+    },
+    "devices.recall.checking": {
+      "text": "در حال بررسی اینکه آیا می‌توان حساب را پس گرفت...",
+      "status": "machine"
+    },
+    "devices.recall.done": {
+      "text": "حسابتان را پس گرفتید. کلیدهای عبور و دستگاه‌های دیگرتان را دوباره اضافه کنید.",
+      "status": "machine"
+    },
+    "devices.recall.error.closed": {
+      "text": "دیگر نمی‌توان حساب را از این دستگاه پس گرفت.",
+      "status": "machine"
+    },
+    "devices.recall.error.exhausted": {
+      "text": "رمز عبور نادرست بیش از حد وارد شد. دیگر نمی‌توان حساب را از این دستگاه پس گرفت.",
+      "status": "machine"
+    },
+    "devices.recall.error.tries_left": {
+      "text": "{count, plural, one {# تلاش مانده} other {# تلاش مانده}}",
+      "status": "machine"
+    },
+    "devices.recall.error.wrong_password": {
+      "text": "این رمز عبوری نیست که این حساب پیش از بازنشانی داشت. اگر در یک ماه گذشته رمز عبورتان را تغییر داده‌اید، رمز عبور پیش از آن را وارد کنید.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_factors": {
+      "text": "کلیدهای عبور و کد برنامه احراز هویت حذف می‌شوند. بعداً دوباره آن‌ها را اضافه کنید.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_keys": {
+      "text": "حساب کلیدهای جدید و یک عبارت بازیابی جدید می‌گیرد.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_messages": {
+      "text": "پیام‌هایی که از زمان بازنشانی به این حساب فرستاده شده‌اند به شما نرسیده‌اند و قابل بازیابی نیستند.",
+      "status": "machine"
+    },
+    "devices.recall.form.lede": {
+      "text": "رمز عبوری را که این حساب پیش از بازنشانی داشت وارد کنید و یک رمز عبور جدید انتخاب کنید. کسی که کلیدها را بازنشانی کرده است از حساب خارج می‌شود.",
+      "status": "machine"
+    },
+    "devices.recall.form.new_password": {
+      "text": "رمز عبور جدید",
+      "status": "machine"
+    },
+    "devices.recall.form.old_password": {
+      "text": "رمز عبور پیش از بازنشانی",
+      "status": "machine"
+    },
+    "devices.recall.form.repeat_password": {
+      "text": "تکرار رمز عبور جدید",
+      "status": "machine"
+    },
+    "devices.recall.form.submit": {
+      "text": "پس گرفتن حساب",
+      "status": "machine"
+    },
+    "devices.recall.form.title": {
+      "text": "پس گرفتن حساب",
+      "status": "machine"
+    },
+    "devices.recall.form.working": {
+      "text": "در حال پس گرفتن حساب...",
+      "status": "machine"
+    },
+    "devices.recall.no": {
+      "text": "نه، پس گرفتن حساب",
+      "status": "machine"
+    },
+    "devices.recall.question": {
+      "text": "شما بودید؟",
+      "status": "machine"
+    },
+    "devices.recall.until": {
+      "text": "تا {date} می‌توانید حساب را از این دستگاه پس بگیرید.",
+      "status": "machine"
+    },
+    "devices.recall.yes": {
+      "text": "بله، من بودم",
+      "status": "machine"
+    },
+    "devices.recall.yes.back": {
+      "text": "بازگشت",
+      "status": "machine"
+    },
+    "devices.recall.yes.confirm": {
+      "text": "بقیه آنچه این حساب روی این دستگاه نگه داشته بود حذف می‌شود. برای استفاده دوباره از حساب در اینجا، وارد شوید و کلیدها را از دستگاهی که آن‌ها را بازنشانی کرده است بگیرید.",
+      "status": "machine"
+    },
+    "devices.recall.yes.delete": {
+      "text": "حذف و ورود",
+      "status": "machine"
+    },
+    "devices.remove.done": {
+      "text": "دستگاه حذف و از حساب خارج شد.",
+      "status": "machine"
+    },
+    "devices.remove.error.not_revoked": {
+      "text": "خروج دستگاه از حساب ممکن نشد، بنابراین چیزی حذف نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "devices.remove.error.try_later": {
+      "text": "این دستگاه هنوز در حال راه‌اندازی حساب است. یک دقیقه دیگر دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "devices.remove.finish": {
+      "text": "تکمیل حذف",
+      "status": "machine"
+    },
+    "devices.remove.pending": {
+      "text": "در حال حذف...",
+      "status": "machine"
+    },
     "devices.removed.body": {
       "text": "این دستگاه از طریق دستگاه دیگری از حساب شما حذف شد. پیام‌های جدید دیگر به آن نمی‌رسند. اگر می‌خواهید از آن استفاده کنید، خارج شوید و دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "devices.removed.body_done": {
+      "text": "این دستگاه روی دستگاهی دیگر از حساب {name} حذف و از حساب خارج شد. هر چه حساب اینجا نگه داشته بود حذف شد.",
+      "status": "machine"
+    },
+    "devices.removed.body_removing": {
+      "text": "این دستگاه روی دستگاهی دیگر از حساب {name} حذف و از حساب خارج شد. هر چه این حساب روی این دستگاه نگه داشته در حال حذف است: گفتگوها، مخاطبان، کلیدها و عبارت بازیابی.",
       "status": "machine"
     },
     "devices.removed.sign_out": {
@@ -4412,6 +4536,74 @@
     },
     "devices.removed.title": {
       "text": "این دستگاه حذف شد",
+      "status": "machine"
+    },
+    "devices.rotate.confirm": {
+      "text": "حذف و تغییر کلیدها",
+      "status": "machine"
+    },
+    "devices.rotate.done": {
+      "text": "کلیدهای حساب شما تغییر کرد. دستگاه‌های دیگرتان دفعه بعد که وصل شوند کلیدهای جدید را می‌گیرند.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_contacts": {
+      "text": "کسانی که با آن‌ها گفتگو می‌کنید لازم نیست کاری انجام دهند.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_devices": {
+      "text": "دستگاه‌های دیگرتان گفتگوهایشان را نگه می‌دارند و کلیدهای جدید را خودشان می‌گیرند.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "کلیدهای عبورتان همچنان شما را وارد می‌کنند. «بازیابی کلیدها با این کلید عبور» خاموش می‌ماند تا دوباره روشنش کنید.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_phrase": {
+      "text": "یک عبارت بازیابی جدید می‌گیرید. عبارت قبلی دیگر کار نمی‌کند.",
+      "status": "machine"
+    },
+    "devices.rotate.error.not_started": {
+      "text": "دستگاه حذف شد، اما کلیدهای حساب شما تغییر نکرد.",
+      "status": "machine"
+    },
+    "devices.rotate.lede": {
+      "text": "دستگاه گم‌شده هنوز کلیدهای حساب شما را دارد. تغییر کلیدها آنچه را روی آن دستگاه است بی‌فایده می‌کند.",
+      "status": "machine"
+    },
+    "devices.rotate.not_now": {
+      "text": "الان نه",
+      "status": "machine"
+    },
+    "devices.rotate.retry": {
+      "text": "تلاش دوباره",
+      "status": "machine"
+    },
+    "devices.rotate.step_devices": {
+      "text": "در حال به‌روزرسانی دستگاه‌های دیگر شما",
+      "status": "machine"
+    },
+    "devices.rotate.step_keys": {
+      "text": "در حال تغییر کلیدهای حساب شما",
+      "status": "machine"
+    },
+    "devices.rotate.step_remove": {
+      "text": "در حال حذف دستگاه",
+      "status": "machine"
+    },
+    "devices.rotate.title": {
+      "text": "حذف این دستگاه و تغییر کلیدهای حساب",
+      "status": "machine"
+    },
+    "devices.rotated.notice": {
+      "text": "کلیدهای حساب شما روی دستگاه دیگری تغییر کرد. این دستگاه کلیدهای جدید را دارد.",
+      "status": "machine"
+    },
+    "devices.rotated.show_phrase": {
+      "text": "نمایش عبارت جدید",
+      "status": "machine"
+    },
+    "devices.rotated.updating": {
+      "text": "در حال به‌روزرسانی کلیدها...",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -6266,6 +6458,18 @@
       "text": "استفاده از رمز عبور به‌جای آن",
       "status": "machine"
     },
+    "proof.remove_device.cancelled": {
+      "text": "لغو شد. دستگاه حذف نشد.",
+      "status": "machine"
+    },
+    "proof.remove_device.help": {
+      "text": "برای حذف این دستگاه، رمز عبور خود را وارد کنید.",
+      "status": "machine"
+    },
+    "proof.remove_device.wrong_password": {
+      "text": "رمز عبور نادرست است. دستگاه حذف نشد.",
+      "status": "machine"
+    },
     "proof.reset.cancelled": {
       "text": "لغو شد. چیزی بازنشانی نشد.",
       "status": "machine"
@@ -6862,6 +7066,10 @@
       "text": "«خروج» داده‌های شما را روی این دستگاه نگه می‌دارد. «فراموش کردن این دستگاه» آن‌ها را حذف می‌کند؛ فقط با دستگاه دیگری که در آن وارد شده‌اید، کلید عبوری که کلیدهای حساب را بازیابی می‌کند، یا عبارت بازیابی می‌توانید برگردید. «حذف حساب» حساب را روی سرور پاک و این دستگاه را پاک‌سازی می‌کند؛ این کار برگشت‌پذیر نیست.",
       "status": "machine"
     },
+    "settings.account.delete.blocked": {
+      "text": "کلیدهای حساب به‌تازگی بازنشانی شده‌اند. تا {date} نمی‌توان حساب را حذف کرد.",
+      "status": "machine"
+    },
     "settings.account.delete.body": {
       "text": "این کار هویت شما روی سرور را پاک می‌کند (نام کاربری، کلیدها، روش‌های بازیابی و نسخه پشتیبان) و شما را از همه‌جا خارج می‌کند. پیام‌های محلی شما هم از این دستگاه پاک می‌شوند. این کار برگشت‌پذیر نیست.",
       "status": "machine"
@@ -7079,15 +7287,31 @@
       "status": "machine"
     },
     "settings.devices.remove.body": {
-      "text": "این دستگاه از همان لحظه دسترسی به پیام‌های شما را از دست می‌دهد. ممکن است کلید عبور شما خواسته شود.",
+      "text": "اکنون از حساب خارج شده است. دفعه بعد که وصل شود، هر چه این حساب روی آن نگه داشته حذف می‌شود: گفتگوها، مخاطبان، کلیدها و عبارت بازیابی.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm": {
+      "text": "حذف دستگاه",
       "status": "machine"
     },
     "settings.devices.remove.confirm_named": {
       "text": "حذف {device}",
       "status": "machine"
     },
+    "settings.devices.remove.reason_stolen": {
+      "text": "گم شده یا دزدیده شده است",
+      "status": "machine"
+    },
+    "settings.devices.remove.reason_unused": {
+      "text": "دیگر از آن استفاده نمی‌کنم",
+      "status": "machine"
+    },
     "settings.devices.remove.title": {
       "text": "{device} حذف شود؟",
+      "status": "machine"
+    },
+    "settings.devices.remove.working": {
+      "text": "در حال حذف...",
       "status": "machine"
     },
     "settings.devices.removed_change_password": {

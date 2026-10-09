@@ -92,6 +92,8 @@ import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
 import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
 import { mintHlc, observeHlc } from "./hlc";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
+import { sealKeyRotationAfterRemoval } from "../key-rotation";
+import { installKeyRotationPort, type JournalCatchUp } from "./key-rotation-port";
 import {
   flushServiceEnvelopes,
   registerServiceEnvelopeSender,
@@ -105,6 +107,7 @@ import {
 } from "./state";
 import { buildFolderChangeSet, mergeRestoredFold, projectSyncedState } from "./synced-projection";
 import { drainOutbox, type OutboxBatch } from "./folder-outbox";
+import { publishOwnDeviceRoster } from "../own-device-roster";
 import {
   detectGrowth,
   onDeviceGroupChangedHere,
@@ -232,6 +235,28 @@ export interface DeviceGroupSyncApi {
   applyFolderEdits(edits: readonly RegisterEdit[]): Promise<void>;
 }
 
+/** How long a catch-up waits for the journal's head before it reports no
+ *  answer. Chosen, not measured. */
+const CATCH_UP_TIMEOUT_MS = 40_000;
+/** How long the envelope waits for this handle to be reloaded after the
+ *  removal. Chosen, not measured. */
+const HANDLE_RELOAD_WAIT_MS = 10_000;
+
+/** The leaf signature keys of a DeviceGroup, or `null` when it cannot be read. */
+function deviceKeysOf(g: WasmDeviceGroup): Uint8Array[] | null {
+  try {
+    return (g.devices() as { signaturePublicKey: Uint8Array }[]).map((m) => m.signaturePublicKey);
+  } catch {
+    return null;
+  }
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 const DeviceGroupSyncContext = createContext<DeviceGroupSyncApi>();
 
 // ---------- Provider implementation ------------------------------
@@ -269,6 +294,11 @@ export function DeviceGroupSyncProvider(props: {
     if (own === undefined) return;
     const before = untrack(deviceRoster);
     const keys = members.map((m) => m.key);
+    // ADR-0066 section 2.3 — the roster every own-device admission is
+    // checked against (`own-device-roster.ts`).
+    if (activeAccountIdB64 !== null) {
+      publishOwnDeviceRoster({ accountIdB64: activeAccountIdB64, keysHex: keys });
+    }
     const addedHere =
       localChange && before !== null ? keys.filter((k) => !before.keys.includes(k)) : [];
     if (
@@ -583,6 +613,11 @@ export function DeviceGroupSyncProvider(props: {
       console.warn("DeviceGroup: this device was removed from the account; sync stopped");
     }
     setDeviceRemoved(true);
+    publishOwnDeviceRoster(null);
+    // ADR-0066 section 2.3: an inactive DeviceGroup is proof of removal by a
+    // device of the account. The device signs out and wipes everything by
+    // itself; the removed screen (UX 18.2) is the auth layer's from here.
+    if (activeAccountIdB64 !== null) auth.reportDeviceRemoved(activeAccountIdB64);
     if (pollAbort !== null) {
       pollAbort.abort();
       pollAbort = null;
@@ -695,6 +730,7 @@ export function DeviceGroupSyncProvider(props: {
     setReady(false);
     setDeviceRemoved(false);
     setDeviceRoster(null);
+    publishOwnDeviceRoster(null);
     setDrafts({});
     setFlags({});
     setReadCursors({});
@@ -773,6 +809,87 @@ export function DeviceGroupSyncProvider(props: {
 
   // ----- Inbound poll loop ---------------------------------------
 
+  // ----- ADR-0066 section 3.3: the key-rotation port -----------------
+
+  /** Poll passes started so far; a catch-up is settled only by a pass that
+   *  started after it was asked for. */
+  let passCounter = 0;
+  const catchUps = new Set<{ readonly after: number; readonly settle: (r: JournalCatchUp) => void }>();
+  function settleCatchUps(result: JournalCatchUp, passStartedAt?: number): void {
+    for (const waiter of [...catchUps]) {
+      if (result === "read" && passStartedAt !== undefined && passStartedAt <= waiter.after) continue;
+      catchUps.delete(waiter);
+      waiter.settle(result);
+    }
+  }
+  function catchUp(): Promise<JournalCatchUp> {
+    if (group === null || pollAbort === null || deviceRemoved()) return Promise.resolve("offline");
+    return new Promise((resolve) => {
+      const waiter = {
+        after: passCounter,
+        settle: (r: JournalCatchUp): void => {
+          clearTimeout(timer);
+          resolve(r);
+        },
+      };
+      const timer = setTimeout(() => {
+        catchUps.delete(waiter);
+        resolve("offline");
+      }, CATCH_UP_TIMEOUT_MS);
+      catchUps.add(waiter);
+    });
+  }
+
+  async function postKeyRotation(input: {
+    readonly removedDeviceKey: Uint8Array;
+    readonly preRemovalEpoch: bigint | null;
+    readonly envelope: Uint8Array;
+  }): Promise<{ readonly epoch: bigint }> {
+    // The removal ran on another handle of this device; this one is reloaded
+    // from disk by `announceDeviceGroupChangedHere`. Give that a moment: the
+    // seam below refuses a handle that still lists the removed device.
+    const deadline = Date.now() + HANDLE_RELOAD_WAIT_MS;
+    while (
+      Date.now() < deadline &&
+      (reloading ||
+        group === null ||
+        (deviceKeysOf(group) ?? []).some((k) => bytesEqual(k, input.removedDeviceKey)))
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return sealKeyRotationAfterRemoval(input, {
+      rosterKeys: () => {
+        if (group === null || reloading) throw new Error("DeviceGroupSyncProvider is not ready");
+        const keys = deviceKeysOf(group);
+        if (keys === null) throw new Error("the DeviceGroup roster could not be read");
+        return keys;
+      },
+      epoch: () => {
+        if (group === null || identity === null) throw new Error("DeviceGroupSyncProvider is not ready");
+        const epoch = deviceGroupEpoch(group, identity);
+        if (epoch === null) throw new Error("the DeviceGroup epoch could not be read");
+        return epoch;
+      },
+      seal: (envelope) => {
+        if (group === null || identity === null || reloading || deviceRemoved()) {
+          throw new Error("DeviceGroupSyncProvider is not ready");
+        }
+        // The DeviceGroup's own `ServiceEnvelope` carrier: this envelope is
+        // never sealed into any other group.
+        return group.createServiceEnvelopeMessage(identity, envelope, mintHlc());
+      },
+      publish: (wire) => publishGroupMessage(wire),
+    });
+  }
+
+  onCleanup(
+    installKeyRotationPort({
+      epoch: () => (group === null || identity === null ? null : deviceGroupEpoch(group, identity)),
+      post: postKeyRotation,
+      catchUp,
+    }),
+  );
+
   async function runPollLoop(
     g: WasmDeviceGroup,
     id: WasmIdentity,
@@ -806,11 +923,13 @@ export function DeviceGroupSyncProvider(props: {
       // attempted before the session's signer factory was installed, or one
       // that met a network failure, is retried (`ds/owner-claim.ts`).
       void ds.ensureOwnerClaim(groupId);
+      const passStartedAt = ++passCounter;
       let raw;
       try {
         raw = await ds.fetchGroup(groupId, {
           after: cursor,
-          waitSecs: 25,
+          // A catch-up is waiting for the head: do not hold the read open.
+          waitSecs: catchUps.size > 0 ? 0 : 25,
         });
       } catch (err) {
         if (signal.aborted) return;
@@ -820,8 +939,15 @@ export function DeviceGroupSyncProvider(props: {
         }
         if (err instanceof DsNetworkError) {
           // Transient — back off briefly + retry.
+          settleCatchUps("offline");
           await sleepCancellable(2000, signal);
           continue;
+        }
+        if (err instanceof DsHttpError && (err.status === 401 || err.status === 403)) {
+          // The journal does not answer this device any more.
+          settleCatchUps("unreadable");
+        } else {
+          settleCatchUps("offline");
         }
         // Unexpected error — log + back off; we don't want a
         // single bad iteration to permanently kill the loop.
@@ -882,6 +1008,15 @@ export function DeviceGroupSyncProvider(props: {
               const wasm = await loadWasm();
               const parsed = wasm.parseDeviceGroupPayload(data);
               try {
+                // ADR-0066 section 3.3: a `key-rotation` envelope means
+                // something here and nowhere else. Awaited, so a journal
+                // read "to the head" has stored it before it reports.
+                if (
+                  parsed.kind === "serviceEnvelope" &&
+                  (await auth.keyRotation.intake(parsed.serviceEnvelope))
+                ) {
+                  return;
+                }
                 applyParsed(parsed);
               } finally {
                 parsed.free();
@@ -946,6 +1081,9 @@ export function DeviceGroupSyncProvider(props: {
         }
       }
 
+      // ADR-0066 section 3.3: a pass that started after a catch-up was asked
+      // for and found nothing more behind it has read the journal to its head.
+      if (batch.persisted && !raw.hasMore) settleCatchUps("read", passStartedAt);
       if (batch.persisted) {
         cursor = batch.nextCursor;
         // Past the cursor on disk now, so these ids can never come back.

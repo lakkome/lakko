@@ -405,9 +405,15 @@ public final class AuthClient {
     /// A `410` from the finish (no live start for this account, e.g. more
     /// than 600 s between the two) restarts the whole signup once from the
     /// start.
+    ///
+    /// ADR-0066 section 0.4: `deviceIdFor` is asked, with the account id this
+    /// signup generated, for the id of this device (its conversation leaf
+    /// key); the finish asserts it, so the session names the device from the
+    /// first token. `nil`, or a `nil` answer, lands an unbound session.
     public func signup(
         password: Data,
         enrolRecovery: Bool = true,
+        deviceIdFor: (@Sendable (_ accountId: Data) async -> Data?)? = nil,
         onCommitting: (@MainActor () -> Void)? = nil
     ) async throws -> SignupResult {
         guard !password.isEmpty else {
@@ -415,18 +421,21 @@ public final class AuthClient {
         }
         do {
             return try await signupOnce(
-                password: password, enrolRecovery: enrolRecovery, onCommitting: onCommitting)
+                password: password, enrolRecovery: enrolRecovery,
+                deviceIdFor: deviceIdFor, onCommitting: onCommitting)
         } catch AuthClientError.http(let status, let endpoint, _)
             where status == 410 && endpoint == "/signup/finish" {
             NSLog("[auth] signup finish found no live start (410), restarting from the start")
             return try await signupOnce(
-                password: password, enrolRecovery: enrolRecovery, onCommitting: onCommitting)
+                password: password, enrolRecovery: enrolRecovery,
+                deviceIdFor: deviceIdFor, onCommitting: onCommitting)
         }
     }
 
     private func signupOnce(
         password: Data,
         enrolRecovery: Bool,
+        deviceIdFor: (@Sendable (_ accountId: Data) async -> Data?)?,
         onCommitting: (@MainActor () -> Void)?
     ) async throws -> SignupResult {
         let accountId = generateAccountId()
@@ -494,11 +503,13 @@ public final class AuthClient {
 
         try Task.checkCancellation()
         if let onCommitting { await onCommitting() }
+        let deviceId = LandingDevice.usable(await deviceIdFor?(accountId))
         let finishResp = try await signupFinish(
             SignupFinishRequest(
                 accountId: accountIdB64,
                 passwordUpload: passwordOut.uploadB64(),
-                recoveryUpload: recoveryUploadB64
+                recoveryUpload: recoveryUploadB64,
+                deviceIdB64: deviceId.map(base64UrlEncodeNoPad)
             )
         )
         guard finishResp.ok else {
@@ -513,7 +524,7 @@ public final class AuthClient {
             accountId: accountId,
             exportKey: passwordOut.exportKey(),
             recoveryPhrase: recoveryMnemonic?.phrase(),
-            session: finishResp.sessionPair,
+            session: finishResp.sessionPair.naming(deviceId: deviceId),
             freshGrant: FreshAuthGrant.from(
                 grant: finishResp.freshGrant, expiresAtMs: finishResp.freshGrantExpiresAtMs)
         )
@@ -536,9 +547,14 @@ public final class AuthClient {
     /// ``AuthClientError/http(status:endpoint:body:)`` with status
     /// 401 — by design, indistinguishable from "unknown account" (a handle
     /// nobody holds runs the same path on a stand-in account).
+    ///
+    /// ADR-0066 section 0.4: `deviceId` is asserted at the finish when the
+    /// caller knows the account before it (the proof login of a signed-in
+    /// account); `nil` lands an unbound session the caller binds afterwards.
     public func login(
         handle: Data,
-        password: Data
+        password: Data,
+        deviceId: Data? = nil
     ) async throws -> LoginResult {
         guard !password.isEmpty else {
             throw AuthClientError.argument("password must be non-empty")
@@ -557,10 +573,12 @@ public final class AuthClient {
             secret: password,
             serverResponseB64: startResp.response
         )
+        let deviceId = LandingDevice.usable(deviceId)
         let finishResp = try await loginFinish(
             LoginFinishRequest(
                 sessionId: startResp.sessionId,
-                finalize: out.finalizeB64()
+                finalize: out.finalizeB64(),
+                deviceIdB64: deviceId.map(base64UrlEncodeNoPad)
             )
         )
         guard finishResp.ok else {
@@ -575,7 +593,7 @@ public final class AuthClient {
             accountId: accountId,
             sessionKey: out.sessionKey(),
             exportKey: out.exportKey(),
-            session: finishResp.sessionPair,
+            session: finishResp.sessionPair.naming(deviceId: deviceId),
             freshGrant: FreshAuthGrant.from(
                 grant: finishResp.freshGrant, expiresAtMs: finishResp.freshGrantExpiresAtMs)
         )
@@ -751,6 +769,88 @@ public final class AuthClient {
         return resp.sessionPair
     }
 
+    // MARK: - ADR-0066: the session names a device
+
+    /// `POST /auth/session/bind-device` (bearer) — name the device a session
+    /// that landed without one belongs to (ADR-0066 "T1 as built" points 8
+    /// and 9). `refreshToken` is the refresh credential of the same session.
+    /// The returned pair names the device; the caller drops the pair it
+    /// replaced.
+    ///
+    /// Throws ``AuthClientError/http(status:endpoint:body:)``: `400` (a bad or
+    /// all-zero id), `401 refresh-invalid`, `401 key-generation-superseded`,
+    /// `401 device-revoked`, `409 device-already-bound`.
+    public func bindDevice(
+        sessionToken: String,
+        deviceId: Data,
+        refreshToken: String
+    ) async throws -> SessionPair {
+        guard !sessionToken.isEmpty, !refreshToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken and refreshToken must be non-empty")
+        }
+        guard let deviceId = LandingDevice.usable(deviceId) else {
+            throw AuthClientError.argument("deviceId must be 32 bytes and not all zero")
+        }
+        let resp: SessionRefreshResponse = try await post(
+            endpoint: "/auth/session/bind-device",
+            body: BindDeviceRequest(
+                deviceIdB64: base64UrlEncodeNoPad(deviceId), refreshToken: refreshToken),
+            bearer: sessionToken
+        )
+        return resp.sessionPair.naming(deviceId: deviceId)
+    }
+
+    /// `POST /auth/session/logout` (bearer, no body) -> `204`: sign this
+    /// device's session out at the server (ADR-0066 section 2.1). Afterwards
+    /// its bearer gets a plain `401` and its refresh `401 refresh-invalid`.
+    public func logoutSession(sessionToken: String) async throws {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let url = try buildURL(endpoint: "/auth/session/logout")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
+        try await executeNoContent(endpoint: "/auth/session/logout", request: request)
+    }
+
+    /// `POST /account/devices/revoke` (bearer) -> `204`: sign ANOTHER device
+    /// of the account out at the server (ADR-0066 section 2.1). `statement`
+    /// is the 138-byte `device-revoke` account statement over `deviceId`,
+    /// signed right before this call (valid 120 s).
+    ///
+    /// Throws ``AuthClientError/http(status:endpoint:body:)``:
+    /// `403 fresh-auth-required` (checked first), `400` (a bad id, this
+    /// device's own id), `403 account-key-required` (no recorded account key,
+    /// or the statement failed), `429 too-many-attempts`.
+    public func revokeDevice(
+        sessionToken: String,
+        freshGrant: String,
+        deviceId: Data,
+        statement: Data
+    ) async throws {
+        guard !sessionToken.isEmpty, !freshGrant.isEmpty else {
+            throw AuthClientError.argument("sessionToken and freshGrant must be non-empty")
+        }
+        guard deviceId.count == 32 else {
+            throw AuthClientError.argument("deviceId must be 32 bytes")
+        }
+        let url = try buildURL(endpoint: "/account/devices/revoke")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
+        do {
+            request.httpBody = try encoder.encode(DeviceRevokeRequest(
+                freshGrant: freshGrant,
+                deviceIdB64: base64UrlEncodeNoPad(deviceId),
+                statementB64: base64UrlEncodeNoPad(statement)))
+        } catch {
+            throw AuthClientError.argument("failed to encode /account/devices/revoke body: \(error)")
+        }
+        try await executeNoContent(endpoint: "/account/devices/revoke", request: request)
+    }
+
     /// `POST /account/keys/reset/start` (bearer).
     public func keyResetStart(
         sessionToken: String,
@@ -840,6 +940,269 @@ public final class AuthClient {
             )
         }
         return KeyResetResult(attestation: attestation, session: finish.sessionPair)
+    }
+
+    // MARK: - ADR-0066 part 3: rotating the account keys, the devices kept
+
+    /// Rotate the signed-in account's keys (ADR-0066 section 3.4):
+    ///
+    /// ```text
+    ///   POST /account/keys/rotate/start   { fresh_grant, recovery_request }  -> { recovery_response }
+    ///   POST /account/keys/rotate/finish  { fresh_grant, recovery_upload, new_signature_pubkey_b64,
+    ///                                       supersession_proof_b64, revoke_device_ids_b64[] }
+    ///                                     -> { key_reset_attest_b64, <session pair> }
+    /// ```
+    ///
+    /// Unlike a reset, auth VERIFIES `supersessionProof` (by the account key
+    /// it has recorded, over `newSignaturePubkey`): a session that holds the
+    /// password but not the account key cannot rotate. Passkeys, the
+    /// password, TOTP and the other devices' session floors are kept; the
+    /// passkey vaults are deleted. The answer carries no fresh-auth grant.
+    ///
+    /// Refusals, in the server's order: `403 fresh-auth-required`, `400`,
+    /// `403 account-key-required`, `429 too-many-attempts`. `start` stores
+    /// nothing, so a failure in either call changes nothing on the server.
+    public func rotateAccountKeys(
+        sessionToken: String,
+        freshGrant: String,
+        seed: Data,
+        newSignaturePubkey: Data,
+        supersessionProof: Data,
+        revokeDeviceIds: [Data]
+    ) async throws -> KeyResetResult {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        guard !freshGrant.isEmpty else {
+            throw AuthClientError.argument("freshGrant must be non-empty")
+        }
+        guard !seed.isEmpty else {
+            throw AuthClientError.argument("seed must be non-empty")
+        }
+        guard newSignaturePubkey.count == 32 else {
+            throw AuthClientError.argument("newSignaturePubkey must be 32 bytes (Ed25519)")
+        }
+        guard supersessionProof.count == KeyRotationWire.proofLength else {
+            throw AuthClientError.argument("supersessionProof must be 145 bytes")
+        }
+        guard revokeDeviceIds.count <= KeyRotationWire.maxRevokedDevices else {
+            throw AuthClientError.argument("at most 8 device ids may be revoked with a rotation")
+        }
+        let reg = try OpaqueRegister.startRecovery(seed: seed)
+        let start: KeyResetStartResponse = try await post(
+            endpoint: "/account/keys/rotate/start",
+            body: KeyResetStartRequest(freshGrant: freshGrant, recoveryRequest: reg.requestB64()),
+            bearer: sessionToken)
+        let upload = try reg.finish(
+            secret: seed, serverResponseB64: start.recoveryResponse
+        ).uploadB64()
+        let finish: KeyResetFinishResponse = try await post(
+            endpoint: "/account/keys/rotate/finish",
+            body: KeyRotateFinishRequest(
+                freshGrant: freshGrant,
+                recoveryUpload: upload,
+                newSignaturePubkeyB64: base64UrlEncodeNoPad(newSignaturePubkey),
+                supersessionProofB64: base64UrlEncodeNoPad(supersessionProof),
+                revokeDeviceIdsB64: revokeDeviceIds.map(base64UrlEncodeNoPad)),
+            bearer: sessionToken)
+        guard let attestation = base64UrlDecodeNoPad(finish.keyResetAttestB64),
+              attestation.count == KeyResetResult.attestationLength else {
+            throw AuthClientError.http(
+                status: 200,
+                endpoint: "/account/keys/rotate/finish",
+                body: "malformed key_reset_attest_b64 in response"
+            )
+        }
+        return KeyResetResult(attestation: attestation, session: finish.sessionPair)
+    }
+
+    /// The session upgrade of a KEPT device (ADR-0066 section 3.3): exchange
+    /// `refreshToken`, a credential of the generation before a rotation, for
+    /// a pair at the current generation naming the same device, by showing
+    /// that this device holds the NEW account key (`newAccountEd25519Seed`).
+    ///
+    /// The statement is signed right before the request. A wrong clock is
+    /// told the server's time (`401 statement-stale`) and the statement is
+    /// signed again at it, once.
+    ///
+    /// Throws `401` with `key-generation-superseded` (the statement was not
+    /// accepted: this key is not the account's), `device-revoked` (this
+    /// device was the one removed), `refresh-invalid`, or `statement-stale`
+    /// again; or ``AuthClientError/network(endpoint:underlying:)``.
+    public func upgradeSession(
+        refreshToken: String,
+        accountId: Data,
+        newAccountEd25519Seed: Data
+    ) async throws -> SessionPair {
+        guard !refreshToken.isEmpty else {
+            throw AuthClientError.argument("refreshToken must be non-empty")
+        }
+        let response: SessionRefreshResponse = try await StatementStale.retrying { serverTimeMs in
+            let statement = try serverTimeMs.map {
+                try signAccountStatementAt(
+                    accountSeed: newAccountEd25519Seed, kind: .sessionUpgrade, accountId: accountId,
+                    body: sessionUpgradeStatementBody(refreshToken: refreshToken), unixMs: $0)
+            } ?? signSessionUpgradeStatement(
+                accountSeed: newAccountEd25519Seed, accountId: accountId, refreshToken: refreshToken)
+            return try await self.post(
+                endpoint: "/auth/session/refresh",
+                body: SessionUpgradeRequest(
+                    refreshToken: refreshToken, keyStatementB64: base64UrlEncodeNoPad(statement)))
+        }
+        return response.sessionPair
+    }
+
+    // MARK: - ADR-0066 part 1: taking the account back after a reset
+
+    /// `POST /account/recall/status` (anonymous) — whether the account can
+    /// still be taken back with the key `record` holds, until when, when the
+    /// keys were reset, and how many password attempts are left. The
+    /// statement is signed right before the request (it is valid 120 s) and
+    /// never stored.
+    ///
+    /// `401 {"error":"recall-refused"}` means it cannot (any more).
+    public func recallStatus(record: RecallRecord) async throws -> RecallWindow {
+        guard let accountId = record.accountId, record.oldSeed.count == RecallRecord.seedLength else {
+            throw AuthClientError.argument("the recall record is malformed")
+        }
+        // ADR-0066 "T5 as built" item 24 — a device with a wrong clock is
+        // told the server's time (only its key's holder is) and signs again.
+        let response: RecallStatusResponse = try await StatementStale.retrying { serverTimeMs in
+            let statement = try serverTimeMs.map {
+                try signAccountStatementAt(
+                    accountSeed: record.oldSeed, kind: .recallStatus, accountId: accountId,
+                    body: Data(), unixMs: $0)
+            } ?? signAccountStatement(
+                accountSeed: record.oldSeed, kind: .recallStatus, accountId: accountId, body: Data())
+            return try await self.post(
+                endpoint: "/account/recall/status",
+                body: RecallStatusRequest(statementB64: base64UrlEncodeNoPad(statement)))
+        }
+        return response.window
+    }
+
+    /// Take the account back (ADR-0066 section 1.2, "T3 as built"):
+    ///
+    /// ```text
+    ///   client: OPAQUE login start (old password), OPAQUE registration
+    ///           starts (new password, new recovery seed), the
+    ///           `recall-start` statement by the OLD account key
+    ///   POST /account/recall/start   -> session_id, three responses, server_nonce
+    ///   client: OPAQUE login finish. A failure here IS the wrong old
+    ///           password: `RecallWrongPassword`, and `finish` is not called.
+    ///   client: both registration finishes, the `recall` statement
+    ///   POST /account/recall/finish  -> the reset's answer + a fresh-auth grant
+    /// ```
+    ///
+    /// Each accepted `start` is one password attempt at the server. Throws
+    /// ``RecallWrongPassword``, ``AuthClientError/http(status:endpoint:body:)``
+    /// (`401 recall-refused`, `401 wrong-password`, `429`, `400`) or
+    /// ``AuthClientError/network(endpoint:underlying:)``.
+    public func recallAccount(_ attempt: RecallAttempt) async throws -> RecallLanded {
+        guard let accountId = attempt.record.accountId,
+              attempt.record.oldSeed.count == RecallRecord.seedLength else {
+            throw AuthClientError.argument("the recall record is malformed")
+        }
+        guard !attempt.oldPassword.isEmpty, !attempt.newPassword.isEmpty else {
+            throw AuthClientError.argument("both passwords must be non-empty")
+        }
+        guard attempt.newSignaturePubkey.count == 32 else {
+            throw AuthClientError.argument("newSignaturePubkey must be 32 bytes (Ed25519)")
+        }
+        let oldSeed = attempt.record.oldSeed
+        let accountIdB64 = base64UrlEncodeNoPad(accountId)
+
+        let login = try OpaqueLogin.startPassword(password: attempt.oldPassword)
+        let passwordReg = try OpaqueRegister.startPassword(password: attempt.newPassword)
+        let recoveryReg = try OpaqueRegister.startRecovery(seed: attempt.newSeed)
+        let loginRequest = login.requestB64()
+        let passwordRequest = passwordReg.requestB64()
+        let recoveryRequest = recoveryReg.requestB64()
+        // A stale statement was not counted as an attempt: the same OPAQUE
+        // messages go again under a statement signed at the server's time.
+        let start: RecallStartResponse = try await StatementStale.retrying { serverTimeMs in
+            let startStatement = try serverTimeMs.map {
+                try signAccountStatementAt(
+                    accountSeed: oldSeed, kind: .recallStart, accountId: accountId,
+                    body: try recallStartStatementBody(
+                        anchorSeq: attempt.anchorSeq, loginRequestB64: loginRequest),
+                    unixMs: $0)
+            } ?? signRecallStartStatement(
+                accountSeed: oldSeed, accountId: accountId, anchorSeq: attempt.anchorSeq,
+                loginRequestB64: loginRequest)
+            return try await self.post(
+                endpoint: "/account/recall/start",
+                body: RecallStartRequest(
+                    accountIdB64: accountIdB64,
+                    anchorSeq: attempt.anchorSeq,
+                    statementB64: base64UrlEncodeNoPad(startStatement),
+                    loginRequest: loginRequest,
+                    passwordRequest: passwordRequest,
+                    recoveryRequest: recoveryRequest))
+        }
+
+        // The server's answer opens only under the password the account had
+        // before the reset.
+        let loginOut: OpaqueLoginOutput
+        do {
+            loginOut = try login.finish(secret: attempt.oldPassword, serverResponseB64: start.loginResponse)
+        } catch {
+            throw RecallWrongPassword()
+        }
+        guard let serverNonce = base64UrlDecodeNoPad(start.serverNonceB64) else {
+            throw AuthClientError.http(
+                status: 200, endpoint: "/account/recall/start", body: "malformed server_nonce_b64 in response")
+        }
+        let passwordUpload = try passwordReg.finish(
+            secret: attempt.newPassword, serverResponseB64: start.passwordResponse
+        ).uploadB64()
+        let recoveryUpload = try recoveryReg.finish(
+            secret: attempt.newSeed, serverResponseB64: start.recoveryResponse
+        ).uploadB64()
+        let deviceId = LandingDevice.usable(attempt.deviceId)
+        let loginFinish = loginOut.finalizeB64()
+        // "T5 as built" item 25 — the request is encoded ONCE per statement
+        // and those exact bytes are sent again when no answer arrives: the
+        // server answers a byte-identical `finish` again for ten minutes, with
+        // the same attestation. The caller keeps the generated phrase until
+        // this returns or throws an answer.
+        let finish: RecallFinishResponse = try await StatementStale.retrying { serverTimeMs in
+            let statement = try serverTimeMs.map {
+                try signAccountStatementAt(
+                    accountSeed: oldSeed, kind: .recall, accountId: accountId,
+                    body: try recallStatementBody(
+                        serverNonce: serverNonce, newSignaturePubkey: attempt.newSignaturePubkey,
+                        passwordUploadB64: passwordUpload, recoveryUploadB64: recoveryUpload),
+                    unixMs: $0)
+            } ?? signRecallStatement(
+                accountSeed: oldSeed, accountId: accountId, serverNonce: serverNonce,
+                newSignaturePubkey: attempt.newSignaturePubkey,
+                passwordUploadB64: passwordUpload, recoveryUploadB64: recoveryUpload)
+            let body = try self.encodeBody(
+                endpoint: "/account/recall/finish",
+                RecallFinishRequest(
+                    sessionId: start.sessionId,
+                    accountIdB64: accountIdB64,
+                    anchorSeq: attempt.anchorSeq,
+                    loginFinish: loginFinish,
+                    passwordUpload: passwordUpload,
+                    recoveryUpload: recoveryUpload,
+                    newSignaturePubkeyB64: base64UrlEncodeNoPad(attempt.newSignaturePubkey),
+                    deviceIdB64: deviceId.map(base64UrlEncodeNoPad),
+                    statementB64: base64UrlEncodeNoPad(statement)))
+            return try await RecallFinishRetry.sendIdentical(body: body) { bytes in
+                try await self.postRaw(endpoint: "/account/recall/finish", body: bytes)
+            }
+        }
+        guard let attestation = base64UrlDecodeNoPad(finish.keyResetAttestB64),
+              attestation.count == KeyResetResult.attestationLength else {
+            throw AuthClientError.http(
+                status: 200, endpoint: "/account/recall/finish",
+                body: "malformed key_reset_attest_b64 in response")
+        }
+        return RecallLanded(
+            reset: KeyResetResult(attestation: attestation, session: finish.sessionPair.naming(deviceId: deviceId)),
+            freshGrant: FreshAuthGrant.from(grant: finish.freshGrant, expiresAtMs: finish.freshGrantExpiresAtMs))
     }
 
     // MARK: - The passkey vault: a passkey that restores keys
@@ -1021,6 +1384,32 @@ public final class AuthClient {
         return try await execute(endpoint: endpoint, request: request)
     }
 
+    /// Encode a request body once, so the exact bytes can be sent again.
+    private func encodeBody<Req: Encodable>(endpoint: String, _ body: Req) throws -> Data {
+        do {
+            return try encoder.encode(body)
+        } catch {
+            throw AuthClientError.argument("failed to encode \(endpoint) body: \(error)")
+        }
+    }
+
+    /// `POST` already-encoded JSON bytes, verbatim.
+    private func postRaw<Res: Decodable>(
+        endpoint: String,
+        body: Data,
+        bearer: String? = nil
+    ) async throws -> Res {
+        let url = try buildURL(endpoint: endpoint)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let bearer {
+            request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = body
+        return try await execute(endpoint: endpoint, request: request)
+    }
+
     private func postNoBody<Res: Decodable>(
         endpoint: String,
         bearer: String? = nil
@@ -1085,6 +1474,26 @@ public final class AuthClient {
                 endpoint: endpoint,
                 body: "decode failed: \(error) [body=\(bodyText)]"
             )
+        }
+    }
+
+    /// Send a request whose success carries no body (`204`).
+    private func executeNoContent(endpoint: String, request: URLRequest) async throws {
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+        } catch {
+            throw AuthClientError.network(endpoint: endpoint, underlying: error)
+        }
+        let (data, response) = raw
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AuthClientError.http(status: 0, endpoint: endpoint, body: "non-HTTP response")
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw AuthClientError.http(
+                status: httpResponse.statusCode,
+                endpoint: endpoint,
+                body: truncate(String(data: data, encoding: .utf8) ?? "<binary>"))
         }
     }
 

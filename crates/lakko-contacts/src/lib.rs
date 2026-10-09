@@ -48,6 +48,12 @@
 //!   fail-closed, classified by [`incoming_envelope`]; the order is
 //!   [`group_closed::group_closed_is_newer`], the authority is the receiver's
 //!   role-table check.
+//! - [`key_rotation`] — the ADR-0066 key-rotation envelope (the device that
+//!   changes the account keys hands the new phrase entropy and the
+//!   supersession proof to the account's other devices, in the DeviceGroup
+//!   only and only after the untrusted device is out): fixed-length,
+//!   fail-closed, classified by [`incoming_envelope`]; the receiver's checks
+//!   and the sender's ordering are in the module docs.
 //! - [`reach`] — ADR-0060 reach keys: the per-class, per-scope Ed25519 keys
 //!   an identity mailbox accepts a write under, derived from the account
 //!   seed, and the [`ReachGrant`] that hands one to someone.
@@ -106,6 +112,7 @@ pub mod group_name;
 pub mod incoming_envelope;
 pub mod introduction;
 pub mod invite;
+pub mod key_rotation;
 pub mod link_seal;
 pub mod media_state;
 pub mod pin;
@@ -191,6 +198,12 @@ pub use invite::{
     revoke_canonical_bytes, sign_owner_list, sign_revocation, InviteCapability, BLOB_ID_B64URL_LEN,
     BLOB_ID_LEN, JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, LINK_ID_LEN, MAX_LABEL_LEN,
     NEVER_EXPIRES, OWNER_LIST_DOMAIN_V1, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
+};
+pub use key_rotation::{
+    compose_key_rotation, decode_key_rotation, try_unwrap_key_rotation, KeyRotation,
+    KeyRotationError, KEY_ROTATION_ENTROPY_LEN, KEY_ROTATION_ENVELOPE_DOMAIN_V1,
+    KEY_ROTATION_ENVELOPE_LEN, KEY_ROTATION_PENDING_MAX_AGE_MS, KEY_ROTATION_PROOF_LEN,
+    KEY_ROTATION_VERSION_V1,
 };
 pub use media_state::{
     compose_media_state, decode_media_state, try_unwrap_media_state, MediaState, MediaStateError,

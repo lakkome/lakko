@@ -105,6 +105,16 @@ const DEFAULT_HANDLE_CHANGE_MIN_INTERVAL_SECS: u32 = 60;
 /// Env knob for the minimum interval between handle changes.
 const HANDLE_CHANGE_INTERVAL_VAR: &str = "LAKKO_AUTH_HANDLE_CHANGE_MIN_INTERVAL_SECS";
 
+/// Default recall window in days (ADR-0066 section 0.2, D4). Chosen, not
+/// measured.
+const DEFAULT_RECALL_WINDOW_DAYS: u32 = 30;
+
+/// Env knob for the recall window, in whole days (positive).
+const RECALL_WINDOW_VAR: &str = "LAKKO_RECALL_WINDOW_DAYS";
+
+/// Milliseconds in a day.
+const MS_PER_DAY: i64 = 86_400_000;
+
 /// Saturation ceiling for the stored hit count (the column is `INT UNSIGNED`).
 const MAX_HITS: u32 = 1_000_000_000;
 
@@ -170,10 +180,26 @@ pub(crate) enum Scope {
     /// account: the reset itself, rarer and more destructive than the
     /// credential replace it carries (ADR-0065 open question 3).
     KeyReset = 13,
+    /// `POST /account/devices/revoke`, keyed on the signed-in account
+    /// (ADR-0066 section 2.1). Charged only after the fresh-auth grant and
+    /// the account-key statement were accepted, so a caller holding neither
+    /// spends none of the owner's budget.
+    DeviceRevoke = 15,
+    /// `POST /account/recall/start`, keyed on the account and the anchor
+    /// (ADR-0066 section 1.2): the password attempts of a recall. Charged
+    /// only after the account statement verified under the anchor's key, so
+    /// a caller without that key spends none of it.
+    Recall = 14,
+    /// `POST /account/keys/rotate/finish`, keyed on the signed-in account
+    /// (ADR-0066 section 3.4): the key rotation itself. Charged only after
+    /// the fresh-auth grant and the supersession proof were accepted, so a
+    /// caller holding a session and the password but not the account key
+    /// spends none of it.
+    KeyRotate = 16,
 }
 
 impl Scope {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 12] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
@@ -183,6 +209,9 @@ impl Scope {
         Self::HandleBind,
         Self::RecoveryReplace,
         Self::KeyReset,
+        Self::DeviceRevoke,
+        Self::Recall,
+        Self::KeyRotate,
     ];
 
     /// Position in [`Self::ALL`] (the stored discriminants have a gap, so
@@ -198,6 +227,9 @@ impl Scope {
             Self::HandleBind => 6,
             Self::RecoveryReplace => 7,
             Self::KeyReset => 8,
+            Self::DeviceRevoke => 9,
+            Self::Recall => 10,
+            Self::KeyRotate => 11,
         }
     }
 
@@ -212,6 +244,9 @@ impl Scope {
             Self::HandleBind => "LAKKO_AUTH_LIMIT_HANDLE_BIND",
             Self::RecoveryReplace => "LAKKO_AUTH_LIMIT_RECOVERY_REPLACE",
             Self::KeyReset => "LAKKO_AUTH_LIMIT_KEY_RESET",
+            Self::DeviceRevoke => "LAKKO_AUTH_LIMIT_DEVICE_REVOKE",
+            Self::Recall => "LAKKO_AUTH_LIMIT_RECALL",
+            Self::KeyRotate => "LAKKO_AUTH_LIMIT_KEY_ROTATE",
         }
     }
 
@@ -223,11 +258,12 @@ impl Scope {
             | Self::LoginRecovery
             | Self::PasswordReset
             | Self::DeviceGrantMint => Window::new(10, 900),
-            Self::TotpRecover => Window::new(5, 900),
+            Self::TotpRecover | Self::Recall => Window::new(5, 900),
             Self::DeviceRequestTarget => Window::new(5, 600),
             Self::HandleBind => Window::new(5, 86_400),
             Self::RecoveryReplace => Window::new(10, 3600),
-            Self::KeyReset => Window::new(3, 86_400),
+            Self::KeyReset | Self::KeyRotate => Window::new(3, 86_400),
+            Self::DeviceRevoke => Window::new(20, 3600),
         }
     }
 
@@ -239,7 +275,10 @@ impl Scope {
             | Self::TotpRecover
             | Self::DeviceGrantMint
             | Self::RecoveryReplace
-            | Self::KeyReset => CODE_TOO_MANY_ATTEMPTS,
+            | Self::KeyReset
+            | Self::DeviceRevoke
+            | Self::Recall
+            | Self::KeyRotate => CODE_TOO_MANY_ATTEMPTS,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
         }
@@ -352,6 +391,8 @@ pub(crate) struct Limits {
     handle_change_min_interval_secs: u32,
     /// The device-link guess budget, one entry per tier.
     device_link: [DeviceLinkTier; DEVICE_LINK_TIERS.len()],
+    /// How long a recall anchor lives (ADR-0066 section 0.2), milliseconds.
+    recall_window_ms: i64,
     /// Cap on the address-bucket map ([`MAX_ADDRESS_BUCKETS`]).
     max_buckets: usize,
     buckets: Mutex<HashMap<(Category, IpAddr), Bucket>>,
@@ -382,6 +423,7 @@ impl Limits {
             name_key,
             handle_change_min_interval_secs,
             device_link: DEVICE_LINK_TIERS.map(|(_, _, tier)| tier),
+            recall_window_ms: i64::from(DEFAULT_RECALL_WINDOW_DAYS) * MS_PER_DAY,
             max_buckets: MAX_ADDRESS_BUCKETS,
             buckets: Mutex::new(HashMap::new()),
         }
@@ -448,8 +490,18 @@ impl Limits {
             rand::rngs::OsRng.fill_bytes(&mut k);
             k
         };
+        let recall_window_days = match std::env::var(RECALL_WINDOW_VAR) {
+            Ok(v) if !v.trim().is_empty() => v
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|d| *d > 0)
+                .ok_or_else(|| anyhow::anyhow!("{RECALL_WINDOW_VAR} must be a positive integer"))?,
+            _ => DEFAULT_RECALL_WINDOW_DAYS,
+        };
         let mut limits = Self::with_windows(names, ips, name_key, interval);
         limits.device_link = device_link;
+        limits.recall_window_ms = i64::from(recall_window_days) * MS_PER_DAY;
         Ok(limits)
     }
 
@@ -472,6 +524,12 @@ impl Limits {
     pub(crate) const fn with_handle_change_interval(mut self, secs: u32) -> Self {
         self.handle_change_min_interval_secs = secs;
         self
+    }
+
+    /// How long a recall anchor lives, in milliseconds
+    /// (`LAKKO_RECALL_WINDOW_DAYS`, default 30).
+    pub(crate) const fn recall_window_ms(&self) -> i64 {
+        self.recall_window_ms
     }
 
     /// The device-link guess budget, one entry per tier.
@@ -912,8 +970,10 @@ mod tests {
         // Stored in the database; a renumbering would merge two counters.
         let pinned: Vec<u8> = Scope::ALL.iter().map(|s| *s as u8).collect();
         // 5 was the removed server-side three-word verifier's; 6, 7 and 8
-        // were the removed one-time-code factor's. None is reused.
-        assert_eq!(pinned, vec![1, 2, 3, 4, 9, 10, 11, 12, 13]);
+        // were the removed one-time-code factor's. None is reused. 14 is the
+        // ADR-0066 recall (listed after 15: it was added later); 16 is the
+        // key rotation.
+        assert_eq!(pinned, vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16]);
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);
         }

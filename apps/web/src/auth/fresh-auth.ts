@@ -432,6 +432,13 @@ export const PROOF_COPY = {
     cancelledKey: "proof.change_password.cancelled",
     genericKey: "recovery.new_password.error.generic",
   },
+  // Removing a device (UX 18.1 / 18.6).
+  removeDevice: {
+    helpKey: "proof.remove_device.help",
+    wrongPasswordKey: "proof.remove_device.wrong_password",
+    cancelledKey: "proof.remove_device.cancelled",
+    genericKey: "devices.remove.error.not_revoked",
+  },
 } as const satisfies Record<string, ProofCopy>;
 
 /** The catalog key (and whether it is an error line) for a failure the

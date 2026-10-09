@@ -42,6 +42,7 @@
  * case.
  */
 import { loadWasm } from "../wasm";
+import { hexOfKey, ownDeviceAdmissible, ownDeviceRoster } from "../devices/own-device-roster";
 import type { ConversationKind } from "../chat/conversation-kind";
 import type { Wasm } from "../wasm";
 import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
@@ -1229,7 +1230,14 @@ export class ContactsClient {
     try {
       const list = await this.discovery.fetchKeyPackages(secrets.accountId);
       if (list === null) return [];
-      return list.filter((d) => !bytesEqualCc(d.deviceId, ownKey));
+      // ADR-0066 section 2.3 — only the devices the account's DeviceGroup
+      // holds: a removed device that publishes itself again is not put into
+      // a new conversation. With no roster loaded none is added here.
+      const roster = ownDeviceRoster(base64Encode(secrets.accountId));
+      return list.filter(
+        (d) =>
+          !bytesEqualCc(d.deviceId, ownKey) && ownDeviceAdmissible(roster, hexOfKey(d.deviceId)),
+      );
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("own devices lookup failed; adding this device only", err);
@@ -1964,7 +1972,15 @@ export class ContactsClient {
     // verified proof bytes (the verifier confirmed the signature
     // over exactly these fields, so the parse is on trusted data).
     const proofExpiresAt = readProofExpiresAtSecs(proofBytes);
-    const result = setPin(accountIdB64, fetchedPubkeyB64, proofExpiresAt);
+    // ADR-0066 section 3.5: the proof verified under the pinned key for
+    // exactly this key, so the replaced key is a PROVEN predecessor: the
+    // leaves bound to it stay the same person. Nothing is flagged, closed or
+    // evicted, and nothing is shown. An attestation beside the proof (the
+    // proven-rotation arm) does not change this: the proof is what tells a
+    // rotation from a reset.
+    const result = setPin(accountIdB64, fetchedPubkeyB64, proofExpiresAt, undefined, {
+      proven: true,
+    });
     if (result === "rejected-backward") {
       throw new SupersessionRefused(
         "marker-backward",
@@ -3477,6 +3493,19 @@ export class ContactsClient {
     const wasm = await loadWasm();
     const deviceKey = wasm.keyPackageSignatureKey(keyPackage);
     if (leafIndexOfSignatureKey(group, deviceKey) !== null) return null;
+    // ADR-0066 section 2.3 — a device of THIS account is admitted only when
+    // the account's DeviceGroup holds it. Every caller that admits an own
+    // device names the account, so the test is made here once.
+    if (
+      identity !== null &&
+      accountId !== undefined &&
+      bytesEqualCc(accountId, identity.accountId) &&
+      !ownDeviceAdmissible(ownDeviceRoster(base64Encode(identity.accountId)), hexOfKey(deviceKey))
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn("own device not in the account's device list; not admitted to the chat");
+      return null;
+    }
     const myIdentity = await this.resolveIdentity(identity);
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
       // Re-checked under the lock: a poll may have applied the very commit

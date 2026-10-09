@@ -4402,8 +4402,132 @@
       "text": "קוד QR לקישור",
       "status": "machine"
     },
+    "devices.recall.body": {
+      "text": "המפתחות של {name} אופסו במכשיר אחר בתאריך {date}. המכשיר הזה נותק, והצ׳אטים ואנשי הקשר שנשמרו בו נמחקו.",
+      "status": "machine"
+    },
+    "devices.recall.checking": {
+      "text": "בודקים אם אפשר לקבל את החשבון בחזרה...",
+      "status": "machine"
+    },
+    "devices.recall.done": {
+      "text": "קיבלתם את החשבון בחזרה. הוסיפו שוב את מפתחות הגישה ואת המכשירים האחרים שלכם.",
+      "status": "machine"
+    },
+    "devices.recall.error.closed": {
+      "text": "כבר אי אפשר לקבל את החשבון בחזרה מהמכשיר הזה.",
+      "status": "machine"
+    },
+    "devices.recall.error.exhausted": {
+      "text": "יותר מדי סיסמאות שגויות. כבר אי אפשר לקבל את החשבון בחזרה מהמכשיר הזה.",
+      "status": "machine"
+    },
+    "devices.recall.error.tries_left": {
+      "text": "{count, plural, one {נותר ניסיון אחד} two {נותרו שני ניסיונות} other {נותרו # ניסיונות}}",
+      "status": "machine"
+    },
+    "devices.recall.error.wrong_password": {
+      "text": "זו לא הסיסמה שהייתה לחשבון הזה לפני האיפוס. אם שיניתם את הסיסמה בחודש האחרון, הזינו את זו שהייתה לכם לפני כן.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_factors": {
+      "text": "מפתחות הגישה והקוד מאפליקציית האימות מוסרים. הוסיפו אותם שוב אחר כך.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_keys": {
+      "text": "החשבון מקבל מפתחות חדשים וביטוי שחזור חדש.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_messages": {
+      "text": "הודעות שנשלחו לחשבון מאז האיפוס לא נשלחו אליכם ואי אפשר לשחזר אותן.",
+      "status": "machine"
+    },
+    "devices.recall.form.lede": {
+      "text": "הזינו את הסיסמה שהייתה לחשבון הזה לפני האיפוס, ובחרו סיסמה חדשה. מי שאיפס את המפתחות ינותק.",
+      "status": "machine"
+    },
+    "devices.recall.form.new_password": {
+      "text": "סיסמה חדשה",
+      "status": "machine"
+    },
+    "devices.recall.form.old_password": {
+      "text": "הסיסמה שלפני האיפוס",
+      "status": "machine"
+    },
+    "devices.recall.form.repeat_password": {
+      "text": "אימות הסיסמה החדשה",
+      "status": "machine"
+    },
+    "devices.recall.form.submit": {
+      "text": "קבלת החשבון בחזרה",
+      "status": "machine"
+    },
+    "devices.recall.form.title": {
+      "text": "קבלת החשבון בחזרה",
+      "status": "machine"
+    },
+    "devices.recall.form.working": {
+      "text": "מקבלים את החשבון בחזרה...",
+      "status": "machine"
+    },
+    "devices.recall.no": {
+      "text": "לא, לקבל את החשבון בחזרה",
+      "status": "machine"
+    },
+    "devices.recall.question": {
+      "text": "זה הייתם אתם?",
+      "status": "machine"
+    },
+    "devices.recall.until": {
+      "text": "אפשר לקבל את החשבון בחזרה מהמכשיר הזה עד {date}.",
+      "status": "machine"
+    },
+    "devices.recall.yes": {
+      "text": "כן, זה הייתי אני",
+      "status": "machine"
+    },
+    "devices.recall.yes.back": {
+      "text": "חזרה",
+      "status": "machine"
+    },
+    "devices.recall.yes.confirm": {
+      "text": "שאר מה שהחשבון הזה שמר במכשיר הזה יימחק. כדי להשתמש בחשבון כאן שוב, התחברו וקבלו את המפתחות מהמכשיר שאיפס אותם.",
+      "status": "machine"
+    },
+    "devices.recall.yes.delete": {
+      "text": "מחיקה והתחברות",
+      "status": "machine"
+    },
+    "devices.remove.done": {
+      "text": "המכשיר הוסר ונותק.",
+      "status": "machine"
+    },
+    "devices.remove.error.not_revoked": {
+      "text": "לא ניתן היה לנתק את המכשיר, ולכן דבר לא הוסר. נסו שוב.",
+      "status": "machine"
+    },
+    "devices.remove.error.try_later": {
+      "text": "המכשיר הזה עדיין מגדיר את החשבון. נסו שוב בעוד דקה.",
+      "status": "machine"
+    },
+    "devices.remove.finish": {
+      "text": "השלמת ההסרה",
+      "status": "machine"
+    },
+    "devices.remove.pending": {
+      "text": "מסיר...",
+      "status": "machine"
+    },
     "devices.removed.body": {
       "text": "המכשיר הוסר מהחשבון שלכם ממכשיר אחר. הודעות חדשות כבר לא מגיעות אליו. התנתקו, ואז התחברו שוב אם תרצו להשתמש בו.",
+      "status": "machine"
+    },
+    "devices.removed.body_done": {
+      "text": "הוא הוסר מהחשבון {name} במכשיר אחר ונותק. כל מה שהחשבון שמר כאן נמחק.",
+      "status": "machine"
+    },
+    "devices.removed.body_removing": {
+      "text": "הוא הוסר מהחשבון {name} במכשיר אחר ונותק. כל מה שהחשבון הזה שמר במכשיר הזה נמחק כעת: צ'אטים, אנשי קשר, מפתחות וביטוי השחזור.",
       "status": "machine"
     },
     "devices.removed.sign_out": {
@@ -4412,6 +4536,74 @@
     },
     "devices.removed.title": {
       "text": "המכשיר הזה הוסר",
+      "status": "machine"
+    },
+    "devices.rotate.confirm": {
+      "text": "הסרה והחלפת מפתחות",
+      "status": "machine"
+    },
+    "devices.rotate.done": {
+      "text": "מפתחות החשבון שלכם הוחלפו. המכשירים האחרים שלכם יקבלו את החדשים בפעם הבאה שיתחברו.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_contacts": {
+      "text": "האנשים שאתם משוחחים איתם לא צריכים לעשות דבר.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_devices": {
+      "text": "המכשירים האחרים שלכם שומרים על הצ׳אטים שלהם ומקבלים את המפתחות החדשים בעצמם.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "מפתחות הגישה שלכם עדיין מחברים אתכם. האפשרות \"שחזור מפתחות עם מפתח הגישה הזה\" כבויה עד שתפעילו אותה שוב.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_phrase": {
+      "text": "תקבלו ביטוי שחזור חדש. הישן יפסיק לעבוד.",
+      "status": "machine"
+    },
+    "devices.rotate.error.not_started": {
+      "text": "המכשיר הוסר, אבל מפתחות החשבון שלכם לא הוחלפו.",
+      "status": "machine"
+    },
+    "devices.rotate.lede": {
+      "text": "מכשיר שאבד עדיין מחזיק במפתחות החשבון שלכם. החלפתם הופכת את מה שהוא מחזיק לחסר תועלת.",
+      "status": "machine"
+    },
+    "devices.rotate.not_now": {
+      "text": "לא עכשיו",
+      "status": "machine"
+    },
+    "devices.rotate.retry": {
+      "text": "ניסיון חוזר",
+      "status": "machine"
+    },
+    "devices.rotate.step_devices": {
+      "text": "מעדכנים את המכשירים האחרים שלכם",
+      "status": "machine"
+    },
+    "devices.rotate.step_keys": {
+      "text": "מחליפים את מפתחות החשבון",
+      "status": "machine"
+    },
+    "devices.rotate.step_remove": {
+      "text": "מסירים את המכשיר",
+      "status": "machine"
+    },
+    "devices.rotate.title": {
+      "text": "הסרת המכשיר הזה והחלפת מפתחות החשבון",
+      "status": "machine"
+    },
+    "devices.rotated.notice": {
+      "text": "מפתחות החשבון שלכם הוחלפו במכשיר אחר. במכשיר הזה כבר יש את החדשים.",
+      "status": "machine"
+    },
+    "devices.rotated.show_phrase": {
+      "text": "הצגת הביטוי החדש",
+      "status": "machine"
+    },
+    "devices.rotated.updating": {
+      "text": "מעדכנים מפתחות...",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -6266,6 +6458,18 @@
       "text": "שימוש בסיסמה במקום",
       "status": "machine"
     },
+    "proof.remove_device.cancelled": {
+      "text": "בוטל. המכשיר לא הוסר.",
+      "status": "machine"
+    },
+    "proof.remove_device.help": {
+      "text": "הזינו את הסיסמה כדי להסיר את המכשיר הזה.",
+      "status": "machine"
+    },
+    "proof.remove_device.wrong_password": {
+      "text": "סיסמה שגויה. המכשיר לא הוסר.",
+      "status": "machine"
+    },
     "proof.reset.cancelled": {
       "text": "בוטל. שום דבר לא אופס.",
       "status": "machine"
@@ -6862,6 +7066,10 @@
       "text": "„התנתקות” משאירה את הנתונים במכשיר הזה. „שכחת המכשיר הזה” מסירה אותם; אפשר לחזור רק ממכשיר מחובר אחר, עם מפתח גישה שמשחזר את מפתחות החשבון, או עם ביטוי השחזור. „מחיקת החשבון” מוחקת את החשבון בשרת ומנקה את המכשיר הזה; אי אפשר לבטל את הפעולה.",
       "status": "machine"
     },
+    "settings.account.delete.blocked": {
+      "text": "מפתחות החשבון אופסו לאחרונה. אי אפשר למחוק את החשבון עד {date}.",
+      "status": "machine"
+    },
     "settings.account.delete.body": {
       "text": "הפעולה מוחקת את הזהות שלכם בשרת — שם משתמש, מפתחות, אמצעי שחזור וגיבוי — ומנתקת אתכם בכל מקום. גם ההודעות המקומיות נמחקות מהמכשיר הזה. אי אפשר לבטל את הפעולה.",
       "status": "machine"
@@ -7079,15 +7287,31 @@
       "status": "machine"
     },
     "settings.devices.remove.body": {
-      "text": "המכשיר הזה יאבד גישה להודעות שלכם מאותו רגע. ייתכן שתתבקשו להזין את מפתח הגישה.",
+      "text": "הוא נותק כעת. בפעם הבאה שיתחבר, יימחק כל מה שהחשבון הזה שמר בו: צ'אטים, אנשי קשר, מפתחות וביטוי השחזור.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm": {
+      "text": "הסרת המכשיר",
       "status": "machine"
     },
     "settings.devices.remove.confirm_named": {
       "text": "הסרת {device}",
       "status": "machine"
     },
+    "settings.devices.remove.reason_stolen": {
+      "text": "הוא אבד או נגנב",
+      "status": "machine"
+    },
+    "settings.devices.remove.reason_unused": {
+      "text": "אני כבר לא משתמש/ת בו",
+      "status": "machine"
+    },
     "settings.devices.remove.title": {
       "text": "להסיר את {device}?",
+      "status": "machine"
+    },
+    "settings.devices.remove.working": {
+      "text": "מסירים...",
       "status": "machine"
     },
     "settings.devices.removed_change_password": {

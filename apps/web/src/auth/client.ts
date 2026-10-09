@@ -40,6 +40,7 @@ import {
 import { solvePow } from "./pow";
 import { normalizeTotpCode } from "./totp-code";
 import { sessionFetch } from "./session-fetch";
+import { sendRecallFinish, sendWithStaleRetry, staleServerTimeMs } from "./statement-stale";
 import { sessionPairOf, type SessionPair } from "./session-pair";
 import { freshGrantOf, type FreshGrant } from "./fresh-auth";
 import type {
@@ -49,8 +50,15 @@ import type {
   GenesisAttestRequest,
   GenesisAttestResponse,
   KeyResetFinishRequest,
+  KeyRotateFinishRequest,
+  SessionRefreshUpgradeRequest,
   KeyResetFinishResponse,
   KeyResetStartRequest,
+  RecallFinishRequest,
+  RecallFinishResponse,
+  RecallStartRequest,
+  RecallStartResponse,
+  RecallStatusRequest,
   KeyResetStartResponse,
   LoginFinishRequest,
   LoginFinishResponse,
@@ -66,6 +74,9 @@ import type {
   PowChallengeResponse,
   SessionRefreshRequest,
   SessionRefreshResponse,
+  SessionBindDeviceRequest,
+  SessionBindDeviceResponse,
+  DeviceRevokeRequest,
   SignupFinishRequest,
   SignupFinishResponse,
   SignupStartRequest,
@@ -207,6 +218,21 @@ export interface KeyResetResult {
   session: SessionPair;
 }
 
+/** Result of `AuthClient.recallTakeBack`: the key reset's, plus the
+ *  fresh-auth grant the recall answers with. */
+export interface RecallResult extends KeyResetResult {
+  freshGrant: FreshGrant | null;
+}
+
+/** The OLD password typed on the take-the-account-back form is wrong: the
+ *  OPAQUE login did not finish on this device, and no finish was sent. */
+export class RecallWrongPasswordError extends Error {
+  override name = "RecallWrongPasswordError";
+  constructor() {
+    super("the password from before the reset is wrong");
+  }
+}
+
 /** A precondition was violated by the caller — e.g. an empty
  *  password. Distinct from a network error so the UI can surface
  *  it as a form validation message. */
@@ -216,6 +242,28 @@ export class AuthClientArgError extends Error {
 
 /** A request to the auth service did not return 2xx. The original
  *  status code and (truncated) body are exposed for diagnostics. */
+/** Account statement kinds (`lakko-attest::account_statement`). */
+export const ACCOUNT_STATEMENT_KIND_RECALL_STATUS = 1;
+export const ACCOUNT_STATEMENT_KIND_RECALL = 2;
+export const ACCOUNT_STATEMENT_KIND_SESSION_UPGRADE = 4;
+export const ACCOUNT_STATEMENT_KIND_RECALL_START = 5;
+
+/** A `recall/finish` request built and signed, kept until it is answered
+ *  (ADR-0066 T5 item 25). */
+export interface RecallPendingFinish {
+  /** The request as last sent (or to be sent). Resent byte for byte. */
+  request: RecallFinishRequest;
+  /** The same request with the statement signed at the server's time. */
+  readonly resign: (signAtMs: number) => RecallFinishRequest;
+  /** Zero the old seed copy the signer holds. */
+  readonly dispose: () => void;
+}
+
+/** The server's time out of a `statement-stale` auth answer. */
+export function authStaleTimeOf(err: unknown): number | null {
+  return err instanceof AuthHttpError ? staleServerTimeMs(err.status, err.body) : null;
+}
+
 export class AuthHttpError extends Error {
   override name = "AuthHttpError";
   constructor(
@@ -389,7 +437,10 @@ export class AuthClient {
    *                       32-byte grant token received over the
    *                       rendezvous channel.
    */
-  async deviceAuthorizeRedeem(grantTokenB64: string): Promise<DeviceAuthorizeRedeemResult> {
+  async deviceAuthorizeRedeem(
+    grantTokenB64: string,
+    deviceIdB64?: string,
+  ): Promise<DeviceAuthorizeRedeemResult> {
     if (grantTokenB64.length === 0) {
       throw new AuthClientArgError("grantTokenB64 must be non-empty");
     }
@@ -398,6 +449,7 @@ export class AuthClient {
       DeviceAuthorizeRedeemResponse
     >("/device/authorize/redeem", {
       grant_token_b64: grantTokenB64,
+      ...deviceField(deviceIdB64),
     });
     const accountId = base64UrlDecodeNoPad(resp.account_id_b64);
     if (accountId.length !== 16) {
@@ -525,6 +577,7 @@ export class AuthClient {
   async totpRecover(
     handle: string,
     code: string,
+    deviceIdB64?: string,
   ): Promise<TotpRecoverResult> {
     requireHandle(handle);
     const normalized = normalizeTotpCode(code);
@@ -533,7 +586,7 @@ export class AuthClient {
     }
     const resp = await this.post<TotpRecoverRequest, TotpRecoverResponse>(
       "/totp/recover",
-      { handle, code: normalized },
+      { handle, code: normalized, ...deviceField(deviceIdB64) },
     );
     return {
       accountId: base64UrlDecodeNoPad(resp.account_id_b64),
@@ -692,7 +745,13 @@ export class AuthClient {
    * Wrong passwords surface as an `AuthHttpError` with status
    * 401 — by design, indistinguishable from "unknown account".
    */
-  async login(handle: string, password: Uint8Array): Promise<LoginResult> {
+  async login(
+    handle: string,
+    password: Uint8Array,
+    /** ADR-0066 section 0.4: this device's id, when it is already known
+     *  for the account being signed in to (`session-device.ts`). */
+    deviceIdB64?: string,
+  ): Promise<LoginResult> {
     if (password.length === 0) {
       throw new AuthClientArgError("password must be non-empty");
     }
@@ -711,6 +770,7 @@ export class AuthClient {
     const finishResp = await this.loginFinish({
       session_id: startResp.session_id,
       finalize: out.finalizeB64,
+      ...deviceField(deviceIdB64),
     });
     if (!finishResp.ok) {
       throw new AuthHttpError(200, "/login/finish", "server reported ok=false");
@@ -744,7 +804,11 @@ export class AuthClient {
    * A seed that is not the account's recovery credential, and a name
    * nobody holds, answer the same `401`.
    */
-  async recoveryLogin(handle: string, seed: Uint8Array): Promise<TotpRecoverResult> {
+  async recoveryLogin(
+    handle: string,
+    seed: Uint8Array,
+    deviceIdB64?: string,
+  ): Promise<TotpRecoverResult> {
     requireHandle(handle);
     if (seed.length === 0) {
       throw new AuthClientArgError("seed must be non-empty");
@@ -767,6 +831,7 @@ export class AuthClient {
     const finishResp = await this.recoveryLoginFinish({
       session_id: startResp.session_id,
       finalize: out.finalizeB64,
+      ...deviceField(deviceIdB64),
     });
     if (!finishResp.ok) {
       throw new AuthHttpError(200, "/recovery/login/finish", "server reported ok=false");
@@ -794,6 +859,118 @@ export class AuthClient {
       { refresh_token: refreshToken },
     );
     return sessionPairOf(resp);
+  }
+
+  /**
+   * `POST /auth/session/bind-device` — replace a session that names no
+   * device with one naming `deviceIdB64` (ADR-0066 section 0.4, T1 points 8
+   * and 9). Bearer; the body carries the refresh credential of the same
+   * session, since the route issues a new 30-day one. Idempotent for a
+   * session that already names this device (a fresh pair).
+   *
+   * Throws `AuthHttpError`: `400` (malformed or all-zero id),
+   * `401 refresh-invalid`, `401 key-generation-superseded`,
+   * `401 device-revoked`, `409 device-already-bound` (the session names
+   * another device). The caller drops the pair it sent.
+   */
+  async sessionBindDevice(
+    sessionToken: string,
+    refreshToken: string,
+    deviceIdB64: string,
+  ): Promise<SessionPair> {
+    if (sessionToken.length === 0 || refreshToken.length === 0) {
+      throw new AuthClientArgError("session credentials must be non-empty");
+    }
+    const resp = await this.post<SessionBindDeviceRequest, SessionBindDeviceResponse>(
+      "/auth/session/bind-device",
+      { device_id_b64: deviceIdB64, refresh_token: refreshToken },
+      sessionToken,
+    );
+    return sessionPairOf(resp);
+  }
+
+  /**
+   * `POST /auth/session/logout` — sign this device's session out at the
+   * server (ADR-0066 section 2.1): afterwards its bearer gets a plain `401`
+   * and its refresh credential `401 refresh-invalid`. Bearer, no body,
+   * `204`. Sent with the token exactly as given (no refresh, no retry): a
+   * logout that fails is retried from the owed marker, not here.
+   */
+  async sessionLogout(sessionToken: string): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const endpoint = "/auth/session/logout";
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${endpoint}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${sessionToken}` },
+        // The page may be navigating away right after a logout.
+        keepalive: true,
+      });
+    } catch (err) {
+      throw new AuthNetworkError(endpoint, err);
+    }
+    if (!response.ok) {
+      throw new AuthHttpError(response.status, endpoint, await safeReadBody(response));
+    }
+  }
+
+  /**
+   * `POST /account/devices/revoke` — sign another device of the account out
+   * and mark it removed (ADR-0066 section 2.1): from then on auth answers
+   * its bearer and its refresh with `401 device-revoked`, and it wipes
+   * itself. Bearer. `204`.
+   *
+   * `statement` is the 138-byte `device-revoke` account statement for
+   * `deviceId` (`signDeviceRevokeStatement`), valid for 120 s: sign it right
+   * before this call.
+   *
+   * Throws `AuthHttpError`: `403 fresh-auth-required` (no usable grant;
+   * checked first), `400` (bad id, the all-zero id, the caller's own
+   * device), `403 account-key-required` (auth has no recorded account key,
+   * or the statement did not verify), `429 too-many-attempts`.
+   */
+  async revokeDevice(
+    sessionToken: string,
+    freshGrant: string,
+    deviceId: Uint8Array,
+    statement: Uint8Array,
+  ): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    if (deviceId.length !== 32) {
+      throw new AuthClientArgError("deviceId must be 32 bytes");
+    }
+    const endpoint = "/account/devices/revoke";
+    const body: DeviceRevokeRequest = {
+      fresh_grant: freshGrant,
+      device_id_b64: base64UrlEncodeNoPad(deviceId),
+      statement_b64: base64UrlEncodeNoPad(statement),
+    };
+    let response: Response;
+    try {
+      response = await sessionFetch(`${this.baseUrl}${endpoint}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw new AuthNetworkError(endpoint, err);
+    }
+    if (!response.ok) {
+      throw new AuthHttpError(
+        response.status,
+        endpoint,
+        await safeReadBody(response),
+        retryAfterHeader(response),
+      );
+    }
   }
 
   /**
@@ -875,6 +1052,321 @@ export class AuthClient {
   }
 
   /**
+   * Rotate the signed-in account's keys, keeping the other devices (ADR-0066
+   * section 3.4, "T5 as built" items 6-13):
+   *
+   * ```text
+   *   POST /account/keys/rotate/start   { fresh_grant, recovery_request }  -> { recovery_response }
+   *   POST /account/keys/rotate/finish  { fresh_grant, recovery_upload, new_signature_pubkey_b64,
+   *                                       supersession_proof_b64, revoke_device_ids_b64[] }
+   *                                     -> { key_reset_attest_b64, <session pair> }
+   * ```
+   *
+   * `proof` is the 145-byte supersession proof signed by the OLD account key
+   * for `newSignaturePubkey`; auth verifies it against the key it recorded,
+   * so a session that holds the password but not the account key cannot
+   * rotate. Passkeys, the password and TOTP are kept; the passkey vaults are
+   * deleted. The answer carries no fresh-auth grant.
+   *
+   * Throws `AuthHttpError` (`403 fresh-auth-required`, `400`, `403
+   * account-key-required`, `429 too-many-attempts`) or `AuthNetworkError`.
+   */
+  async rotateAccountKeys(args: {
+    readonly sessionToken: string;
+    readonly freshGrant: string;
+    /** The 64-byte BIP39 seed of the NEW phrase. */
+    readonly newSeed: Uint8Array;
+    readonly newSignaturePubkey: Uint8Array;
+    readonly proof: Uint8Array;
+    /** Devices whose removal raced the commit (at most 8). */
+    readonly revokeDeviceIds: readonly Uint8Array[];
+  }): Promise<KeyResetResult> {
+    if (args.sessionToken.length === 0) throw new AuthClientArgError("sessionToken must be non-empty");
+    if (args.freshGrant.length === 0) throw new AuthClientArgError("freshGrant must be non-empty");
+    if (args.newSeed.length === 0) throw new AuthClientArgError("newSeed must be non-empty");
+    if (args.newSignaturePubkey.length !== 32) {
+      throw new AuthClientArgError("newSignaturePubkey must be 32 bytes (Ed25519)");
+    }
+    if (args.revokeDeviceIds.length > 8) {
+      throw new AuthClientArgError("at most 8 device ids ride a rotation");
+    }
+    const wasm = await loadWasm();
+    const reg = wasm.OpaqueRegister.startRecovery(args.newSeed);
+    const start = await this.post<KeyResetStartRequest, KeyResetStartResponse>(
+      "/account/keys/rotate/start",
+      { fresh_grant: args.freshGrant, recovery_request: reg.requestB64 },
+      args.sessionToken,
+    );
+    const upload = reg.finish(args.newSeed, start.recovery_response).uploadB64;
+    const finish = await this.post<KeyRotateFinishRequest, KeyResetFinishResponse>(
+      "/account/keys/rotate/finish",
+      {
+        fresh_grant: args.freshGrant,
+        recovery_upload: upload,
+        new_signature_pubkey_b64: base64UrlEncodeNoPad(args.newSignaturePubkey),
+        supersession_proof_b64: base64UrlEncodeNoPad(args.proof),
+        revoke_device_ids_b64: args.revokeDeviceIds.map((id) => base64UrlEncodeNoPad(id)),
+      },
+      args.sessionToken,
+    );
+    const attestation = base64UrlDecodeNoPad(finish.key_reset_attest_b64);
+    if (attestation.length !== KEY_RESET_ATTESTATION_LEN) {
+      throw new AuthHttpError(
+        200,
+        "/account/keys/rotate/finish",
+        `key_reset_attest_b64 is ${attestation.length} bytes, expected ${KEY_RESET_ATTESTATION_LEN}`,
+      );
+    }
+    return {
+      attestation,
+      attestationB64Url: finish.key_reset_attest_b64,
+      session: sessionPairOf(finish),
+    };
+  }
+
+  /**
+   * `POST /auth/session/refresh` with a `key_statement_b64` (ADR-0066 section
+   * 3.3, "T5 as built" items 15-17): a refresh credential of a LOWER
+   * generation is exchanged for a pair at the current one when the kind-4
+   * account statement over it verifies under the account's recorded key.
+   * Only a device that holds the new account key can produce it.
+   *
+   * `sign(signAtMs)` returns the statement signed now (`null`) or at the
+   * server's time; a `statement-stale` answer is re-signed once.
+   *
+   * Throws `AuthHttpError` 401 (`key-generation-superseded`: this key is not
+   * the account's; `device-revoked`; `refresh-invalid`) or `AuthNetworkError`.
+   */
+  async sessionRefreshUpgrade(
+    refreshToken: string,
+    sign: (signAtMs: number | null) => Uint8Array,
+  ): Promise<SessionPair> {
+    if (refreshToken.length === 0) throw new AuthClientArgError("refreshToken must be non-empty");
+    const resp = await sendWithStaleRetry(
+      (signAtMs) =>
+        this.post<SessionRefreshUpgradeRequest, SessionRefreshResponse>("/auth/session/refresh", {
+          refresh_token: refreshToken,
+          key_statement_b64: base64UrlEncodeNoPad(sign(signAtMs)),
+        }),
+      authStaleTimeOf,
+    );
+    return sessionPairOf(resp);
+  }
+
+  /**
+   * `POST /account/recall/status` (ADR-0066 part 1): whether the account
+   * can be taken back from this device, and until when. Anonymous;
+   * `statement` is the `recall-status` account statement signed by the OLD
+   * account key. Returns the parsed JSON body as it arrived
+   * (`recall.ts` reads it). Throws `AuthHttpError` (`401 recall-refused`:
+   * not possible any more; `429`) or `AuthNetworkError`.
+   */
+  async recallStatus(sign: (signAtMs: number | null) => Uint8Array): Promise<unknown> {
+    // T5 item 24: a device with a wrong clock is told the server's time and
+    // signs again; it must not read "no anchor" and destroy its record.
+    return sendWithStaleRetry(
+      (signAtMs) =>
+        this.post<RecallStatusRequest, unknown>("/account/recall/status", {
+          statement_b64: base64UrlEncodeNoPad(sign(signAtMs)),
+        }),
+      authStaleTimeOf,
+    );
+  }
+
+  /**
+   * Take the account back from a device of before the reset (ADR-0066
+   * part 1, "T3 as built"):
+   *
+   * ```text
+   *   client: OPAQUE login start (old password), registration starts (new
+   *           password, new recovery credential), the recall-start statement
+   *   POST /account/recall/start    ->  the three responses, a server nonce
+   *   client: OPAQUE login finish. A failure here is a wrong OLD password:
+   *           `RecallWrongPasswordError`, and finish is NOT called.
+   *   client: both registration finishes, the recall statement
+   *   POST /account/recall/finish   ->  the key reset's answer + a grant
+   * ```
+   *
+   * Every accepted start is one password attempt at the server. The result
+   * is the key reset's: the caller continues exactly as after
+   * `resetAccountKeys`.
+   *
+   * Throws {@link RecallWrongPasswordError}, `AuthHttpError` (`401
+   * recall-refused`, `401 wrong-password` at finish, `429
+   * too-many-attempts`, `400`) or `AuthNetworkError`.
+   */
+  async recallTakeBack(args: {
+    readonly accountId: Uint8Array;
+    /** The OLD account identity's 32-byte Ed25519 seed (the recall record). */
+    readonly oldAccountSeed: Uint8Array;
+    readonly anchorSeq: number;
+    readonly oldPassword: Uint8Array;
+    readonly newPassword: Uint8Array;
+    /** The 64-byte BIP39 seed of the NEW phrase. */
+    readonly newSeed: Uint8Array;
+    readonly newSignaturePubkey: Uint8Array;
+  }): Promise<RecallResult> {
+    if (args.oldPassword.length === 0 || args.newPassword.length === 0) {
+      throw new AuthClientArgError("passwords must be non-empty");
+    }
+    if (args.newSeed.length === 0) {
+      throw new AuthClientArgError("newSeed must be non-empty");
+    }
+    if (args.newSignaturePubkey.length !== 32) {
+      throw new AuthClientArgError("newSignaturePubkey must be 32 bytes (Ed25519)");
+    }
+    const prepared = await this.recallPrepare(args);
+    return this.recallFinish(prepared);
+  }
+
+  /**
+   * The first half of {@link recallTakeBack}: `recall/start`, the local
+   * OPAQUE finishes, and the finish request built and signed but NOT sent.
+   * The caller keeps the returned value (and the phrase it generated) until
+   * {@link recallFinish} has answered: a finish whose answer was lost is
+   * asked again with the same request (ADR-0066 T5 item 25).
+   *
+   * A `statement-stale` answer to start is re-signed at the server's time
+   * and sent once more (item 24); nothing was counted for it.
+   */
+  async recallPrepare(args: {
+    readonly accountId: Uint8Array;
+    readonly oldAccountSeed: Uint8Array;
+    readonly anchorSeq: number;
+    readonly oldPassword: Uint8Array;
+    readonly newPassword: Uint8Array;
+    readonly newSeed: Uint8Array;
+    readonly newSignaturePubkey: Uint8Array;
+  }): Promise<RecallPendingFinish> {
+    if (args.oldPassword.length === 0 || args.newPassword.length === 0) {
+      throw new AuthClientArgError("passwords must be non-empty");
+    }
+    if (args.newSeed.length === 0) {
+      throw new AuthClientArgError("newSeed must be non-empty");
+    }
+    if (args.newSignaturePubkey.length !== 32) {
+      throw new AuthClientArgError("newSignaturePubkey must be 32 bytes (Ed25519)");
+    }
+    const wasm = await loadWasm();
+    const accountIdB64Url = base64UrlEncodeNoPad(args.accountId);
+    const login = wasm.OpaqueLogin.startPassword(args.oldPassword);
+    const passwordReg = wasm.OpaqueRegister.startPassword(args.newPassword);
+    const recoveryReg = wasm.OpaqueRegister.startRecovery(args.newSeed);
+    const loginRequest = login.requestB64;
+    const start = await sendWithStaleRetry(
+      (signAtMs) =>
+        this.post<RecallStartRequest, RecallStartResponse>("/account/recall/start", {
+          account_id_b64: accountIdB64Url,
+          anchor_seq: args.anchorSeq,
+          statement_b64: base64UrlEncodeNoPad(
+            signAtMs === null
+              ? wasm.signRecallStartStatement(
+                  args.oldAccountSeed,
+                  args.accountId,
+                  BigInt(args.anchorSeq),
+                  loginRequest,
+                )
+              : wasm.signAccountStatementAt(
+                  args.oldAccountSeed,
+                  ACCOUNT_STATEMENT_KIND_RECALL_START,
+                  args.accountId,
+                  wasm.recallStartStatementBody(BigInt(args.anchorSeq), loginRequest),
+                  BigInt(signAtMs),
+                ),
+          ),
+          login_request: loginRequest,
+          password_request: passwordReg.requestB64,
+          recovery_request: recoveryReg.requestB64,
+        }),
+      authStaleTimeOf,
+    );
+    let loginFinish: string;
+    try {
+      loginFinish = login.finish(args.oldPassword, start.login_response).finalizeB64;
+    } catch {
+      // The AKE did not agree on a key: the OLD password is wrong. Nothing
+      // more is sent; the attempt was counted at start.
+      throw new RecallWrongPasswordError();
+    }
+    const passwordUpload = passwordReg.finish(args.newPassword, start.password_response).uploadB64;
+    const recoveryUpload = recoveryReg.finish(args.newSeed, start.recovery_response).uploadB64;
+    const serverNonce = base64UrlDecodeNoPad(start.server_nonce_b64);
+    const base = {
+      session_id: start.session_id,
+      account_id_b64: accountIdB64Url,
+      anchor_seq: args.anchorSeq,
+      login_finish: loginFinish,
+      password_upload: passwordUpload,
+      recovery_upload: recoveryUpload,
+      new_signature_pubkey_b64: base64UrlEncodeNoPad(args.newSignaturePubkey),
+    };
+    const oldAccountSeed = args.oldAccountSeed.slice();
+    const accountId = args.accountId.slice();
+    const newSignaturePubkey = args.newSignaturePubkey.slice();
+    const sign = (signAtMs: number | null): string =>
+      base64UrlEncodeNoPad(
+        signAtMs === null
+          ? wasm.signRecallStatement(
+              oldAccountSeed,
+              accountId,
+              serverNonce,
+              newSignaturePubkey,
+              passwordUpload,
+              recoveryUpload,
+            )
+          : wasm.signAccountStatementAt(
+              oldAccountSeed,
+              ACCOUNT_STATEMENT_KIND_RECALL,
+              accountId,
+              wasm.recallStatementBody(serverNonce, newSignaturePubkey, passwordUpload, recoveryUpload),
+              BigInt(signAtMs),
+            ),
+      );
+    return {
+      request: { ...base, statement_b64: sign(null) },
+      resign: (signAtMs) => ({ ...base, statement_b64: sign(signAtMs) }),
+      dispose: () => oldAccountSeed.fill(0),
+    };
+  }
+
+  /**
+   * The second half: `recall/finish` with the prepared request. No answer
+   * (or a `5xx`) resends the BYTE-IDENTICAL request, bounded
+   * (`statement-stale.ts`); the server answers a repeated identical finish
+   * `200` again with the same attestation for the attempt's ten minutes. A
+   * `statement-stale` answer re-signs at the server's time once; the
+   * re-signed request then replaces `pending.request`, so a later call
+   * resends what was last sent. May be called again with the same `pending`
+   * after it threw for a lost answer.
+   */
+  async recallFinish(pending: RecallPendingFinish): Promise<RecallResult> {
+    const finish = await sendWithStaleRetry((signAtMs) => {
+      if (signAtMs !== null) pending.request = pending.resign(signAtMs);
+      const request = pending.request;
+      return sendRecallFinish(
+        () => this.post<RecallFinishRequest, RecallFinishResponse>("/account/recall/finish", request),
+        (err) =>
+          err instanceof AuthNetworkError ? null : err instanceof AuthHttpError ? err.status : undefined,
+        (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+      );
+    }, authStaleTimeOf);
+    const attestation = base64UrlDecodeNoPad(finish.key_reset_attest_b64);
+    if (attestation.length !== KEY_RESET_ATTESTATION_LEN) {
+      throw new AuthHttpError(
+        200,
+        "/account/recall/finish",
+        `key_reset_attest_b64 is ${attestation.length} bytes, expected ${KEY_RESET_ATTESTATION_LEN}`,
+      );
+    }
+    return {
+      attestation,
+      attestationB64Url: finish.key_reset_attest_b64,
+      session: sessionPairOf(finish),
+      freshGrant: freshGrantOf(finish),
+    };
+  }
+
+  /**
    * Drive the full recover-from-mnemonic flow:
    *
    * ```text
@@ -915,6 +1407,7 @@ export class AuthClient {
     handle: string,
     mnemonicSeed: Uint8Array,
     newPassword: Uint8Array,
+    deviceIdB64?: string,
   ): Promise<RecoverResult> {
     requireHandle(handle);
     if (mnemonicSeed.length === 0) {
@@ -957,6 +1450,7 @@ export class AuthClient {
       session_id: startResp.session_id,
       recovery_finalize: recoveryOut.finalizeB64,
       new_password_upload: passwordOut.uploadB64,
+      ...deviceField(deviceIdB64),
     });
     if (!finishResp.ok) {
       throw new AuthHttpError(
@@ -1324,6 +1818,12 @@ function optionalBytes(b64: string | null | undefined): Uint8Array | null {
 
 /** A login handle on the wire: base64url without padding of 32 bytes. */
 const HANDLE_WIRE = /^[A-Za-z0-9_-]{43}$/;
+
+/** The optional `device_id_b64` field of a landing request (ADR-0066
+ *  section 0.4): present only when the caller knows this device's id. */
+function deviceField(deviceIdB64: string | undefined): { device_id_b64?: string } {
+  return deviceIdB64 === undefined ? {} : { device_id_b64: deviceIdB64 };
+}
 
 function requireHandle(handle: string): void {
   if (!HANDLE_WIRE.test(handle)) {

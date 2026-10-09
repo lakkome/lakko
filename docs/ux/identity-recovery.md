@@ -1689,3 +1689,405 @@ disabled control.
   ten languages; 22 are security-critical and render in English in a
   translation until reviewed (ADR-0061).
 - Nothing here was built, rendered or walked.
+
+## 18. A device that should not have the account: remove it, change the keys, take the account back
+
+Added 2026-10-07 (maintainer's decisions of that day). **Status: designed,
+not built.** Nothing in this section exists in any service or client.
+Architecture: [ADR-0066](../adr/0066-account-takeover-resistance.md). The
+catalog was **not** edited; the new keys are listed in 18.6 with their
+English text.
+
+Three things a person may need, and the one screen each starts from:
+
+| The person's situation | Where | What it does |
+|---|---|---|
+| "I do not use that device any more" / "I lost it" | Settings > Devices, on a device that has the keys | Removes the device: signs it out at once, deletes the account's data on it at its next contact, keeps it out. |
+| "That device was stolen" | The same row, second choice | Removes it **and** changes the account keys. The other devices keep everything. |
+| "My account keys were reset and it was not me" | The old device, by itself | Takes the account back with the password from before. |
+
+Contacts see nothing for any of these: no row, no banner, no prompt, no
+changed name. The safety-number screen shows the current number, as always.
+
+### 18.1 Settings > Devices: remove a device
+
+The Devices list of `second-device.md` section 3. Each other device's row
+has **Remove**. It opens the app's own sheet (never a system dialog):
+
+```
+Remove this device?
+
+It is signed out now. The next time it connects, everything this
+account kept on it is deleted: chats, contacts, keys and the
+recovery phrase.
+
+( ) I do not use it any more
+( ) It was lost or stolen
+
+[proof block, when no proof is live: section 17.1]
+
+[Cancel]                                   [Remove device]
+```
+
+- The two choices are a radio pair, neither selected at first; the main
+  button is disabled until one is.
+- **I do not use it any more** keeps the button `Remove device`.
+- **It was lost or stolen** changes the sheet in place:
+
+```
+Remove this device and change your account keys
+
+A lost device still holds your account keys. Changing them makes
+what it holds useless.
+
+- Your other devices keep their chats and get the new keys by
+  themselves.
+- You get a new recovery phrase. The old one stops working.
+- Your passkeys still sign you in. "Restore keys with this passkey"
+  is turned off until you turn it on again.
+- The people you talk to do not have to do anything.
+
+[proof block]
+
+[Cancel]                          [Remove and change keys]
+```
+
+- The proof block is section 17.1's, with helper
+  `proof.remove_device.help`. A device that holds no keys never reaches
+  this sheet: the Devices list is not shown on it (it shows "Restore your
+  keys", section 8).
+
+States of the sheet:
+
+| State | What the person sees |
+|---|---|
+| Idle | As drawn. |
+| Working (remove) | Button reads `Removing...`; everything disabled. |
+| Working (remove and change keys) | A step list replaces the bullets, one line active at a time: `Removing the device` / `Changing your account keys` / `Updating your other devices`. No percentage. Cancel is disabled from the first step. |
+| Done (remove) | The sheet closes; the row is gone; one line at the top of the list for that session: `devices.remove.done`. |
+| Done (remove and change keys) | The new recovery phrase screen of section 9.1, unchanged, then back to Devices with `devices.rotate.done`. |
+| Sign-out could not be confirmed | `devices.remove.error.not_revoked`: nothing was removed, the row stays. Retry is the same button. |
+| Signed out, removal still finishing | The row stays with a `Removing...` label and no Remove control; it finishes by itself the next time this device is online. No error. |
+| Keys could not be changed (before the change took effect) | `devices.rotate.error.not_started`: the device **was** removed, the keys are unchanged; the sheet offers `Try again` and `Not now`. |
+| Keys changed, publishing still owed | The existing "publish owed" state of 15.4: the words are withheld with 15.4's copy, retried by itself. |
+| Wrong password / rate limited / offline / passkey states | Section 17.1's table. Wrong-password line: `proof.remove_device.wrong_password`. |
+| This device has no account key recorded yet | `devices.remove.error.try_later` (a state of an account created before this was built; not expected after the flag day). |
+
+What changed from today's sheet: `settings.devices.remove.body` ("You may
+be asked for your passkey") is replaced by the text above; the passkey
+gesture, when the account has one, is the proof block's.
+
+### 18.2 The removed device
+
+Replaces `second-device.md` 3.1's screen. Same full-screen shape, no
+dismiss, no chat list behind it, at launch too. The deletion **starts by
+itself**; there is no Sign out button to tap first.
+
+```
+This device was removed
+
+It was removed from the account @name on another device and
+signed out.
+
+Everything this account kept on this device is being deleted:
+its chats, contacts, keys and recovery phrase.
+
+[progress]  Removing...
+```
+
+then:
+
+```
+This device was removed
+
+It was removed from the account @name on another device and
+signed out. Everything the account kept here was deleted.
+
+[Sign in]
+```
+
+- Shown when the server refuses the device as removed, or when the device
+  reads its own removal from its devices' shared state. Never on a failed
+  request alone.
+- No "Was it you?" here and no way back: a removal changes no keys, so
+  there is nothing to take back. If the person did not remove it, they sign
+  in with their password and are a device without keys (section 8).
+- Accessibility as 15.2: one announcement for title and body, `Removing`
+  announced once, the single button the only focusable element.
+
+**Log out** (Settings > Account) keeps its sheet and copy. What changes is
+not visible: the device is signed out at the server too, so a copy of what
+it held cannot keep using the account. Offline, the device logs out locally
+and tells the server the next time the app opens; nothing is shown for
+that.
+
+### 18.3 The other devices after "remove and change keys"
+
+A kept device changes its keys by itself the next time it is online. The
+person sees the app as it was, with every chat, and one dismissible line at
+the top of the chat list:
+
+```
+Your account keys were changed on another device. This device has
+the new ones.                                  [Show new phrase]
+```
+
+- `Show new phrase` opens Settings > Security > Recovery, which asks for
+  the password as it always does.
+- While the device is fetching the new keys (it was told its session is
+  out of date and has not yet read them): the chat list stays, the header
+  shows `Updating keys...` where "Synchronizing..." would be, sends wait.
+  No full-screen state.
+- If the new keys never reach it (it was offline for longer than they are
+  kept, about a month): it shows 18.4, whose **Yes** leads to signing in
+  and getting the keys from another device.
+
+### 18.4 The old device after a reset: "Was it you?"
+
+Replaces 15.2's first screen. A device that learns the account keys were
+reset elsewhere deletes the account's chats, contacts and conversation
+data **at once**, as before, and then asks:
+
+```
+Your account keys were reset
+
+The keys of @name were reset on another device on 7 October.
+This device was signed out, and the chats and contacts it kept
+were deleted.
+
+Was it you?
+
+[Yes, it was me]
+[No, take the account back]
+
+You can take the account back from this device until 6 November.
+```
+
+- Both buttons are full-width, stacked, neither styled as destructive;
+  **No, take the account back** is the primary.
+- The date line is drawn only when the device has confirmed with the server
+  that taking back is possible. While it is checking: the buttons are shown
+  with **No** disabled and `devices.recall.checking` under them. Offline:
+  both shown, **No** disabled, `common.error.offline`, re-checked when the
+  connection returns.
+- When taking back is not possible (the time has passed, or this device was
+  never able to): the screen is 15.2 as built (the deletion finishes by
+  itself, then `Sign in`). Nothing says why.
+- **Yes, it was me**: one confirmation inside the same screen, not a
+  dialog: `devices.recall.yes.confirm` with `Delete and sign in` /
+  `Go back`. Then 15.2's "Removing..." and `Sign in`.
+
+**No, take the account back** opens the form on the same screen:
+
+```
+Take the account back
+
+Enter the password this account had before the reset, and choose a
+new one. Whoever reset the keys will be signed out.
+
+Password before the reset
+[ ............            (show) ]
+
+New password
+[ ............            (show) ]
+Repeat new password
+[ ............            (show) ]
+
+- The account gets new keys and a new recovery phrase.
+- Passkeys and the authenticator code are removed. Add them again
+  afterwards.
+- Messages sent to the account since the reset were not sent to
+  you and cannot be recovered.
+
+[Back]                              [Take the account back]
+```
+
+| State | What the person sees |
+|---|---|
+| Idle | Main button disabled until the three fields are filled, the new password passes the signup rule and the two match. |
+| Working | `Taking the account back...`; fields and buttons disabled. |
+| Wrong password | `devices.recall.error.wrong_password` under the first field, which keeps focus and is selected. If the server said how many tries are left below five: `devices.recall.error.tries_left`. |
+| Changed your own password recently | Not detectable; the wrong-password line carries the hint (`...If you changed your password in the last month, enter the one you had before that.`). |
+| Rate limited | `recovery.error.rate_limited` with the countdown; Back stays usable. |
+| No more tries | `devices.recall.error.exhausted`; the screen becomes 15.2 (deletion finishes, `Sign in`). |
+| Not possible any more (the time passed while the form was open) | `devices.recall.error.closed`; then 15.2. |
+| Offline | `common.error.offline`; the fields keep their contents. |
+| Done | The new recovery phrase screen of section 9.1 (acknowledge-gated, withheld while the publish is owed as in 15.4), then the app, signed in, with no chats yet. One line at the top of the chat list for that session: `devices.recall.done`. |
+
+- The three password fields are secure fields with show / hide; none is
+  pre-filled; the first uses the platform's "current password" content
+  type so a password manager offers the saved one, the other two "new
+  password".
+- No passkey route here: the passkeys on the account may be the other
+  party's, and the rule is the password from before.
+- After the account was taken back, the device that had reset the keys is
+  an old device in its turn. It has nothing older to take the account back
+  with, so it shows 15.2 as built: the deletion finishes by itself, then
+  `Sign in`.
+
+### 18.5 What nobody else sees
+
+- A contact: nothing, for a removal, a key change with the devices kept, a
+  reset, or an account taken back. Conversations stay in their rows.
+- The person's own other devices after a plain removal: the row disappears
+  from Devices. No banner.
+- After the account was taken back, the device that had reset it shows
+  15.2 / 18.4 like any other old device.
+
+### 18.6 Copy (new keys; not in the catalog yet)
+
+`sc` marks a security-critical candidate (ADR-0061: it renders in English
+in a translation until a native reviewer has passed it).
+
+| Key | English | sc |
+|---|---|---|
+| `settings.devices.remove.title` | Remove this device? | |
+| `settings.devices.remove.body` (replaces the existing text) | It is signed out now. The next time it connects, everything this account kept on it is deleted: chats, contacts, keys and the recovery phrase. | sc |
+| `settings.devices.remove.reason_unused` | I do not use it any more | |
+| `settings.devices.remove.reason_stolen` | It was lost or stolen | |
+| `settings.devices.remove.confirm` | Remove device | |
+| `settings.devices.remove.working` | Removing... | |
+| `devices.rotate.title` | Remove this device and change your account keys | sc |
+| `devices.rotate.lede` | A lost device still holds your account keys. Changing them makes what it holds useless. | sc |
+| `devices.rotate.effect_devices` | Your other devices keep their chats and get the new keys by themselves. | sc |
+| `devices.rotate.effect_phrase` | You get a new recovery phrase. The old one stops working. | sc |
+| `devices.rotate.effect_passkeys` | Your passkeys still sign you in. "Restore keys with this passkey" is turned off until you turn it on again. | sc |
+| `devices.rotate.effect_contacts` | The people you talk to do not have to do anything. | sc |
+| `devices.rotate.confirm` | Remove and change keys | |
+| `devices.rotate.step_remove` | Removing the device | |
+| `devices.rotate.step_keys` | Changing your account keys | |
+| `devices.rotate.step_devices` | Updating your other devices | |
+| `devices.rotate.done` | Your account keys were changed. Your other devices get the new ones when they next connect. | sc |
+| `devices.rotate.error.not_started` | The device was removed, but your account keys were not changed. | sc |
+| `devices.rotate.retry` | Try again | |
+| `devices.rotate.not_now` | Not now | |
+| `devices.remove.done` | Device removed and signed out. | sc |
+| `devices.remove.pending` | Removing... | |
+| `devices.remove.error.not_revoked` | The device could not be signed out, so nothing was removed. Try again. | sc |
+| `devices.remove.error.try_later` | This device is still setting up the account. Try again in a minute. | |
+| `proof.remove_device.help` | Enter your password to remove this device. | sc |
+| `proof.remove_device.wrong_password` | That password is not right. The device was not removed. | sc |
+| `devices.removed.title` (existing) | This device was removed | sc |
+| `devices.removed.body_removing` | It was removed from the account {name} on another device and signed out. Everything this account kept on this device is being deleted: its chats, contacts, keys and recovery phrase. | sc |
+| `devices.removed.body_done` | It was removed from the account {name} on another device and signed out. Everything the account kept here was deleted. | sc |
+| `devices.rotated.notice` | Your account keys were changed on another device. This device has the new ones. | sc |
+| `devices.rotated.show_phrase` | Show new phrase | |
+| `devices.rotated.updating` | Updating keys... | |
+| `devices.recall.body` | The keys of {name} were reset on another device on {date}. This device was signed out, and the chats and contacts it kept were deleted. | sc |
+| `devices.recall.question` | Was it you? | sc |
+| `devices.recall.yes` | Yes, it was me | sc |
+| `devices.recall.no` | No, take the account back | sc |
+| `devices.recall.until` | You can take the account back from this device until {date}. | sc |
+| `devices.recall.checking` | Checking whether the account can be taken back... | |
+| `devices.recall.yes.confirm` | The rest of what this account kept on this device will be deleted. To use the account here again, sign in and get the keys from the device that reset them. | sc |
+| `devices.recall.yes.delete` | Delete and sign in | |
+| `devices.recall.yes.back` | Go back | |
+| `devices.recall.form.title` | Take the account back | sc |
+| `devices.recall.form.lede` | Enter the password this account had before the reset, and choose a new one. Whoever reset the keys will be signed out. | sc |
+| `devices.recall.form.old_password` | Password before the reset | sc |
+| `devices.recall.form.new_password` | New password | |
+| `devices.recall.form.repeat_password` | Repeat new password | |
+| `devices.recall.form.effect_keys` | The account gets new keys and a new recovery phrase. | sc |
+| `devices.recall.form.effect_factors` | Passkeys and the authenticator code are removed. Add them again afterwards. | sc |
+| `devices.recall.form.effect_messages` | Messages sent to the account since the reset were not sent to you and cannot be recovered. | sc |
+| `devices.recall.form.submit` | Take the account back | sc |
+| `devices.recall.form.working` | Taking the account back... | |
+| `devices.recall.error.wrong_password` | That is not the password this account had before the reset. If you changed your password in the last month, enter the one you had before that. | sc |
+| `devices.recall.error.tries_left` | {count, plural, one {# try left} other {# tries left}} | sc |
+| `devices.recall.error.exhausted` | Too many wrong passwords. The account can no longer be taken back from this device. | sc |
+| `devices.recall.error.closed` | The account can no longer be taken back from this device. | sc |
+| `devices.recall.done` | You took your account back. Add your passkeys and your other devices again. | sc |
+| `settings.account.delete.blocked` | The account keys were reset recently. The account cannot be deleted until {date}. | sc |
+
+Reused unchanged: `devices.signed_out.*` (15.2), `proof.*` and
+`recovery.error.rate_limited` (17), `common.error.offline`,
+`settings.account.log_out.*`, the section 9.1 phrase screen.
+
+Retired when this is built: `devices.removed.body`, `devices.removed.sign_out`
+(the deletion no longer waits for a tap).
+
+### 18.7 Data the UI needs
+
+From the server (none of it exists; routes in ADR-0066):
+
+- Removing: an answer that tells "signed out at the server" from every
+  failure, before anything else is attempted; a refusal that means "proof
+  required" (17.6); a refusal that means "this device cannot remove
+  devices" (it holds no keys).
+- On the removed device: a refusal that means **removed**, distinct from
+  "keys were reset" and from "session expired". Each of the three leads to
+  a different screen and a different deletion (all / staged / none).
+- For "Was it you?": whether this device can take the account back, until
+  when, and when the keys were reset; the answer must be unobtainable
+  without this device.
+- For the form: wrong password as its own answer, with the number of tries
+  left when it is below five; "no longer possible"; the retry time when
+  rate limited.
+- For a kept device: that its session is out of date **because the keys
+  were changed with the devices kept** is not something the server tells
+  it; it learns it from its own devices' shared state. Until it has, it
+  shows `Updating keys...`, never a full-screen state.
+- Account deletion: a refusal carrying the date until which it is blocked.
+
+Kept by the client:
+
+- On the old device, for the time taking back is possible: the account
+  name, the date it learned of the reset, the date until which it can act,
+  and what it needs to prove it is a device of the account. Nothing else of
+  the account.
+- On the removing device: which step of a removal or of a key change is
+  still owed, so a closed app finishes it at the next launch.
+- On a kept device: whether the "keys were changed" line was dismissed.
+
+### 18.8 Cross-platform shape
+
+- One model on web, iOS and Android: the same sheet, the same two
+  full-screen states, the same form, the same order of fields.
+- Every surface is the app's own: the remove sheet replaces any stock
+  confirm (web `ConfirmDialog`, the app-drawn sheets on iOS and Android);
+  the "Yes" confirmation is drawn inside the screen.
+- The removed and "Was it you?" screens replace the whole app on every
+  platform, including on launch and when opened from a notification; a
+  notification that arrives for an account in either state is not shown.
+- Web: a second tab of the same account shows the same state without a
+  reload. iOS: the notification extension stops producing previews for the
+  account as soon as either state is entered. Android: the same for the
+  background decrypt.
+- Dates use the platform's medium date in the interface language. `{name}`
+  is the `@username`.
+- Right-to-left: the sheet and the form mirror; password fields stay LTR.
+- Accessibility: the radio pair is one group with a label; the step list
+  announces each step once when it becomes active; on "Was it you?" the
+  title, body and question are one announcement and focus lands on **No,
+  take the account back**; error lines are announced when they appear and
+  focus stays in the field; the tries-left line is announced once per
+  change.
+
+### 18.9 Deliberately not built, and open
+
+- **A device without keys cannot remove a device.** It can reset the keys
+  (15.1), which the old devices can answer with 18.4.
+- **Taking back needs an old device that is opened within about a month.**
+  With no device left, a reset by someone who learned the password stands.
+- **What was sent to the account between the reset and the take-back is
+  gone for the owner and was read by the other party.** The form says so.
+- **A removal alone does not change the account keys.** The sheet's second
+  choice exists to say this at the moment it matters; there is no warning
+  on the first.
+- **After "remove and change keys", conversations keep working unchanged,
+  and a device added later joins them as before.** Moving every
+  conversation onto the new keys is a later build (ADR-0066 section 3.6)
+  with nothing to show.
+- **Account deletion is blocked for about a month after a reset**, with one
+  line and a date. Open: the maintainer may prefer to allow it (ADR-0066
+  D3).
+- **The password asked for is the one from before the first change**, which
+  for a person who changed their own password in the last month is the
+  older one. The error line says it. Open (ADR-0066 D2).
+- No list of "devices that were removed", no undo of a removal, no email or
+  push about any of this to the person or to anyone else.
+- Whether the take-back form should also offer the old device's own screen
+  lock as an extra step was not designed.
+- Strings: 57 keys listed in 18.6 (55 new, one existing text replaced, one
+  existing key reused as is), 37 marked security-critical, none added to
+  the catalog. Nothing here was built, rendered or walked.

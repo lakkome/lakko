@@ -158,7 +158,7 @@ private final class ScriptedKeyReset: KeyResetAttestationVerifying {
                 self.keyPackageCalls.append(secrets)
                 if let error = self.keyPackageError { throw error }
             },
-            refoundDeviceGroup: { [unowned self] _, accountIdB64, attestation in
+            refoundDeviceGroup: { [unowned self] _, accountIdB64, attestation, _ in
                 self.events.append("devicegroup")
                 self.deviceGroupCalls.append((accountIdB64, attestation))
                 if let error = self.deviceGroupError { throw error }
@@ -288,7 +288,9 @@ final class RecoveryFlowTests: XCTestCase {
             grantNowMs: { clock.nowMs },
             attestationVerifier: reset,
             keyResetHooks: reset.hooks,
-            wipeAfterKeyReset: { wiped.note($0) }
+            wipeAfterKeyReset: { wiped.note($0) },
+            recallRecords: InMemoryRecallRecordStore(),
+            recallOperations: .unreachable
         )
         return Harness(
             repository: repository, store: store, persistence: persistence, directory: directory,

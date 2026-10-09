@@ -875,6 +875,36 @@ impl ChannelStore for SqlChannelStore {
         .transpose()
     }
 
+    async fn replace_owner(
+        &self,
+        channel: ChannelId,
+        current_owner: [u8; OWNER_PUBKEY_LEN],
+        new_owner: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError> {
+        // One conditional UPDATE: of two handovers verified under the same
+        // key, the row lock lets one through and the other matches no row.
+        let replaced =
+            sqlx::query("UPDATE channels SET owner_pubkey = ? WHERE id = ? AND owner_pubkey = ?")
+                .bind(new_owner.as_slice())
+                .bind(channel.as_bytes().as_slice())
+                .bind(current_owner.as_slice())
+                .execute(&self.pool)
+                .await
+                .map_err(db_err)?
+                .rows_affected();
+        if replaced == 1 {
+            return Ok(true);
+        }
+        // No row matched: an unknown channel, or a key that is not (or no
+        // longer) the owner's. (`new == current` matches a row and changes
+        // nothing; MariaDB then reports 0 affected rows, which is also the
+        // "nothing changed" answer.)
+        match self.owner_pubkey(channel).await? {
+            None => Err(StorageError::UnknownChannel),
+            Some(stored) => Ok(stored == new_owner && current_owner == new_owner),
+        }
+    }
+
     async fn consume_owner_nonce(
         &self,
         nonce: [u8; OWNER_NONCE_LEN],

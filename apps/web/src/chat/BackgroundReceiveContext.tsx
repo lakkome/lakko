@@ -46,7 +46,7 @@ import {
   type JSX,
 } from "solid-js";
 
-import { useAuth } from "../auth/AuthContext";
+import { conversationSeedOf, useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { useCallHost } from "../calls/CallHostContext";
 import { isDsNetworkFailure } from "../ds/client";
@@ -123,6 +123,7 @@ import {
   type RosterLeafKeys,
 } from "./device-readmission";
 import { markOwnPublished } from "./own-published";
+import { hexOfKey, ownDeviceAdmissible, ownDeviceRoster } from "../devices/own-device-roster";
 import { ownPersonKeyB64, personKeyOf, personKeysOf, type RosterLeaf } from "./person-key";
 import { accountIdB64OfHex, loadAccepted, loadFlaggedContacts, readKeyReset } from "../contacts/local-store";
 import {
@@ -177,7 +178,9 @@ export interface BackgroundReceiveApi {
   /**
    * ADR-0050 section 2.10 — retire a device just removed from the DeviceGroup
    * from EVERY chat this device is in (its one leaf per chat, the account's
-   * other devices untouched), then delete its directory KeyPackage.
+   * other devices untouched). The directory row is deleted before this, by
+   * the removal operation (ADR-0066 section 2.3, `devices/removal.ts`), which
+   * retries this fan-out from its owed record while `failed` is not 0.
    */
   retireDevice(deviceKey: Uint8Array): Promise<DeviceFanOut>;
 }
@@ -197,6 +200,11 @@ export interface DeviceFanOut {
  *  it has landed a session, which includes a proof-of-work solve. */
 export const ADMIT_DEVICE_WAIT_MS = 180_000;
 export const ADMIT_DEVICE_POLL_MS = 3_000;
+/** How long `admitDevice` waits for the account's DeviceGroup roster to name
+ *  the device (ADR-0066 section 2.3). The pairing added it there before this
+ *  runs; the wait covers the sync runtime reloading its handle. Chosen. */
+export const ADMIT_DEVICE_ROSTER_WAIT_MS = 30_000;
+export const ADMIT_DEVICE_ROSTER_POLL_MS = 1_000;
 
 const BackgroundReceiveContext = createContext<BackgroundReceiveApi>();
 
@@ -493,7 +501,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     let ownRole: PushRotationRole = null;
     {
       const wasm = await loadWasm();
-      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+      const identity = wasm.Identity.fromSeed(conversationSeedOf(secrets));
       try {
         ownRole = await readPushRotationRole(entry.group, identity);
       } finally {
@@ -681,11 +689,18 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         accounts.push({ personKeyB64: l.personKeyB64, devices: null });
       }
     }
+    // ADR-0066 section 2.3 — an own device is admitted only when the
+    // account's DeviceGroup holds it.
+    const deviceGroup = ownDeviceRoster(account);
     const plan = planReadmission({
       roster,
       ownPersonKeyB64: own,
       accounts,
       removed: removedDevices(account, entry.groupIdB64),
+      ownDeviceGroup:
+        deviceGroup === null
+          ? null
+          : new Set([...deviceGroup.keysHex].map((hex) => base64Encode(hexToBytes(hex) ?? new Uint8Array(0)))),
     });
     if (plan.admit.length === 0 && plan.retire.length === 0) return;
     let proposed = 0;
@@ -835,10 +850,31 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     }
   }
 
+  /** Wait, bounded, until the account's DeviceGroup roster names
+   *  `deviceKey`; throws when it never does. */
+  async function awaitOwnDeviceInRoster(accountIdB64: string, deviceKey: Uint8Array): Promise<void> {
+    const deadline = Date.now() + ADMIT_DEVICE_ROSTER_WAIT_MS;
+    const keyHex = hexOfKey(deviceKey);
+    for (;;) {
+      if (ownDeviceAdmissible(ownDeviceRoster(accountIdB64), keyHex)) return;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          "the device is not in the account's device list; it is not added to your chats",
+        );
+      }
+      await sleepCancellable(ADMIT_DEVICE_ROSTER_POLL_MS, new AbortController().signal);
+    }
+  }
+
   async function admitDevice(deviceKey: Uint8Array): Promise<DeviceFanOut> {
     const secrets = auth.identitySecrets();
     if (secrets === null) throw new Error("admitDevice: no session");
     const keyPackage = await awaitDeviceKeyPackage(secrets.accountId, deviceKey);
+    // ADR-0066 section 2.3 — only a device the account's DeviceGroup holds
+    // is fanned into the chats. The pairing that calls this added it there
+    // first; the sync runtime reloads its handle after that change, so the
+    // roster is given a moment to show it.
+    await awaitOwnDeviceInRoster(base64Encode(secrets.accountId), deviceKey);
     let offered = 0;
     let skipped = 0;
     let failed = 0;
@@ -902,17 +938,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         console.warn("ADR-0050 retire device: chat skipped", entry.groupIdB64, err);
       }
     }
-    // The directory row last: a peer that fetched it meanwhile only produced a
-    // Welcome nobody will open.
-    discovery.setSessionToken(secrets.sessionToken);
-    try {
-      await discovery.deleteKeyPackage(deviceKey);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("ADR-0050 retire device: directory KeyPackage not deleted", err);
-    } finally {
-      discovery.setSessionToken(null);
-    }
+    // ADR-0066 section 2.3 — the directory row is deleted FIRST now, with
+    // the account statement, by the removal operation that calls this
+    // (`devices/removal.ts`), not here.
     return { offered, skipped, failed };
   }
 
@@ -1138,7 +1166,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       const currentMemberKeys = memberSignatureKeys(entry.group);
       const selfEvicted = readIsActive(entry.group) === false;
       const wasm = await loadWasm();
-      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+      const identity = wasm.Identity.fromSeed(conversationSeedOf(secrets));
       let ownRole;
       try {
         ownRole = await readPushRotationRole(entry.group, identity);

@@ -63,6 +63,13 @@ public struct ChatListScreen: View {
     public var onOpenFolderSettings: (_ reorder: Bool) -> Void
     /// UX 17.5 — `Open Devices` on the new-device banner: Settings > Devices.
     public var onOpenDevices: () -> Void = {}
+    /// UX 18.4, "Done" — the one-session line after the account was taken
+    /// back on this device (``RecalledNoticeBanner``). A view of its own, so
+    /// this screen is not re-evaluated by it; `nil` draws nothing.
+    var recalledNotice: RecalledNoticeBanner?
+    /// UX 18.3 — `Updating keys...` in the header while a kept device adopts
+    /// the account's new keys (``KeysUpdatingLabel``); `nil` draws nothing.
+    var keysUpdatingLabel: KeysUpdatingLabel?
     /// ADR-0060 — "Search people" (`docs/ux/who-can-find-me.md` section 6.1):
     /// the network search for a username or a name, and the request to one of
     /// its results. `nil` hides the row.
@@ -90,6 +97,8 @@ public struct ChatListScreen: View {
         onFoundPerson: @escaping (String) -> Void,
         onOpenFolderSettings: @escaping (Bool) -> Void = { _ in },
         onOpenDevices: @escaping () -> Void = {},
+        recalledNotice: RecalledNoticeBanner? = nil,
+        keysUpdatingLabel: KeysUpdatingLabel? = nil,
         peopleSearch: PeopleSearchActions? = nil
     ) {
         self.viewModel = viewModel
@@ -101,6 +110,8 @@ public struct ChatListScreen: View {
         self.onFoundPerson = onFoundPerson
         self.onOpenFolderSettings = onOpenFolderSettings
         self.onOpenDevices = onOpenDevices
+        self.recalledNotice = recalledNotice
+        self.keysUpdatingLabel = keysUpdatingLabel
         self.peopleSearch = peopleSearch
     }
 
@@ -137,6 +148,7 @@ public struct ChatListScreen: View {
                 // folder bar. Its own view observes the notice, so this
                 // screen is not re-evaluated by it.
                 NewDeviceNoticeBanner(center: .shared, onOpenDevices: onOpenDevices)
+                if let recalledNotice { recalledNotice }
                 if showsFolderBar {
                     FolderBar(
                         folders: deviceGroupSync.folders,
@@ -193,6 +205,9 @@ public struct ChatListScreen: View {
                             .foregroundStyle(.secondary)
                             .accessibilityAddTraits(.updatesFrequently)
                     }
+                }
+                if let keysUpdatingLabel, !viewModel.synchronizing {
+                    ToolbarItem(placement: .navigationBarLeading) { keysUpdatingLabel }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) { createMenu }
             }

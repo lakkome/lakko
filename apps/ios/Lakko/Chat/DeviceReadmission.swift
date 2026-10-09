@@ -78,11 +78,23 @@ public enum DeviceReadmission {
     ///   member's client would propose adding them to every shared group ahead
     ///   of any verification. The retire half is untouched: it is about this
     ///   account's own leaves.
+    ///
+    /// - Parameter ownDeviceGroupRoster: ADR-0066 section 2.3 — the leaf keys
+    ///   (base64) of the account's own DeviceGroup, or `nil` when it could
+    ///   not be read. A device of the OWN account is proposed for an Add only
+    ///   when it is in that roster: the DeviceGroup is the account's own,
+    ///   MLS-authenticated record of its devices, and a removed device is not
+    ///   in it, so one that publishes itself again is not put back. A roster
+    ///   that could not be read admits no own device (the next check reads it
+    ///   again). The per-chat `removed` memory stays as defence in depth, and
+    ///   stays the only memory for a contact's devices. The retire half is
+    ///   untouched.
     public static func plan(
         roster: [RosterLeafKeys],
         ownPersonKeyB64: String,
         accounts: [AccountDevices],
         removed: Set<String>,
+        ownDeviceGroupRoster: Set<String>?,
         suppressAdmit: Set<String> = []
     ) -> Plan {
         let rosterKeys = Set(roster.map { $0.leafKeyB64 })
@@ -93,8 +105,13 @@ public enum DeviceReadmission {
             guard let devices = account.devices else { continue }
             let listed = Set(devices.map { $0.deviceKeyB64 })
             let suppressed = suppressAdmit.contains(account.personKeyB64)
+            let own = account.personKeyB64 == ownPersonKeyB64
             for device in devices where !suppressed {
                 if rosterKeys.contains(device.deviceKeyB64) { continue }
+                if own, !ownDeviceAdmissible(
+                    deviceKeyB64: device.deviceKeyB64, ownDeviceGroupRoster: ownDeviceGroupRoster) {
+                    continue
+                }
                 if removed.contains(device.deviceKeyB64) { continue }
                 if seen.contains(device.deviceKeyB64) { continue }
                 seen.insert(device.deviceKeyB64)
@@ -107,6 +124,18 @@ public enum DeviceReadmission {
             }
         }
         return Plan(admit: admit, retire: retire)
+    }
+
+    /// ADR-0066 section 2.3 — whether a device of the OWN account may be
+    /// added to a conversation: only when its key is a leaf of the account's
+    /// DeviceGroup. `nil` (the roster could not be read) admits nothing.
+    /// Every "add my own device" path asks this: the re-admission arm, the
+    /// pairing fan-out and a new conversation's first commit.
+    public static func ownDeviceAdmissible(
+        deviceKeyB64: String,
+        ownDeviceGroupRoster: Set<String>?
+    ) -> Bool {
+        ownDeviceGroupRoster?.contains(deviceKeyB64) ?? false
     }
 }
 

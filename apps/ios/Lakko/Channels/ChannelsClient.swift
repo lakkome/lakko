@@ -324,6 +324,44 @@ public final class ChannelsClient {
         }
     }
 
+    /// `PUT /v1/channels/{id}/owner` (ADR-0066 section 3.5, "Channels") —
+    /// replace the channel's owner key after a rotation of the account keys.
+    /// The body is the NEW owner key (32 raw bytes: the verifying key the new
+    /// account identity derives for the channel); the authorisation is the
+    /// existing owner request proof, signed by `signingIdentity`'s owner key
+    /// over the method, the path and the body.
+    ///
+    /// `204`: the key was replaced, or `signingIdentity` already owns the
+    /// channel under the key named (which is how the new owner asks whether
+    /// its handover landed). Throws ``ChannelsApiError``: `401
+    /// owner-proof-required` (the signer is not the owner), `400
+    /// bad-owner-pubkey`, `409 owner-changed`.
+    public func replaceOwner(
+        channelIdHex: String,
+        signingIdentity: Identity,
+        newOwnerIdentity: Identity
+    ) async throws {
+        guard let id = Self.hexToData(channelIdHex), id.count == 16 else {
+            throw ChannelsApiError(status: -1, code: "bad-channel-id", detail: "channel id is not 32 hex chars")
+        }
+        let path = "/v1/channels/\(channelIdHex)/owner"
+        let signer = try Self.ownerSigner(accountIdentity: signingIdentity, channelIdHex: channelIdHex)
+        let body = try Self.ownerSigner(accountIdentity: newOwnerIdentity, channelIdHex: channelIdHex)
+            .verifyingKey()
+        var request = URLRequest(url: try buildURL(endpoint: path))
+        request.httpMethod = "PUT"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue(
+            signer.sign(method: "PUT", path: path, query: "", body: body),
+            forHTTPHeaderField: channelOwnerProofHeaderName())
+        request.httpBody = body
+        let (data, response) = try await transport(request)
+        guard let http = response as? HTTPURLResponse else {
+            throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
+        }
+        let _: EmptyResponse = try decode(data: data, http: http)
+    }
+
     /// `GET /v1/channels/:id/subscribers/:pk/envelope` —
     /// fetch the latest seed envelope delivered to this
     /// subscriber. Returns `nil` when registered but no

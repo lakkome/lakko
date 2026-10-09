@@ -93,6 +93,30 @@ final class DeleteAccountWipeTests: XCTestCase {
         XCTAssertTrue(proof.layout.showsBlock)
     }
 
+    /// ADR-0066 section 1.3 — while the account can still be taken back
+    /// after a key reset it cannot be deleted: `409 recall-window-open` shows
+    /// the blocked line with the date, and nothing is wiped.
+    func testA409RecallWindowOpenShowsTheBlockedLineAndWipesNothing() async throws {
+        StatusStub.status = 409
+        StatusStub.body = #"{"error":"recall-window-open","until_ms":1762387200000}"#
+        var wiped: [String] = []
+        let (model, auth) = makeModel { wiped.append($0) }
+        try await auth.proveWithPassword(password: Data("pw".utf8))
+
+        let deleted = await model.deleteAccount(proof: model.makeProof(.deleteAccount), hasPasskey: false)
+
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(wiped, [], "the account still exists, so its data stays")
+        guard case .error(let line)? = model.message else {
+            return XCTFail("expected the blocked line")
+        }
+        let date = RecallCopy.date(ms: 1_762_387_200_000, locale: Localization.currentLocale)
+        XCTAssertEqual(
+            line.text, Localization.text("settings.account.delete.blocked", texts: ["date": date]))
+        XCTAssertTrue(line.text.contains(date))
+        XCTAssertTrue(auth.holdsLiveFreshAuth(), "the proof is not what was refused")
+    }
+
     // MARK: - An account with a passkey: one gesture (UX 17.3)
 
     /// The gesture bound to the deletion is the proof: one passkey sheet, no
@@ -244,8 +268,15 @@ final class DeleteAccountWipeTests: XCTestCase {
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+        /// ADR-0066: every session landing names the device and records the
+        /// account key at auth, in the background. Those two are not what
+        /// these tests count.
+        private static let landingPaths: Set<String> = ["/auth/session/bind-device", "/auth/genesis/attest"]
+
         override func startLoading() {
-            Self.requests += 1
+            if !Self.landingPaths.contains(request.url?.path ?? "") {
+                Self.requests += 1
+            }
             if let grant = request.value(forHTTPHeaderField: WebauthnClient.freshGrantHeader) {
                 Self.lastFreshGrant = grant
             }

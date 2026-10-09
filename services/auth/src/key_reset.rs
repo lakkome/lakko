@@ -18,9 +18,13 @@
 //!    the key generation, the key-reset attestation and a fresh session pair,
 //!    after ONE transaction, in this order:
 //!    1. lock the account row and compare its key generation with the
-//!       grant's (equal, or the whole reset is refused), then bump
-//!       `accounts.identity_version` and read the new value `g` in one
-//!       statement (the `LAST_INSERT_ID` idiom);
+//!       grant's (equal, or the whole reset is refused), capture the recall
+//!       anchor (ADR-0066 section 0.2: the identity key and the password
+//!       envelope as they are before this change, unless an anchor for the
+//!       current key already exists; see `crate::recall`), then bump
+//!       `accounts.identity_version`, record the new key in
+//!       `accounts.identity_pubkey` (ADR-0066 section 0.1) and read the new
+//!       value `g` in one statement (the `LAST_INSERT_ID` idiom);
 //!    2. replace the recovery credential: delete the account's in-flight
 //!       recovery-login and password-reset states, upsert `KIND_RECOVERY`;
 //!    3. delete the passkey vaults, then the passkeys, then the account's
@@ -123,7 +127,7 @@ use crate::opaque::{
     LakkoCipherSuite, OpaqueError, KIND_PASSWORD_RESET, KIND_RECOVERY,
 };
 use crate::session::SessionPair;
-use crate::webauthn::{ApiError, AuthenticatedAccount};
+use crate::webauthn::{ApiError, AuthenticatedAccount, AuthenticatedDevice};
 use crate::AppState;
 
 /// Body of `POST /account/keys/reset/start`.
@@ -158,8 +162,15 @@ pub(crate) struct ResetFinishReq {
     /// Base64-encoded `RegistrationUpload` for the new recovery seed.
     pub(crate) recovery_upload: String,
     /// URL-safe base64 of the new identity's 32-byte Ed25519 signature
-    /// pubkey: the key the reset installs, bound into the attestation.
+    /// pubkey: the key the reset installs, bound into the attestation and
+    /// recorded as the account's identity key (ADR-0066 section 0.1).
     pub(crate) new_signature_pubkey_b64: String,
+    /// URL-safe base64 of the 32-byte device id the new pair names
+    /// (ADR-0066 section 0.4). Absent: the pair names the device the
+    /// caller's bearer names. A reset that gives the device a new
+    /// conversation leaf key sends the new id here.
+    #[serde(default)]
+    pub(crate) device_id_b64: Option<String>,
 }
 
 /// Response of `POST /account/keys/reset/finish`.
@@ -185,7 +196,46 @@ fn decode_pubkey(b64: &str) -> Result<[u8; 32], ApiError> {
         .as_slice()
         .try_into()
         .map_err(|_| ApiError::BadInput("new_signature_pubkey must decode to 32 bytes"))?;
+    // The key is recorded as the account's identity key and will verify
+    // account statements: an undecodable or small-order one is refused.
+    crate::genesis_attest::require_usable_identity_key(&key)?;
     Ok(key)
+}
+
+/// Steps 3 and 4 of the reset's transaction: delete the passkey vaults, the
+/// passkeys, every in-flight WebAuthn ceremony and action grant, and the
+/// account's device grants and device requests. Shared with the recall
+/// (`crate::recall::finish`), which is this reset plus a password change.
+pub(crate) async fn delete_superseded_state(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    account_id: &[u8; 16],
+) -> Result<(), ApiError> {
+    for statement in [
+        "DELETE FROM passkey_vaults WHERE account_id = ?",
+        "DELETE FROM webauthn_credentials WHERE account_id = ?",
+        "DELETE FROM webauthn_states WHERE account_id = ?",
+        "DELETE FROM webauthn_action_grants WHERE account_id = ?",
+        "DELETE FROM device_grants WHERE account_id = ?",
+        "DELETE FROM device_requests WHERE account_id = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(account_id.as_slice())
+            .execute(&mut **tx)
+            .await
+            .map_err(ApiError::Db)?;
+    }
+    Ok(())
+}
+
+/// The device the reset's new pair names: the one the body asserts, else the
+/// one the caller's bearer names.
+fn pair_device(
+    device_id_b64: Option<&str>,
+    caller: &AuthenticatedDevice,
+) -> Result<crate::session::DeviceId, ApiError> {
+    device_id_b64.map_or(Ok(caller.device_id), |b64| {
+        crate::session::decode_device_id(Some(b64))
+    })
 }
 
 /// `POST /account/keys/reset/start` — bearer-auth. The first OPAQUE message
@@ -228,12 +278,15 @@ pub(crate) async fn start(
 /// A live token for an account deleted meanwhile reaches the generation bump
 /// with no row to update and is answered with the enumeration-safe `401`.
 #[axum::debug_handler]
+#[allow(clippy::too_many_lines)] // one transaction, its steps numbered as in the module doc
 pub(crate) async fn finish(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
+    Extension(caller): Extension<AuthenticatedDevice>,
     Json(payload): Json<ResetFinishReq>,
 ) -> Result<Json<ResetFinishRes>, OpaqueError> {
     let account_id = auth.0;
+    let device_id = pair_device(payload.device_id_b64.as_deref(), &caller)?;
     let grant_generation =
         crate::session::require_fresh_grant(&state, &account_id, payload.fresh_grant.as_deref())
             .await?;
@@ -252,7 +305,12 @@ pub(crate) async fn finish(
     .await?;
     crate::limits::charge_name(&state.db, &state.limits, Scope::KeyReset, &account_id).await?;
 
-    let mut tx = state.db.begin().await.map_err(ApiError::Db)?;
+    let mut conn = crate::session::read_committed_conn(&state.db)
+        .await
+        .map_err(ApiError::Db)?;
+    let mut tx = sqlx::Acquire::begin(&mut conn)
+        .await
+        .map_err(ApiError::Db)?;
 
     // 1. Lock the row and hold the grant to the generation it now has: of
     //    two requests carrying grants of one generation, the second waits
@@ -272,10 +330,28 @@ pub(crate) async fn finish(
         Some(_) => {},
     }
 
-    //    Bump the key generation and read the new value in one statement.
-    let bumped = sqlx::query(
-        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1) WHERE id = ?",
+    //    The recall anchor (ADR-0066 section 0.2), before anything changes:
+    //    the identity key and the password envelope as they are now, unless
+    //    an anchor for this identity key already holds an earlier state.
+    //    Under the row lock just taken, so two changes capture one anchor.
+    crate::recall::capture_anchor(
+        &mut tx,
+        &account_id,
+        grant_generation,
+        crate::recall::Change::IdentityKey,
+        state.limits.recall_window_ms(),
     )
+    .await
+    .map_err(ApiError::Db)?;
+
+    //    Bump the key generation and read the new value in one statement.
+    //    The same statement records the new identity key (ADR-0066 section
+    //    0.1): the reset is the one writer that moves it.
+    let bumped = sqlx::query(
+        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), \
+         identity_pubkey = ? WHERE id = ?",
+    )
+    .bind(&new_signature_pubkey[..])
     .bind(account_id.as_slice())
     .execute(&mut *tx)
     .await
@@ -311,20 +387,7 @@ pub(crate) async fn finish(
     // 3. Passkeys: the vault blobs first, then the credentials (the order
     //    `delete_credential` uses), then every in-flight ceremony and grant.
     // 4. Device grants and requests.
-    for statement in [
-        "DELETE FROM passkey_vaults WHERE account_id = ?",
-        "DELETE FROM webauthn_credentials WHERE account_id = ?",
-        "DELETE FROM webauthn_states WHERE account_id = ?",
-        "DELETE FROM webauthn_action_grants WHERE account_id = ?",
-        "DELETE FROM device_grants WHERE account_id = ?",
-        "DELETE FROM device_requests WHERE account_id = ?",
-    ] {
-        sqlx::query(statement)
-            .bind(account_id.as_slice())
-            .execute(&mut *tx)
-            .await
-            .map_err(ApiError::Db)?;
-    }
+    delete_superseded_state(&mut tx, &account_id).await?;
 
     // 5. The attestation, over the new generation and the asserted key.
     let signed_at = crate::session::now_ms();
@@ -337,7 +400,7 @@ pub(crate) async fn finish(
     .sign(&state.attest_key.signing);
 
     // 6. The caller's new pair at the new generation.
-    let session = crate::session::issue_pair_at(&state, &account_id, key_generation)?;
+    let session = crate::session::issue_pair_at(&state, &account_id, key_generation, &device_id)?;
 
     tx.commit().await.map_err(ApiError::Db)?;
 

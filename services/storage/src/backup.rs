@@ -387,7 +387,7 @@ mod tests {
         .expect("UNIX millis fit in i64 well past year 200000");
         let expires_at_ms = now_ms + 60 * 60 * 1_000;
         secret
-            .issue(&account_id[..], 1, expires_at_ms)
+            .issue(&account_id[..], 1, &[0u8; 32], 0, expires_at_ms)
             .expect("issue")
     }
 

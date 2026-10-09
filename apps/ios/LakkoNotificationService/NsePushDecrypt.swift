@@ -1044,6 +1044,20 @@ public func nseLooksLikePin(_ bytes: Data, envelopeLen: Int) -> Bool {
     bytes.count == envelopeLen && bytes.first == pinEnvelopeFirstByte
 }
 
+/// First byte of the ADR-0066 key-rotation domain separator
+/// (`"lakko/key-rotation/v1\0"`): the same ASCII `l` as every other envelope
+/// domain, its own constant for the same reason as the others.
+private let keyRotationEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap, allocation-free pre-filter for the ADR-0066 key-rotation envelope:
+/// the exact length (192 bytes, injected from the slim FFI's
+/// `keyRotationEnvelopeLen()` rather than written here, because a stale
+/// literal silently stops suppressing it) and the first domain byte. The peek
+/// decides nothing; `isKeyRotationEnvelope` is the verdict.
+public func nseLooksLikeKeyRotation(_ bytes: Data, envelopeLen: Int) -> Bool {
+    envelopeLen > 0 && bytes.count == envelopeLen && bytes.first == keyRotationEnvelopeFirstByte
+}
+
 /// `true` when an already-DECRYPTED MLS application body is an in-group SERVICE
 /// envelope that must NEVER be rendered as a notification.
 ///
@@ -1136,9 +1150,20 @@ public func nseIsServiceEnvelope(
     // decoder) keep compiling; a stub that says "never" only ever lets a
     // notice through, which is what those sites did before the arm existed.
     decodesAsGroupClosed: (Data) -> Bool = { _ in false },
-    groupClosedEnvelopeLens: ClosedRange<Int> = 0...0
+    groupClosedEnvelopeLens: ClosedRange<Int> = 0...0,
+    // ADR-0066 section 3.3 — the tenth, the account's `key-rotation`
+    // envelope. It is meaningful only in the account's own DeviceGroup, which
+    // this process never reads; here it is recognised and suppressed like
+    // every service envelope, and NOT decoded: it carries the account's next
+    // seed, so the slim FFI answers a yes / no (`isKeyRotationEnvelope`) and
+    // the bytes never become a Swift value. Defaulted for the reason above.
+    isKeyRotation: (Data) -> Bool = { _ in false },
+    keyRotationEnvelopeLen: Int = 0
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
+    if nseLooksLikeKeyRotation(bytes, envelopeLen: keyRotationEnvelopeLen), isKeyRotation(bytes) {
+        return true
+    }
     if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
     if nseLooksLikeCommitterBeacon(bytes, envelopeLen: committerBeaconEnvelopeLen),
        decodesAsCommitterBeacon(bytes) {

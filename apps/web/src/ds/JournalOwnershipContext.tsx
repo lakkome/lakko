@@ -48,6 +48,7 @@ import { DiscoveryClient } from "../discovery/client";
 import { onGroupMlsIdle } from "../mls/group-lock";
 import { useProfiles } from "../profile/ProfileContext";
 import { loadWasm, type Wasm } from "../wasm";
+import { installRotationTakeOver } from "./rotation-takeover";
 import { dsAccess } from "./access";
 import {
   clearAppointmentRecord,
@@ -165,6 +166,13 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
     derived = { account, identity: wasmNow.Identity.fromSeed(secrets.accountIdentitySeed) };
     return derived.identity;
   }
+  /** ADR-0066 section 3.5: the account key this account holds INSIDE a
+   *  conversation (the role table's owner slot, the member an envelope is
+   *  sealed to): after a proven rotation the predecessor, else the account
+   *  key. The journal ROOT is always derived from the account identity. */
+  function conversationIdentityNow(): WasmIdentity | null {
+    return chats.predecessorAccountIdentity() ?? accountIdentityNow();
+  }
   function dropDerived(): void {
     if (derived === null) return;
     try {
@@ -180,7 +188,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
   const unregisterOwner = dsAccess.registerOwnerSource((groupId) => {
     const entry = chats.get(base64Encode(groupId));
     if (entry === undefined) return null;
-    const account = accountIdentityNow();
+    const account = conversationIdentityNow();
     if (account === null) return false;
     let owner: Uint8Array | undefined;
     try {
@@ -296,7 +304,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
     const entry = chats.get(groupIdB64);
     if (wasm === null || entry === undefined) return;
     if (readIsActive(entry.group) === false) return;
-    const own = accountIdentityNow();
+    const own = conversationIdentityNow();
     if (own === null) return;
     const groupId = base64Decode(groupIdB64);
     const ownB64 = base64Encode(own.signaturePublicKey);
@@ -398,7 +406,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
     const groupId = base64Decode(groupIdB64);
     const outcome = await runOwedHandover({
       groupId,
-      ownAccountKey: () => accountIdentityNow()?.signaturePublicKey ?? null,
+      ownAccountKey: () => conversationIdentityNow()?.signaturePublicKey ?? null,
       liveOwner: () => {
         try {
           return entry.group.roleTableOwner();
@@ -439,7 +447,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
   const unsubscribeTransition = installOwnerTransitionHandler((t) => {
     const account = accountId();
     if (account === null) return;
-    const own = accountIdentityNow()?.signaturePublicKey ?? null;
+    const own = conversationIdentityNow()?.signaturePublicKey ?? null;
     if (own === null) return;
     // The marker describes the DS, which moves only at the takeover: a
     // transition to or from this account clears it (a new owner signs with
@@ -488,6 +496,30 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
     })();
   }
 
+  // ADR-0066 section 3.5: after a key rotation every conversation journal
+  // this account owns is taken over by the root of the new seed, exactly as a
+  // handover to oneself.
+  const uninstallRotationTakeOver = installRotationTakeOver(async (oldAccountEd25519Seed) => {
+    const wasm = wasmNow ?? (await loadWasm());
+    const own = conversationIdentityNow();
+    if (own === null) return 0;
+    let started = 0;
+    for (const entry of chats.groups()) {
+      let owner: Uint8Array | undefined;
+      try {
+        owner = entry.group.roleTableOwner();
+      } catch {
+        continue;
+      }
+      if (!sameBytes(owner, own.signaturePublicKey)) continue;
+      const groupId = base64Decode(entry.groupIdB64);
+      takeOver(groupId, entry.groupIdB64, wasm.dsJournalRootSeed(oldAccountEd25519Seed, groupId));
+      started += 1;
+    }
+    return started;
+  });
+  onCleanup(uninstallRotationTakeOver);
+
   function scheduleTakeover(groupIdB64: string): void {
     const account = accountId();
     if (account === null || wasmNow === null) return;
@@ -530,7 +562,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
         stillOwner: () => dsAccess.ownsJournal(groupId),
         desiredRegistrars: () => {
           const roster = rosterOf(entry.group);
-          const own = accountIdentityNow();
+          const own = conversationIdentityNow();
           if (roster === null || own === null) return null;
           return desiredSetFor(roster, base64Encode(own.signaturePublicKey));
         },
@@ -655,11 +687,13 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
           }
         };
         const open = (plaintext: Uint8Array): Uint8Array => {
-          const identity = accountIdentityNow();
+          // Sealed to the member's account key as the roster names it.
+          const identity = conversationIdentityNow();
           if (identity === null) throw new Error("no account identity");
           return wasm.openRegistrarSeedEnvelope(plaintext, identity);
         };
-        const ownAccountKey = (): Uint8Array | null => accountIdentityNow()?.signaturePublicKey ?? null;
+        const ownAccountKey = (): Uint8Array | null =>
+          conversationIdentityNow()?.signaturePublicKey ?? null;
         uninstallHandler = installRegistrarSeedHandler(async (arrival) => {
           const header = decode(arrival.plaintext);
           // ADR-0057 (amended 2026-10-01) item 1 - every envelope the owner

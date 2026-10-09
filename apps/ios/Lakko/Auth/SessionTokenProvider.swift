@@ -56,8 +56,13 @@ public enum SessionTokenRule {
         /// `{"error":"refresh-invalid"}`: the refresh credential is bad,
         /// expired or unknown. Sign in again; nothing is wiped.
         case refreshInvalid
+        /// `{"error":"device-revoked"}` (ADR-0066 section 2): this device was
+        /// removed from the account on another device. The device signs out
+        /// and wipes everything, by itself. Read before the generation, as
+        /// the server checks it first.
+        case deviceRevoked
         /// A plain `401` (an expired access token, wrong credentials, a
-        /// refused code): no body code, or another one.
+        /// refused code, a logged-out session): no body code, or another one.
         case other
     }
 
@@ -71,14 +76,28 @@ public enum SessionTokenRule {
         switch code {
         case "key-generation-superseded": return .keyGenerationSuperseded
         case "refresh-invalid": return .refreshInvalid
+        case "device-revoked": return .deviceRevoked
         default: return .other
         }
+    }
+
+    /// Whether a `device-revoked` answer to `requestURL` is proof that this
+    /// device was removed: only when the request went to `services/auth`
+    /// (ADR-0066 section 2.3; discovery's `403 device-revoked` and a DS `401`
+    /// are not proof).
+    public static func revocationIsProof(requestURL: URL?, authBaseURL: String) -> Bool {
+        guard let requestURL, !authBaseURL.isEmpty else { return false }
+        let text = requestURL.absoluteString
+        return text == authBaseURL || text.hasPrefix(authBaseURL + "/")
     }
 
     /// What the caller of a bearer route does after a `401`.
     public enum AfterBearer401: Equatable {
         /// Sign out and wipe (section 3.5). The request is not retried.
         case signOutSuperseded
+        /// This device was removed (ADR-0066): sign out and wipe everything.
+        /// The request is not retried.
+        case signOutRevoked
         /// Refresh once, then retry the request once.
         case refreshAndRetry
         /// Report the `401` as it is.
@@ -94,6 +113,8 @@ public enum SessionTokenRule {
         switch meaning {
         case .keyGenerationSuperseded:
             return .signOutSuperseded
+        case .deviceRevoked:
+            return .signOutRevoked
         case .refreshInvalid, .other:
             return alreadyRetried ? .report : .refreshAndRetry
         }
@@ -107,12 +128,22 @@ public struct SessionSupersededError: Error, Equatable {
     public init() {}
 }
 
+/// Thrown by the provider's transport hook when a request would have gone
+/// out under a session the server already refused as device-revoked
+/// (ADR-0066). The request is never sent; the device is wiping.
+public struct SessionDeviceRevokedError: Error, Equatable {
+    public init() {}
+}
+
 /// How one refresh ended.
 public enum SessionRefreshOutcome: Equatable {
     /// A new pair was installed.
     case refreshed(SessionPair)
     /// `401 key-generation-superseded`: the provider is now superseded.
     case superseded
+    /// `401 device-revoked`: this device was removed; the provider is now
+    /// revoked.
+    case revoked
     /// `401 refresh-invalid`: the credential is dead; sign in again.
     case invalid
     /// No refresh credential, or no account signed in.
@@ -146,6 +177,9 @@ public final class SessionTokenProvider: @unchecked Sendable {
     /// `true` once the server answered `key-generation-superseded`; every
     /// later access is refused without a network call until ``clear()``.
     private var superseded = false
+    /// `true` once the server answered `device-revoked` (ADR-0066); every
+    /// later access is refused without a network call until ``clear()``.
+    private var revoked = false
     private var inFlight: Task<SessionRefreshOutcome, Never>?
 
     /// Set by the repository. Absent means a refresh cannot run.
@@ -155,6 +189,10 @@ public final class SessionTokenProvider: @unchecked Sendable {
     }
     private var _refresher: Refresher?
 
+    /// The base URL of `services/auth`, the one service whose
+    /// `device-revoked` is proof of a removal. Injectable for tests.
+    public var authBaseURL: @Sendable () -> String = { ApiEndpoints.baseURL(for: .auth) }
+
     /// The clock, injectable for tests.
     public var nowMs: @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
 
@@ -163,6 +201,9 @@ public final class SessionTokenProvider: @unchecked Sendable {
     /// The account's keys were reset elsewhere (ADR-0065 section 3.5). Fired
     /// at most once per installed session.
     public var onSuperseded: (@Sendable (_ accountIdB64: String) -> Void)?
+    /// This device was removed from the account on another device (ADR-0066
+    /// section 2.3). Fired at most once per installed session.
+    public var onDeviceRevoked: (@Sendable (_ accountIdB64: String) -> Void)?
     /// The refresh credential was refused as invalid: sign in again, nothing
     /// is wiped.
     public var onRefreshInvalid: (@Sendable (_ accountIdB64: String) -> Void)?
@@ -182,6 +223,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
         accountIdB64 = newAccount
         pair = newPair
         superseded = false
+        revoked = false
         if !newPair.sessionToken.isEmpty {
             knownAccessTokens.insert(newPair.sessionToken)
         }
@@ -195,6 +237,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
         pair = nil
         knownAccessTokens = []
         superseded = false
+        revoked = false
         inFlight?.cancel()
         inFlight = nil
         lock.unlock()
@@ -221,6 +264,13 @@ public final class SessionTokenProvider: @unchecked Sendable {
         return superseded
     }
 
+    /// Whether the server refused this session as device-revoked.
+    public var isDeviceRevoked: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return revoked
+    }
+
     /// Whether `token` is an access token this session issued (current or
     /// earlier).
     public func isKnownAccessToken(_ token: String) -> Bool {
@@ -237,6 +287,8 @@ public final class SessionTokenProvider: @unchecked Sendable {
         case token(String)
         /// The session is superseded: do not send.
         case superseded
+        /// This device was removed: do not send.
+        case revoked
         /// The refresh credential was refused as invalid.
         case invalid
         /// No session is installed.
@@ -251,7 +303,9 @@ public final class SessionTokenProvider: @unchecked Sendable {
         lock.lock()
         let snapshot = pair
         let wasSuperseded = superseded
+        let wasRevoked = revoked
         lock.unlock()
+        if wasRevoked { return .revoked }
         if wasSuperseded { return .superseded }
         guard let snapshot else { return .signedOut }
         switch SessionTokenRule.decide(pair: snapshot, nowMs: nowMs()) {
@@ -261,6 +315,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
             switch await refresh() {
             case .refreshed(let fresh): return .token(fresh.sessionToken)
             case .superseded: return .superseded
+            case .revoked: return .revoked
             case .invalid: return .invalid
             case .noCredential, .failed: return .token(snapshot.sessionToken)
             }
@@ -273,6 +328,10 @@ public final class SessionTokenProvider: @unchecked Sendable {
     @discardableResult
     public func refresh() async -> SessionRefreshOutcome {
         lock.lock()
+        if revoked {
+            lock.unlock()
+            return .revoked
+        }
         if superseded {
             lock.unlock()
             return .superseded
@@ -292,7 +351,8 @@ public final class SessionTokenProvider: @unchecked Sendable {
         let task = Task<SessionRefreshOutcome, Never> { [weak self] in
             guard let self else { return .failed("provider gone") }
             return await self.runRefresh(
-                refreshToken: snapshot.refreshToken, account: account, refresher: refresher)
+                refreshToken: snapshot.refreshToken, deviceIdB64: snapshot.deviceIdB64,
+                account: account, refresher: refresher)
         }
         inFlight = task
         lock.unlock()
@@ -301,15 +361,19 @@ public final class SessionTokenProvider: @unchecked Sendable {
 
     private func runRefresh(
         refreshToken: String,
+        deviceIdB64: String?,
         account: String,
         refresher: Refresher
     ) async -> SessionRefreshOutcome {
         let outcome: SessionRefreshOutcome
         do {
-            let fresh = try await refresher(refreshToken)
+            // A refresh keeps the device (ADR-0066 section 0.4), so the
+            // client-side note of it moves to the new pair.
+            let fresh = try await refresher(refreshToken).naming(deviceIdB64: deviceIdB64)
             outcome = .refreshed(fresh)
         } catch AuthClientError.http(let status, _, let body) where status == 401 {
             switch SessionTokenRule.classify401(body: Data(body.utf8)) {
+            case .deviceRevoked: outcome = .revoked
             case .keyGenerationSuperseded: outcome = .superseded
             case .refreshInvalid, .other: outcome = .invalid
             }
@@ -332,6 +396,12 @@ public final class SessionTokenProvider: @unchecked Sendable {
                 if !superseded {
                     superseded = true
                     let callback = onSuperseded
+                    fire = { callback?(account) }
+                }
+            case .revoked:
+                if !revoked {
+                    revoked = true
+                    let callback = onDeviceRevoked
                     fire = { callback?(account) }
                 }
             case .invalid:
@@ -361,6 +431,22 @@ public final class SessionTokenProvider: @unchecked Sendable {
         fire?()
     }
 
+    /// A bearer route of auth answered `device-revoked` directly (ADR-0066
+    /// section 2.3): mark the session and fire the callback once. Only
+    /// auth's `401` is proof; discovery's `403 device-revoked` is not, and a
+    /// caller that meets it runs ``refresh()`` and lets auth answer.
+    public func noteDeviceRevoked() {
+        var fire: (() -> Void)?
+        lock.lock()
+        if !revoked, let account = accountIdB64 {
+            revoked = true
+            let callback = onDeviceRevoked
+            fire = { callback?(account) }
+        }
+        lock.unlock()
+        fire?()
+    }
+
     // MARK: - The transport hook
 
     /// Send `request` through `send`, applying the token rules when it
@@ -380,6 +466,8 @@ public final class SessionTokenProvider: @unchecked Sendable {
             Self.setBearer(token, on: &first)
         case .superseded:
             throw SessionSupersededError()
+        case .revoked:
+            throw SessionDeviceRevokedError()
         case .invalid, .signedOut:
             break
         }
@@ -392,6 +480,16 @@ public final class SessionTokenProvider: @unchecked Sendable {
         case .signOutSuperseded:
             noteSuperseded()
             return (data, response)
+        case .signOutRevoked:
+            // Only auth's answer is proof of a removal (ADR-0066 section
+            // 2.3). The same body from any other service triggers nothing by
+            // itself: auth is asked, and its answer to the refresh decides.
+            if SessionTokenRule.revocationIsProof(requestURL: first.url, authBaseURL: authBaseURL()) {
+                noteDeviceRevoked()
+            } else {
+                _ = await refresh()
+            }
+            return (data, response)
         case .report:
             return (data, response)
         case .refreshAndRetry:
@@ -400,7 +498,7 @@ public final class SessionTokenProvider: @unchecked Sendable {
                 var retry = request
                 Self.setBearer(fresh.sessionToken, on: &retry)
                 return try await send(retry)
-            case .superseded:
+            case .superseded, .revoked:
                 return (data, response)
             case .invalid, .noCredential, .failed:
                 return (data, response)

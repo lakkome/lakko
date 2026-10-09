@@ -27,11 +27,22 @@ import { join, relative } from "node:path";
 
 import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
 import { base64Encode, base64UrlEncodeNoPad } from "./account-id";
-import { accountWipeSteps, wipeAccountLocalData } from "./wipe-account";
+import {
+  accountWipeSteps,
+  STAGED_WIPE_KEEPS,
+  stagedWipeSteps,
+  wipeAccountLocalData,
+  wipeAccountStaged,
+} from "./wipe-account";
 import { savePersistedAccount, loadPersistedAccount } from "./persisted-account";
 import { markSignupPhraseOwed } from "./phrase-gate";
 import { markThreeWordsSuspended, saveBudget } from "./recover/three-words";
 import { writeKeyResetOwed } from "./key-reset-owed";
+import { writeGenesisRecorded, writeKnownDeviceId } from "./session-device";
+import { markLogoutOwed } from "./logout-owed";
+import { newRemoval, writeRemoval } from "../devices/removal";
+import { markRotatedNotice, newRotation, writeRotation } from "../devices/key-rotation";
+import { markOwnerMoved } from "../channels/owner-moved";
 import { upsertAccepted } from "../contacts/local-store";
 import { rememberInviteLinkSecret } from "../contacts/invite-link-secrets";
 import { writeKnockCursor } from "../chat/knock-cursor";
@@ -93,6 +104,12 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
   });
   return [
     byId("lakko-auth", "device_keys"),
+    // ADR-0066 section 1.1: the recall record of a device whose account keys
+    // were reset elsewhere.
+    byId("lakko-recall-record", "records"),
+    // ADR-0066 part 3: the predecessor seeds, the pending key-rotation
+    // envelopes and a prepared rotation, sealed under the device key.
+    { db: "lakko-key-rotation", store: "state", row: { accountId: acct, ciphertext: ct } },
     byId("lakko-mls", "snapshots"),
     { db: "lakko-mls", store: "commit-outbox", row: { id: `${acct}#1`, accountId: acct, commit: ct } },
     byId("lakko-message-log", "logs"),
@@ -166,6 +183,19 @@ function seedAccount(acct: string, acctUrl: string): void {
     signedAtMs: 1,
     done: { directory: false, deviceGroup: false },
   });
+  // ADR-0066: the device id the sessions name, the "account key recorded at
+  // auth" mark, a logout still owed, and a device removal still finishing.
+  writeKnownDeviceId(local, acct, "B".repeat(43));
+  writeGenesisRecorded(local, acct, "a2V5");
+  markLogoutOwed(local, acct);
+  writeRemoval(local, acct, "C".repeat(43), newRemoval("C".repeat(43), 1));
+  // ADR-0066 part 3: a key rotation this device was finishing, the "keys
+  // were changed" line, the predecessor mailbox's cursor and the channels
+  // whose owner key moved.
+  writeRotation(local, acct, newRotation("C".repeat(43), 1));
+  markRotatedNotice(local, acct);
+  put(`lakko.contacts.predecessor-mailbox.v1.${acct}`, "7");
+  markOwnerMoved(acct, "c0ffee", local);
   put(`lakko.pending-requests.v1.${acct}.${G}`, "{}");
   put(`lakko.unapplied-requests.v1.${acct}.${G}`, "[]");
   put(`lakko.own-requests.v1.${acct}.${G}`, "{}");
@@ -374,6 +404,51 @@ describe("wipeAccountLocalData", () => {
     expect(notLoadBearing).toEqual([]);
   });
 
+  // ADR-0066 section 1.1 (UX 18.4): the staged wipe of a device whose
+  // account keys were reset on another device.
+  it("staged: deletes what the full wipe deletes, minus the recall record and its device key", async () => {
+    await createSchemas();
+    seedAccount(A, A_URL);
+    seedAccount(B, B_URL);
+    seedRetired(A);
+    savePersistedAccount({ v: 1, accountIdB64: A, username: "alice" });
+    const before = inventory().filter((e) => namesB(e.text) && !namesA(e.text));
+
+    const report = await wipeAccountStaged(A);
+    expect(report.failed).toEqual([]);
+
+    // All that still names the account: the two kept rows.
+    const left = inventory()
+      .filter((e) => namesA(e.text))
+      .map((e) => e.where)
+      .sort();
+    expect(left).toEqual(["lakko-auth/device_keys", "lakko-recall-record/records"]);
+    // The other account is untouched.
+    const after = inventory().filter((e) => namesB(e.text) && !namesA(e.text));
+    expect(after).toEqual(before);
+
+    // The rest of the wipe (the record destroyed) then leaves nothing.
+    await wipeAccountLocalData(A);
+    expect(inventory().filter((e) => namesA(e.text))).toEqual([]);
+  });
+
+  it("staged: the step list is the full list minus the kept steps, in the same order", () => {
+    const full = accountWipeSteps(A).map((s) => s.name);
+    const staged = stagedWipeSteps(A).map((s) => s.name);
+    expect(STAGED_WIPE_KEEPS).toEqual(["device-key", "recall-record"]);
+    expect(staged).toEqual(full.filter((name) => !STAGED_WIPE_KEEPS.includes(name)));
+    expect(full.length - staged.length).toBe(STAGED_WIPE_KEEPS.length);
+    for (const kept of STAGED_WIPE_KEEPS) expect(full).toContain(kept);
+  });
+
+  it("full: a removed device (`device-revoked`) is left no recall record", async () => {
+    await createSchemas();
+    seedAccount(A, A_URL);
+    expect(idb.walk().some((e) => e.where === "lakko-recall-record/records" && namesA(e.text))).toBe(true);
+    await wipeAccountLocalData(A);
+    expect(idb.walk().filter((e) => e.where === "lakko-recall-record/records" && namesA(e.text))).toEqual([]);
+  });
+
   it("names every step once", () => {
     const names = accountWipeSteps(A).map((s) => s.name);
     expect(new Set(names).size).toBe(names.length);
@@ -393,6 +468,10 @@ describe("wipeAccountLocalData", () => {
 const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage"> = {
   // IndexedDB
   "lakko-auth": "account",
+  "lakko-recall-record": "account",
+  "lakko-key-rotation": "account",
+  // The Web Lock name of a recall action (`navigator.locks`), not a store.
+  "lakko-recall:": "not-storage",
   "lakko-mls": "account",
   "lakko-message-log": "account",
   "lakko-channel-log": "account",
@@ -431,6 +510,14 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:three-words-budget:": "account",
   "lakko:three-words-suspended:": "account",
   "lakko:key-reset-owed:": "account",
+  "lakko:device-id:": "account",
+  "lakko:genesis-recorded:": "account",
+  "lakko:logout-owed:": "account",
+  "lakko:device-removal-owed:": "account",
+  "lakko:key-rotation-owed:": "account",
+  "lakko:key-rotation-notice:": "account",
+  "lakko.contacts.predecessor-mailbox.v1.": "account",
+  "lakko:channel-owner-moved:": "account",
   "lakko.pending-requests.v1": "account",
   "lakko.unapplied-requests.v1": "account",
   "lakko.own-requests.v1": "account",

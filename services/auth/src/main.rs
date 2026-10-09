@@ -120,6 +120,19 @@
 //!   an account with one needs the passkey action grant instead), `POST /device/authorize/start`
 //!   and `POST /device/requests/{id}/{pake,result}` (body `fresh_grant`) gained the
 //!   same gate)
+//! - `POST /auth/session/logout`     — raise the session floor of the caller's own device, so
+//!   its access token and refresh credentials stop at auth at once (ADR-0066 section 2.1,
+//!   bearer-auth, no body)
+//! - `POST /auth/session/bind-device` — exchange a pair that names no device for one naming
+//!   the caller's (ADR-0066 section 0.4, bearer-auth, body `device_id_b64` + `refresh_token`)
+//! - `POST /account/devices/revoke`  — remove another device: raise its session floor so its
+//!   credentials answer `401 device-revoked` (ADR-0066 section 2.1, bearer-auth AND a
+//!   `fresh_grant` AND a `statement_b64` signed by the account's recorded identity key, else
+//!   `403 fresh-auth-required` / `403 account-key-required`)
+//!
+//! Since ADR-0066 every session-landing route also takes an optional `device_id_b64` (the
+//! device the pair names), and `POST /auth/genesis/attest` records the account's identity
+//! key on its first call and attests only that key afterwards (`409 identity-key-mismatch`).
 
 #![forbid(unsafe_code)]
 
@@ -128,13 +141,20 @@ mod backup_head;
 mod call_jwt;
 mod device_authorize;
 mod device_request;
+mod devices;
+#[cfg(test)]
+mod devices_tests;
 mod genesis_attest;
 mod key_reset;
+mod key_rotate;
 mod limits;
 mod login_handle;
 mod opaque;
 mod passkey_vault;
 mod pow;
+mod recall;
+#[cfg(test)]
+mod recall_tests;
 mod session;
 mod throttle;
 mod totp;
@@ -501,6 +521,9 @@ async fn main() -> Result<()> {
     // ADR-0054 S4 — expired name counters + refilled address buckets.
     let _limits_pruner = limits::spawn_pruner(pool.clone(), limits);
     let _webauthn_pruner = webauthn::spawn_state_pruner(pool.clone());
+    let _floor_pruner = session::spawn_floor_pruner(pool.clone(), refresh_token_ttl_ms);
+    // ADR-0066 section 0.2 — expired recall anchors and stale recall states.
+    let _recall_pruner = recall::spawn_pruner(pool.clone());
     // ADR-0033 — prune expired call-admission events + throttled-call rows.
     let _throttle_pruner = throttle::spawn_pruner(pool.clone(), throttle_config);
     // ADR-0054 — drop issuance-quota rows older than the previous epoch.
@@ -637,6 +660,25 @@ fn build_app(state: AppState) -> Router {
         // where the passkey may be gone too.
         .route("/account/keys/reset/start", post(key_reset::start))
         .route("/account/keys/reset/finish", post(key_reset::finish))
+        // ADR-0066 section 3.4 — rotate the account keys and keep the other
+        // devices. Bearer + fresh-auth grant + a supersession proof by the
+        // identity key auth has recorded: someone who holds only the
+        // password can reset (recallable) but cannot rotate. One
+        // transaction: bump the generation, record the new key, replace the
+        // recovery credential, delete the passkey vaults (not the passkeys),
+        // floor the devices removed with it, mint the attestation.
+        .route("/account/keys/rotate/start", post(key_rotate::start))
+        .route("/account/keys/rotate/finish", post(key_rotate::finish))
+        // ADR-0066 sprint T1 — per-device revocation. `logout` raises the
+        // session floor of the caller's own device (no grant: signing out
+        // must always work); `bind-device` replaces a pair that names no
+        // device with one that names the caller's; `devices/revoke` removes
+        // ANOTHER device and needs a fresh-auth grant AND a statement signed
+        // by the account's identity key, so the password alone cannot wipe
+        // the owner's devices.
+        .route("/auth/session/logout", post(session::logout))
+        .route("/auth/session/bind-device", post(session::bind_device))
+        .route("/account/devices/revoke", post(devices::revoke))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             webauthn::require_session,
@@ -779,6 +821,25 @@ fn build_app(state: AppState) -> Router {
         .route(
             "/auth/session/refresh",
             post(session::refresh).route_layer(ip(limits::Category::Attempt)),
+        )
+        // ADR-0066 section 1.2 — the recall: an old device takes the account
+        // back after a key reset. ANONYMOUS (its session was superseded by
+        // the reset): every request carries an account statement signed by
+        // the identity key the account had before the change, checked first,
+        // and everything that is not a wrong password is one `401
+        // recall-refused`. Per-address limited; the per-anchor attempt
+        // budget is charged inside `start`, after the statement.
+        .route(
+            "/account/recall/status",
+            post(recall::status).route_layer(ip(limits::Category::Attempt)),
+        )
+        .route(
+            "/account/recall/start",
+            post(recall::start).route_layer(ip(limits::Category::Attempt)),
+        )
+        .route(
+            "/account/recall/finish",
+            post(recall::finish).route_layer(ip(limits::Category::Attempt)),
         )
         // Phase 3b4 forward — anonymous JWKS endpoint. The
         // public key is public; the SFU fetches it at

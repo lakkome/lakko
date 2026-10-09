@@ -39,15 +39,33 @@
 //! definition ([`lakko_transparency::account_username_hash`]) so it is
 //! byte-identical to the discovery log-append side ([ADR-0036] drift hazard).
 //!
-//! Stateless: no DB row is written. A valid attestation for one's own account
-//! is self-limited by the transparency gate's version monotonicity (a second
-//! "genesis" for a `username_hash` that already has an entry is a rotation,
-//! refused as an unauthorised genesis). The short [`GENESIS_ATTEST_TTL_SECS`]
-//! TTL bounds the mint -> append replay window. The signing key + published
-//! JWKS are REUSED from the device-attestation role ([ADR-0036] §3); the
-//! distinct `lakko/genesis-attest/v1` domain separator makes the two
-//! attestation kinds cryptographically non-interchangeable.
+//! ## The recorded key ([ADR-0066] section 0.1)
 //!
+//! The first mint for an account records the attested key in
+//! `accounts.identity_pubkey`, in one conditional statement. From then on the
+//! route attests **only that key**: any other is answered `409
+//! {"error":"identity-key-mismatch"}`. So a session can no longer obtain a
+//! genesis attestation for an arbitrary key, and auth holds the public key a
+//! later account statement (remove a device, and the recall and rotation of
+//! the same ADR) is verified under. The mint is idempotent for the recorded
+//! key; a client calls it on every session landing until it has succeeded
+//! once. The one writer that moves the recorded key is the key reset
+//! (`crate::key_reset`), which sets it to the key the reset installs.
+//!
+//! A key that does not decode as an Ed25519 point, or is of small order, is
+//! refused (`400`): a signature "under" a small-order key can be forged for
+//! any message, and this key will verify statements.
+//!
+//! A valid attestation for one's own account is self-limited by the
+//! transparency gate's version monotonicity (a second "genesis" for a
+//! `username_hash` that already has an entry is a rotation, refused as an
+//! unauthorised genesis). The short [`GENESIS_ATTEST_TTL_SECS`] TTL bounds
+//! the mint -> append replay window. The signing key + published JWKS are
+//! REUSED from the device-attestation role ([ADR-0036] §3); the distinct
+//! `lakko/genesis-attest/v1` domain separator makes the two attestation kinds
+//! cryptographically non-interchangeable.
+//!
+//! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
 //! [ADR-0036]: ../../../docs/adr/0036-auth-attested-genesis.md
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -87,7 +105,25 @@ fn decode_pubkey(b64: &str) -> Result<[u8; PUBKEY_LEN], ApiError> {
     }
     let mut out = [0u8; PUBKEY_LEN];
     out.copy_from_slice(&bytes);
+    require_usable_identity_key(&out)?;
     Ok(out)
+}
+
+/// Refuse a key auth must not record as an account's identity key: one that
+/// does not decode as an Ed25519 point, or one of small order (a signature
+/// under it verifies for any message). Shared by the genesis mint and the key
+/// reset, the two writers of `accounts.identity_pubkey`.
+///
+/// # Errors
+///
+/// [`ApiError::BadInput`].
+pub(crate) fn require_usable_identity_key(key: &[u8; PUBKEY_LEN]) -> Result<(), ApiError> {
+    let verifying = lakko_crypto::signing::VerifyingKey::from_bytes(key)
+        .map_err(|_| ApiError::BadInput("pubkey is not an Ed25519 public key"))?;
+    if verifying.is_weak() {
+        return Err(ApiError::BadInput("pubkey is a small-order key"));
+    }
+    Ok(())
 }
 
 /// Current time in unix seconds, saturating on the (impossible) overflow.
@@ -103,15 +139,20 @@ fn now_unix_secs() -> i64 {
 /// `POST /auth/genesis/attest` — mint a genesis attestation (G-30 finding 2,
 /// [ADR-0036]).
 ///
-/// Bearer-authenticated. Derives `username_hash` from the authenticated
-/// `account_id` (NEVER from the request body — the body carries only the
-/// client's genesis pubkey), signs a [`GenesisAttestation`] over
-/// `(account_id, username_hash, pubkey, expiry)` with the shared attestation
-/// key, and returns it base64-encoded. Stateless — no DB row.
+/// Bearer-authenticated. Records the key as the account's identity key if
+/// none is recorded yet (one conditional `UPDATE`, so two racing first mints
+/// record exactly one key), refuses a key other than the recorded one, then
+/// derives `username_hash` from the authenticated `account_id` (NEVER from
+/// the request body — the body carries only the client's genesis pubkey),
+/// signs a [`GenesisAttestation`] over `(account_id, username_hash, pubkey,
+/// expiry)` with the shared attestation key, and returns it base64-encoded.
 ///
 /// # Errors
 ///
-/// [`ApiError::BadInput`] when `pubkey_b64` is not 32-byte URL-safe base64.
+/// [`ApiError::BadInput`] when `pubkey_b64` is not 32-byte URL-safe base64 of
+/// a usable Ed25519 key; [`ApiError::IdentityKeyMismatch`] (`409`) when the
+/// account's recorded key is another one; [`ApiError::InvalidCredential`]
+/// when the account was deleted meanwhile; [`ApiError::Db`].
 ///
 /// [ADR-0036]: ../../../docs/adr/0036-auth-attested-genesis.md
 #[axum::debug_handler]
@@ -121,6 +162,25 @@ pub(crate) async fn genesis_attest(
     Json(req): Json<GenesisAttestReq>,
 ) -> Result<Json<GenesisAttestRes>, ApiError> {
     let pubkey = decode_pubkey(&req.pubkey_b64)?;
+
+    // ADR-0066 section 0.1: record the key on the first mint, attest only the
+    // recorded key afterwards. The conditional write and the read-back are
+    // two statements; the write is atomic, so whichever of two racing first
+    // mints loses reads the winner's key and is refused when its own differs.
+    sqlx::query("UPDATE accounts SET identity_pubkey = ? WHERE id = ? AND identity_pubkey IS NULL")
+        .bind(&pubkey[..])
+        .bind(&auth.0[..])
+        .execute(&state.db)
+        .await
+        .map_err(ApiError::Db)?;
+    let recorded = crate::devices::identity_pubkey_of(&state.db, &auth.0)
+        .await
+        .map_err(ApiError::Db)?
+        .ok_or(ApiError::InvalidCredential)?;
+    if recorded != pubkey {
+        tracing::info!("genesis attest: a key other than the recorded one refused");
+        return Err(ApiError::IdentityKeyMismatch);
+    }
 
     // Derived from the AUTHENTICATED account id — the bridge that lets the
     // transparency gate bind the attestation to the KT-log leaf without ever
@@ -165,104 +225,32 @@ pub(crate) struct GenesisAttestRes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opaque::LakkoCipherSuite;
-    use lakko_attest::{verify_genesis_binding, GenesisAttestError};
-    use opaque_ke::ServerSetup;
-    use rand::rngs::OsRng;
-    use sqlx::mysql::MySqlPoolOptions;
-    use std::sync::Arc;
 
-    /// Fixed seed for the test attestation key so the test reconstructs the
-    /// verifying key that signed.
-    const ATTEST_SEED: [u8; 32] = [0xCD; 32];
-
-    /// Build an [`AppState`] WITHOUT a live database. The genesis handler is
-    /// stateless (it never touches the pool), so a lazily-connected pool that
-    /// is never awaited suffices — the whole test runs DB-free.
-    fn build_state_no_db() -> AppState {
-        let pool = MySqlPoolOptions::new()
-            .connect_lazy("mysql://lakko:devpass@127.0.0.1:3306/lakko_auth")
-            .expect("lazy pool (never connects)");
-        let opaque_setup = ServerSetup::<LakkoCipherSuite>::new(&mut OsRng);
-        let token_secret = lakko_auth_token::TokenSecret::new(vec![7u8; 64]).expect("token secret");
-        AppState {
-            db: pool,
-            opaque_setup: Arc::new(opaque_setup),
-            session_token_secret: Arc::new(token_secret),
-            session_token_ttl_ms: 86_400_000,
-            refresh_token_ttl_ms: 30 * 86_400_000,
-            fresh_grant_ttl_ms: 600_000,
-            webauthn: None,
-            webauthn_action_core: None,
-            call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
-            attest_key: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&ATTEST_SEED)),
-            turn: None,
-            totp_enc_key: None,
-            vault_enc_key: None,
-            throttle: crate::throttle::ThrottleConfig::disabled(),
-            backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
-            anon_tokens: None,
-            handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
-            limits: Arc::new(crate::limits::Limits::defaults()),
-        }
-    }
-
-    /// The handler mints an attestation that verifies under the published
-    /// attestation key and is bound to the authenticated account, the derived
-    /// `username_hash`, and the presented pubkey — and rejects a wrong pubkey.
-    #[tokio::test]
-    async fn mints_a_genesis_attestation_bound_to_account_and_pubkey() {
-        let state = build_state_no_db();
-        let account_id: [u8; 16] = [0x11; 16];
-        let pubkey: [u8; 32] = [0x22; 32];
-
-        let res = genesis_attest(
-            State(state),
-            Extension(AuthenticatedAccount(account_id)),
-            Json(GenesisAttestReq {
-                pubkey_b64: URL_SAFE_NO_PAD.encode(pubkey),
-            }),
-        )
-        .await
-        .expect("mint succeeds");
-
-        let bytes = URL_SAFE_NO_PAD
-            .decode(&res.0.genesis_attest_b64)
-            .expect("attestation decodes");
-
-        // The verifying key that signed (reconstructed from the fixed seed).
-        let attest_vk = lakko_call_jwt::CallSigningKey::from_seed(&ATTEST_SEED).verifying;
-        // The SAME derivation the handler used, from the shared crate.
-        let username_hash = account_username_hash(&account_id);
-
-        // Binds to the right account / username_hash / pubkey.
-        let claims =
-            verify_genesis_binding(&bytes, &attest_vk, &account_id, &username_hash, &pubkey)
-                .expect("attestation verifies + binds to this account/username/pubkey");
-        assert_eq!(claims.account_id, account_id);
-        assert_eq!(claims.username_hash, username_hash);
-        assert_eq!(claims.pubkey, pubkey);
-
-        // A DIFFERENT pubkey must NOT verify against this attestation — the
-        // core anti-squatting binding (auth attested exactly the presented key).
-        assert_eq!(
-            verify_genesis_binding(&bytes, &attest_vk, &account_id, &username_hash, &[0x33; 32],),
-            Err(GenesisAttestError::PubkeyMismatch),
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_a_malformed_pubkey() {
-        let state = build_state_no_db();
-        let res = genesis_attest(
-            State(state),
-            Extension(AuthenticatedAccount([0x11; 16])),
-            Json(GenesisAttestReq {
-                // 31 bytes — one short.
-                pubkey_b64: URL_SAFE_NO_PAD.encode([0x22; 31]),
-            }),
-        )
-        .await;
-        assert!(matches!(res, Err(ApiError::BadInput(_))));
+    /// A malformed, undecodable or small-order key is refused before the
+    /// database is touched. (The mint itself is covered by the DB-gated
+    /// route tests in `crate::devices_tests`.)
+    #[test]
+    fn unusable_keys_are_refused() {
+        // 31 bytes: one short.
+        assert!(matches!(
+            decode_pubkey(&URL_SAFE_NO_PAD.encode([0x22; 31])),
+            Err(ApiError::BadInput(_))
+        ));
+        assert!(matches!(
+            decode_pubkey("not base64!"),
+            Err(ApiError::BadInput(_))
+        ));
+        // The identity point: decodes, order 1.
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        assert!(matches!(
+            decode_pubkey(&URL_SAFE_NO_PAD.encode(identity)),
+            Err(ApiError::BadInput(_))
+        ));
+        // A real key passes.
+        let real = lakko_crypto::signing::SigningKey::from_seed(&[7; 32])
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(decode_pubkey(&URL_SAFE_NO_PAD.encode(real)).unwrap(), real);
     }
 }

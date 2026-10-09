@@ -26,6 +26,7 @@ class DeviceReadmissionTest {
                 AccountDevices("bob", listOf(kp("bob-1"), kp("bob-2"))),
             ),
             removed = emptySet(),
+            ownDeviceRoster = setOf("me-1", "me-2"),
         )
         assertEquals(listOf("me-2", "bob-2"), plan.admit.map { it.deviceKey })
         assertEquals(emptyList<String>(), plan.retire)
@@ -38,6 +39,7 @@ class DeviceReadmissionTest {
             ownPersonKey = "me",
             accounts = listOf(AccountDevices("bob", listOf(kp("bob-1"), kp("bob-old")))),
             removed = setOf("bob-old"),
+            ownDeviceRoster = emptySet(),
         )
         assertTrue(plan.admit.isEmpty())
     }
@@ -56,6 +58,7 @@ class DeviceReadmissionTest {
                 AccountDevices("bob", emptyList()),
             ),
             removed = emptySet(),
+            ownDeviceRoster = setOf("me-1"),
         )
         assertEquals(listOf("me-forgotten"), plan.retire)
         assertTrue(plan.admit.isEmpty())
@@ -68,6 +71,7 @@ class DeviceReadmissionTest {
             ownPersonKey = "me",
             accounts = listOf(AccountDevices("me", null)),
             removed = emptySet(),
+            ownDeviceRoster = setOf("me-1", "me-2"),
         )
         assertTrue(plan.admit.isEmpty())
         assertTrue(plan.retire.isEmpty())
@@ -83,8 +87,76 @@ class DeviceReadmissionTest {
                 AccountDevices("b", listOf(kp("x"))),
             ),
             removed = emptySet(),
+            ownDeviceRoster = null,
         )
         assertEquals(1, plan.admit.size)
+    }
+
+    // ---- ADR-0066 section 2.3: the DeviceGroup filter ------------------------
+
+    @Test
+    fun `an own device is admitted only when the account's DeviceGroup roster lists it`() {
+        val plan = DeviceReadmission.plan(
+            roster = listOf(RosterLeaf("me-1", "me"), RosterLeaf("bob-1", "bob")),
+            ownPersonKey = "me",
+            accounts = listOf(
+                // me-removed published itself again after it was removed.
+                AccountDevices("me", listOf(kp("me-1"), kp("me-2"), kp("me-removed"))),
+                AccountDevices("bob", listOf(kp("bob-1"), kp("bob-2"))),
+            ),
+            removed = emptySet(),
+            ownDeviceRoster = setOf("me-1", "me-2"),
+        )
+        // The removed device is not put back; a contact's device is not
+        // filtered by OUR device list.
+        assertEquals(listOf("me-2", "bob-2"), plan.admit.map { it.deviceKey })
+    }
+
+    @Test
+    fun `an unreadable DeviceGroup roster admits no own device, and still admits a contact's`() {
+        val plan = DeviceReadmission.plan(
+            roster = listOf(RosterLeaf("me-1", "me"), RosterLeaf("bob-1", "bob")),
+            ownPersonKey = "me",
+            accounts = listOf(
+                AccountDevices("me", listOf(kp("me-1"), kp("me-2"))),
+                AccountDevices("bob", listOf(kp("bob-1"), kp("bob-2"))),
+            ),
+            removed = emptySet(),
+            ownDeviceRoster = null,
+        )
+        assertEquals(listOf("bob-2"), plan.admit.map { it.deviceKey })
+    }
+
+    @Test
+    fun `the removed memory still applies to an own device the roster lists`() {
+        val plan = DeviceReadmission.plan(
+            roster = listOf(RosterLeaf("me-1", "me")),
+            ownPersonKey = "me",
+            accounts = listOf(AccountDevices("me", listOf(kp("me-1"), kp("me-2")))),
+            removed = setOf("me-2"),
+            ownDeviceRoster = setOf("me-1", "me-2"),
+        )
+        assertTrue(plan.admit.isEmpty())
+    }
+
+    @Test
+    fun `the filter does not change which own leaves are retired`() {
+        val plan = DeviceReadmission.plan(
+            roster = listOf(RosterLeaf("me-1", "me"), RosterLeaf("me-forgotten", "me")),
+            ownPersonKey = "me",
+            accounts = listOf(AccountDevices("me", listOf(kp("me-1")))),
+            removed = emptySet(),
+            ownDeviceRoster = null,
+        )
+        assertEquals(listOf("me-forgotten"), plan.retire)
+    }
+
+    @Test
+    fun `the pairing fan-out obeys the same rule`() {
+        assertTrue(DeviceReadmission.ownDeviceAdmissible("me-2", setOf("me-1", "me-2")))
+        assertFalse(DeviceReadmission.ownDeviceAdmissible("me-removed", setOf("me-1", "me-2")))
+        assertFalse(DeviceReadmission.ownDeviceAdmissible("me-2", null))
+        assertFalse(DeviceReadmission.ownDeviceAdmissible("me-2", emptySet()))
     }
 
     @Test

@@ -4402,8 +4402,132 @@
       "text": "Código QR de vinculación",
       "status": "machine"
     },
+    "devices.recall.body": {
+      "text": "Las claves de {name} se restablecieron en otro dispositivo el {date}. Se cerró la sesión de este dispositivo y se eliminaron los chats y contactos que guardaba.",
+      "status": "machine"
+    },
+    "devices.recall.checking": {
+      "text": "Comprobando si la cuenta se puede recuperar...",
+      "status": "machine"
+    },
+    "devices.recall.done": {
+      "text": "Recuperaste tu cuenta. Vuelve a añadir tus llaves de acceso y tus otros dispositivos.",
+      "status": "machine"
+    },
+    "devices.recall.error.closed": {
+      "text": "La cuenta ya no se puede recuperar desde este dispositivo.",
+      "status": "machine"
+    },
+    "devices.recall.error.exhausted": {
+      "text": "Demasiadas contraseñas incorrectas. La cuenta ya no se puede recuperar desde este dispositivo.",
+      "status": "machine"
+    },
+    "devices.recall.error.tries_left": {
+      "text": "{count, plural, one {Queda # intento} other {Quedan # intentos}}",
+      "status": "machine"
+    },
+    "devices.recall.error.wrong_password": {
+      "text": "Esa no es la contraseña que tenía esta cuenta antes del restablecimiento. Si cambiaste tu contraseña en el último mes, introduce la que tenías antes.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_factors": {
+      "text": "Se quitan las llaves de acceso y el código de la app de autenticación. Vuelve a añadirlos después.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_keys": {
+      "text": "La cuenta recibe claves nuevas y una nueva frase de recuperación.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_messages": {
+      "text": "Los mensajes enviados a la cuenta desde el restablecimiento no se te enviaron y no se pueden recuperar.",
+      "status": "machine"
+    },
+    "devices.recall.form.lede": {
+      "text": "Introduce la contraseña que tenía esta cuenta antes del restablecimiento y elige una nueva. Se cerrará la sesión de quien restableció las claves.",
+      "status": "machine"
+    },
+    "devices.recall.form.new_password": {
+      "text": "Nueva contraseña",
+      "status": "machine"
+    },
+    "devices.recall.form.old_password": {
+      "text": "Contraseña anterior al restablecimiento",
+      "status": "machine"
+    },
+    "devices.recall.form.repeat_password": {
+      "text": "Repetir nueva contraseña",
+      "status": "machine"
+    },
+    "devices.recall.form.submit": {
+      "text": "Recuperar la cuenta",
+      "status": "machine"
+    },
+    "devices.recall.form.title": {
+      "text": "Recuperar la cuenta",
+      "status": "machine"
+    },
+    "devices.recall.form.working": {
+      "text": "Recuperando la cuenta...",
+      "status": "machine"
+    },
+    "devices.recall.no": {
+      "text": "No, recuperar la cuenta",
+      "status": "machine"
+    },
+    "devices.recall.question": {
+      "text": "¿Fuiste tú?",
+      "status": "machine"
+    },
+    "devices.recall.until": {
+      "text": "Puedes recuperar la cuenta desde este dispositivo hasta el {date}.",
+      "status": "machine"
+    },
+    "devices.recall.yes": {
+      "text": "Sí, fui yo",
+      "status": "machine"
+    },
+    "devices.recall.yes.back": {
+      "text": "Atrás",
+      "status": "machine"
+    },
+    "devices.recall.yes.confirm": {
+      "text": "Se eliminará el resto de lo que esta cuenta guardaba en este dispositivo. Para volver a usar la cuenta aquí, inicia sesión y obtén las claves del dispositivo que las restableció.",
+      "status": "machine"
+    },
+    "devices.recall.yes.delete": {
+      "text": "Eliminar e iniciar sesión",
+      "status": "machine"
+    },
+    "devices.remove.done": {
+      "text": "Dispositivo quitado y con la sesión cerrada.",
+      "status": "machine"
+    },
+    "devices.remove.error.not_revoked": {
+      "text": "No se pudo cerrar la sesión del dispositivo, así que no se quitó nada. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "devices.remove.error.try_later": {
+      "text": "Este dispositivo aún está configurando la cuenta. Inténtalo en un minuto.",
+      "status": "machine"
+    },
+    "devices.remove.finish": {
+      "text": "Terminar de quitar",
+      "status": "machine"
+    },
+    "devices.remove.pending": {
+      "text": "Quitando...",
+      "status": "machine"
+    },
     "devices.removed.body": {
       "text": "Se quitó de tu cuenta desde otro dispositivo. Los mensajes nuevos ya no le llegan. Cierra sesión y vuelve a iniciarla si quieres usarlo.",
+      "status": "machine"
+    },
+    "devices.removed.body_done": {
+      "text": "Se quitó de la cuenta {name} en otro dispositivo y se cerró la sesión. Se eliminó todo lo que la cuenta guardaba aquí.",
+      "status": "machine"
+    },
+    "devices.removed.body_removing": {
+      "text": "Se quitó de la cuenta {name} en otro dispositivo y se cerró la sesión. Se está eliminando todo lo que esta cuenta guardaba en este dispositivo: sus chats, contactos, claves y frase de recuperación.",
       "status": "machine"
     },
     "devices.removed.sign_out": {
@@ -4412,6 +4536,74 @@
     },
     "devices.removed.title": {
       "text": "Este dispositivo se quitó",
+      "status": "machine"
+    },
+    "devices.rotate.confirm": {
+      "text": "Quitar y cambiar las claves",
+      "status": "machine"
+    },
+    "devices.rotate.done": {
+      "text": "Las claves de tu cuenta se cambiaron. Tus otros dispositivos recibirán las nuevas la próxima vez que se conecten.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_contacts": {
+      "text": "Las personas con las que hablas no tienen que hacer nada.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_devices": {
+      "text": "Tus otros dispositivos conservan sus chats y reciben las claves nuevas por sí solos.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Tus llaves de acceso siguen sirviendo para iniciar sesión. «Restaurar claves con esta llave de acceso» queda desactivado hasta que lo vuelvas a activar.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_phrase": {
+      "text": "Recibes una nueva frase de recuperación. La anterior deja de funcionar.",
+      "status": "machine"
+    },
+    "devices.rotate.error.not_started": {
+      "text": "El dispositivo se quitó, pero las claves de tu cuenta no se cambiaron.",
+      "status": "machine"
+    },
+    "devices.rotate.lede": {
+      "text": "Un dispositivo perdido todavía tiene las claves de tu cuenta. Cambiarlas vuelve inútil lo que guarda.",
+      "status": "machine"
+    },
+    "devices.rotate.not_now": {
+      "text": "Ahora no",
+      "status": "machine"
+    },
+    "devices.rotate.retry": {
+      "text": "Reintentar",
+      "status": "machine"
+    },
+    "devices.rotate.step_devices": {
+      "text": "Actualizando tus otros dispositivos",
+      "status": "machine"
+    },
+    "devices.rotate.step_keys": {
+      "text": "Cambiando las claves de tu cuenta",
+      "status": "machine"
+    },
+    "devices.rotate.step_remove": {
+      "text": "Quitando el dispositivo",
+      "status": "machine"
+    },
+    "devices.rotate.title": {
+      "text": "Quitar este dispositivo y cambiar las claves de tu cuenta",
+      "status": "machine"
+    },
+    "devices.rotated.notice": {
+      "text": "Las claves de tu cuenta se cambiaron en otro dispositivo. Este dispositivo ya tiene las nuevas.",
+      "status": "machine"
+    },
+    "devices.rotated.show_phrase": {
+      "text": "Mostrar nueva frase",
+      "status": "machine"
+    },
+    "devices.rotated.updating": {
+      "text": "Actualizando claves...",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -6266,6 +6458,18 @@
       "text": "Usar tu contraseña en su lugar",
       "status": "machine"
     },
+    "proof.remove_device.cancelled": {
+      "text": "Cancelado. El dispositivo no se quitó.",
+      "status": "machine"
+    },
+    "proof.remove_device.help": {
+      "text": "Introduce tu contraseña para quitar este dispositivo.",
+      "status": "machine"
+    },
+    "proof.remove_device.wrong_password": {
+      "text": "Contraseña incorrecta. El dispositivo no se quitó.",
+      "status": "machine"
+    },
     "proof.reset.cancelled": {
       "text": "Cancelado. No se restableció nada.",
       "status": "machine"
@@ -6862,6 +7066,10 @@
       "text": "Cerrar sesión mantiene tus datos en este dispositivo. Olvidar este dispositivo los borra; solo podrás volver con otro dispositivo con la sesión iniciada, una llave de acceso que restaure claves o tu frase de recuperación. Eliminar cuenta borra la cuenta en el servidor y limpia este dispositivo; no se puede deshacer.",
       "status": "machine"
     },
+    "settings.account.delete.blocked": {
+      "text": "Las claves de la cuenta se restablecieron hace poco. La cuenta no se puede eliminar hasta el {date}.",
+      "status": "machine"
+    },
     "settings.account.delete.body": {
       "text": "Esto borra tu identidad en el servidor —nombre de usuario, claves, factores de recuperación y copia de seguridad— y cierra tu sesión en todas partes. Los mensajes locales también se borran de este dispositivo. No se puede deshacer.",
       "status": "machine"
@@ -7079,15 +7287,31 @@
       "status": "machine"
     },
     "settings.devices.remove.body": {
-      "text": "Este dispositivo perderá el acceso a tus mensajes desde ese momento. Puede que se te pida tu llave de acceso.",
+      "text": "Ya se cerró su sesión. La próxima vez que se conecte, se eliminará todo lo que esta cuenta guardaba en él: chats, contactos, claves y la frase de recuperación.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm": {
+      "text": "Quitar dispositivo",
       "status": "machine"
     },
     "settings.devices.remove.confirm_named": {
       "text": "Quitar {device}",
       "status": "machine"
     },
+    "settings.devices.remove.reason_stolen": {
+      "text": "Se perdió o lo robaron",
+      "status": "machine"
+    },
+    "settings.devices.remove.reason_unused": {
+      "text": "Ya no lo uso",
+      "status": "machine"
+    },
     "settings.devices.remove.title": {
       "text": "¿Quitar {device}?",
+      "status": "machine"
+    },
+    "settings.devices.remove.working": {
+      "text": "Quitando...",
       "status": "machine"
     },
     "settings.devices.removed_change_password": {

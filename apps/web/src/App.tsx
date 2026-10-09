@@ -49,6 +49,8 @@ import { OneToOneContactAdoption } from "./contacts/OneToOneContactAdoption";
 import { ProfileProvider } from "./profile/ProfileContext";
 import { ReachProvider } from "./reach/ReachProvider";
 import { ScopedDiscoveryRuntime } from "./reach/ScopedDiscoveryRuntime";
+import { OwedDeviceRemovals } from "./devices/OwedDeviceRemovals";
+import { OwedKeyRotation } from "./devices/OwedKeyRotation";
 import { GroupClosedProvider } from "./chat/GroupClosedContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
 import { JournalOwnershipProvider } from "./ds/JournalOwnershipContext";
@@ -211,6 +213,12 @@ const App: Component = () => (
            * relayed bundle). Whole-session, like the receivers above.
            */}
           <ScopedDiscoveryRuntime />
+          {/*
+           * ADR-0066 section 2.3 — a device removal whose later steps are
+           * still owed is finished at every landing, whatever screen shows.
+           */}
+          <OwedDeviceRemovals />
+          <OwedKeyRotation />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole

@@ -27,6 +27,10 @@ import android.content.Context
  * before this client joined is invisible to it, and the device would be
  * re-admitted — recorded in the ADR as the arm's known limit.
  *
+ * For the OWN account that limit is closed (ADR-0066 section 2.3): a device of
+ * this account is admitted only while the account's DeviceGroup roster lists
+ * it. A removed device is not in that roster, whatever it publishes.
+ *
  * Keys are opaque strings to the planner; the caller uses one encoding for
  * roster leaves, directory devices and the removed memory.
  */
@@ -53,6 +57,18 @@ public object DeviceReadmission {
         ownPersonKey: String,
         accounts: List<AccountDevices>,
         removed: Set<String>,
+        /**
+         * ADR-0066 section 2.3 — the device keys in THIS account's
+         * DeviceGroup roster, or `null` when the roster could not be read.
+         * A device of the own account is admitted only when it is in it: the
+         * DeviceGroup is the account's own, MLS-authenticated record of its
+         * devices, and a removed device is not in it, so a device that
+         * publishes itself again after its removal is not put back. An
+         * unreadable roster admits no own device (fail closed). Contacts'
+         * devices are not filtered by it; [removed] stays for every account
+         * as defence in depth.
+         */
+        ownDeviceRoster: Set<String>?,
     ): Plan {
         val rosterKeys = roster.map { it.leafKey }.toSet()
         val admit = mutableListOf<DirectoryDevice>()
@@ -61,9 +77,11 @@ public object DeviceReadmission {
         for (account in accounts) {
             val devices = account.devices ?: continue
             val listed = devices.map { it.deviceKey }.toSet()
+            val own = account.personKey == ownPersonKey
             for (d in devices) {
                 if (d.deviceKey in rosterKeys) continue
                 if (d.deviceKey in removed) continue
+                if (own && !ownDeviceAdmissible(d.deviceKey, ownDeviceRoster)) continue
                 if (!seen.add(d.deviceKey)) continue
                 admit += d
             }
@@ -76,6 +94,15 @@ public object DeviceReadmission {
         }
         return Plan(admit, retire)
     }
+
+    /**
+     * Whether a device of the OWN account may be added to a conversation:
+     * only when the account's DeviceGroup roster lists its key. `null`
+     * roster (not readable now) admits nothing. The same rule guards the
+     * pairing fan-out (`ChatRepository.admitDevice`).
+     */
+    public fun ownDeviceAdmissible(deviceKey: String, ownDeviceRoster: Set<String>?): Boolean =
+        ownDeviceRoster != null && deviceKey in ownDeviceRoster
 
     // ---- the throttle -----------------------------------------------------
 

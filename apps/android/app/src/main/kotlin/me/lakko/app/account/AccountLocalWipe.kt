@@ -33,9 +33,11 @@ import java.io.File
  * could write a store back (chat, contacts, channels, device sync), so a
  * deleted row stays deleted.
  *
- * Called from exactly one place, [me.lakko.app.auth.AuthRepository.forgetDevice],
- * which Forget device and Delete account both reach through the same
- * orchestration in `MainActivity`.
+ * Called from [me.lakko.app.auth.AuthRepository.forgetDevice], which Forget
+ * device and Delete account both reach through the same orchestration in
+ * `MainActivity`, and from the signed-out screens' wipe
+ * ([me.lakko.app.auth.AuthRepository.wipeAfterKeyReset]). A device whose
+ * account keys were reset elsewhere runs [wipeKeepingRecallRecord] first.
  */
 public object AccountLocalWipe {
 
@@ -51,6 +53,15 @@ public object AccountLocalWipe {
      */
     public fun wipeAccountLocalData(context: Context, accountIdB64: String): List<String> =
         runSteps(context, accountIdB64, steps)
+
+    /**
+     * ADR-0066 section 1.1 - the STAGED wipe of a device whose account keys
+     * were reset elsewhere: everything [wipeAccountLocalData] removes EXCEPT
+     * the recall record ([RECALL_RECORD_STEP]), which is what lets the person
+     * take the account back. The full wipe runs later, when the record goes.
+     */
+    public fun wipeKeepingRecallRecord(context: Context, accountIdB64: String): List<String> =
+        runSteps(context, accountIdB64, stagedSteps)
 
     /** [wipeAccountLocalData] over an explicit step list (tests prove the
      *  inventory walk notices a store left out). */
@@ -115,6 +126,17 @@ public object AccountLocalWipe {
         // ADR-0065: the attestation and the step markers of a reset whose
         // publish is still owed.
         Step("key-reset-owed") { ctx, acct -> me.lakko.app.auth.KeyResetOwedStore.onDevice(ctx).clear(acct) },
+        // ADR-0066: the "auth recorded this identity key" mark, a logout the
+        // server was not told about, and a device removal still owed.
+        Step("genesis-recorded") { ctx, acct -> me.lakko.app.auth.GenesisRecordedStore.onDevice(ctx).clear(acct) },
+        Step("logout-owed") { ctx, acct -> me.lakko.app.auth.LogoutOwedStore.onDevice(ctx).clear(acct) },
+        Step("device-removal-owed") { ctx, acct ->
+            me.lakko.app.devices.DeviceRemovalOwedStore.onDevice(ctx).clearAccount(acct)
+        },
+        // ADR-0066 section 1.1: the recall record (the old account signing
+        // seed an old device keeps after a reset elsewhere). The one step
+        // the staged wipe leaves out ([stagedSteps]).
+        Step(RECALL_RECORD_STEP) { ctx, acct -> me.lakko.app.auth.RecallRecordStore.deleteFile(ctx, acct) },
 
         // ---- backup ---------------------------------------------------------
         Step("new-device-notice") { ctx, acct ->
@@ -165,6 +187,22 @@ public object AccountLocalWipe {
         Step("conversations-closed") { ctx, acct -> me.lakko.app.chat.ConversationClosedStore.deleteAccount(ctx, acct) },
         Step("keys-reset-evictions") { ctx, acct -> me.lakko.app.chat.EvictionStore.deleteAccount(ctx, acct) },
         Step("contact-key-state") { ctx, acct -> me.lakko.app.contacts.SharedPrefsContactKeyStateStore(ctx).clearForOwner(acct) },
+        // ADR-0066 part 3 - a key rotation's sealed files (the prepared
+        // entropy and proof, pending envelopes, this account's previous
+        // identities), its owed record and the kept device's notice flag.
+        Step("key-rotation-files") { ctx, acct -> me.lakko.app.auth.KeyRotationFiles.deleteAll(ctx, acct) },
+        Step("key-rotation-owed") { ctx, acct ->
+            me.lakko.app.devices.KeyRotationOwedStore.onDevice(ctx).clear(acct)
+        },
+        Step("inbox-mailbox") { ctx, acct -> me.lakko.app.contacts.InboxMailboxStore.deleteAccount(ctx, acct) },
+        Step("key-rotation-notice") { ctx, acct ->
+            ctx.getSharedPreferences("lakko-key-rotation-notice", Context.MODE_PRIVATE)
+                .edit().remove("notice-v1:$acct").commit()
+        },
+        // ADR-0066 section 3.5 - the proven steps of contacts' key histories.
+        Step("proven-predecessors") { ctx, acct ->
+            me.lakko.app.contacts.SharedPrefsProvenLinkStore(ctx).clearForOwner(acct)
+        },
         Step("orphaned-channels") { ctx, acct -> me.lakko.app.channels.OrphanedChannelsStore.onDevice(ctx).deleteAccount(acct) },
         Step("pins") { ctx, acct -> me.lakko.app.chat.PinStore.deleteAccount(ctx, acct) },
         Step("read-watermarks") { ctx, acct ->
@@ -265,6 +303,12 @@ public object AccountLocalWipe {
         // sidecar, or a store added later whose deletion was not listed above.
         Step("no-backup-files-sweep") { ctx, acct -> sweepFilesNamedBy(ctx.noBackupFilesDir, acct) },
     )
+
+    /** The name of the step that deletes the ADR-0066 recall record. */
+    public const val RECALL_RECORD_STEP: String = "recall-record"
+
+    /** The staged wipe: the full list minus the recall record, in order. */
+    public val stagedSteps: List<Step> = steps.filterNot { it.name == RECALL_RECORD_STEP }
 
     /** The `channel-publisher-keys` step over the preferences [publisherPrefs]
      *  opens. Production passes the Keystore-backed store; the JVM tests,

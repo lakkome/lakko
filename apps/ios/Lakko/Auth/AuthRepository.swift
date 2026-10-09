@@ -71,6 +71,16 @@ public final class AuthRepository: ObservableObject {
             if case .session(let account) = state, let token = identitySecrets?.sessionToken {
                 ensureLoginHandleBound(username: account.username, sessionToken: token, context: "session")
             }
+            // ADR-0066 — every state that holds a session names this device
+            // in it, and a session with keys records the account key at auth
+            // until that has succeeded once. One hook for every landing: the
+            // relaunch restore, passkey, pairing, the phrase completion.
+            switch state {
+            case .session(let account), .needsRecoveryPhrase(let account), .saveFreshPhrase(let account):
+                sessionLanded(accountIdB64: account.accountIdB64)
+            case .loading, .anon:
+                break
+            }
         }
     }
 
@@ -81,10 +91,31 @@ public final class AuthRepository: ObservableObject {
     /// otherwise. Cleared by "Sign in" on the screen.
     @Published public private(set) var keysSignOut: KeysSignOutState?
 
+    /// Why ``keysSignOut`` is set: the keys were reset elsewhere (ADR-0065),
+    /// or this device was removed from the account (ADR-0066 section 2.3).
+    /// The screen's copy differs; the wipe is the same full one.
+    @Published public private(set) var keysSignOutCause: DeviceSignOutCause = .keysReset
+
     /// The username the signed-out screen names (`@name`), captured when
     /// ``keysSignOut`` is set: the session record it would read is gone
     /// once the wipe ran. Empty for a guest account.
     public private(set) var keysSignOutUsername: String = ""
+
+    /// The line the signed-out screen adds under its body, as a catalog key,
+    /// or `nil`: a recall that ended because the tries ran out, or because
+    /// the time passed while the form was open (UX 18.4). Cleared with the
+    /// screen.
+    public private(set) var keysSignOutNoticeKey: String?
+
+    /// ADR-0066 section 1.1 / UX 18.4 — "Was it you?": the account's keys
+    /// were reset on another device, this device deleted what the account
+    /// kept on it and holds a recall record. Replaces the whole app while
+    /// set, at launch too (it is read back from the record). `nil` otherwise.
+    @Published public private(set) var recall: RecallScreenState?
+
+    /// UX 18.4, "Done" — the account was taken back on this device in this
+    /// session: one line at the top of the chat list. In memory only.
+    @Published public private(set) var accountRecalledThisSession: Bool = false
 
     /// UX 15.3 — the keys were reset on THIS device in this session: the
     /// Devices and Passkeys screens show their one-session note. In memory
@@ -233,6 +264,43 @@ public final class AuthRepository: ObservableObject {
     /// The owed markers of a fresh identity (``RecoveryMarkers``).
     private let markers: RecoveryMarkers
 
+    /// ADR-0066 section 0.4 — this device's id for an account (its
+    /// conversation leaf key), or `nil` when the device identity cannot be
+    /// read or minted. Injectable for tests.
+    typealias OwnDeviceId = @MainActor (_ accountIdB64: String) -> Data?
+
+    private let ownDeviceId: OwnDeviceId
+
+    /// The production device id: the public key of the per-account device
+    /// identity seed (``DeviceIdentityStore``), minted on first use, which is
+    /// the key of this device's conversation leaves and of its directory row.
+    static let storedOwnDeviceId: OwnDeviceId = { accountIdB64 in
+        do {
+            let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
+            return try Identity.fromSeed(seed: seed).signaturePublicKey()
+        } catch {
+            NSLog("[auth] WARN this device's identity could not be read; the session stays unbound")
+            return nil
+        }
+    }
+
+    /// ADR-0066 section 0.1 — the per-account "account key recorded at
+    /// auth" mark.
+    private let identityKeyMarks: IdentityKeyRecordMarks
+
+    /// ADR-0066 section 2.3 — the owed server half of Log out.
+    private let logoutOwed: LogoutOwedStoring
+
+    /// A bind is running for this account (one at a time).
+    private var deviceBindInFlight: String?
+    /// A genesis mint is running for this account.
+    private var identityKeyRecordInFlight: String?
+
+    /// Called once the session was re-issued naming this device, so what a
+    /// device-bound session is needed for (the KeyPackage publish) can run
+    /// again. Wired by the composition root.
+    var onSessionDeviceBound: (@MainActor () -> Void)?
+
     /// ADR-0065 section 3.3 — the one token provider every REST client's
     /// request passes through. The repository installs the pair on every
     /// landing, clears it on sign-out, and answers its three callbacks.
@@ -290,8 +358,10 @@ public final class AuthRepository: ObservableObject {
         var republishOwnKeyPackage: @MainActor (IdentitySecrets) async throws -> Void
         /// Re-found the DeviceGroup and re-root its journal with the
         /// attestation. Throws when the reset did not land.
+        /// `keyGeneration` is the attestation's: the root endorsement
+        /// (ADR-0066 section 4.6) binds it.
         var refoundDeviceGroup: @MainActor (
-            _ accountIdBytes: Data, _ accountIdB64: String, _ attestation: Data
+            _ accountIdBytes: Data, _ accountIdB64: String, _ attestation: Data, _ keyGeneration: UInt64
         ) async throws -> Void
 
         /// The defaults: the device binding is re-minted under the new
@@ -308,11 +378,12 @@ public final class AuthRepository: ObservableObject {
                         underlying: AuthClientError.argument("device binding could not be re-minted"))
                 }
             },
-            refoundDeviceGroup: { accountIdBytes, accountIdB64, attestation in
+            refoundDeviceGroup: { accountIdBytes, accountIdB64, attestation, keyGeneration in
                 try await DeviceGroupDsAccess.refoundAfterKeyReset(
                     accountIdBytes: accountIdBytes,
                     accountIdB64: accountIdB64,
                     attestation: attestation,
+                    keyGeneration: keyGeneration,
                     ds: DsClient())
             }
         )
@@ -328,6 +399,70 @@ public final class AuthRepository: ObservableObject {
     /// session here. Nothing is published first and no call needs the
     /// superseded token.
     var wipeAfterKeyReset: @MainActor (_ accountIdB64: String) async -> Void
+
+    /// ADR-0066 section 1.1 — the STAGED wipe: the same deletion, except the
+    /// recall record. Injectable like ``wipeAfterKeyReset``; the composition
+    /// root points it at ``AppServices/stagedWipeAfterKeyReset(accountIdB64:)``.
+    var stagedWipeAfterKeyReset: @MainActor (_ accountIdB64: String) async -> Void
+
+    /// The recall record's store (the app-private Keychain in production).
+    private let recallRecords: RecallRecordStoring
+    /// The recall's server operations.
+    private let recallOperations: RecallOperations
+    /// A status read is running.
+    private var recallStatusInFlight = false
+    /// A take-back attempt is running.
+    private var recallAttemptInFlight = false
+
+    // MARK: ADR-0066 part 3 — a rotation of the account keys, the devices kept
+
+    /// A kept device is fetching the account's new keys: its session was
+    /// refused as of an old key generation and it has not yet adopted them
+    /// (UX 18.3: "Updating keys..." where "Synchronizing..." would be; the
+    /// chat list stays, sends wait). Never a full-screen state.
+    @Published public private(set) var keysUpdating: Bool = false
+
+    /// This device adopted keys another device changed: the one dismissible
+    /// line at the top of the chat list (UX 18.3), kept across launches until
+    /// dismissed.
+    @Published public private(set) var keysRotatedNotice: Bool = false
+
+    /// The pending `key-rotation` envelopes of a kept device.
+    private let rotationPending: KeyRotationPendingStoring
+    /// The account's own old seed(s), kept after a rotation.
+    private let ownPredecessors: OwnPredecessorStoring
+    private let rotatedNotice: KeysRotatedNoticeStore
+    /// The rotating device's owed record (read here only for "is a publish
+    /// owed").
+    private let rotationStore: KeyRotationStore
+    /// One adoption run at a time.
+    private var rotationAdoptInFlight = false
+    /// The retry of an adoption that got no verdict.
+    private var rotationAdoptRetry: Task<Void, Never>?
+
+    /// The session upgrade of a kept device (`refreshToken`, the account id,
+    /// the NEW account identity's Ed25519 seed):
+    /// ``AuthClient/upgradeSession(refreshToken:accountId:newAccountEd25519Seed:)``
+    /// in the app; injectable so the flow runs under a scripted server.
+    typealias SessionUpgradeOperation = (
+        _ refreshToken: String, _ accountId: Data, _ newAccountEd25519Seed: Data
+    ) async throws -> SessionPair
+
+    private let sessionUpgradeOperation: SessionUpgradeOperation
+
+    /// ADR-0066 section 3.3 — read this account's DeviceGroup journal to its
+    /// head once (``DeviceGroupSyncRepository/waitForJournalHead(timeoutMs:)``);
+    /// `false` when it could not be read. Wired by the composition root; the
+    /// default reads nothing.
+    var readDeviceGroupJournalToHead: @MainActor (_ accountIdB64: String) async -> Bool = { _ in false }
+
+    /// The account's keys were rotated and this device holds the new ones
+    /// (it rotated them, or it adopted them): what derives from the account
+    /// seed outside this repository is re-keyed (the chat repository's
+    /// account identity, the reach keys and the mailbox, this device's
+    /// KeyPackage row). `predecessorSeed` is the OLD 64-byte seed. Wired by
+    /// the composition root.
+    var onAccountKeysRotated: (@MainActor (_ secrets: IdentitySecrets, _ predecessorSeed: Data) async -> Void)?
 
     /// The live `UNUserNotificationCenter` removal.
     nonisolated static func removeAllDeliveredNotifications() {
@@ -368,8 +503,27 @@ public final class AuthRepository: ObservableObject {
         grantNowMs: @escaping () -> Int64 = SessionRestore.nowMs,
         attestationVerifier: KeyResetAttestationVerifying = PinnedKeyResetAttestationVerifier(),
         keyResetHooks: KeyResetHooks = .production,
-        wipeAfterKeyReset: (@MainActor (String) async -> Void)? = nil
+        wipeAfterKeyReset: (@MainActor (String) async -> Void)? = nil,
+        stagedWipeAfterKeyReset: (@MainActor (String) async -> Void)? = nil,
+        recallRecords: RecallRecordStoring = KeychainRecallRecordStore(),
+        recallOperations: RecallOperations? = nil,
+        ownDeviceId: OwnDeviceId? = nil,
+        identityKeyMarks: IdentityKeyRecordMarks = IdentityKeyRecordMarks(),
+        logoutOwed: LogoutOwedStoring = KeychainLogoutOwedStore(),
+        rotationPending: KeyRotationPendingStoring = KeychainKeyRotationPendingStore(),
+        ownPredecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore(),
+        rotatedNotice: KeysRotatedNoticeStore = KeysRotatedNoticeStore(),
+        rotationStore: KeyRotationStore = KeyRotationStore(),
+        sessionUpgradeOperation: SessionUpgradeOperation? = nil
     ) {
+        self.rotationPending = rotationPending
+        self.ownPredecessors = ownPredecessors
+        self.rotatedNotice = rotatedNotice
+        self.rotationStore = rotationStore
+        self.sessionUpgradeOperation = sessionUpgradeOperation ?? { refreshToken, accountId, seed in
+            try await authClientFactory().upgradeSession(
+                refreshToken: refreshToken, accountId: accountId, newAccountEd25519Seed: seed)
+        }
         self.sessionStore = sessionStore
         self.authClientFactory = authClientFactory
         self.persistence = persistence
@@ -380,6 +534,9 @@ public final class AuthRepository: ObservableObject {
         self.removeDeliveredNotifications = removeDeliveredNotifications
         self.passkeyCeremony = passkeyCeremony
         self.markers = markers
+        self.ownDeviceId = ownDeviceId ?? AuthRepository.storedOwnDeviceId
+        self.identityKeyMarks = identityKeyMarks
+        self.logoutOwed = logoutOwed
         self.tokenProvider = tokenProvider
         self.keyResetOperation = keyResetOperation ?? { sessionToken, freshGrant, seed, newKey in
             try await authClientFactory().resetAccountKeys(
@@ -397,14 +554,28 @@ public final class AuthRepository: ObservableObject {
         self.attestationVerifier = attestationVerifier
         self.keyResetHooks = keyResetHooks
         self.wipeAfterKeyReset = wipeAfterKeyReset ?? { _ in }
+        // A caller that injected its own full wipe and no staged one gets
+        // the same closure for both: it owns what "wipe" means.
+        self.stagedWipeAfterKeyReset = stagedWipeAfterKeyReset ?? wipeAfterKeyReset ?? { _ in }
+        self.recallRecords = recallRecords
+        self.recallOperations = recallOperations ?? .live(authClientFactory)
         if wipeAfterKeyReset == nil {
             self.wipeAfterKeyReset = { [weak self] accountIdB64 in
                 AccountLocalDataWipe.wipe(accountIdB64: accountIdB64)
                 self?.endSessionAfterLocalWipe()
             }
+            if stagedWipeAfterKeyReset == nil {
+                self.stagedWipeAfterKeyReset = { [weak self] accountIdB64 in
+                    AccountLocalDataWipe.wipe(accountIdB64: accountIdB64, keeping: [.recallRecord])
+                    self?.endSessionAfterLocalWipe()
+                }
+            }
         }
         wireTokenProvider()
         rehydrate(nowMs: nowMs())
+        restoreRecall(nowMs: nowMs())
+        retryOwedLogout()
+        restoreKeysRotatedNotice()
     }
 
     /// The provider's refresher and its three callbacks (ADR-0065 section
@@ -419,10 +590,16 @@ public final class AuthRepository: ObservableObject {
             Task { @MainActor in self?.sessionPairRefreshed(pair, accountIdB64: accountIdB64) }
         }
         tokenProvider.onSuperseded = { [weak self] accountIdB64 in
-            Task { @MainActor in self?.handleKeysSuperseded(accountIdB64: accountIdB64) }
+            // ADR-0066 section 3.3 — a superseded generation is a rotation
+            // when this device holds (or finds) the account's new keys, and
+            // only otherwise a reset.
+            Task { @MainActor in self?.keysSuperseded(accountIdB64: accountIdB64, publishedSignaturePubkey: nil) }
         }
         tokenProvider.onRefreshInvalid = { [weak self] accountIdB64 in
             Task { @MainActor in self?.handleRefreshInvalid(accountIdB64: accountIdB64) }
+        }
+        tokenProvider.onDeviceRevoked = { [weak self] accountIdB64 in
+            Task { @MainActor in self?.handleDeviceRevoked(accountIdB64: accountIdB64) }
         }
     }
 
@@ -478,7 +655,10 @@ public final class AuthRepository: ObservableObject {
             // upload. No upload on a silent restore.
             Task { [weak self] in
                 guard let self else { return }
-                if case .superseded = await self.tokenProvider.refresh() { return }
+                switch await self.tokenProvider.refresh() {
+                case .superseded, .revoked: return
+                case .refreshed, .invalid, .noCredential, .failed: break
+                }
                 await self.checkPublishedIdentity(
                     accountIdBytes: secrets.accountId,
                     accountIdentitySeed: secrets.accountIdentitySeed,
@@ -553,6 +733,9 @@ public final class AuthRepository: ObservableObject {
     /// hold a pair before ``identitySecrets`` exists (a sign-in parked
     /// without keys, the fresh phrase). Best-effort persist, as above.
     private func adoptSessionPair(_ pair: SessionPair, accountIdB64: String, context: String) {
+        // A session exists again on this device: a logout still owed from
+        // before must not be sent now (its floor would end this session).
+        logoutOwed.clear()
         tokenProvider.install(pair, accountIdB64: accountIdB64)
         do {
             try persistence.putSessionToken(PersistedSessionToken(pair: pair), accountIdB64: accountIdB64)
@@ -594,8 +777,17 @@ public final class AuthRepository: ObservableObject {
             emptyError: AuthClientError.argument("username must be non-empty")
         )
         let client = authClientFactory()
+        let deviceId = ownDeviceId
         let result = try await client.signup(
-            password: password, enrolRecovery: true, onCommitting: onCommitting)
+            password: password, enrolRecovery: true,
+            deviceIdFor: { accountId in
+                // ADR-0066 section 0.4 — signup knows the account id before
+                // the finish, so the first session already names this device.
+                LandingDevice.asserted(
+                    accountKnownBeforeFinish: true,
+                    ownDeviceId: await deviceId(base64Encode(accountId)))
+            },
+            onCommitting: onCommitting)
         // A fresh unstructured task does not inherit the caller's cancellation.
         return try await Task { @MainActor in
             try await self.completeSignup(result: result, username: canonical)
@@ -1829,6 +2021,10 @@ public final class AuthRepository: ObservableObject {
         // ADR-0054 S3 — the push unregister spends a token; take it from
         // the pool BEFORE the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
+        // ADR-0066 section 2.1 — the session is signed out at the server
+        // too, best effort: the pair is read before the provider forgets it,
+        // and the local sign-out below never waits for the call.
+        let endingPair = tokenProvider.current
         tokenProvider.clear()
         freshAuth.clear()
         sessionLanding = nil
@@ -1841,8 +2037,14 @@ public final class AuthRepository: ObservableObject {
         freshPublishPending = false
         freshPublishNeedsSignIn = false
         keysResetThisSession = false
+        accountRecalledThisSession = false
+        keysUpdating = false
+        keysRotatedNotice = false
+        rotationAdoptRetry?.cancel()
+        rotationAdoptRetry = nil
         sessionExpiredNotice = false
         state = .anon(cachedUsername: cached?.username)
+        if let endingPair { logoutAtServer(endingPair) }
         // 1.20c — fire-and-forget unsubscribe so the next page
         // reload doesn't silently keep accepting pushes against
         // a logged-out session.
@@ -1875,6 +2077,10 @@ public final class AuthRepository: ObservableObject {
         // ADR-0054 S3 — the push unregister below spends a token; take it
         // before the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
+        // ADR-0066 section 2.1 — Forget this device signs the session out at
+        // the server as Log out does. After a reset elsewhere or a removal
+        // the provider is already empty and nothing is sent.
+        let endingPair = tokenProvider.current
         tokenProvider.clear()
         freshAuth.clear()
         sessionLanding = nil
@@ -1890,8 +2096,14 @@ public final class AuthRepository: ObservableObject {
         freshPublishPending = false
         freshPublishNeedsSignIn = false
         keysResetThisSession = false
+        accountRecalledThisSession = false
+        keysUpdating = false
+        keysRotatedNotice = false
+        rotationAdoptRetry?.cancel()
+        rotationAdoptRetry = nil
         sessionExpiredNotice = false
         state = .anon(cachedUsername: nil)
+        if let endingPair { logoutAtServer(endingPair) }
         // 1.20c — full wipe of push state too. The contract is
         // "leave NOTHING per-account behind on this device", so
         // we both unregister server-side and clear the Keychain
@@ -2103,15 +2315,19 @@ public final class AuthRepository: ObservableObject {
         // is BEHIND this device, by design, until the owed upload lands
         // (section 2.3). Comparing against it now would read this device's
         // own new keys as a mismatch; the owed publish is what runs instead.
-        guard !markers.isPublishOwed(accountIdB64: accountIdB64) else {
-            NSLog("[auth] published-identity check skipped: this device's reset is still being published")
+        // The same holds for a rotation this device made (ADR-0066 section
+        // 3.2): its directory upload is owed until it lands.
+        guard !keyResetPublishOwed(accountIdB64: accountIdB64) else {
+            NSLog("[auth] published-identity check skipped: this device's new keys are still being published")
             return
         }
 
         let observed: KeyResetLanding.Observation
+        var publishedSignaturePubkey: Data?
         do {
             if let bundle = try await restoreDirectory.fetchIdentityBundle(
                 accountId: accountIdBytes, sessionToken: tokenProvider.current?.sessionToken) {
+                publishedSignaturePubkey = base64Decode(bundle.signaturePubkey)
                 observed = .present(
                     signaturePubkey: base64Decode(bundle.signaturePubkey),
                     keyGeneration: bundle.keyGeneration)
@@ -2135,7 +2351,11 @@ public final class AuthRepository: ObservableObject {
         switch verdict {
         case .staleKeys:
             NSLog("[auth] the directory publishes keys of a higher generation; this device's keys are stale")
-            handleKeysSuperseded(accountIdB64: accountIdB64)
+            // ADR-0066 section 3.3 — "the published bundle carries the
+            // proof's new key" is how a kept device sees the commit: a
+            // pending envelope for that key is adopted; with none, the
+            // journal is read once, and only then is this a reset.
+            keysSuperseded(accountIdB64: accountIdB64, publishedSignaturePubkey: publishedSignaturePubkey)
             return
         case .mismatch:
             NSLog("[auth] the directory publishes other keys at this generation; refusing to upload")
@@ -2194,13 +2414,34 @@ public final class AuthRepository: ObservableObject {
     /// and run the full forget-device wipe by itself — publishing nothing
     /// first and calling nothing that needs the superseded token. Once per
     /// account: a second signal while the wipe runs changes nothing.
+    ///
+    /// ADR-0066 section 1.1 changes WHICH wipe (``SignOutWipe``): a device
+    /// that holds the account's keys runs the STAGED wipe, keeps a recall
+    /// record and shows "Was it you?" (``recall``); a device that never held
+    /// them keeps nothing and shows the signed-out screen as before.
     func handleKeysSuperseded(accountIdB64: String) {
-        guard keysSignOut == nil else { return }
+        guard keysSignOut == nil, recall == nil else { return }
         guard signedInAccountIdB64 == accountIdB64 || sessionStore.load()?.accountIdB64 == accountIdB64 else {
             return
         }
+        let username = signedInUsername(accountIdB64: accountIdB64)
+        if let record = recallRecordForSupersededDevice(accountIdB64: accountIdB64, username: username) {
+            NSLog("[auth] the account keys were reset on another device; deleting this device's data, keeping the recall record")
+            recall = RecallScreenState(record: record)
+            pushBinding.clear()
+            removeDeliveredNotifications()
+            tokenProvider.clear()
+            Task { [weak self] in
+                guard let self else { return }
+                await self.stagedWipeAfterKeyReset(accountIdB64)
+                await self.refreshRecallStatus()
+            }
+            return
+        }
         NSLog("[auth] the account keys were reset on another device; signing this device out")
-        keysSignOutUsername = signedInUsername(accountIdB64: accountIdB64)
+        keysSignOutUsername = username
+        keysSignOutCause = .keysReset
+        keysSignOutNoticeKey = nil
         keysSignOut = .removing
         // From here on no background wake is handled for this account and
         // nothing it received stays on the lock screen.
@@ -2214,12 +2455,497 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
+    // MARK: - ADR-0066 section 2.3: this device was removed
+
+    /// This device was removed from the account on another device: auth
+    /// answered `401 device-revoked`, or this device's own DeviceGroup turned
+    /// inactive (it applied its own removal). Show "This device was removed",
+    /// stop every writer, and wipe EVERYTHING by itself: no button, nothing
+    /// published first, no call that needs the revoked token, and no recall
+    /// record (a removal changes no keys, so there is nothing to take back).
+    /// Once per account; a signal while a sign-out is already running changes
+    /// nothing.
+    ///
+    /// Never called on a failed request alone: discovery's `403
+    /// device-revoked` and a DS `401` are not proof.
+    func handleDeviceRevoked(accountIdB64: String) {
+        guard keysSignOut == nil, recall == nil else { return }
+        guard signedInAccountIdB64 == accountIdB64 || sessionStore.load()?.accountIdB64 == accountIdB64 else {
+            return
+        }
+        NSLog("[auth] this device was removed from the account; signing out and deleting its data")
+        keysSignOutUsername = signedInUsername(accountIdB64: accountIdB64)
+        keysSignOutCause = .deviceRemoved
+        keysSignOutNoticeKey = nil
+        // ADR-0066 section 2.3 — a removal changes no keys: no recall record
+        // is written, and one left from before goes with the full wipe.
+        recallRecords.clear(accountIdB64: accountIdB64)
+        keysSignOut = .removing
+        pushBinding.clear()
+        removeDeliveredNotifications()
+        // A logout owed from before is moot, and nothing is sent with the
+        // revoked pair.
+        logoutOwed.clear()
+        tokenProvider.clear()
+        Task { [weak self] in
+            guard let self else { return }
+            await self.wipeAfterKeyReset(accountIdB64)
+            if self.keysSignOut == .removing { self.keysSignOut = .removed }
+        }
+    }
+
+    /// The account's own DeviceGroup reports this device out of it (the
+    /// sync runtime read `isActive == false`): proof of removal by a device
+    /// of the account (ADR-0066 section 2.3).
+    public func deviceGroupReportedRemoval() {
+        guard let accountIdB64 = signedInAccountIdB64 else { return }
+        handleDeviceRevoked(accountIdB64: accountIdB64)
+    }
+
+    // MARK: - ADR-0066 sections 0.1, 0.4: the session names a device; the account key is recorded
+
+    /// A state holding a session for `accountIdB64` was entered: name this
+    /// device in the session if it is not named yet, then record the account
+    /// key at auth if that never succeeded for the key this device holds.
+    private func sessionLanded(accountIdB64: String) {
+        // ADR-0066 part 3 — a kept device's pending rotations age out, and
+        // the "keys were changed" line survives a relaunch until dismissed.
+        pruneKeyRotationPending(accountIdB64: accountIdB64)
+        keysRotatedNotice = rotatedNotice.isOwed(accountIdB64: accountIdB64)
+        Task { [weak self] in
+            guard let self else { return }
+            await self.bindSessionDeviceIfNeeded(accountIdB64: accountIdB64, context: "landing")
+            guard let secrets = self.identitySecrets, base64Encode(secrets.accountId) == accountIdB64 else {
+                return
+            }
+            await self.recordIdentityKeyIfNeeded(
+                accountIdBytes: secrets.accountId, accountIdentitySeed: secrets.accountIdentitySeed)
+        }
+    }
+
+    /// Name this device in the installed session (``SessionDeviceBinding``):
+    /// `POST /auth/session/bind-device` for a pair that names none, after
+    /// which the unbound pair is dropped. Returns whether the session names
+    /// this device when the call returns.
+    @discardableResult
+    func bindSessionDeviceIfNeeded(accountIdB64: String, context: String) async -> Bool {
+        guard tokenProvider.account == accountIdB64, let pair = tokenProvider.current else { return false }
+        switch SessionDeviceBinding.decide(pair: pair, ownDeviceId: ownDeviceId(accountIdB64)) {
+        case .bound:
+            return true
+        case .noDeviceIdentity:
+            return false
+        case .boundToAnother:
+            NSLog("[auth] WARN the session names another device id; a fresh sign-in is needed to publish")
+            return false
+        case .bind(let deviceId):
+            guard deviceBindInFlight != accountIdB64, pair.refreshUsable(nowMs: grantNowMs()) else {
+                return false
+            }
+            deviceBindInFlight = accountIdB64
+            defer { deviceBindInFlight = nil }
+            do {
+                let bound = try await authClientFactory().bindDevice(
+                    sessionToken: pair.sessionToken, deviceId: deviceId, refreshToken: pair.refreshToken)
+                // The session may have ended or changed while the call ran.
+                guard tokenProvider.account == accountIdB64 else { return false }
+                if let secrets = identitySecrets, base64Encode(secrets.accountId) == accountIdB64 {
+                    adoptIdentitySecrets(
+                        IdentitySecrets(
+                            accountId: secrets.accountId,
+                            exportKey: secrets.exportKey,
+                            accountIdentitySeed: secrets.accountIdentitySeed,
+                            session: bound),
+                        context: "bind-device (\(context))")
+                } else {
+                    adoptSessionPair(bound, accountIdB64: accountIdB64, context: "bind-device (\(context))")
+                }
+                onSessionDeviceBound?()
+                return true
+            } catch {
+                switch SessionDeviceBinding.refusal(of: error) {
+                case .deviceRevoked:
+                    handleDeviceRevoked(accountIdB64: accountIdB64)
+                case .superseded:
+                    handleKeysSuperseded(accountIdB64: accountIdB64)
+                case .refreshInvalid:
+                    handleRefreshInvalid(accountIdB64: accountIdB64)
+                case .alreadyBound:
+                    NSLog("[auth] WARN bind-device: the session already names another device")
+                case .badDeviceId, .other:
+                    NSLog("[auth] bind-device did not land (%@); the next landing tries again",
+                          String(describing: type(of: error)))
+                }
+                return false
+            }
+        }
+    }
+
+    /// Record the account key at auth (`POST /auth/genesis/attest`) unless
+    /// the mint already succeeded for this key (``IdentityKeyRecord``).
+    func recordIdentityKeyIfNeeded(accountIdBytes: Data, accountIdentitySeed: Data) async {
+        let accountIdB64 = base64Encode(accountIdBytes)
+        guard identityKeyRecordInFlight != accountIdB64,
+              let pubkey = try? Identity.fromSeed(seed: accountIdentitySeed).signaturePublicKey(),
+              IdentityKeyRecord.needsMint(
+                recordedPubkeyB64: identityKeyMarks.recorded(accountIdB64: accountIdB64), currentPubkey: pubkey),
+              tokenProvider.account == accountIdB64,
+              let token = tokenProvider.current?.sessionToken else {
+            return
+        }
+        identityKeyRecordInFlight = accountIdB64
+        defer { identityKeyRecordInFlight = nil }
+        do {
+            _ = try await authClientFactory().mintGenesisAttestation(
+                sessionToken: token, identityPubkey: pubkey)
+            identityKeyMarks.markRecorded(pubkey: pubkey, accountIdB64: accountIdB64)
+        } catch {
+            switch IdentityKeyRecord.refusal(of: error) {
+            case .identityKeyMismatch:
+                NSLog("[auth] WARN auth holds another account key for this account; not recorded")
+            case .unusableKey:
+                NSLog("[auth] WARN auth refused this account key as unusable")
+            case .retryLater:
+                NSLog("[auth] the account key was not recorded at auth; the next landing tries again")
+            }
+        }
+    }
+
+    /// Whether auth has this account's key on record as far as this device
+    /// knows, and ask for it again when not (a removal answered
+    /// `account-key-required`).
+    public func recordIdentityKeyNow() {
+        guard let secrets = identitySecrets else { return }
+        Task { [weak self] in
+            await self?.recordIdentityKeyIfNeeded(
+                accountIdBytes: secrets.accountId, accountIdentitySeed: secrets.accountIdentitySeed)
+        }
+    }
+
+    /// Whether a key-reset publish is owed for the signed-in account: a
+    /// device removal must not run in that window (ADR-0066 "T1 as built"
+    /// point 15).
+    public func keyResetPublishOwed(accountIdB64: String) -> Bool {
+        markers.isPublishOwed(accountIdB64: accountIdB64)
+            || rotationStore.publishOwed(accountIdB64: accountIdB64)
+    }
+
+    /// This device's id for `accountIdB64` (its conversation leaf key).
+    public func deviceId(accountIdB64: String) -> Data? {
+        ownDeviceId(accountIdB64)
+    }
+
+    // MARK: - ADR-0066 section 2.1: Log out at the server
+
+    /// `POST /auth/session/logout` for the pair a Log out just dropped, best
+    /// effort. An unreachable server leaves one owed record for the next
+    /// launch (``retryOwedLogout()``); the local sign-out never waits.
+    private func logoutAtServer(_ pair: SessionPair) {
+        guard !pair.sessionToken.isEmpty else { return }
+        logoutOwed.store(pair)
+        let factory = authClientFactory
+        let owed = logoutOwed
+        Task {
+            var failure: Error?
+            do {
+                try await factory().logoutSession(sessionToken: pair.sessionToken)
+            } catch {
+                failure = error
+            }
+            // A sign-in since then cleared the record; this attempt must not
+            // put a stale one back, so it only ever removes.
+            if !LogoutOwed.keepsRecord(after: LogoutOwed.attempt(of: failure), isLaunchRetry: false) {
+                if owed.load()?.sessionToken == pair.sessionToken { owed.clear() }
+            }
+        }
+    }
+
+    /// The one retry of an owed logout, at launch: with the stored access
+    /// token while it lives, else after one refresh. The record is dropped
+    /// whatever the retry came to. Nothing is shown.
+    private func retryOwedLogout() {
+        guard let pair = logoutOwed.load() else { return }
+        // A session was restored for this launch: it is not the one that
+        // logged out (a logout drops the persisted pair), but the same
+        // device id, so the owed logout would end it. Drop the record.
+        if tokenProvider.current != nil {
+            logoutOwed.clear()
+            return
+        }
+        let factory = authClientFactory
+        let owed = logoutOwed
+        let plan = LogoutOwed.retryPlan(pair: pair, nowMs: grantNowMs())
+        Task {
+            // Read again right before sending: a sign-in meanwhile cleared it.
+            guard owed.load()?.sessionToken == pair.sessionToken else { return }
+            switch plan {
+            case .logout(let token):
+                try? await factory().logoutSession(sessionToken: token)
+            case .refreshThenLogout(let refreshToken):
+                if let fresh = try? await factory().refreshSession(refreshToken: refreshToken) {
+                    try? await factory().logoutSession(sessionToken: fresh.sessionToken)
+                }
+            case .drop:
+                break
+            }
+            if owed.load()?.sessionToken == pair.sessionToken { owed.clear() }
+        }
+    }
+
+    // MARK: - ADR-0066 section 1: "Was it you?" and taking the account back
+
+    /// The recall record a superseded device keeps, or `nil` when it keeps
+    /// none (``SignOutWipe``): the one already stored for the account (a
+    /// wipe that was interrupted), else a new one built from the account
+    /// identity seed this device holds, written to the store BEFORE the
+    /// wipe starts. A device without the seed, or whose record could not be
+    /// written, gets `nil` and runs the full wipe.
+    private func recallRecordForSupersededDevice(accountIdB64: String, username: String) -> RecallRecord? {
+        let existing = recallRecords.load().flatMap { $0.accountIdB64 == accountIdB64 ? $0 : nil }
+        let oldSeed = heldAccountSigningSeed(accountIdB64: accountIdB64)
+        switch SignOutWipe.plan(
+            cause: .keysReset, holdsAccountSeed: oldSeed != nil, recallRecordExists: existing != nil) {
+        case .full:
+            return nil
+        case .staged:
+            if let existing { return existing }
+            guard let oldSeed else { return nil }
+            let record = RecallRecord(
+                accountIdB64: accountIdB64, oldSeed: oldSeed, username: username, learnedAtMs: grantNowMs())
+            do {
+                try recallRecords.put(record)
+                return record
+            } catch {
+                NSLog("[auth] WARN the recall record could not be stored; this device keeps nothing")
+                return nil
+            }
+        }
+    }
+
+    /// The 32-byte Ed25519 seed of the account identity this device holds
+    /// for `accountIdB64`, or `nil` when it holds no account keys.
+    private func heldAccountSigningSeed(accountIdB64: String) -> Data? {
+        var phraseSeed: Data?
+        if let secrets = identitySecrets, base64Encode(secrets.accountId) == accountIdB64 {
+            phraseSeed = secrets.accountIdentitySeed
+        } else if let pending = pendingFreshPhrase, pending.accountIdB64 == accountIdB64 {
+            phraseSeed = pending.seed
+        } else {
+            phraseSeed = persistence.accountIdentitySeed(accountIdB64: accountIdB64)
+        }
+        guard let phraseSeed, !phraseSeed.isEmpty,
+              let seed = try? Identity.fromSeed(seed: phraseSeed).ed25519Seed(),
+              seed.count == RecallRecord.seedLength else { return nil }
+        return seed
+    }
+
+    /// At launch: a stored recall record puts "Was it you?" back on screen
+    /// (the screen is driven by the record, not by memory).
+    ///
+    ///   * A session for the same account was restored with OTHER keys than
+    ///     the record's: the recall landed and the app closed before the
+    ///     record was destroyed. Destroy it.
+    ///   * A session for the same account with the SAME keys: the staged
+    ///     wipe was interrupted. The refresh at launch answers
+    ///     `key-generation-superseded` again and the wipe runs again,
+    ///     keeping this record.
+    ///   * No session: show the screen, or end it when the 30 days passed.
+    private func restoreRecall(nowMs: Int64) {
+        guard let record = recallRecords.load() else { return }
+        if let held = heldAccountSigningSeed(accountIdB64: record.accountIdB64),
+           signedInAccountIdB64 == record.accountIdB64 || pendingFreshPhrase?.accountIdB64 == record.accountIdB64 {
+            if held != record.oldSeed {
+                recallRecords.clear(accountIdB64: record.accountIdB64)
+            }
+            return
+        }
+        guard case .anon = state else { return }
+        recall = RecallScreenState(record: record)
+        if record.locallyExpired(nowMs: nowMs) {
+            endRecall(.expired)
+            return
+        }
+        Task { [weak self] in await self?.refreshRecallStatus() }
+    }
+
+    /// Apply a transition of the recall screen.
+    private func applyRecall(_ transition: RecallMachine.Transition) {
+        switch transition {
+        case .show(let next):
+            if recall != nil { recall = next }
+        case .end(let end):
+            endRecall(end)
+        }
+    }
+
+    /// The recall is over without the account being taken back: destroy the
+    /// record, finish the wipe, and show the signed-out screen (UX 15.2),
+    /// with its extra line when there is one.
+    private func endRecall(_ end: RecallEnd) {
+        guard let current = recall else { return }
+        NSLog("[auth] the recall ended (%@); finishing the wipe", String(describing: end))
+        recallRecords.clear(accountIdB64: current.accountIdB64)
+        recall = nil
+        keysSignOutUsername = current.username
+        keysSignOutCause = .keysReset
+        keysSignOutNoticeKey = end.noticeKey
+        keysSignOut = .removing
+        let accountIdB64 = current.accountIdB64
+        Task { [weak self] in
+            guard let self else { return }
+            await self.wipeAfterKeyReset(accountIdB64)
+            if self.keysSignOut == .removing { self.keysSignOut = .removed }
+        }
+    }
+
+    /// Ask the server whether the account can still be taken back from this
+    /// device (`POST /account/recall/status`). Called after the staged wipe,
+    /// at launch, and by the screen while it shows the offline line. A
+    /// refusal destroys the record and finishes the wipe; no answer leaves
+    /// the question on screen with **No** disabled.
+    public func refreshRecallStatus() async {
+        guard let current = recall, !recallStatusInFlight, !recallAttemptInFlight else { return }
+        guard let record = recallRecords.load(), record.accountIdB64 == current.accountIdB64 else {
+            // The record is gone: nothing can be proven any more.
+            endRecall(.closed)
+            return
+        }
+        if RecallMachine.expired(current, nowMs: grantNowMs()) {
+            endRecall(.expired)
+            return
+        }
+        recallStatusInFlight = true
+        let answer = await readRecallStatus(record)
+        recallStatusInFlight = false
+        guard let latest = recall, latest.accountIdB64 == record.accountIdB64 else { return }
+        applyRecall(RecallMachine.afterStatus(latest, answer, nowMs: grantNowMs()))
+    }
+
+    private func readRecallStatus(_ record: RecallRecord) async -> RecallAnswers.Status {
+        do {
+            return .open(try await recallOperations.status(record))
+        } catch {
+            return RecallAnswers.status(of: error)
+        }
+    }
+
+    /// **Yes, it was me**: the confirmation step, inside the screen.
+    public func recallTapYes() {
+        guard let current = recall else { return }
+        recall = RecallMachine.tapYes(current)
+    }
+
+    /// **No, take the account back**: the form.
+    public func recallTapNo() {
+        guard let current = recall else { return }
+        recall = RecallMachine.tapNo(current)
+    }
+
+    /// `Go back` / `Back`.
+    public func recallBack() {
+        guard let current = recall else { return }
+        recall = RecallMachine.back(current)
+    }
+
+    /// `Delete and sign in`: local only, nothing is sent. The record is
+    /// destroyed and the rest of the wipe runs.
+    public func recallConfirmYes() {
+        guard let current = recall else { return }
+        applyRecall(RecallMachine.confirmYes(current))
+    }
+
+    /// Take the account back with the password it had before the reset
+    /// (ADR-0066 section 1.2). The identity afterwards is NEW: a fresh
+    /// phrase and seed are generated here exactly as a reset generates them,
+    /// and once `POST /account/recall/finish` answered the flow IS the key
+    /// reset's (``landKeyReset(reset:seed:phrase:newPubkey:accountIdBytes:accountIdB64:username:context:)``):
+    /// the owed-publish record, the attested directory upload, this device's
+    /// KeyPackage, the DeviceGroup re-founding, the genesis mint, and the
+    /// new words shown last, withheld while the publish is owed.
+    ///
+    /// Every failure leaves the form on screen in the matching state, or
+    /// ends the recall when the server says it is over. The finish carries
+    /// no device id: this device's identity was deleted by the staged wipe,
+    /// and the session is bound right after the landing, as after any
+    /// sign-in that learns the account from the answer.
+    public func recallTakeBack(oldPassword: Data, newPassword: Data) async {
+        guard let current = recall, !recallAttemptInFlight,
+              case .open(let window) = current.check,
+              let working = RecallMachine.submit(current) else { return }
+        guard let record = recallRecords.load(), record.accountIdB64 == current.accountIdB64,
+              let accountIdBytes = record.accountId else {
+            endRecall(.closedInForm)
+            return
+        }
+        recallAttemptInFlight = true
+        defer { recallAttemptInFlight = false }
+        recall = working
+
+        let mnemonic = RecoveryMnemonic.generate()
+        let phrase = mnemonic.phrase()
+        let seed = mnemonic.toSeed()
+        let landed: RecallLanded
+        let newPubkey: Data
+        do {
+            newPubkey = try Identity.fromSeed(seed: seed).signaturePublicKey()
+            landed = try await recallOperations.takeBack(
+                RecallAttempt(
+                    record: record,
+                    anchorSeq: window.anchorSeq,
+                    oldPassword: oldPassword,
+                    newPassword: newPassword,
+                    newSeed: seed,
+                    newSignaturePubkey: newPubkey,
+                    deviceId: nil))
+        } catch {
+            guard let latest = recall else { return }
+            switch RecallAnswers.refusal(of: error) {
+            case .wrongPassword:
+                // How many tries are left is the server's to say.
+                let status = await readRecallStatus(record)
+                guard let after = recall else { return }
+                applyRecall(RecallMachine.afterWrongPassword(after, status: status, nowMs: grantNowMs()))
+            case let refusal:
+                NSLog("[auth] the recall did not land (%@)", String(describing: refusal))
+                applyRecall(RecallMachine.afterRefusal(latest, refusal))
+            }
+            return
+        }
+
+        // The server took the account back. The record has done its work:
+        // destroy it before anything else, then the key reset's client order.
+        recallRecords.clear(accountIdB64: record.accountIdB64)
+        recall = nil
+        freshAuth.put(landed.freshGrant, accountIdB64: record.accountIdB64)
+        accountRecalledThisSession = true
+        // The staged wipe removed the session record; a relaunch on the
+        // phrase screen restores from it.
+        sessionStore.save(PersistedSession(accountIdB64: record.accountIdB64, username: record.username))
+        await landKeyReset(
+            reset: landed.reset,
+            seed: seed,
+            phrase: phrase,
+            newPubkey: newPubkey,
+            accountIdBytes: accountIdBytes,
+            accountIdB64: record.accountIdB64,
+            username: record.username,
+            context: "recall"
+        )
+    }
+
+    /// The person dismissed the "You took your account back" line.
+    public func dismissRecalledNotice() {
+        accountRecalledThisSession = false
+    }
+
     /// Rule 4 of ADR-0065 section 4.2: the directory publishes other keys
     /// at the same generation. The blocking screen; the wipe runs on the
     /// tap (``signOutAfterKeysMismatch()``). Nothing is uploaded.
     private func showKeysMismatch(accountIdB64: String) {
-        guard keysSignOut == nil else { return }
+        guard keysSignOut == nil, recall == nil else { return }
         keysSignOutUsername = signedInUsername(accountIdB64: accountIdB64)
+        keysSignOutCause = .keysReset
+        keysSignOutNoticeKey = nil
         keysSignOut = .mismatch
         pushBinding.clear()
         removeDeliveredNotifications()
@@ -2246,6 +2972,7 @@ public final class AuthRepository: ObservableObject {
         guard keysSignOut == .removed else { return }
         keysSignOut = nil
         keysSignOutUsername = ""
+        keysSignOutNoticeKey = nil
     }
 
     /// The username of `accountIdB64` as this device knows it: the live
@@ -2871,10 +3598,15 @@ public final class AuthRepository: ObservableObject {
         let newPubkey = try Identity.fromSeed(seed: seed).signaturePublicKey()
 
         // 2. The server step: the point of no return.
+        // ADR-0066 "T1 as built" point 10: the pair a reset returns keeps the
+        // device the bearer names, so the client-side note moves with it.
+        let bearer = pending.currentSession(tokenProvider)
         let reset: KeyResetResult
         do {
-            reset = try await keyResetOperation(
-                pending.currentSession(tokenProvider).sessionToken, grant, seed, newPubkey)
+            let answered = try await keyResetOperation(bearer.sessionToken, grant, seed, newPubkey)
+            reset = KeyResetResult(
+                attestation: answered.attestation,
+                session: answered.session.naming(deviceIdB64: bearer.deviceIdB64))
         } catch {
             if FreshAuthRefusal.isRequired(error) {
                 // The grant expired on the way (or was spent): ask again.
@@ -2886,41 +3618,79 @@ public final class AuthRepository: ObservableObject {
         // A successful reset spends the grant and every one before it.
         freshAuth.clear()
 
-        // 3. Persist, before any further network call.
-        adoptSessionPair(reset.session, accountIdB64: pending.accountIdB64, context: "key reset")
-        bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
+        // 3 to 5. Persist, park the phrase screen, publish.
+        await landKeyReset(
+            reset: reset,
+            seed: seed,
+            phrase: phrase,
+            newPubkey: newPubkey,
+            accountIdBytes: pending.accountIdBytes,
             accountIdB64: pending.accountIdB64,
+            username: pending.username,
+            context: "key reset"
+        )
+        return phrase
+    }
+
+    /// Steps 3 to 5 of a key reset's client order (ADR-0065 section 2.3),
+    /// after the server step answered: persist the new pair, the seed and
+    /// the phrase with the owed-publish record BEFORE any further network
+    /// call, park the phrase screen, then run the publish. The ONE code path
+    /// for it: ``mintFreshIdentity(password:username:)`` comes here after
+    /// `POST /account/keys/reset/finish`, and a recall (ADR-0066 section
+    /// 1.2: "from the reset's client order onward the recall IS a reset")
+    /// after `POST /account/recall/finish`.
+    private func landKeyReset(
+        reset: KeyResetResult,
+        seed: Data,
+        phrase: String,
+        newPubkey: Data,
+        accountIdBytes: Data,
+        accountIdB64: String,
+        username: String,
+        context: String
+    ) async {
+        // 3. Persist, before any further network call.
+        adoptSessionPair(reset.session, accountIdB64: accountIdB64, context: context)
+        bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
+            accountIdB64: accountIdB64,
             accountIdentitySeed: seed,
-            context: "mintFreshIdentity"
+            context: context
         )
         do {
             try AccountIdentitySeedStore.putAccountIdentitySeed(
-                accountIdB64: pending.accountIdB64,
+                accountIdB64: accountIdB64,
                 seed: seed
             )
         } catch {
             NSLog("fresh-identity seed persist failed: \(error)")
         }
         // The device holds the new keys, so it holds the new phrase.
-        DevicePhrase.store(phrase, accountIdB64: pending.accountIdB64, context: "fresh-identity")
-        markers.markPhraseOwed(accountIdB64: pending.accountIdB64)
+        DevicePhrase.store(phrase, accountIdB64: accountIdB64, context: "fresh-identity")
+        markers.markPhraseOwed(accountIdB64: accountIdB64)
         let record = KeyResetPublishRecord(
             attestation: reset.attestation,
             keyGeneration: reset.session.keyGeneration,
             signedAtMs: 0,
             newSignaturePubkey: newPubkey
         )
-        markers.markPublishOwed(record, accountIdB64: pending.accountIdB64)
+        markers.markPublishOwed(record, accountIdB64: accountIdB64)
         keysResetThisSession = true
+        // ADR-0066 section 0.1 — auth recorded the new key inside the reset;
+        // the mint for it is idempotent and moves this device's mark.
+        Task { [weak self] in
+            await self?.recordIdentityKeyIfNeeded(
+                accountIdBytes: accountIdBytes, accountIdentitySeed: seed)
+        }
 
         // The state flips before the publish so a failure parks the phrase
         // screen in its "could not finish publishing" form.
         pendingFreshPhrase = PendingFreshPhrase(
             seed: seed,
-            accountIdBytes: pending.accountIdBytes,
-            accountIdB64: pending.accountIdB64,
+            accountIdBytes: accountIdBytes,
+            accountIdB64: accountIdB64,
             session: reset.session,
-            username: pending.username,
+            username: username,
             phrase: phrase,
             publishOwed: true
         )
@@ -2930,8 +3700,8 @@ public final class AuthRepository: ObservableObject {
         restoreNotice = nil
         state = .saveFreshPhrase(
             SessionAccount(
-                accountIdB64: pending.accountIdB64,
-                username: pending.username
+                accountIdB64: accountIdB64,
+                username: username
             )
         )
 
@@ -2939,15 +3709,14 @@ public final class AuthRepository: ObservableObject {
         //    bound applies.
         do {
             try await runOwedKeyResetPublish(
-                accountIdB64: pending.accountIdB64,
-                accountIdBytes: pending.accountIdBytes,
+                accountIdB64: accountIdB64,
+                accountIdBytes: accountIdBytes,
                 accountIdentitySeed: seed,
                 requireFresh: false
             )
         } catch {
             NSLog("[auth] the publish after a key reset did not finish; the phrase screen offers a retry")
         }
-        return phrase
     }
 
     /// Whether a live fresh-auth proof is held for the account parked on the
@@ -3109,6 +3878,7 @@ public final class AuthRepository: ObservableObject {
                 session: session,
                 username: pending.username
             )
+            sessionLanded(accountIdB64: account.accountIdB64)
             return
         }
         guard let secrets = identitySecrets, secrets.accountId == account.accountIdBytes else {
@@ -3124,6 +3894,9 @@ public final class AuthRepository: ObservableObject {
             ),
             context: context
         )
+        // ADR-0066 — the proof sign-in issued a pair that names no device;
+        // name this one again.
+        sessionLanded(accountIdB64: account.accountIdB64)
     }
 
     // MARK: - Password change gate
@@ -3368,9 +4141,14 @@ public final class AuthRepository: ObservableObject {
                         }
                     }
                 case .keyPackage:
+                    // ADR-0066 section 2.2 — a KeyPackage publish needs a
+                    // session naming this device; a reset run from a session
+                    // that had not been bound yet binds it first.
+                    await bindSessionDeviceIfNeeded(accountIdB64: accountIdB64, context: "key reset publish")
                     try await keyResetHooks.republishOwnKeyPackage(secrets)
                 case .deviceGroup:
-                    try await keyResetHooks.refoundDeviceGroup(accountIdBytes, accountIdB64, record.attestation)
+                    try await keyResetHooks.refoundDeviceGroup(
+                        accountIdBytes, accountIdB64, record.attestation, record.keyGeneration)
                 }
             } catch {
                 if KeyResetVerifyFailure.isStale(error) {
@@ -4161,4 +4939,347 @@ public struct IdentityVerificationUnavailable: Error, LocalizedError {
     }
     /// A diagnostic; screens render ``kind`` from the catalog.
     public var errorDescription: String? { message }
+}
+
+// MARK: - ADR-0066 part 3: a rotation of the account keys, the devices kept
+
+extension AuthRepository {
+
+    /// The account key this device holds for the signed-in account.
+    private func heldAccountPublicKey(accountIdB64: String) -> Data? {
+        guard let secrets = identitySecrets, base64Encode(secrets.accountId) == accountIdB64 else {
+            return nil
+        }
+        return try? Identity.fromSeed(seed: secrets.accountIdentitySeed).signaturePublicKey()
+    }
+
+    /// The account's own old seed(s) kept after a rotation (the predecessor
+    /// slot), newest last.
+    public func ownPredecessorSeeds(accountIdB64: String) -> [Data] {
+        ownPredecessors.load(accountIdB64: accountIdB64)
+    }
+
+    private func restoreKeysRotatedNotice() {
+        guard let accountIdB64 = signedInAccountIdB64 else { return }
+        keysRotatedNotice = rotatedNotice.isOwed(accountIdB64: accountIdB64)
+    }
+
+    /// The person dismissed "Your account keys were changed on another
+    /// device".
+    public func dismissKeysRotatedNotice() {
+        if let accountIdB64 = signedInAccountIdB64 {
+            rotatedNotice.clear(accountIdB64: accountIdB64)
+        }
+        keysRotatedNotice = false
+    }
+
+    // MARK: A kept device: the envelope
+
+    /// A dispatched `key-rotation` envelope (ADR-0066 section 3.3). It is
+    /// meaningful ONLY in the account's own DeviceGroup; from anywhere else
+    /// it is dropped. Here it is verified against the account key this
+    /// device holds and stored as PENDING, keyed on the new key. Nothing
+    /// else changes: the device adopts only when the server side shows that
+    /// key as the account's.
+    ///
+    /// The plaintext carries the account's next seed: it is never logged.
+    public func receiveKeyRotationEnvelope(_ plaintext: Data, arrival: KeptDeviceRule.Arrival) {
+        guard let accountIdB64 = signedInAccountIdB64,
+              let heldKey = heldAccountPublicKey(accountIdB64: accountIdB64) else {
+            NSLog("[auth] a key-rotation envelope arrived with no account keys on this device; dropped")
+            return
+        }
+        let nowMs = UInt64(max(0, grantNowMs()))
+        let verified: PendingKeyRotation? = arrival == .ownDeviceGroup
+            ? (try? verifyKeyRotationEnvelope(
+                plaintext: plaintext, heldAccountPubkey: heldKey, nowUnixSecs: Int64(nowMs / 1000)))
+                .map { PendingKeyRotation($0) }
+            : nil
+        let held = KeptDeviceRule.pruned(
+            rotationPending.load(accountIdB64: accountIdB64), nowMs: nowMs,
+            expired: keyRotationPendingExpired(preparedAtMs:nowMs:))
+        switch KeptDeviceRule.receive(
+            arrival: arrival, verified: verified, held: held, nowMs: nowMs,
+            expired: keyRotationPendingExpired(preparedAtMs:nowMs:)) {
+        case .store(let pending):
+            do {
+                try rotationPending.save(held + [pending], accountIdB64: accountIdB64)
+                NSLog("[auth] a key rotation of this account is pending on this device")
+            } catch {
+                NSLog("[auth] WARN a pending key rotation could not be stored")
+            }
+        case .alreadyHeld:
+            break
+        case .drop(let reason):
+            NSLog("[auth] a key-rotation envelope was dropped (%@)", String(describing: reason))
+        }
+    }
+
+    /// Drop the pending envelopes that are too old to keep (14 days). Called
+    /// at every session landing.
+    func pruneKeyRotationPending(accountIdB64: String) {
+        let stored = rotationPending.load(accountIdB64: accountIdB64)
+        guard !stored.isEmpty else { return }
+        let kept = KeptDeviceRule.pruned(
+            stored, nowMs: UInt64(max(0, grantNowMs())),
+            expired: keyRotationPendingExpired(preparedAtMs:nowMs:))
+        if kept.count != stored.count {
+            try? rotationPending.save(kept, accountIdB64: accountIdB64)
+        }
+    }
+
+    // MARK: A kept device: superseded
+
+    /// This device learned its keys or its session are of an old key
+    /// generation (a refresh answered `key-generation-superseded`, or the
+    /// directory publishes other keys at a higher generation).
+    ///
+    /// A device that holds the account's keys first finds out whether this
+    /// was a ROTATION: it tries the pending envelopes it holds; with none it
+    /// reads its DeviceGroup journal to the head once; and only when nothing
+    /// can be adopted does it treat the change as a reset (the staged wipe
+    /// and "Was it you?", ``handleKeysSuperseded(accountIdB64:)``). While it
+    /// is finding out, the app stays as it was with "Updating keys...".
+    ///
+    /// A device without keys has nothing to adopt with and signs out at
+    /// once, as before.
+    func keysSuperseded(accountIdB64: String, publishedSignaturePubkey: Data?) {
+        guard keysSignOut == nil, recall == nil else { return }
+        guard heldAccountPublicKey(accountIdB64: accountIdB64) != nil, case .session = state else {
+            handleKeysSuperseded(accountIdB64: accountIdB64)
+            return
+        }
+        guard !rotationAdoptInFlight else { return }
+        rotationAdoptInFlight = true
+        keysUpdating = true
+        rotationAdoptRetry?.cancel()
+        rotationAdoptRetry = nil
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await self.runKeyRotationAdoption(
+                accountIdB64: accountIdB64, publishedSignaturePubkey: publishedSignaturePubkey)
+            self.rotationAdoptInFlight = false
+            switch outcome {
+            case .adopted:
+                self.keysUpdating = false
+            case .treatAsReset:
+                self.keysUpdating = false
+                self.handleKeysSuperseded(accountIdB64: accountIdB64)
+            case .wipeRevoked:
+                // This device was the one removed: the full wipe.
+                self.keysUpdating = false
+                self.handleDeviceRevoked(accountIdB64: accountIdB64)
+            case .signInAgain:
+                self.keysUpdating = false
+                self.handleRefreshInvalid(accountIdB64: accountIdB64)
+            case .retryLater:
+                // No verdict: nothing is wiped, the line stays, and the
+                // upgrade is tried again.
+                self.scheduleKeyRotationAdoptionRetry(accountIdB64: accountIdB64)
+            }
+        }
+    }
+
+    /// How long an adoption that got no verdict waits before it is tried
+    /// again. Chosen, not measured.
+    static let keyRotationAdoptRetryNanos: UInt64 = 30_000_000_000
+
+    private func scheduleKeyRotationAdoptionRetry(accountIdB64: String) {
+        rotationAdoptRetry?.cancel()
+        rotationAdoptRetry = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.keyRotationAdoptRetryNanos)
+            guard !Task.isCancelled, let self, self.keysUpdating,
+                  self.signedInAccountIdB64 == accountIdB64 else { return }
+            self.keysSuperseded(accountIdB64: accountIdB64, publishedSignaturePubkey: nil)
+        }
+    }
+
+    /// Retry a pending adoption now (the app came to the foreground, the
+    /// network returned).
+    public func retryKeysUpdating() {
+        guard keysUpdating, !rotationAdoptInFlight, let accountIdB64 = signedInAccountIdB64 else { return }
+        keysSuperseded(accountIdB64: accountIdB64, publishedSignaturePubkey: nil)
+    }
+
+    /// One run of ``KeptDeviceRule``: prune, read the journal once when
+    /// nothing is pending, then try the session upgrade with each pending
+    /// envelope until the server accepts one.
+    func runKeyRotationAdoption(
+        accountIdB64: String, publishedSignaturePubkey: Data?
+    ) async -> KeptDeviceRule.Outcome {
+        guard let secrets = identitySecrets, base64Encode(secrets.accountId) == accountIdB64 else {
+            return .treatAsReset
+        }
+        let refreshToken = tokenProvider.current?.refreshToken ?? secrets.session.refreshToken
+        let deviceIdB64 = tokenProvider.current?.deviceIdB64 ?? secrets.session.deviceIdB64
+        var journalRead = false
+        while true {
+            pruneKeyRotationPending(accountIdB64: accountIdB64)
+            let held = rotationPending.load(accountIdB64: accountIdB64)
+            switch KeptDeviceRule.onSuperseded(
+                held: held, publishedSignaturePubkey: publishedSignaturePubkey, journalRead: journalRead) {
+            case .readJournalFirst:
+                NSLog("[auth] no pending key rotation on this device; reading the device journal once")
+                _ = await readDeviceGroupJournalToHead(accountIdB64)
+                journalRead = true
+                continue
+            case .treatAsReset:
+                return .treatAsReset
+            case .tryAdopting(let candidates):
+                var answers: [SessionUpgradeAnswer] = []
+                for candidate in candidates {
+                    guard let mnemonic = try? RecoveryMnemonic.fromEntropy(entropy: candidate.newEntropy),
+                          let account = try? Identity.fromSeed(seed: mnemonic.toSeed()),
+                          account.signaturePublicKey() == candidate.newSignaturePubkey else {
+                        answers.append(.notAccepted)
+                        continue
+                    }
+                    var failure: Error?
+                    var upgraded: SessionPair?
+                    do {
+                        upgraded = try await sessionUpgradeOperation(
+                            refreshToken, secrets.accountId, account.ed25519Seed())
+                    } catch {
+                        failure = error
+                    }
+                    let answer = SessionUpgradeAnswer.of(failure)
+                    answers.append(answer)
+                    if let upgraded, KeptDeviceRule.afterUpgrade(answer) == .adopt {
+                        do {
+                            // The upgraded pair names the same device.
+                            try await installRotatedKeys(
+                                accountIdB64: accountIdB64,
+                                phrase: mnemonic.phrase(),
+                                seed: mnemonic.toSeed(),
+                                session: upgraded.naming(deviceIdB64: deviceIdB64),
+                                context: "key rotation adopted")
+                        } catch {
+                            NSLog("[auth] ERR the adopted keys could not be stored on this device")
+                            return .retryLater
+                        }
+                        rotationPending.clear(accountIdB64: accountIdB64)
+                        rotatedNotice.markOwed(accountIdB64: accountIdB64)
+                        keysRotatedNotice = true
+                        NSLog("[auth] this device adopted the account's new keys; every local store was kept")
+                        return .adopted
+                    }
+                    if KeptDeviceRule.afterUpgrade(answer) != .tryNext { break }
+                }
+                return KeptDeviceRule.outcome(of: answers)
+            }
+        }
+    }
+
+    // MARK: Both sides: the new keys replace the old ones, everything is kept
+
+    /// The new seed, phrase and session pair replace the old ones on this
+    /// device (ADR-0066 section 3.2 step 6, section 3.3 "adopting"). ALL
+    /// local data is kept: chats, contacts, history, the device identity and
+    /// its binding. The OLD seed goes to the predecessor slot FIRST: without
+    /// it this device's stored binding would be re-minted under the new key
+    /// at the next launch, and its conversation leaves would stop being its
+    /// own (fact 14). A failure there throws and nothing is changed.
+    func installRotatedKeys(
+        accountIdB64: String,
+        phrase: String,
+        seed: Data,
+        session: SessionPair,
+        context: String
+    ) async throws {
+        guard let old = identitySecrets, base64Encode(old.accountId) == accountIdB64 else {
+            throw SessionNotReady()
+        }
+        let predecessorSeed = old.accountIdentitySeed
+        guard predecessorSeed != seed else {
+            // Already adopted (a retry): only the pair moves.
+            adoptSessionPair(session, accountIdB64: accountIdB64, context: context)
+            return
+        }
+        try ownPredecessors.add(predecessorSeed, accountIdB64: accountIdB64)
+        try AccountIdentitySeedStore.putAccountIdentitySeed(accountIdB64: accountIdB64, seed: seed)
+        // The device holds the new keys, so it holds the new phrase.
+        DevicePhrase.store(phrase, accountIdB64: accountIdB64, context: context)
+        let secrets = IdentitySecrets(
+            accountId: old.accountId,
+            exportKey: old.exportKey,
+            accountIdentitySeed: seed,
+            session: session
+        )
+        adoptIdentitySecrets(secrets, context: context)
+        // ADR-0066 section 0.1 — auth recorded the new key inside the
+        // rotation; the mint for it is idempotent and moves this device's
+        // mark.
+        Task { [weak self] in
+            await self?.recordIdentityKeyIfNeeded(
+                accountIdBytes: secrets.accountId, accountIdentitySeed: seed)
+        }
+        await onAccountKeysRotated?(secrets, predecessorSeed)
+    }
+
+    /// The rotating device's step 6: adopt what `rotate/finish` answered.
+    /// The pair names the device the caller's bearer names.
+    public func adoptOwnKeyRotation(material: KeyRotationMaterial, session: SessionPair) async throws {
+        guard let accountIdB64 = signedInAccountIdB64 else { throw SessionNotReady() }
+        let deviceIdB64 = tokenProvider.current?.deviceIdB64 ?? identitySecrets?.session.deviceIdB64
+        try await installRotatedKeys(
+            accountIdB64: accountIdB64,
+            phrase: material.phrase,
+            seed: material.seed,
+            session: session.naming(deviceIdB64: deviceIdB64),
+            context: "key rotation")
+        // This device's own copy of the envelope has done its work.
+        rotationPending.clear(accountIdB64: accountIdB64)
+    }
+
+    /// Keep the rotating device's own prepared rotation as a pending
+    /// envelope until the commit answered: a commit whose answer is lost is
+    /// then adopted like a kept device's, instead of being read as a reset.
+    public func storeOwnPendingKeyRotation(_ pending: PendingKeyRotation, accountIdB64: String) throws {
+        let held = rotationPending.load(accountIdB64: accountIdB64)
+            .filter { $0.newSignaturePubkey != pending.newSignaturePubkey }
+        try rotationPending.save(held + [pending], accountIdB64: accountIdB64)
+    }
+
+    /// The proven-rotation upload of the rotating device (ADR-0066 section
+    /// 3.5, "Discovery"): the new bundle with the key-reset attestation (when
+    /// there is one) and, when `withProof`, the supersession proof, on the
+    /// new session. No genesis attestation is minted here: auth moved its
+    /// record of the account key inside the rotation.
+    public func publishRotatedIdentity(
+        supersessionProof: Data, attestation: Data?, withProof: Bool
+    ) async throws {
+        guard let secrets = identitySecrets, let token = tokenProvider.current?.sessionToken else {
+            throw SessionNotReady()
+        }
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        try await accountDirectory.publishRotatedIdentityBundle(
+            accountId: secrets.accountId,
+            signaturePubkey: identity.signaturePublicKey(),
+            x25519Pubkey: identity.x25519PublicKey(),
+            supersessionProof: withProof ? supersessionProof : nil,
+            keyResetAttest: attestation,
+            sessionToken: token
+        )
+    }
+
+    /// The backup, re-sealed under the phrase this device holds now and
+    /// uploaded with a new head (ADR-0066 section 3.5, "Backup").
+    public func resealBackupAfterKeyRotation(wholeStorageSnapshot: Data = Data()) async throws {
+        guard let secrets = identitySecrets, let token = tokenProvider.current?.sessionToken else {
+            throw SessionNotReady()
+        }
+        let accountIdB64 = base64Encode(secrets.accountId)
+        guard let phrase = DevicePhrase.read(accountIdB64: accountIdB64) else {
+            throw AuthClientError.argument("the new phrase is not readable on this device")
+        }
+        await Self.bootstrapBackupBestEffort(
+            accountId: secrets.accountId,
+            accountIdB64: accountIdB64,
+            accountIdentitySeed: secrets.accountIdentitySeed,
+            sessionToken: token,
+            phrase: phrase,
+            context: "key rotation",
+            wholeStorageSnapshot: wholeStorageSnapshot
+        )
+    }
 }

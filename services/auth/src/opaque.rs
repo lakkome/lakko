@@ -65,6 +65,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::MySqlPool;
 use uuid::Uuid;
 
+use crate::webauthn::ApiError;
+
 /// Error type of the OPAQUE handlers: the plain `(status, text)` shape they
 /// always had, or a limiter refusal (`429` + body code + `Retry-After`, or
 /// `503` when the counter store fails).
@@ -153,7 +155,10 @@ pub(crate) const KIND_PASSWORD_RESET: u8 = 3;
 /// Build the OPAQUE credential_id by appending the registration kind to
 /// `account_id`. Domain-separates the password and recovery flows so an
 /// envelope from one flow cannot answer a challenge in the other.
-fn build_credential_id(account_id: &[u8; ACCOUNT_ID_LEN], kind: u8) -> [u8; CREDENTIAL_ID_LEN] {
+pub(crate) fn build_credential_id(
+    account_id: &[u8; ACCOUNT_ID_LEN],
+    kind: u8,
+) -> [u8; CREDENTIAL_ID_LEN] {
     let mut out = [0u8; CREDENTIAL_ID_LEN];
     out[..ACCOUNT_ID_LEN].copy_from_slice(account_id);
     out[ACCOUNT_ID_LEN] = kind;
@@ -453,6 +458,13 @@ pub(crate) struct SignupFinishRequest {
     /// be present iff `signup_start` was called with `recovery_request`.
     #[serde(default)]
     pub(crate) recovery_upload: Option<String>,
+    /// URL-safe base64 (no padding) of the 32-byte id of the device this
+    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// section 0.4). Absent when the device has no keys yet; the session then
+    /// names no device and the client calls `POST /auth/session/bind-device`
+    /// once it has them.
+    #[serde(default)]
+    pub(crate) device_id_b64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -497,6 +509,7 @@ pub(crate) async fn signup_finish(
     Json(payload): Json<SignupFinishRequest>,
 ) -> Result<Json<SignupFinishResponse>, OpaqueError> {
     let account_id = decode_account_id(&payload.account_id)?;
+    let device_id = crate::session::decode_device_id(payload.device_id_b64.as_deref())?;
 
     let password_upload = decode_registration_upload(&payload.password_upload)?;
     let password_registration = ServerRegistration::<LakkoCipherSuite>::finish(password_upload);
@@ -597,7 +610,7 @@ pub(crate) async fn signup_finish(
     );
     // A fresh account is at the genesis generation; the read is one more
     // round trip but keeps a single issuance path.
-    let session = crate::session::issue_pair(&state, &account_id).await?;
+    let session = crate::session::issue_pair(&state, &account_id, &device_id).await?;
     // The password was set in this exchange: mint the fresh-auth grant at
     // the generation the pair was issued under (a guest signup is this same
     // route, so it gets one too).
@@ -650,15 +663,41 @@ async fn insert_login_state(
     Ok(session_id)
 }
 
+/// A login state taken out of `opaque_login_states`.
+struct TakenLoginState {
+    /// The OPAQUE server state `/…/start` stored.
+    server_login: ServerLogin<LakkoCipherSuite>,
+    /// The account the start resolved (a stand-in id for an unknown handle).
+    account_id: [u8; ACCOUNT_ID_LEN],
+    /// The flow the state was created for.
+    kind: u8,
+    /// The account's key generation, read in the SAME transaction that
+    /// removed the state row; `None` when the account does not exist. The
+    /// caller issues its session pair at this generation, never at one read
+    /// later: see [`take_login_state`].
+    key_generation: Option<u64>,
+}
+
 /// Fetch a `ServerLogin` state by session_id and **delete the row in the
 /// same transaction** (one-shot — replaying the same session_id on a second
 /// `/login/finish` returns 401).
+///
+/// The transaction also reads the account's key generation, while it holds
+/// the state row's lock. A key reset and a recall delete an account's
+/// in-flight login states inside the transaction that bumps the generation
+/// (ADR-0065 section 2, ADR-0066 section 1.2), so one of two things is true
+/// for a login that straddles one: the state row was already gone (`None`
+/// here), or the generation read here is the one from BEFORE the change, and
+/// the pair the caller issues at it is refused on first use. Reading the
+/// generation after the state was consumed, as the handlers did until sprint
+/// T3, let a login in flight at the moment of a recall come out with a
+/// session of the new generation.
 ///
 /// Returns `None` if session_id is unknown or expired (TTL elapsed).
 async fn take_login_state(
     pool: &MySqlPool,
     session_id: Uuid,
-) -> Result<Option<(ServerLogin<LakkoCipherSuite>, [u8; ACCOUNT_ID_LEN], u8)>, sqlx::Error> {
+) -> Result<Option<TakenLoginState>, sqlx::Error> {
     // Atomically: fetch the row (with TTL check) and delete it.
     // MySQL/MariaDB has no `DELETE ... RETURNING`, so we use a transaction:
     //   1. SELECT ... FOR UPDATE
@@ -688,6 +727,13 @@ async fn take_login_state(
         return Ok(None);
     };
 
+    // Still holding the state row's lock: the generation as committed now.
+    let key_generation: Option<u64> =
+        sqlx::query_scalar("SELECT identity_version FROM accounts WHERE id = ?")
+            .bind(&account_id_vec)
+            .fetch_optional(&mut *tx)
+            .await?;
+
     sqlx::query("DELETE FROM opaque_login_states WHERE session_id = ?")
         .bind(session_id.as_bytes().as_slice())
         .execute(&mut *tx)
@@ -698,12 +744,15 @@ async fn take_login_state(
         tracing::error!(error = ?e, "opaque_login_states row does not deserialize");
         sqlx::Error::Protocol("corrupted opaque_login_states row".to_string())
     })?;
-    let mut acct = [0u8; ACCOUNT_ID_LEN];
-    if account_id_vec.len() != ACCOUNT_ID_LEN {
+    let Ok(account_id) = <[u8; ACCOUNT_ID_LEN]>::try_from(account_id_vec.as_slice()) else {
         return Ok(None);
-    }
-    acct.copy_from_slice(&account_id_vec);
-    Ok(Some((server_login, acct, kind)))
+    };
+    Ok(Some(TakenLoginState {
+        server_login,
+        account_id,
+        kind,
+        key_generation,
+    }))
 }
 
 /// Spawn a background task that runs every `LOGIN_STATE_PRUNE_INTERVAL` and
@@ -773,6 +822,13 @@ pub(crate) struct LoginFinishRequest {
     pub(crate) session_id: String,
     /// Base64-encoded `CredentialFinalization` from `ClientLogin::finish`.
     pub(crate) finalize: String,
+    /// URL-safe base64 (no padding) of the 32-byte id of the device this
+    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// section 0.4). Absent when the device has no keys yet; the session then
+    /// names no device and the client calls `POST /auth/session/bind-device`
+    /// once it has them.
+    #[serde(default)]
+    pub(crate) device_id_b64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -927,6 +983,9 @@ async fn login_finish_inner(
             format!("invalid session_id (not a UUID): {e}"),
         )
     })?;
+    // Decoded before the single-use login state is taken, so a malformed id
+    // costs the caller nothing.
+    let device_id = crate::session::decode_device_id(payload.device_id_b64.as_deref())?;
 
     let cached = take_login_state(&state.db, session_id)
         .await
@@ -942,7 +1001,12 @@ async fn login_finish_inner(
             "session_id unknown or expired".to_string(),
         ))?;
 
-    let (server_login, account_id, kind) = cached;
+    let TakenLoginState {
+        server_login,
+        account_id,
+        kind,
+        key_generation,
+    } = cached;
 
     if kind != expected_kind {
         // The session was started for a different flow. Treat as 401 —
@@ -989,7 +1053,10 @@ async fn login_finish_inner(
 
     tracing::info!(kind, account_id = %B64.encode(account_id), "login completed");
 
-    let session = crate::session::issue_pair(state, &account_id).await?;
+    // At the generation read with the state row (see `take_login_state`),
+    // never at one read now. No row: the account was deleted meanwhile.
+    let key_generation = key_generation.ok_or(crate::webauthn::ApiError::InvalidCredential)?;
+    let session = crate::session::issue_pair_at(state, &account_id, key_generation, &device_id)?;
     Ok((
         account_id,
         LoginFinishResponse {
@@ -1131,6 +1198,13 @@ pub(crate) struct PasswordResetFinishRequest {
     pub(crate) recovery_finalize: String,
     /// Base64-encoded `RegistrationUpload` for the new password envelope.
     pub(crate) new_password_upload: String,
+    /// URL-safe base64 (no padding) of the 32-byte id of the device this
+    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// section 0.4). Absent when the device has no keys yet; the session then
+    /// names no device and the client calls `POST /auth/session/bind-device`
+    /// once it has them.
+    #[serde(default)]
+    pub(crate) device_id_b64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1283,6 +1357,14 @@ pub(crate) async fn password_reset_start(
 /// REPLACES `opaque_registrations(account_id, kind=KIND_PASSWORD)`.
 /// The recovery envelope stays untouched — the same mnemonic keeps
 /// working for future resets.
+///
+/// The replacement is one transaction under the account row's lock (ADR-0066
+/// section 0.2): before the envelope changes, the recall anchor for the
+/// account's current identity key is captured if it has none, so the
+/// password in force before the FIRST change is what a recall is checked
+/// against, and a later change cannot overwrite it. The same transaction
+/// refuses a proof made under an older key generation.
+#[allow(clippy::too_many_lines)] // one flow, read top to bottom: proof, envelope, transaction
 pub(crate) async fn password_reset_finish(
     State(state): State<crate::AppState>,
     Json(payload): Json<PasswordResetFinishRequest>,
@@ -1293,6 +1375,7 @@ pub(crate) async fn password_reset_finish(
             format!("invalid session_id (not a UUID): {e}"),
         )
     })?;
+    let device_id = crate::session::decode_device_id(payload.device_id_b64.as_deref())?;
 
     let cached = take_login_state(&state.db, session_id)
         .await
@@ -1308,7 +1391,12 @@ pub(crate) async fn password_reset_finish(
             "session_id unknown or expired".to_string(),
         ))?;
 
-    let (server_login, account_id, kind) = cached;
+    let TakenLoginState {
+        server_login,
+        account_id,
+        kind,
+        key_generation,
+    } = cached;
 
     if kind != KIND_PASSWORD_RESET {
         // Caller tried to finalize a regular login session via the
@@ -1355,10 +1443,51 @@ pub(crate) async fn password_reset_finish(
     let new_registration = ServerRegistration::<LakkoCipherSuite>::finish(new_password_upload);
     let new_bytes = new_registration.serialize().to_vec();
 
-    // 3. Replace the password envelope. ON DUPLICATE KEY UPDATE relies
-    //    on the (account_id, kind) composite primary key; the
-    //    `updated_at` column auto-bumps via the table's
-    //    `ON UPDATE CURRENT_TIMESTAMP` clause.
+    // 3. One transaction (ADR-0066 section 0.2; it was a bare upsert before):
+    //    lock the account row, hold the proof to the generation it was made
+    //    under, capture the recall anchor, then replace the envelope.
+    let invalid = || (StatusCode::UNAUTHORIZED, "invalid credentials".to_string());
+    let proven_generation = key_generation.ok_or_else(invalid)?;
+    let mut conn = crate::session::read_committed_conn(&state.db)
+        .await
+        .map_err(ApiError::Db)?;
+    let mut tx = sqlx::Acquire::begin(&mut conn)
+        .await
+        .map_err(ApiError::Db)?;
+    let current: Option<u64> =
+        sqlx::query_scalar("SELECT identity_version FROM accounts WHERE id = ? FOR UPDATE")
+            .bind(&account_id[..])
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(ApiError::Db)?;
+    // The recovery credential this proof was checked against is replaced only
+    // by a key reset or a recall, and both bump the generation: a different
+    // generation here means the proof is of a credential that is no longer
+    // the account's, and the password it would set must not land.
+    if current != Some(proven_generation) {
+        tracing::info!(
+            account_id = %B64.encode(account_id),
+            "password_reset_finish: the account's keys changed since the proof; refused",
+        );
+        return Err(invalid().into());
+    }
+
+    //    The anchor: the account as it was before the first change made under
+    //    its current identity key. A password change does not move the key,
+    //    so an existing anchor is left exactly as it is.
+    crate::recall::capture_anchor(
+        &mut tx,
+        &account_id,
+        proven_generation,
+        crate::recall::Change::Password,
+        state.limits.recall_window_ms(),
+    )
+    .await
+    .map_err(ApiError::Db)?;
+
+    //    Replace the password envelope. ON DUPLICATE KEY UPDATE relies on the
+    //    (account_id, kind) composite primary key; the `updated_at` column
+    //    auto-bumps via the table's `ON UPDATE CURRENT_TIMESTAMP` clause.
     sqlx::query(
         "INSERT INTO opaque_registrations (account_id, kind, registration_bytes) \
          VALUES (?, ?, ?) \
@@ -1367,22 +1496,18 @@ pub(crate) async fn password_reset_finish(
     .bind(&account_id[..])
     .bind(KIND_PASSWORD)
     .bind(&new_bytes)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "upsert opaque_registrations (password_reset)");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal db error".to_string(),
-        )
-    })?;
+    .map_err(ApiError::Db)?;
+    tx.commit().await.map_err(ApiError::Db)?;
 
     tracing::info!(
         account_id = %B64.encode(account_id),
         "password reset completed (mnemonic-driven)",
     );
 
-    let session = crate::session::issue_pair(&state, &account_id).await?;
+    let session =
+        crate::session::issue_pair_at(&state, &account_id, proven_generation, &device_id)?;
     Ok(Json(PasswordResetFinishResponse {
         ok: true,
         account_id: B64.encode(account_id),
@@ -1955,6 +2080,14 @@ mod signup_login_limits_e2e_tests {
             .expect("connect test DB");
         crate::MIGRATIONS.run(&pool).await.expect("migrations");
         Some(pool)
+    }
+
+    /// A real Ed25519 public key per tag: the key reset records the key it
+    /// installs and refuses one that is not a usable point (ADR-0066).
+    fn pk(tag: u8) -> [u8; 32] {
+        lakko_crypto::signing::SigningKey::from_seed(&[tag; 32])
+            .verifying_key()
+            .to_bytes()
     }
 
     /// A fresh 16-byte account id, base64 as the wire carries it.
@@ -2823,7 +2956,7 @@ mod signup_login_limits_e2e_tests {
         .unwrap();
         let token = state
             .session_token_secret
-            .issue(&id, 1, now_ms + 3_600_000)
+            .issue(&id, 1, &[0u8; 32], 0, now_ms + 3_600_000)
             .unwrap();
         (id, token)
     }
@@ -3335,7 +3468,7 @@ mod signup_login_limits_e2e_tests {
         )
     }
 
-    /// Every login route lands a v2 pair at the account's generation; a
+    /// Every login route lands a v3 pair at the account's generation; a
     /// reset bumps the generation, mints an attestation that verifies under
     /// the published attest key and binds the account, the journal and the
     /// new key, and from then on every credential of the old generation is
@@ -3352,20 +3485,20 @@ mod signup_login_limits_e2e_tests {
         let pw = b"the password";
         let old_seed = [0x51u8; 64];
         let new_seed = [0x52u8; 64];
-        let new_pubkey = [0x5Au8; 32];
+        let new_pubkey = pk(0x5A);
         let (a, a_token) = signup_account(&state, pw, &old_seed).await;
         let (_, handle) = crate::login_handle::random_handle();
         assert_eq!(
             put_handle(&state, &a_token, &handle).await.0,
             StatusCode::OK
         );
-        assert!(a_token.starts_with("v2."), "{a_token}");
+        assert!(a_token.starts_with("v3."), "{a_token}");
 
         // "Another device": a password login, whose pair is at generation 1.
         let other = password_login(&state, &handle, pw).await.unwrap();
         let (other_access, other_refresh, other_gen) = pair_of(&other);
         assert_eq!(other_gen, 1);
-        assert!(other_refresh.starts_with("r1."));
+        assert!(other_refresh.starts_with("r2."));
         assert_eq!(export(&state, &other_access).await.0, StatusCode::OK);
         let (st, body) = refresh(&state, &other_refresh).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
@@ -3375,11 +3508,57 @@ mod signup_login_limits_e2e_tests {
 
         // The reset, from the first device, with the password proven anew.
         let grant = grant_by_password(&state, &handle, pw).await;
+        // ADR-0066: before the reset the genesis mint recorded the old key.
+        let old_pubkey = pk(0x59);
+        let genesis = |token: String, key: [u8; 32]| {
+            let state = state.clone();
+            async move {
+                send_json(
+                    &state,
+                    Method::POST,
+                    "/auth/genesis/attest",
+                    Some(&token),
+                    Some(&serde_json::json!({ "pubkey_b64": URL_SAFE_NO_PAD.encode(key) })),
+                )
+                .await
+                .0
+            }
+        };
+        assert_eq!(genesis(a_token.clone(), old_pubkey).await, StatusCode::OK);
+        assert_eq!(
+            genesis(a_token.clone(), new_pubkey).await,
+            StatusCode::CONFLICT
+        );
+
         let (st, body) = reset_keys(&state, &a_token, Some(&grant), &new_seed, &new_pubkey).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let (new_access, new_refresh, new_gen) = pair_of(&answer);
         assert_eq!(new_gen, 2);
+        // The reset is the one writer that moves the recorded identity key:
+        // the mint now attests the new key and refuses the old one.
+        assert_eq!(
+            crate::devices::identity_pubkey_of(&pool, &a).await.unwrap(),
+            Some(new_pubkey)
+        );
+        assert_eq!(
+            genesis(new_access.clone(), new_pubkey).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            genesis(new_access.clone(), old_pubkey).await,
+            StatusCode::CONFLICT
+        );
+        // The caller's new pair names the device its bearer named (none, in
+        // this test: the signup carried no `device_id_b64`).
+        assert_eq!(
+            state
+                .session_token_secret
+                .verify(&new_access, crate::session::now_ms())
+                .unwrap()
+                .device_id,
+            [0u8; 32]
+        );
         assert_eq!(
             crate::session::key_generation_of(&pool, &a).await.unwrap(),
             Some(2)
@@ -3461,7 +3640,7 @@ mod signup_login_limits_e2e_tests {
         assert_eq!(err_code(&body), "refresh-invalid");
         let b_refresh = state
             .session_token_secret
-            .issue_refresh(&b, 1, crate::session::now_ms() + 60_000)
+            .issue_refresh(&b, 1, &[0u8; 32], 0, crate::session::now_ms() + 60_000)
             .unwrap();
         drop_accounts(&pool, &[b]).await;
         let (st, body) = refresh(&state, &b_refresh).await;
@@ -3492,14 +3671,25 @@ mod signup_login_limits_e2e_tests {
         let (a, a_token) = signup_account(&state, b"pw", &[0x54u8; 64]).await;
         let id_b64 = URL_SAFE_NO_PAD.encode(a);
         let exp = crate::session::now_ms() + 60_000;
-        // A v1-shaped token whose tag is the v2 tag of the same fields can
-        // never exist; any four-part string is malformed to the verifier.
+        // The retired shapes: a four-part `v1` string and a five-part `v2`
+        // one whose tag is the tag `v2` would have carried. Both are
+        // malformed to the verifier by their segment count alone.
         let v1 = format!("v1.{id_b64}.{exp}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let v2 = {
+            use hmac::Mac as _;
+            let message = format!("v2.{id_b64}.1.{exp}");
+            let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&[7u8; 64]).unwrap();
+            mac.update(message.as_bytes());
+            format!(
+                "{message}.{}",
+                URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+            )
+        };
         let refresh_as_bearer = state
             .session_token_secret
-            .issue_refresh(&a, 1, exp)
+            .issue_refresh(&a, 1, &[0u8; 32], 0, exp)
             .unwrap();
-        for bad in [v1.as_str(), refresh_as_bearer.as_str()] {
+        for bad in [v1.as_str(), v2.as_str(), refresh_as_bearer.as_str()] {
             let (st, body) = export(&state, bad).await;
             assert_eq!(st, StatusCode::UNAUTHORIZED, "{bad}");
             assert!(body.is_empty(), "the plain 401 carries no body: {bad}");
@@ -3554,7 +3744,7 @@ mod signup_login_limits_e2e_tests {
             .unwrap();
 
         let grant = grant_by_password(&state, &h, pw).await;
-        let (st, body) = reset_keys(&state, &a_token, Some(&grant), &new_seed, &[0x6Au8; 32]).await;
+        let (st, body) = reset_keys(&state, &a_token, Some(&grant), &new_seed, &pk(0x6A)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
 
         let (st, _, _) = post(
@@ -3709,8 +3899,7 @@ mod signup_login_limits_e2e_tests {
         assert_eq!(counts(&pool, a).await, vec![1; 6]);
 
         let (_, grant) = bind_and_grant(&state, &a_token, b"a").await;
-        let (st, body) =
-            reset_keys(&state, &a_token, Some(&grant), &[0x73u8; 64], &[0x7Au8; 32]).await;
+        let (st, body) = reset_keys(&state, &a_token, Some(&grant), &[0x73u8; 64], &pk(0x7A)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert_eq!(
             counts(&pool, a).await,
@@ -3792,7 +3981,7 @@ mod signup_login_limits_e2e_tests {
                 "account_id": a_b64,
                 "fresh_grant": b_grant,
                 "recovery_upload": upload,
-                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([0x8Bu8; 32]),
+                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pk(0x8B)),
             })),
         )
         .await;
@@ -3896,7 +4085,7 @@ mod signup_login_limits_e2e_tests {
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
 
-        let (st, body) = reset_keys(&state, &a_token, Some(&grant1), &seed1, &[0x9Au8; 32]).await;
+        let (st, body) = reset_keys(&state, &a_token, Some(&grant1), &seed1, &pk(0x9A)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let (a_token2, _, _) = pair_of(&serde_json::from_slice(&body).unwrap());
         // A second reset needs the password proven again, at generation 2.
@@ -3906,7 +4095,7 @@ mod signup_login_limits_e2e_tests {
         // hit), finish is the 4th and refused there - and KeyReset would
         // refuse it too. The counters are per account and the refusal
         // leaves the credential and the generation as they were.
-        let (st, body) = reset_keys(&state, &a_token2, Some(&grant2), &seed2, &[0x9Bu8; 32]).await;
+        let (st, body) = reset_keys(&state, &a_token2, Some(&grant2), &seed2, &pk(0x9B)).await;
         assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"], crate::limits::CODE_TOO_MANY_ATTEMPTS);
@@ -3942,7 +4131,7 @@ mod signup_login_limits_e2e_tests {
             Some(&serde_json::json!({
                 "fresh_grant": grant2,
                 "recovery_upload": upload,
-                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([0x9Cu8; 32]),
+                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pk(0x9C)),
             })),
         )
         .await;
@@ -3958,7 +4147,7 @@ mod signup_login_limits_e2e_tests {
         );
 
         assert_eq!(
-            reset_keys(&state, &b_token, Some(&b_grant), &seed1, &[0x9Du8; 32])
+            reset_keys(&state, &b_token, Some(&b_grant), &seed1, &pk(0x9D))
                 .await
                 .0,
             StatusCode::OK,
@@ -3997,7 +4186,7 @@ mod signup_login_limits_e2e_tests {
         .unwrap();
 
         let grant = grant_by_password(&state, &ha, b"a's password").await;
-        let (st, body) = reset_keys(&state, &a_token, Some(&grant), &new_seed, &[0xAAu8; 32]).await;
+        let (st, body) = reset_keys(&state, &a_token, Some(&grant), &new_seed, &pk(0xAA)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert_eq!(recovery_login(&state, &ha, &new_seed).await, Ok(()));
         assert_eq!(recovery_login(&state, &ha, &old_seed).await, Err(()));
@@ -4059,9 +4248,11 @@ mod signup_login_limits_e2e_tests {
             .unwrap()
             .issue_fresh_grant(&a, 1, now + 60_000)
             .unwrap();
-        let access_as_grant = secret.issue(&a, 1, now + 60_000).unwrap();
-        let refresh_as_grant = secret.issue_refresh(&a, 1, now + 60_000).unwrap();
-        let relabelled = format!("k1{}", a_token.strip_prefix("v2").unwrap());
+        let access_as_grant = secret.issue(&a, 1, &[0u8; 32], 0, now + 60_000).unwrap();
+        let refresh_as_grant = secret
+            .issue_refresh(&a, 1, &[0u8; 32], 0, now + 60_000)
+            .unwrap();
+        let relabelled = format!("k1{}", a_token.strip_prefix("v3").unwrap());
         let bad: Vec<(&str, Option<&str>)> = vec![
             ("no grant", None),
             ("empty", Some("")),
@@ -4079,10 +4270,10 @@ mod signup_login_limits_e2e_tests {
             ("an access token relabelled k1", Some(&relabelled)),
         ];
         for (what, grant) in &bad {
-            let (st, body) = reset_keys(&state, &a_token, *grant, &new_seed, &[0xBAu8; 32]).await;
+            let (st, body) = reset_keys(&state, &a_token, *grant, &new_seed, &pk(0xBA)).await;
             assert_password_required(st, &body, &format!("start with {what}"));
             let (st, body) =
-                reset_finish_only(&state, &a_token, *grant, &a, &new_seed, &[0xBAu8; 32]).await;
+                reset_finish_only(&state, &a_token, *grant, &a, &new_seed, &pk(0xBA)).await;
             assert_password_required(st, &body, &format!("finish with {what}"));
         }
         // The grant is checked before the body: a session without the
@@ -4097,8 +4288,7 @@ mod signup_login_limits_e2e_tests {
         .await;
         assert_password_required(st, &body, "a malformed start without a grant");
         // A's own grant under B's session is another account's grant there.
-        let (st, body) =
-            reset_keys(&state, &b_token, Some(&a_grant), &new_seed, &[0xBAu8; 32]).await;
+        let (st, body) = reset_keys(&state, &b_token, Some(&a_grant), &new_seed, &pk(0xBA)).await;
         assert_password_required(st, &body, "A's grant with B's session");
 
         // Nothing changed.
@@ -4120,8 +4310,7 @@ mod signup_login_limits_e2e_tests {
         assert_eq!(export(&state, &a_token).await.0, StatusCode::OK);
 
         // And nothing was charged: the owner's one reset still goes through.
-        let (st, body) =
-            reset_keys(&state, &a_token, Some(&a_grant), &new_seed, &[0xBAu8; 32]).await;
+        let (st, body) = reset_keys(&state, &a_token, Some(&a_grant), &new_seed, &pk(0xBA)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert_eq!(
             crate::session::key_generation_of(&pool, &a).await.unwrap(),
@@ -4147,8 +4336,7 @@ mod signup_login_limits_e2e_tests {
         let (ha, grant) = bind_and_grant(&state, &a_token, pw).await;
         let sibling = grant_by_password(&state, &ha, pw).await;
 
-        let (st, body) =
-            reset_keys(&state, &a_token, Some(&grant), &[0xC2u8; 64], &[0xCAu8; 32]).await;
+        let (st, body) = reset_keys(&state, &a_token, Some(&grant), &[0xC2u8; 64], &pk(0xCA)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(
@@ -4158,12 +4346,10 @@ mod signup_login_limits_e2e_tests {
         let (token2, refresh2, _) = pair_of(&answer);
 
         for (what, old) in [("the spent grant", &grant), ("its sibling", &sibling)] {
-            let (st, body) =
-                reset_keys(&state, &token2, Some(old), &[0xC3u8; 64], &[0xCBu8; 32]).await;
+            let (st, body) = reset_keys(&state, &token2, Some(old), &[0xC3u8; 64], &pk(0xCB)).await;
             assert_password_required(st, &body, &format!("start with {what}"));
             let (st, body) =
-                reset_finish_only(&state, &token2, Some(old), &a, &[0xC3u8; 64], &[0xCBu8; 32])
-                    .await;
+                reset_finish_only(&state, &token2, Some(old), &a, &[0xC3u8; 64], &pk(0xCB)).await;
             assert_password_required(st, &body, &format!("finish with {what}"));
         }
         // A refreshed session carries no grant either.
@@ -4177,8 +4363,7 @@ mod signup_login_limits_e2e_tests {
         );
 
         let fresh = grant_by_password(&state, &ha, pw).await;
-        let (st, body) =
-            reset_keys(&state, &token2, Some(&fresh), &[0xC3u8; 64], &[0xCBu8; 32]).await;
+        let (st, body) = reset_keys(&state, &token2, Some(&fresh), &[0xC3u8; 64], &pk(0xCB)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert_eq!(
             crate::session::key_generation_of(&pool, &a).await.unwrap(),
@@ -4201,23 +4386,10 @@ mod signup_login_limits_e2e_tests {
         let (a, a_token) = signup_account(&state, pw, &[0xD1u8; 64]).await;
         let (_, grant) = bind_and_grant(&state, &a_token, pw).await;
 
+        let (key_a, key_b) = (pk(0xDA), pk(0xDB));
         let (first, second) = tokio::join!(
-            reset_finish_only(
-                &state,
-                &a_token,
-                Some(&grant),
-                &a,
-                &[0xD2u8; 64],
-                &[0xDAu8; 32]
-            ),
-            reset_finish_only(
-                &state,
-                &a_token,
-                Some(&grant),
-                &a,
-                &[0xD3u8; 64],
-                &[0xDBu8; 32]
-            ),
+            reset_finish_only(&state, &a_token, Some(&grant), &a, &[0xD2u8; 64], &key_a),
+            reset_finish_only(&state, &a_token, Some(&grant), &a, &[0xD3u8; 64], &key_b),
         );
         let mut statuses = [first.0, second.0];
         statuses.sort();
@@ -4296,7 +4468,7 @@ mod signup_login_limits_e2e_tests {
         assert!(by_phrase.get("fresh_grant").is_none());
         assert!(by_phrase.get("fresh_grant_expires_at_ms").is_none());
         let phrase_token = by_phrase["session_token"].as_str().unwrap();
-        let (st, body) = reset_keys(&state, phrase_token, None, &[0xE2u8; 64], &[0xEAu8; 32]).await;
+        let (st, body) = reset_keys(&state, phrase_token, None, &[0xE2u8; 64], &pk(0xEA)).await;
         assert_password_required(st, &body, "a recovery-login session");
 
         // A wrong password finishes nowhere, so mints nothing.
@@ -4368,12 +4540,16 @@ mod signup_login_limits_e2e_tests {
             ),
             (
                 "an access token",
-                Some(secret.issue(a, 1, now + 60_000).unwrap()),
+                Some(secret.issue(a, 1, &[0u8; 32], 0, now + 60_000).unwrap()),
             ),
             ("the bearer itself", Some(a_token.to_string())),
             (
                 "a refresh credential",
-                Some(secret.issue_refresh(a, 1, now + 60_000).unwrap()),
+                Some(
+                    secret
+                        .issue_refresh(a, 1, &[0u8; 32], 0, now + 60_000)
+                        .unwrap(),
+                ),
             ),
         ]
     }
@@ -4708,14 +4884,8 @@ mod signup_login_limits_e2e_tests {
 
         // A grant minted before a key reset is refused for delete after it.
         let sibling = grant_by_password(&state, &hb, b"b's password").await;
-        let (st, body) = reset_keys(
-            &state,
-            &b_token,
-            Some(&b_grant),
-            &[0xF3u8; 64],
-            &[0xFAu8; 32],
-        )
-        .await;
+        let (st, body) =
+            reset_keys(&state, &b_token, Some(&b_grant), &[0xF3u8; 64], &pk(0xFA)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let (b_token2, _, _) = pair_of(&serde_json::from_slice(&body).unwrap());
         for (what, old) in [("the spent grant", &b_grant), ("its sibling", &sibling)] {
@@ -4954,14 +5124,8 @@ mod signup_login_limits_e2e_tests {
 
         // After a key reset the grant names a generation the account left.
         let sibling = grant_by_password(&state, &ha, pw).await;
-        let (st, body) = reset_keys(
-            &state,
-            &a_token,
-            Some(&a_grant),
-            &[0xA3u8; 64],
-            &[0xAAu8; 32],
-        )
-        .await;
+        let (st, body) =
+            reset_keys(&state, &a_token, Some(&a_grant), &[0xA3u8; 64], &pk(0xAA)).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let (a_token2, _, _) = pair_of(&serde_json::from_slice(&body).unwrap());
         let id3 = open_device_request(&state, &ha).await;

@@ -199,6 +199,7 @@ pub(crate) async fn register_start(
 pub(crate) async fn register_finish(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
+    Extension(caller): Extension<AuthenticatedDevice>,
     Json(req): Json<RegisterFinishReq>,
 ) -> Result<Json<RegisterFinishRes>, ApiError> {
     // The fresh-auth grant first, again: the start's check alone would let a
@@ -234,6 +235,13 @@ pub(crate) async fn register_finish(
     // appear twice — webauthn-rs's excludeCredentials hint at /start
     // should have prevented it, but the authenticator may ignore
     // the hint. `ON DUPLICATE KEY` swallows the retry cleanly.
+    //
+    // Inside the generation fence (ADR-0066 "T3 as built"): a passkey is a
+    // way to sign in and to get a fresh-auth grant, so one registered by a
+    // session that a key reset or a recall has just displaced must not
+    // survive it.
+    let mut tx =
+        crate::session::begin_at_generation(&state.db, &auth.0, caller.key_generation).await?;
     sqlx::query(
         "INSERT INTO webauthn_credentials \
             (credential_id, account_id, passkey_bytes, nickname) \
@@ -246,9 +254,10 @@ pub(crate) async fn register_finish(
     .bind(auth.0.as_slice())
     .bind(&passkey_bytes)
     .bind(&req.nickname)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(ApiError::Db)?;
+    tx.commit().await.map_err(ApiError::Db)?;
 
     // Drop the in-flight state row; the registration is finalised.
     let _ = sqlx::query("DELETE FROM webauthn_states WHERE state_id = ?")
@@ -450,7 +459,37 @@ pub(crate) async fn delete_account(
     // `device_requests`, whose foreign key ADR-0056 dropped (an unknown
     // handle's request is stored against a stand-in id that is not an
     // account); its row is removed in the same transaction.
-    let mut tx = state.db.begin().await.map_err(ApiError::Db)?;
+    let mut conn = crate::session::read_committed_conn(&state.db)
+        .await
+        .map_err(ApiError::Db)?;
+    let mut tx = sqlx::Acquire::begin(&mut conn)
+        .await
+        .map_err(ApiError::Db)?;
+
+    // ADR-0066 section 1.3: while a recall window is open the account cannot
+    // be deleted. Without this the party who cannot keep the account could
+    // destroy it, and a deleted account cannot be recalled. Checked under
+    // the account row's lock, which every capture also takes, so a deletion
+    // racing the reset that opens the window either runs first (and there
+    // was no window yet) or sees the anchor. The proof above was already
+    // spent for a passkey account; the client asks for a new one after the
+    // window, which is at least days away.
+    let locked: Option<u64> =
+        sqlx::query_scalar("SELECT identity_version FROM accounts WHERE id = ? FOR UPDATE")
+            .bind(auth.0.as_slice())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(ApiError::Db)?;
+    if locked.is_some() {
+        if let Some(until_ms) =
+            crate::recall::open_window_until(&mut tx, &auth.0, crate::session::now_ms())
+                .await
+                .map_err(ApiError::Db)?
+        {
+            return Err(ApiError::RecallWindowOpen { until_ms });
+        }
+    }
+
     sqlx::query("DELETE FROM device_requests WHERE account_id = ?")
         .bind(auth.0.as_slice())
         .execute(&mut *tx)
@@ -623,6 +662,7 @@ pub(crate) async fn auth_finish(
     let webauthn = state.webauthn.as_ref().ok_or(ApiError::Disabled)?.clone();
 
     let state_id = parse_state_id(&req.state_id)?;
+    let device_id = crate::session::decode_device_id(req.device_id_b64.as_deref())?;
     // Try the allow-list row first, then the discoverable row. We
     // look up by `state_id` only — the `kind` discriminator tells
     // us which path to take. A `state_id` from one kind cannot be
@@ -659,6 +699,19 @@ pub(crate) async fn auth_finish(
     } else {
         return Err(ApiError::StateMissing);
     };
+
+    // The generation the pair is issued at, read BEFORE the credential row
+    // below is consulted (ADR-0066 "T3 as built"). A key reset and a recall
+    // delete the account's passkeys in the transaction that bumps the
+    // generation, so a sign-in that straddles one either finds no credential
+    // row further down, or is issued at the generation from before the
+    // change and refused on first use. Reading it after, as before sprint
+    // T3, let a passkey sign-in in flight at the moment of a recall come out
+    // with a session (and a fresh-auth grant) of the new generation.
+    let key_generation = crate::session::key_generation_of(&state.db, &account_id)
+        .await
+        .map_err(ApiError::Db)?
+        .ok_or(ApiError::InvalidCredential)?;
 
     // Drop the in-flight state row immediately — a state_id is
     // single-use; clearing protects against accidental client
@@ -720,7 +773,7 @@ pub(crate) async fn auth_finish(
     // (ADR-0065) — the same shape every login route returns — and, because
     // the passkey assertion just verified, a fresh-auth grant at that same
     // generation (amended 2026-10-06).
-    let session = crate::session::issue_pair(&state, &account_id).await?;
+    let session = crate::session::issue_pair_at(&state, &account_id, key_generation, &device_id)?;
     let grant = crate::session::issue_fresh_grant(&state, &account_id, session.key_generation)?;
 
     Ok(Json(AuthFinishRes {
@@ -971,15 +1024,81 @@ pub(crate) const CODE_REFRESH_INVALID: &str = "refresh-invalid";
 /// (`POST /webauthn/auth/{start,finish}`).
 pub(crate) const CODE_FRESH_AUTH_REQUIRED: &str = "fresh-auth-required";
 
+/// JSON `error` code of the `401` auth answers to a credential that names a
+/// device removed from the account after the credential was issued (ADR-0066
+/// section 0.4). Discovery answers a `403` with the same code to a KeyPackage
+/// publish under a tombstoned device id.
+pub(crate) const CODE_DEVICE_REVOKED: &str = "device-revoked";
+
+/// Body code of the `403` a route answers when it needs a statement signed
+/// by the account's recorded identity key and none verifies (ADR-0066).
+pub(crate) const CODE_ACCOUNT_KEY_REQUIRED: &str = "account-key-required";
+
+/// Body code of the `409` the genesis mint answers to a key other than the
+/// account's recorded one (ADR-0066 section 0.1).
+pub(crate) const CODE_IDENTITY_KEY_MISMATCH: &str = "identity-key-mismatch";
+
+/// Body code of the `409` `POST /auth/session/bind-device` answers to a
+/// session that already names another device.
+pub(crate) const CODE_DEVICE_ALREADY_BOUND: &str = "device-already-bound";
+
+/// Body code of the one `401` every recall route answers to anything that is
+/// not a wrong password (ADR-0066 section 1.2).
+pub(crate) const CODE_RECALL_REFUSED: &str = "recall-refused";
+
+/// Body code of the `401` `POST /account/recall/finish` answers when the
+/// anchored password did not verify.
+pub(crate) const CODE_WRONG_PASSWORD: &str = "wrong-password";
+
+/// `401` body code of an account statement that verifies but was signed with
+/// a clock outside the two-minute window (ADR-0066 "T5 as built"). The body
+/// also carries `server_time_ms`.
+pub(crate) const CODE_STATEMENT_STALE: &str = "statement-stale";
+
+/// Body code of the `409` `DELETE /account` answers while a recall window is
+/// open (ADR-0066 section 1.3).
+pub(crate) const CODE_RECALL_WINDOW_OPEN: &str = "recall-window-open";
+
+/// The device a verified bearer names and when the token was issued, stamped
+/// into the request extensions beside [`AuthenticatedAccount`] (ADR-0066
+/// section 0.4). `device_id` is all zero for a session that names no device
+/// yet.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AuthenticatedDevice {
+    /// The token's device id.
+    pub(crate) device_id: [u8; 32],
+    /// The token's key generation (the account's current one: the
+    /// middleware refused anything else).
+    pub(crate) key_generation: u64,
+}
+
 /// Bearer-auth middleware. The same shape as
-/// `services/storage::auth::require_session` plus the ADR-0065 generation
-/// check: after the stateless verify it reads `accounts.identity_version`
-/// (one primary-key read per bearer request) and refuses a token whose
-/// generation is below it with `401 {"error":"key-generation-superseded"}`.
-/// Every other failure — no header, no `Bearer` prefix, a token that does
-/// not verify or has expired, an account that no longer exists — is the
-/// plain bodiless `401` it always was. Stamps an [`AuthenticatedAccount`]
-/// into the request extensions on success.
+/// `services/storage::auth::require_session` plus two stateful checks, both
+/// primary-key reads per bearer request:
+///
+/// - the ADR-0065 generation check: a token whose generation is below
+///   `accounts.identity_version` is refused with `401
+///   {"error":"key-generation-superseded"}`;
+/// - the ADR-0066 device floor: a token of the CURRENT generation issued at
+///   or before its device's floor is refused, with `401
+///   {"error":"device-revoked"}` when the device was removed and the plain
+///   `401` when it logged out.
+///
+/// **The generation is checked first** (sprint T3; T1 read the floor first).
+/// A device answers `device-revoked` by wiping everything and keeping no
+/// recall record, and a floor is written by whoever holds the account's
+/// CURRENT identity key. After a hostile key reset that is the attacker: with
+/// the floor first they could revoke the owner's device ids and make those
+/// devices destroy the very key a recall needs. A credential of an older
+/// generation is therefore always told `key-generation-superseded`, whatever
+/// floors exist. The cost: a device the owner removed and whose account was
+/// reset afterwards keeps a recall record for the window instead of wiping
+/// at once; it still needs the password from before to use it. Every other
+/// failure —
+/// no header, no `Bearer` prefix, a token that does not verify or has
+/// expired, an account that no longer exists — is the plain bodiless `401`
+/// it always was. Stamps an [`AuthenticatedAccount`] and an
+/// [`AuthenticatedDevice`] into the request extensions on success.
 pub(crate) async fn require_session(
     State(state): State<AppState>,
     mut request: axum::extract::Request,
@@ -1032,9 +1151,27 @@ pub(crate) async fn require_session(
         );
         return Err(plain());
     }
+    match crate::session::floor_verdict(&state.db, &verified)
+        .await
+        .map_err(|e| ApiError::Db(e).into_response())?
+    {
+        crate::session::FloorVerdict::Above => {},
+        crate::session::FloorVerdict::LoggedOut => {
+            tracing::debug!("webauthn auth: token of a logged-out device session refused");
+            return Err(plain());
+        },
+        crate::session::FloorVerdict::Removed => {
+            tracing::info!("webauthn auth: token of a removed device refused");
+            return Err(ApiError::DeviceRevoked.into_response());
+        },
+    }
     request
         .extensions_mut()
         .insert(AuthenticatedAccount(verified.account_id));
+    request.extensions_mut().insert(AuthenticatedDevice {
+        device_id: verified.device_id,
+        key_generation: verified.key_generation,
+    });
     Ok(next.run(request).await)
 }
 
@@ -1139,6 +1276,13 @@ pub(crate) struct AuthFinishReq {
     /// `PublicKeyCredential` produced by the authenticator (the
     /// asserted signature + clientDataJSON + authenticatorData).
     pub credential: PublicKeyCredential,
+    /// URL-safe base64 (no padding) of the 32-byte id of the device this
+    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// section 0.4). Absent when the device has no keys yet; the session then
+    /// names no device and the client calls `POST /auth/session/bind-device`
+    /// once it has them.
+    #[serde(default)]
+    pub device_id_b64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1216,6 +1360,51 @@ pub(crate) enum ApiError {
     /// or of a generation a reset has since replaced). One body for all of
     /// them, `403 {"error":"fresh-auth-required"}`.
     FreshAuthRequired,
+    /// ADR-0066 section 0.4: the credential names a device that was removed
+    /// from the account after the credential was issued. `401` with the JSON
+    /// body `{"error":"device-revoked"}`: the device stops, shows the removed
+    /// screen and wipes itself.
+    DeviceRevoked,
+    /// ADR-0066 sections 0.1 and 2.1: the route needs a statement signed by
+    /// the account's recorded identity key and got none that verifies (no
+    /// key recorded yet, a malformed statement, another key, another device,
+    /// outside the time window). One body for all of them, `403
+    /// {"error":"account-key-required"}`.
+    AccountKeyRequired,
+    /// ADR-0066 section 0.1 (`POST /auth/genesis/attest`): the account's
+    /// identity key is already recorded and the request names another one.
+    /// `409 {"error":"identity-key-mismatch"}`.
+    IdentityKeyMismatch,
+    /// ADR-0066 section 0.4 (`POST /auth/session/bind-device`): the session
+    /// already names another device. `409 {"error":"device-already-bound"}`.
+    DeviceAlreadyBound,
+    /// ADR-0066 section 1.2: a recall request without a statement that
+    /// verifies under a live anchor's key, or naming a state, an anchor or an
+    /// account that is not there. One body for every such refusal, `401
+    /// {"error":"recall-refused"}`, so a caller without the anchor key learns
+    /// nothing, not even whether the account exists.
+    RecallRefused,
+    /// ADR-0066 section 1.2 (`POST /account/recall/finish`): the statement
+    /// verified and the password from before the change did not. `401
+    /// {"error":"wrong-password"}`.
+    WrongPassword,
+    /// ADR-0066 "T5 as built": an account statement that verifies under the
+    /// key the route checks it against, but whose signing time lies outside
+    /// the two-minute window: the device's clock is wrong. `401
+    /// {"error":"statement-stale","server_time_ms":...}`; the device signs
+    /// again with the server's time. Answered ONLY when the signature
+    /// verified, so a caller without the key never sees it.
+    StatementStale {
+        /// The server's clock, unix milliseconds.
+        server_time_ms: i64,
+    },
+    /// ADR-0066 section 1.3 (`DELETE /account`): an unexpired recall anchor
+    /// exists, so the account cannot be deleted yet. `409
+    /// {"error":"recall-window-open","until_ms":...}`.
+    RecallWindowOpen {
+        /// Unix milliseconds at which the last open anchor expires.
+        until_ms: i64,
+    },
     /// 2a2b: catch-all for unrecoverable server-side errors
     /// (session-token issuance failures). The OPAQUE module
     /// folds the same case into a tuple-StatusCode; we keep an
@@ -1228,6 +1417,7 @@ pub(crate) enum ApiError {
 }
 
 impl IntoResponse for ApiError {
+    #[allow(clippy::too_many_lines)] // a flat variant-to-answer table
     fn into_response(self) -> axum::response::Response {
         let (code, msg) = match self {
             Self::Disabled => (StatusCode::SERVICE_UNAVAILABLE, "webauthn-disabled"),
@@ -1277,6 +1467,68 @@ impl IntoResponse for ApiError {
                 return (
                     StatusCode::FORBIDDEN,
                     axum::Json(serde_json::json!({ "error": CODE_FRESH_AUTH_REQUIRED })),
+                )
+                    .into_response();
+            },
+            Self::DeviceRevoked => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": CODE_DEVICE_REVOKED })),
+                )
+                    .into_response();
+            },
+            Self::AccountKeyRequired => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({ "error": CODE_ACCOUNT_KEY_REQUIRED })),
+                )
+                    .into_response();
+            },
+            Self::IdentityKeyMismatch => {
+                return (
+                    StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({ "error": CODE_IDENTITY_KEY_MISMATCH })),
+                )
+                    .into_response();
+            },
+            Self::DeviceAlreadyBound => {
+                return (
+                    StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({ "error": CODE_DEVICE_ALREADY_BOUND })),
+                )
+                    .into_response();
+            },
+            Self::RecallRefused => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": CODE_RECALL_REFUSED })),
+                )
+                    .into_response();
+            },
+            Self::WrongPassword => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": CODE_WRONG_PASSWORD })),
+                )
+                    .into_response();
+            },
+            Self::StatementStale { server_time_ms } => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({
+                        "error": CODE_STATEMENT_STALE,
+                        "server_time_ms": server_time_ms,
+                    })),
+                )
+                    .into_response();
+            },
+            Self::RecallWindowOpen { until_ms } => {
+                return (
+                    StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({
+                        "error": CODE_RECALL_WINDOW_OPEN,
+                        "until_ms": until_ms,
+                    })),
                 )
                     .into_response();
             },

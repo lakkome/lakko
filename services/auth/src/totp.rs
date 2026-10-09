@@ -270,6 +270,13 @@ pub(crate) struct RecoverReq {
     /// without padding.
     pub handle: String,
     pub code: String,
+    /// URL-safe base64 (no padding) of the 32-byte id of the device this
+    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// section 0.4). Absent when the device has no keys yet; the session then
+    /// names no device and the client calls `POST /auth/session/bind-device`
+    /// once it has them.
+    #[serde(default)]
+    pub device_id_b64: Option<String>,
 }
 
 /// `POST /totp/recover` response — the account id plus the same session pair
@@ -412,6 +419,7 @@ pub(crate) async fn recover(
     let pepper = crate::login_handle::pepper(&state)?;
     let handle = crate::login_handle::decode_handle(&req.handle)?;
     let code = parse_code(&req.code)?;
+    let device_id = crate::session::decode_device_id(req.device_id_b64.as_deref())?;
     crate::limits::charge_name(
         &state.db,
         &state.limits,
@@ -425,6 +433,14 @@ pub(crate) async fn recover(
         .await?
         .account_id;
     let now = now_unix_secs();
+    // The generation the pair is issued at, read BEFORE the authenticator
+    // row (ADR-0066 "T3 as built"): a recall deletes that row in the
+    // transaction that bumps the generation, so a recovery that straddles
+    // one either loses the compare-and-set below, or is issued at the
+    // generation from before the change and refused on first use.
+    let key_generation = crate::session::key_generation_of(&state.db, &account_id)
+        .await
+        .map_err(ApiError::Db)?;
 
     let row: Option<RecoverRow> = sqlx::query_as(
         "SELECT secret_enc, confirmed_at, last_accepted_step \
@@ -478,7 +494,8 @@ pub(crate) async fn recover(
 
     let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
     tracing::info!(account_id = %account_id_b64, "totp: code accepted, issuing session token");
-    let session = crate::session::issue_pair(&state, &account_id).await?;
+    let key_generation = key_generation.ok_or(ApiError::InvalidCredential)?;
+    let session = crate::session::issue_pair_at(&state, &account_id, key_generation, &device_id)?;
     Ok(Json(RecoverRes {
         account_id_b64,
         session,
@@ -716,7 +733,7 @@ mod totp_e2e_tests {
         format!(
             "Bearer {}",
             token_secret
-                .issue(account_id, 1, now_ms() + 3_600_000)
+                .issue(account_id, 1, &[0u8; 32], 0, now_ms() + 3_600_000)
                 .expect("mint session token")
         )
     }

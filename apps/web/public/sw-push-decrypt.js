@@ -909,7 +909,7 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
  * kinds before its chat parse; this is the background mirror of that
  * same two-step peek, in the same order.
  *
- * Eleven arms below: call signaling, the ADR-0042 / ADR-0044 push-routing
+ * Twelve arms below (the last is the ADR-0066 key-rotation envelope): call signaling, the ADR-0042 / ADR-0044 push-routing
  * secret, the ADR-0045 committer beacon, the ADR-0048 profile, the ADR-0048
  * profile request, the ADR-0051 group name, the ADR-0065 group-closed
  * notice, the ADR-0052 shared pin, the ADR-0059 shared channels, the
@@ -951,7 +951,38 @@ function isServiceEnvelope(wasm, bytes) {
 
   // 10. Scoped discovery (ADR-0060).
   if (isScopedDiscoveryEnvelope(wasm, bytes)) return true;
+  // 11. Key rotation (ADR-0066 section 3.3). It means something only in the
+  //     account's own DeviceGroup, which this worker never reads; in a
+  //     conversation it is somebody's stray bytes and is never rendered.
+  if (isKeyRotationEnvelope(wasm, bytes)) return true;
   return false;
+}
+
+/**
+ * Arm 11 of {@link isServiceEnvelope} — the ADR-0066 `key-rotation`
+ * envelope, classified by the core's `dispatchIncomingEnvelope`. Same cheap
+ * first-byte peek as the other `lakko/...` arms. Classification ONLY: the
+ * envelope's fields (the account's new entropy) are never read here (C-59).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isKeyRotationEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== 0x6c) return false;
+  if (typeof wasm.dispatchIncomingEnvelope !== "function" || wasm.IncomingEnvelopeKind === undefined) {
+    return false;
+  }
+  let env;
+  try {
+    env = wasm.dispatchIncomingEnvelope(bytes);
+  } catch {
+    return false;
+  }
+  const kind = env === null || env === undefined ? undefined : env.kind;
+  freeQuietly(env);
+  const kinds = /** @type {Record<string, number>} */ (wasm.IncomingEnvelopeKind);
+  return kinds["KeyRotation"] !== undefined && kinds["KeyRotation"] === kind;
 }
 
 /**

@@ -198,6 +198,57 @@ class AccountLocalWipeTest {
         assertTrue(fileLeftovers().any { it.startsWith("lakko-message-logs/") })
     }
 
+    // ---- ADR-0066 section 1.1: the staged wipe -----------------------------
+
+    @Test
+    fun `the staged wipe is the full wipe minus the recall record, step for step`() {
+        val full = AccountLocalWipe.steps.map { it.name }
+        val staged = AccountLocalWipe.stagedSteps.map { it.name }
+        assertEquals(1, full.count { it == AccountLocalWipe.RECALL_RECORD_STEP })
+        assertEquals(full - AccountLocalWipe.RECALL_RECORD_STEP, staged)
+        // Same step objects in the same order: nothing re-implemented.
+        assertEquals(
+            AccountLocalWipe.steps.filterNot { it.name == AccountLocalWipe.RECALL_RECORD_STEP },
+            AccountLocalWipe.stagedSteps,
+        )
+    }
+
+    @Test
+    fun `the staged wipe leaves the recall record and nothing else of the account`() {
+        seed(rawA, a, marker = "account-A")
+        seed(rawB, b, marker = "account-B")
+        seedDeviceWideAndRetired()
+        AcceptedContactsStore.unbind()
+        val staged = stepsWithPlainChannelPublisherPrefs()
+            .filterNot { it.name == AccountLocalWipe.RECALL_RECORD_STEP }
+        val failed = AccountLocalWipe.runSteps(context, a, staged)
+        assertEquals(KEYSTORE_BACKED_STEPS, failed.toSet())
+
+        assertTrue("prefs rows still naming the account: ${prefsLeftovers()}", prefsLeftovers().isEmpty())
+        // Exactly one file of the account is left, and it is the record: the
+        // backstop sweep (part of the staged wipe) did not take it.
+        assertEquals(listOf(recallRecordPath(rawA)), fileLeftovers())
+        assertEquals("account-A", File(context.noBackupFilesDir, recallRecordPath(rawA)).readText())
+        // The other account's record is untouched.
+        assertTrue(File(context.noBackupFilesDir, recallRecordPath(rawB)).exists())
+
+        // The rest of the wipe, when the record goes: the full list.
+        AccountLocalWipe.runSteps(context, a, stepsWithPlainChannelPublisherPrefs())
+        assertTrue(fileLeftovers().isEmpty())
+        assertTrue(File(context.noBackupFilesDir, recallRecordPath(rawB)).exists())
+    }
+
+    @Test
+    fun `the full wipe would leave the recall record behind without its step`() {
+        // Negative control for the inventory walk: the record is named in
+        // hex, which the backstop sweep does not match, so only its own step
+        // removes it.
+        seed(rawA, a, marker = "account-A")
+        AcceptedContactsStore.unbind()
+        AccountLocalWipe.runSteps(context, a, AccountLocalWipe.stagedSteps)
+        assertEquals(listOf(recallRecordPath(rawA)), fileLeftovers())
+    }
+
     @Test
     fun `the wipe of one account never touches another account's session record`() {
         SessionStore(context).save(PersistedSession(accountIdB64 = b, username = "bob"))
@@ -331,6 +382,9 @@ class AccountLocalWipeTest {
             // The played marks (the process-wide MediaPrefs is not used here:
             // a singleton made by another test would hold another app dir).
             "lakko-media-played/${MediaPrefs.playedFileName(acct)}",
+            // ADR-0066: the recall record (sealed under the Keystore wrap
+            // key on a device; opaque bytes on disk, named by the id in hex).
+            recallRecordPath(raw),
         )) {
             File(nb, path).apply { parentFile?.mkdirs() }.writeText(marker)
         }
@@ -339,6 +393,10 @@ class AccountLocalWipeTest {
             PendingCommitEntry(id = "entry-$marker", accountId = acct, groupId = group, targetEpoch = "2", commitB64 = "AA=="),
         )
     }
+
+    private fun recallRecordPath(raw: ByteArray): String =
+        me.lakko.app.auth.RecallRecordStore.DIR + "/" +
+            me.lakko.app.auth.RecallRecordStore.hexOf(raw) + me.lakko.app.auth.RecallRecordStore.FILE_SUFFIX
 
     private fun seedDeviceWideAndRetired() {
         for ((prefs, key) in RETIRED_ROWS) {
@@ -453,9 +511,10 @@ class AccountLocalWipeTest {
             CHANNEL_PUBLISHER_PREFS,
         )
 
-        /** Eight Keystore-envelope files, one played-marks file, one
-         *  commit-outbox entry and one anonymous-token pool per account. */
-        const val FILES_SEEDED_PER_ACCOUNT = 11
+        /** Eight Keystore-envelope files, one played-marks file, one recall
+         *  record, one commit-outbox entry and one anonymous-token pool per
+         *  account. */
+        const val FILES_SEEDED_PER_ACCOUNT = 12
 
         /** Device-wide rows of builds before 2026-09-30, never read. */
         val RETIRED_ROWS = listOf(

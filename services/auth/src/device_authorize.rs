@@ -132,6 +132,7 @@ fn decode_grant_token(b64: &str) -> Result<[u8; GRANT_TOKEN_LEN], ApiError> {
 pub(crate) async fn start(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
+    Extension(caller): Extension<crate::webauthn::AuthenticatedDevice>,
     body: axum::body::Bytes,
 ) -> Result<Json<DeviceAuthorizeStartRes>, ApiError> {
     let account_id = auth.0;
@@ -152,6 +153,12 @@ pub(crate) async fn start(
 
     // Refresh `expires_at` if the same (astronomically-unlikely) hash
     // already exists for this account — mirrors `write_action_grant`.
+    //
+    // Inside the generation fence (ADR-0066 "T3 as built"): a device grant
+    // is redeemable for a session, so one minted by a session that a key
+    // reset or a recall has just displaced must not survive it.
+    let mut tx =
+        crate::session::begin_at_generation(&state.db, &account_id, caller.key_generation).await?;
     sqlx::query(
         "INSERT INTO device_grants (account_id, grant_hash, expires_at) \
          VALUES (?, ?, NOW(3) + INTERVAL ? SECOND) \
@@ -160,9 +167,10 @@ pub(crate) async fn start(
     .bind(account_id.as_slice())
     .bind(hash.as_slice())
     .bind(DEVICE_GRANT_TTL_SECS)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(ApiError::Db)?;
+    tx.commit().await.map_err(ApiError::Db)?;
 
     tracing::info!(
         account_id = %URL_SAFE_NO_PAD.encode(account_id),
@@ -190,9 +198,11 @@ pub(crate) async fn redeem(
     Json(req): Json<DeviceAuthorizeRedeemReq>,
 ) -> Result<Json<DeviceAuthorizeRedeemRes>, ApiError> {
     let token = decode_grant_token(&req.grant_token_b64)?;
+    // Decoded before the single-use grant is consumed.
+    let device_id = crate::session::decode_device_id(req.device_id_b64.as_deref())?;
     let hash = grant_hash(&token);
 
-    let Some(account_id) = consume_grant(&state.db, &hash)
+    let Some((account_id, key_generation)) = consume_grant(&state.db, &hash)
         .await
         .map_err(ApiError::Db)?
     else {
@@ -209,7 +219,7 @@ pub(crate) async fn redeem(
         "device-authorize: grant redeemed, issuing session token",
     );
 
-    let session = crate::session::issue_pair(&state, &account_id).await?;
+    let session = crate::session::issue_pair_at(&state, &account_id, key_generation, &device_id)?;
     Ok(Json(DeviceAuthorizeRedeemRes {
         account_id_b64: URL_SAFE_NO_PAD.encode(account_id),
         session,
@@ -224,10 +234,16 @@ pub(crate) async fn redeem(
 /// the live row, then a `DELETE` of exactly that `(account_id, grant_hash)`
 /// whose `rows_affected == 1`. Two concurrent redeems of one token serialise
 /// on the row lock; the second reads nothing once the first commits.
+///
+/// Also returns the account's key generation, read while the grant row's
+/// lock is held (ADR-0066 "T3 as built"). A key reset and a recall delete the
+/// account's device grants in the transaction that bumps the generation, so a
+/// redeem that straddles one either finds no grant, or issues its pair at the
+/// generation from before the change, which is refused on first use.
 async fn consume_grant(
     pool: &sqlx::MySqlPool,
     hash: &[u8; 32],
-) -> Result<Option<[u8; ACCOUNT_ID_LEN]>, sqlx::Error> {
+) -> Result<Option<([u8; ACCOUNT_ID_LEN], u64)>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let row: Option<(Vec<u8>,)> = sqlx::query_as(
         "SELECT account_id FROM device_grants \
@@ -241,6 +257,11 @@ async fn consume_grant(
         tx.commit().await?;
         return Ok(None);
     };
+    let key_generation: Option<u64> =
+        sqlx::query_scalar("SELECT identity_version FROM accounts WHERE id = ?")
+            .bind(account_id.as_slice())
+            .fetch_optional(&mut *tx)
+            .await?;
     let deleted = sqlx::query("DELETE FROM device_grants WHERE account_id = ? AND grant_hash = ?")
         .bind(account_id.as_slice())
         .bind(hash.as_slice())
@@ -248,7 +269,9 @@ async fn consume_grant(
         .await?
         .rows_affected();
     tx.commit().await?;
-    Ok((deleted == 1).then_some(account_id))
+    Ok(key_generation
+        .filter(|_| deleted == 1)
+        .map(|generation| (account_id, generation)))
 }
 
 // ----------------------------------------------------------------
@@ -278,6 +301,13 @@ pub(crate) struct DeviceAuthorizeRedeemReq {
     /// URL-safe base64 of the raw 32-byte grant token the fresh device
     /// received over the rendezvous channel.
     pub grant_token_b64: String,
+    /// URL-safe base64 (no padding) of the 32-byte id of the device this
+    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// section 0.4). Absent when the device has no keys yet; the session then
+    /// names no device and the client calls `POST /auth/session/bind-device`
+    /// once it has them.
+    #[serde(default)]
+    pub device_id_b64: Option<String>,
 }
 
 /// `POST /device/authorize/redeem` response body. Mirrors `AuthFinishRes`
@@ -449,7 +479,7 @@ mod device_authorize_e2e_tests {
         let bearer = format!(
             "Bearer {}",
             token_secret
-                .issue(&account_id, 1, now_ms() + 3_600_000)
+                .issue(&account_id, 1, &[0u8; 32], 0, now_ms() + 3_600_000)
                 .expect("mint session token")
         );
         let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);

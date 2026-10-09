@@ -239,6 +239,67 @@ public object DeviceRemoval {
     }
 
     /**
+     * ADR-0066 section 2.3 step 4 — the DeviceGroup Remove for the device
+     * whose leaf signature key is [deviceKey], resolved against the roster
+     * as it is NOW (an owed removal is retried at a later launch, when leaf
+     * indices may have moved).
+     *
+     *   * no leaf holds the key -> [GroupRemoval.NotInRoster] (already out);
+     *   * the account's policy requires an attested removal (ADR-0015) and
+     *     [attestation] is `null` -> [GroupRemoval.NeedsAttestation], and
+     *     nothing is committed: every peer would refuse the commit and this
+     *     device would be left an epoch ahead of them;
+     *   * otherwise [removeDeviceAt], whose errors propagate.
+     */
+    public suspend fun removeDeviceByKey(
+        context: Context,
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        deviceKey: ByteArray,
+        attestation: ByteArray?,
+    ): GroupRemoval {
+        val seed = DeviceIdentityStore.ensureDeviceIdentitySeed(
+            context = context,
+            accountIdB64 = accountIdB64,
+        )
+        val ensured = DeviceGroupLifecycle.ensureDeviceGroup(
+            context = context,
+            accountIdBytes = accountIdBytes,
+            accountIdB64 = accountIdB64,
+            deviceIdentitySeed = seed,
+        )
+        seed.fill(0)
+        val (leaf, attestedOnly) = try {
+            val own = ensured.group.ownLeafIndex()
+            val row = ensured.group.devices().firstOrNull {
+                it.leafIndex != own && it.signaturePublicKey.contentEquals(deviceKey)
+            }
+            row?.leafIndex to ensured.group.requireAttestedRemovals()
+        } finally {
+            try {
+                ensured.group.close()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+            try {
+                ensured.identity.close()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+        }
+        if (leaf == null) return GroupRemoval.NotInRoster
+        if (attestedOnly && attestation == null) return GroupRemoval.NeedsAttestation
+        removeDeviceAt(
+            context = context,
+            accountIdBytes = accountIdBytes,
+            accountIdB64 = accountIdB64,
+            leafIndex = leaf,
+            attestation = attestation,
+        )
+        return GroupRemoval.Removed
+    }
+
+    /**
      * G-13 (ADR-0015): enable the attested-removal policy on the local
      * DeviceGroup if it is not already on, broadcasting the
      * GroupContextExtensions commit over the journal so every device enforces

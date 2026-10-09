@@ -206,6 +206,18 @@ public final class ChannelsUiState: ObservableObject {
             forKey: Self.ownerGenerationKey(account))
     }
 
+    /// ADR-0066 section 3.5 — the account's keys were rotated and the owner
+    /// key of the channels this device created was handed to the new seed's
+    /// key (``OwnedChannelGenerations``): re-read the recorded generations
+    /// and take the session's new one, in that order, so no channel is read
+    /// as orphaned in between.
+    public func keysRotated(currentKeyGeneration generation: UInt64?) {
+        if let account = boundAccountIdB64 {
+            ownerKeyGenerationByChannel = Self.loadOwnerGenerations(accountIdB64: account)
+        }
+        if let generation { currentKeyGeneration = generation }
+    }
+
     /// Record, at creation, which key generation registered the owner key.
     public func recordOwnerKeyGeneration(channelId: String, generation: UInt64) {
         ownerKeyGenerationByChannel[channelId] = generation

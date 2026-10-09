@@ -128,6 +128,20 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
     }
 
+    /// ADR-0066 section 3.3 — where a `key-rotation` envelope received in
+    /// THIS account's DeviceGroup goes (the kept device's pending store, via
+    /// ``AuthRepository/receiveKeyRotationEnvelope(_:arrival:)``). It carries
+    /// the account's next seed, so it is handed over as bytes and never
+    /// logged, rendered, or passed to ``onServiceEnvelope``. The default
+    /// drops it.
+    var onKeyRotationEnvelope: @MainActor (Data) -> Void = { _ in
+        NSLog("ADR-0066: a key-rotation envelope arrived with no receiver wired; dropped")
+    }
+    /// When the poll loop last completed a fetch that reached the journal's
+    /// head (unix ms); 0 before the first one. Read by
+    /// ``waitForJournalHead(timeoutMs:)``.
+    private var lastDrainedFetchAtMs: Int64 = 0
+
     public init() {
         restoreObserver = NotificationCenter.default.addObserver(
             forName: .lakkoSyncedStateRestored, object: nil, queue: .main
@@ -557,6 +571,75 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
     }
 
+    /// Whether `envelope` dispatches as a `key-rotation` envelope.
+    static func isKeyRotation(_ envelope: Data) -> Bool {
+        (try? dispatchIncomingEnvelope(plaintext: envelope).kind) == .keyRotation
+    }
+
+    // MARK: - ADR-0066 section 3.2: the rotating device
+
+    /// The epoch of the live DeviceGroup handle (the one every message of
+    /// this repository is sealed at).
+    public func currentEpoch() throws -> UInt64 {
+        guard let group, let identity, !deviceRemoved else {
+            throw NSError(
+                domain: "DeviceGroupSync", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Sync not ready"])
+        }
+        return try group.dsAccessSigner(identity: identity).epoch()
+    }
+
+    /// Seal `envelope` (a `key-rotation` envelope) as ONE application message
+    /// of the account's DeviceGroup, at the live handle's current epoch, and
+    /// publish it on the DeviceGroup journal: the only destination it ever
+    /// has. Returns the epoch the emitted MLS message is framed at, read off
+    /// the message itself, which is what ``KeyRotationAnnounce`` checks
+    /// against the removal's floor.
+    ///
+    /// Unlike ``sendServiceEnvelope(_:)`` this is not best effort and keeps
+    /// nothing for a retry: the rotation stops when it throws.
+    public func sendKeyRotationEnvelope(_ envelope: Data) async throws -> UInt64 {
+        guard Self.isKeyRotation(envelope) else {
+            throw NSError(
+                domain: "DeviceGroupSync", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Not a key-rotation envelope"])
+        }
+        var sealedEpoch: UInt64?
+        try await publish { group, identity in
+            let wire = try group.createServiceEnvelopeMessage(
+                identity: identity, envelope: envelope, hlc: Hlc.mint())
+            sealedEpoch = epochOfMessage(bytes: wire)
+            return wire
+        }
+        guard let sealedEpoch else {
+            throw NSError(
+                domain: "DeviceGroupSync", code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "The sealed message carries no epoch"])
+        }
+        return sealedEpoch
+    }
+
+    /// How long ``waitForJournalHead(timeoutMs:)`` waits by default: one long
+    /// poll (25 s) and a margin. Chosen, not measured.
+    public static let journalHeadTimeoutMs: Int64 = 30_000
+
+    /// ADR-0066 section 3.3, "order on a superseded device" — wait until the
+    /// poll loop has read the DeviceGroup journal to its head once more (a
+    /// fetch that completed after this call and found nothing further). The
+    /// DS does not use session tokens, so a device whose session is
+    /// superseded can still do this. `false` when the journal could not be
+    /// read to its head in time (offline, a journal that answers 401).
+    public func waitForJournalHead(timeoutMs: Int64 = DeviceGroupSyncRepository.journalHeadTimeoutMs) async -> Bool {
+        guard ready, group != nil, !deviceRemoved else { return false }
+        let start = Int64(Date().timeIntervalSince1970 * 1000)
+        while Int64(Date().timeIntervalSince1970 * 1000) - start < timeoutMs {
+            if lastDrainedFetchAtMs > start { return true }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if Task.isCancelled { return false }
+        }
+        return lastDrainedFetchAtMs > start
+    }
+
     private func sendBody(_ body: DeviceGroupBody, hlc: UInt64) async throws {
         try await publish { group, identity in
             try group.createDevicegroupMessage(identity: identity, body: body, hlc: hlc)
@@ -771,6 +854,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             // Live walk 2026-09-30 — a DeviceGroup that forked from the one
             // on the DS (``DeviceGroupFork``) repairs itself, once.
             let drained = result.messages.isEmpty && !result.hasMore
+            if drained { lastDrainedFetchAtMs = Int64(Date().timeIntervalSince1970 * 1000) }
             var localEpoch: UInt64?
             if let g = group, let id = identity {
                 localEpoch = try? g.dsAccessSigner(identity: id).epoch()
@@ -933,6 +1017,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// nothing (older, or already held) is a no-op.
     func applyParsed(_ parsed: ParsedDeviceGroupPayload) {
         if case .serviceEnvelope(let envelope) = parsed.body {
+            // ADR-0066 section 3.3 — the account's own `key-rotation`
+            // envelope: meaningful here and nowhere else. It never reaches
+            // the reach / profile adopters.
+            if Self.isKeyRotation(envelope) {
+                onKeyRotationEnvelope(envelope)
+                return
+            }
             // ADR-0060 section 7 — the Visibility setting and the ReachState
             // counters, ordered by the envelope's own stamp, not by the
             // DeviceGroup HLC: a setting is kept only when strictly newer,
@@ -973,6 +1064,17 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             await self?.sendSnapshot()
             self?.resendTask = nil
         }
+    }
+
+    /// ADR-0066 section 2.3 — the leaf keys of the account's DeviceGroup as
+    /// the live handle reads them: the account's own, MLS-authenticated
+    /// record of its devices, which the conversations' own-device admission
+    /// is filtered by. `nil` when no handle is held, this device was removed,
+    /// or the roster cannot be read (never an empty set standing for "no
+    /// devices").
+    public func rosterDeviceKeys() -> [Data]? {
+        guard !deviceRemoved, let devices = try? group?.devices(), !devices.isEmpty else { return nil }
+        return devices.map(\.signaturePublicKey)
     }
 
     /// UX 17.5 — hand the account's device roster, as this handle reads it,

@@ -377,6 +377,25 @@ pub trait ChannelStore: Send + Sync {
         channel: ChannelId,
     ) -> Result<Option<[u8; OWNER_PUBKEY_LEN]>, StorageError>;
 
+    /// Replace the owner key of `channel` (ADR-0066 section 3.5: the owning
+    /// account changed its keys), as a compare-and-swap: the key becomes
+    /// `new_owner` only while it is still `current_owner`, the key the
+    /// caller verified the handover under. `Ok(true)` when it was replaced,
+    /// `Ok(false)` when the stored key is no longer `current_owner` (a
+    /// concurrent handover won) and nothing changed. The co-publisher
+    /// appointments, the listing and everything else about the channel are
+    /// untouched: none of them is signed by the owner key.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`] when the channel does not exist.
+    async fn replace_owner(
+        &self,
+        channel: ChannelId,
+        current_owner: [u8; OWNER_PUBKEY_LEN],
+        new_owner: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError>;
+
     /// Record an owner request-proof nonce. `Ok(false)` when it was already
     /// recorded (a replay).
     async fn consume_owner_nonce(
@@ -1444,6 +1463,24 @@ impl ChannelStore for InMemoryChannelStore {
         Ok(self.inner.read().await.owners.get(&channel).copied())
     }
 
+    async fn replace_owner(
+        &self,
+        channel: ChannelId,
+        current_owner: [u8; OWNER_PUBKEY_LEN],
+        new_owner: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        let stored = guard
+            .owners
+            .get_mut(&channel)
+            .ok_or(StorageError::UnknownChannel)?;
+        if *stored != current_owner {
+            return Ok(false);
+        }
+        *stored = new_owner;
+        Ok(true)
+    }
+
     async fn consume_owner_nonce(
         &self,
         nonce: [u8; OWNER_NONCE_LEN],
@@ -1702,6 +1739,30 @@ mod tests {
 
     fn cid(b: u8) -> ChannelId {
         ChannelId([b; 16])
+    }
+
+    #[tokio::test]
+    async fn replace_owner_is_a_compare_and_swap() {
+        let store = InMemoryChannelStore::new();
+        let c = ChannelId::from_bytes(&[0x41; 16]).unwrap();
+        assert!(matches!(
+            store.replace_owner(c, [1; 32], [2; 32]).await,
+            Err(StorageError::UnknownChannel)
+        ));
+        store.create(c, [1; 32]).await.unwrap();
+        // Not the current key: nothing changes.
+        assert!(!store.replace_owner(c, [9; 32], [2; 32]).await.unwrap());
+        assert_eq!(store.owner_pubkey(c).await.unwrap(), Some([1; 32]));
+        // The current key hands over, once.
+        assert!(store.replace_owner(c, [1; 32], [2; 32]).await.unwrap());
+        assert_eq!(store.owner_pubkey(c).await.unwrap(), Some([2; 32]));
+        assert!(!store.replace_owner(c, [1; 32], [3; 32]).await.unwrap());
+        assert_eq!(store.owner_pubkey(c).await.unwrap(), Some([2; 32]));
+        // Re-creating under the old key is still refused.
+        assert!(matches!(
+            store.create(c, [1; 32]).await,
+            Err(StorageError::OwnerMismatch)
+        ));
     }
 
     #[tokio::test]

@@ -135,6 +135,7 @@ final class ContactKeyResetTests: XCTestCase {
                 DeviceReadmission.AccountDevices(personKeyB64: key(0xA1), devices: [newDevice]),
             ],
             removed: [],
+            ownDeviceGroupRoster: nil,
             suppressAdmit: [key(0xA1)])
         XCTAssertTrue(plan.admit.isEmpty, "the new identity's devices are not proposed ahead of verification")
         XCTAssertEqual(plan.retire, ["own-gone"])
@@ -142,7 +143,8 @@ final class ContactKeyResetTests: XCTestCase {
         let unsuppressed = DeviceReadmission.plan(
             roster: [], ownPersonKeyB64: "me",
             accounts: [DeviceReadmission.AccountDevices(personKeyB64: key(0xA1), devices: [newDevice])],
-            removed: [])
+            removed: [],
+            ownDeviceGroupRoster: nil)
         XCTAssertEqual(unsuppressed.admit, [newDevice])
     }
 

@@ -22,6 +22,7 @@ import me.lakko.app.anon.errorCodeOf
 import me.lakko.app.auth.SessionRefusal
 import me.lakko.app.auth.SessionTokenProvider
 import me.lakko.app.auth.SessionTokens
+import me.lakko.app.auth.deviceRevokedHintOf
 import me.lakko.app.auth.sessionRefusalOf
 
 /**
@@ -41,7 +42,11 @@ import me.lakko.app.auth.sessionRefusalOf
  *   3. on `401 key-generation-superseded`, from the first send or the
  *      retry, reports it to the provider - the account's keys were reset
  *      elsewhere and the device signs out (contract section 7) - and hands
- *      the response back unchanged.
+ *      the response back unchanged;
+ *   4. on `401 device-revoked` (ADR-0066: this device was removed from the
+ *      account) reports that instead, the same way; and on discovery's
+ *      `403 device-revoked`, which proves nothing, refreshes at auth so
+ *      auth's answer decides.
  *
  * A request with no bearer, a refresh credential as bearer, or a bearer of
  * another account goes through untouched; the provider never substitutes a
@@ -65,12 +70,17 @@ public class SessionBearerEngine(
 
         val token = provider.current() ?: bearer
         val first = delegate.execute(if (token == bearer) data else withBearer(data, token))
+        if (first.statusCode == HttpStatusCode.Forbidden) return afterForbidden(first, provider)
         if (first.statusCode != HttpStatusCode.Unauthorized) return first
 
         val (body, firstAgain) = drainBody(first)
         when (sessionRefusalOf(first.statusCode.value, errorCodeOf(String(body, Charsets.UTF_8)))) {
             SessionRefusal.KeysReset -> {
                 SessionTokens.reportSuperseded()
+                return firstAgain
+            }
+            SessionRefusal.DeviceRevoked -> {
+                SessionTokens.reportDeviceRevoked()
                 return firstAgain
             }
             SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized, null -> Unit
@@ -80,12 +90,32 @@ public class SessionBearerEngine(
         val second = delegate.execute(withBearer(data, retryToken))
         if (second.statusCode != HttpStatusCode.Unauthorized) return second
         val (secondBody, secondAgain) = drainBody(second)
-        if (sessionRefusalOf(second.statusCode.value, errorCodeOf(String(secondBody, Charsets.UTF_8))) ==
-            SessionRefusal.KeysReset
-        ) {
-            SessionTokens.reportSuperseded()
+        when (sessionRefusalOf(second.statusCode.value, errorCodeOf(String(secondBody, Charsets.UTF_8)))) {
+            SessionRefusal.KeysReset -> SessionTokens.reportSuperseded()
+            SessionRefusal.DeviceRevoked -> SessionTokens.reportDeviceRevoked()
+            SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized, null -> Unit
         }
         return secondAgain
+    }
+
+    /**
+     * ADR-0066 "T1 as built" point 24 - discovery's `403 device-revoked` on
+     * a KeyPackage publish is not proof of removal. Refresh at auth and let
+     * auth's answer decide: its `401 device-revoked` reaches the provider's
+     * refusal hook (the removed screen), and a new pair means the device is
+     * still the account's. The response goes back with the body it had (an
+     * error body is one small JSON object; it is read with the same bound as
+     * a `401`'s).
+     */
+    private suspend fun afterForbidden(
+        response: HttpResponseData,
+        provider: SessionTokenProvider,
+    ): HttpResponseData {
+        val (body, again) = drainBody(response)
+        if (deviceRevokedHintOf(response.statusCode.value, errorCodeOf(String(body, Charsets.UTF_8)))) {
+            provider.refreshNow()
+        }
+        return again
     }
 
     override fun close() {

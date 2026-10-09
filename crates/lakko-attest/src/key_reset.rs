@@ -391,6 +391,243 @@ pub fn verify_key_reset_fresh(
     Ok(att)
 }
 
+/// Domain separator of a root endorsement, followed by one `0x00` byte.
+/// Distinct from every other thing an account identity key signs (account
+/// statements, supersession proofs, device bindings, DS proofs).
+pub const ROOT_ENDORSEMENT_DOMAIN: &[u8] = b"lakko/ds/root-endorsement/v1";
+
+/// Length of a root endorsement: one Ed25519 signature.
+pub const ROOT_ENDORSEMENT_LEN: usize = SIGNATURE_LEN;
+
+/// Why a root endorsement was rejected.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RootEndorsementError {
+    /// The byte slice is not [`ROOT_ENDORSEMENT_LEN`] long.
+    #[error("root endorsement has wrong length: {got} bytes")]
+    BadLength {
+        /// The actual length received.
+        got: usize,
+    },
+    /// The attested key is not a usable Ed25519 key, or the signature does
+    /// not verify under it.
+    #[error("root endorsement signature is invalid")]
+    BadSignature,
+}
+
+/// The bytes a root endorsement signs: the domain, one zero byte, the
+/// journal, the key generation and the root key being endorsed.
+fn root_endorsement_input(
+    journal_id: &[u8; JOURNAL_ID_LEN],
+    key_generation: u64,
+    root_key: &[u8; PUBKEY_LEN],
+) -> Vec<u8> {
+    let mut buf =
+        Vec::with_capacity(ROOT_ENDORSEMENT_DOMAIN.len() + 1 + JOURNAL_ID_LEN + 8 + PUBKEY_LEN);
+    buf.extend_from_slice(ROOT_ENDORSEMENT_DOMAIN);
+    buf.push(0);
+    buf.extend_from_slice(journal_id);
+    buf.extend_from_slice(&key_generation.to_be_bytes());
+    buf.extend_from_slice(root_key);
+    buf
+}
+
+/// Sign a **root endorsement** ([ADR-0066] section 4.6, decision D11): the
+/// identity key a key-reset attestation names says which key may become the
+/// root of the account's DeviceGroup journal under that attestation.
+///
+/// A key-reset attestation alone says "this account moved to this key at
+/// this generation"; it does not say who may act on it. The Delivery Service
+/// hears an attested journal `reset` from any signer, so without this an
+/// attestation that anyone can read (ADR-0065 R.3 has discovery serve it)
+/// would let anyone become the root. With it, the attestation is useless to
+/// everyone but the holder of the attested identity key.
+///
+/// `identity` is the NEW account identity's signing key (the one whose
+/// public half is the attestation's `new_signature_pubkey`); `root_key` is
+/// the key that becomes the journal's root: the signer of a `reset`
+/// statement, the `new_root` of a `root` transfer.
+///
+/// [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+#[must_use]
+pub fn sign_root_endorsement(
+    identity: &SigningKey,
+    journal_id: &[u8; JOURNAL_ID_LEN],
+    key_generation: u64,
+    root_key: &[u8; PUBKEY_LEN],
+) -> [u8; ROOT_ENDORSEMENT_LEN] {
+    identity
+        .sign(&root_endorsement_input(
+            journal_id,
+            key_generation,
+            root_key,
+        ))
+        .to_bytes()
+}
+
+/// Verify a root endorsement against an attestation the caller has ALREADY
+/// verified: the signature must be by the attestation's
+/// `new_signature_pubkey` over its journal, its generation and `root_key`.
+///
+/// # Errors
+///
+/// [`RootEndorsementError::BadLength`]; [`RootEndorsementError::BadSignature`]
+/// for a small-order or undecodable attested key and for a signature that
+/// does not verify.
+pub fn verify_root_endorsement(
+    attestation: &KeyResetAttestation,
+    root_key: &[u8; PUBKEY_LEN],
+    endorsement: &[u8],
+) -> Result<(), RootEndorsementError> {
+    if endorsement.len() != ROOT_ENDORSEMENT_LEN {
+        return Err(RootEndorsementError::BadLength {
+            got: endorsement.len(),
+        });
+    }
+    let sig = Signature::from_bytes(endorsement).map_err(|_| RootEndorsementError::BadSignature)?;
+    let key = VerifyingKey::from_bytes(&attestation.new_signature_pubkey)
+        .map_err(|_| RootEndorsementError::BadSignature)?;
+    // A small-order key verifies forged signatures.
+    if key.is_weak() {
+        return Err(RootEndorsementError::BadSignature);
+    }
+    key.verify(
+        &root_endorsement_input(
+            &attestation.device_group_journal_id,
+            attestation.key_generation,
+            root_key,
+        ),
+        &sig,
+    )
+    .map_err(|_| RootEndorsementError::BadSignature)
+}
+
+#[cfg(test)]
+mod endorsement_tests {
+    use super::*;
+
+    const ACCOUNT: [u8; 16] = [0xAB; 16];
+    const ROOT: [u8; 32] = [0x52; 32];
+
+    fn identity() -> SigningKey {
+        SigningKey::from_seed(&[0x61; 32])
+    }
+
+    fn attestation(generation: u64) -> KeyResetAttestation {
+        KeyResetAttestation::for_account(
+            &ACCOUNT,
+            generation,
+            identity().verifying_key().to_bytes(),
+            1_000,
+        )
+    }
+
+    #[test]
+    fn an_endorsement_by_the_attested_key_verifies_for_exactly_what_it_names() {
+        let att = attestation(3);
+        let sig = sign_root_endorsement(
+            &identity(),
+            &att.device_group_journal_id,
+            att.key_generation,
+            &ROOT,
+        );
+        assert_eq!(sig.len(), 64);
+        verify_root_endorsement(&att, &ROOT, &sig).unwrap();
+
+        // Another root key, another generation, another journal, another
+        // signer: each refused.
+        assert_eq!(
+            verify_root_endorsement(&att, &[0x53; 32], &sig),
+            Err(RootEndorsementError::BadSignature)
+        );
+        assert_eq!(
+            verify_root_endorsement(&attestation(4), &ROOT, &sig),
+            Err(RootEndorsementError::BadSignature)
+        );
+        let other_account = KeyResetAttestation::for_account(
+            &[0xAC; 16],
+            3,
+            identity().verifying_key().to_bytes(),
+            1_000,
+        );
+        assert_eq!(
+            verify_root_endorsement(&other_account, &ROOT, &sig),
+            Err(RootEndorsementError::BadSignature)
+        );
+        let stranger = sign_root_endorsement(
+            &SigningKey::from_seed(&[0x62; 32]),
+            &att.device_group_journal_id,
+            att.key_generation,
+            &ROOT,
+        );
+        assert_eq!(
+            verify_root_endorsement(&att, &ROOT, &stranger),
+            Err(RootEndorsementError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn malformed_endorsements_and_weak_attested_keys_are_refused() {
+        let att = attestation(3);
+        let sig = sign_root_endorsement(
+            &identity(),
+            &att.device_group_journal_id,
+            att.key_generation,
+            &ROOT,
+        );
+        assert_eq!(
+            verify_root_endorsement(&att, &ROOT, &sig[..63]),
+            Err(RootEndorsementError::BadLength { got: 63 })
+        );
+        assert_eq!(
+            verify_root_endorsement(&att, &ROOT, &[]),
+            Err(RootEndorsementError::BadLength { got: 0 })
+        );
+        let mut flipped = sig;
+        flipped[10] ^= 1;
+        assert_eq!(
+            verify_root_endorsement(&att, &ROOT, &flipped),
+            Err(RootEndorsementError::BadSignature)
+        );
+        // The identity point (small order) as the attested key: a forged
+        // all-zero-R signature must not pass.
+        let mut weak = [0u8; 32];
+        weak[0] = 1;
+        let weak_att = KeyResetAttestation::for_account(&ACCOUNT, 3, weak, 1_000);
+        assert_eq!(
+            verify_root_endorsement(&weak_att, &ROOT, &sig),
+            Err(RootEndorsementError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn the_signed_bytes_are_pinned() {
+        let journal = [0x4A; 32];
+        let input = root_endorsement_input(&journal, 7, &ROOT);
+        assert_eq!(input.len(), 28 + 1 + 32 + 8 + 32);
+        assert_eq!(&input[..28], b"lakko/ds/root-endorsement/v1");
+        assert_eq!(input[28], 0);
+        assert_eq!(&input[29..61], &journal);
+        assert_eq!(&input[61..69], &7u64.to_be_bytes());
+        assert_eq!(&input[69..], &ROOT);
+    }
+
+    #[test]
+    fn an_endorsement_is_not_an_account_statement_or_an_attestation() {
+        // The endorsement is 64 bytes: every other kind in this crate is
+        // longer and refuses it by length before any signature is checked.
+        let att = attestation(3);
+        let sig = sign_root_endorsement(
+            &identity(),
+            &att.device_group_journal_id,
+            att.key_generation,
+            &ROOT,
+        );
+        let vk = identity().verifying_key();
+        assert!(KeyResetAttestation::open(&sig, &vk).is_err());
+        assert!(crate::AccountStatement::open(&sig, &vk).is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

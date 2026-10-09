@@ -603,16 +603,24 @@ public enum JournalOwnership {
     /// earlier attempt landed, which the root probe confirms (`204` for the
     /// new root); a probe that answers `401` is a real conflict and is
     /// thrown. `503 key-reset-disabled` and every other refusal are thrown.
+    ///
+    /// ADR-0066 section 4.6 ("T5 as built" item 21): the DS hears an attested
+    /// reset only with a ROOT ENDORSEMENT beside the attestation, a signature
+    /// by the attested NEW account key over the journal, the generation and
+    /// the key that becomes the root (`root.publicKey()`). `endorse` signs it
+    /// (``RootEndorsement``); without it the DS answers the uniform `401`.
     public static func attestedReset(
         root: DsStatementSignerProtocol,
         journalId: Data,
         epoch: UInt64,
         epochKey: Data,
         attestation: Data,
+        endorse: (_ rootKey: Data) throws -> Data,
         ds: DsStatementSending
     ) async throws {
         let plain = try root.reset(journalId: journalId, epoch: epoch, epochKey: epochKey, registrars: nil)
-        let request = try AttestedResetBody.attach(attestation: attestation, to: plain)
+        let request = try AttestedResetBody.attach(
+            attestation: attestation, endorsement: try endorse(root.publicKey()), to: plain)
         do {
             try await ds.putStatement(request)
         } catch DsStatementError.conflict {
@@ -653,26 +661,57 @@ public enum JournalOwnership {
     }
 }
 
-// MARK: - The attested reset body (ADR-0065)
+// MARK: - The attested reset body (ADR-0065, ADR-0066 section 4.6)
 
-/// `PUT /ds/group/{hex}/reset` with `{statement_b64, key_reset_attest_b64}`:
-/// the Rust core spells the statement and its route; the attestation field
-/// is added here, next to it, as standard base64 of the 177 bytes.
+/// `PUT /ds/group/{hex}/reset` (after a reset or a recall) and
+/// `PUT /ds/group/{hex}/root` (after a rotation) with
+/// `{statement_b64, key_reset_attest_b64, root_endorsement_b64}`: the Rust
+/// core spells the statement and its route; the two fields are added here,
+/// next to it, each as standard base64.
 enum AttestedResetBody {
     static let attestationField = "key_reset_attest_b64"
+    static let endorsementField = "root_endorsement_b64"
 
-    /// `request` with the attestation added to its JSON body.
-    static func attach(attestation: Data, to request: DsStatementRequest) throws -> DsStatementRequest {
+    /// `request` with the attestation and the root endorsement added to its
+    /// JSON body. The DS refuses the attestation without the endorsement, so
+    /// there is no way to attach one alone.
+    static func attach(
+        attestation: Data, endorsement: Data, to request: DsStatementRequest
+    ) throws -> DsStatementRequest {
         guard var object = try JSONSerialization.jsonObject(with: Data(request.bodyJson.utf8))
                 as? [String: Any] else {
             throw DsStatementError.malformed("statement body is not a JSON object")
         }
+        guard !endorsement.isEmpty else {
+            throw DsStatementError.malformed("the root endorsement is missing")
+        }
         object[attestationField] = attestation.base64EncodedString()
+        object[endorsementField] = endorsement.base64EncodedString()
         let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         guard let json = String(data: data, encoding: .utf8) else {
             throw DsStatementError.malformed("statement body could not be re-encoded")
         }
         return DsStatementRequest(path: request.path, bodyJson: json)
+    }
+}
+
+/// The root endorsement of ADR-0066 section 4.6: the account's NEW identity
+/// key says which key becomes the root of the account's DeviceGroup journal,
+/// at which generation. The DS verifies it with the key inside the
+/// attestation it is already checking, so a served attestation is useless to
+/// anyone but the new identity.
+enum RootEndorsement {
+    /// Sign with the NEW account identity derived from `accountIdentitySeed`
+    /// (the 64-byte phrase seed).
+    static func sign(
+        accountIdentitySeed: Data, journalId: Data, keyGeneration: UInt64, rootKey: Data
+    ) throws -> Data {
+        let account = try Identity.fromSeed(seed: accountIdentitySeed)
+        return try signDsRootEndorsement(
+            newAccountEd25519Seed: account.ed25519Seed(),
+            journalId: journalId,
+            keyGeneration: keyGeneration,
+            rootKey: rootKey)
     }
 }
 

@@ -267,6 +267,63 @@ impl OwnerProof {
     }
 }
 
+/// Length of an owner handover body: one Ed25519 public key.
+pub const OWNER_HANDOVER_BODY_LEN: usize = 32;
+
+/// Why an owner handover body was refused.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerHandoverError {
+    /// The body is not exactly [`OWNER_HANDOVER_BODY_LEN`] bytes.
+    #[error("owner handover body is {got} bytes long")]
+    BadLength {
+        /// The actual length received.
+        got: usize,
+    },
+    /// The bytes are not a usable Ed25519 public key (undecodable, or of
+    /// small order).
+    #[error("owner handover body is not a usable Ed25519 public key")]
+    BadKey,
+}
+
+/// The body of `PUT /v1/channels/<id>/owner` ([ADR-0066] section 3.5): the
+/// NEW owner public key, 32 raw bytes, nothing else.
+///
+/// The handover is "the current owner key signs a statement that names the
+/// new owner key". The statement is this module's existing owner request
+/// proof: it covers the method, the routed path (so the channel) and
+/// `BLAKE3(body)`, and the body is the new key. No new signed layout is
+/// needed, and a proof for one new key cannot be used for another.
+///
+/// When it is used: the account that owns the channel changed its keys, so
+/// the owner key (derived from the account seed) changed with them. The
+/// device that holds both seeds signs with the key the OLD seed derives and
+/// names the key the NEW seed derives.
+///
+/// [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+#[must_use]
+pub fn owner_handover_body(new_owner_key: &VerifyingKey) -> [u8; OWNER_HANDOVER_BODY_LEN] {
+    new_owner_key.to_bytes()
+}
+
+/// Parse an owner handover body. Bounded and fail-closed: exactly 32 bytes
+/// that decode as an Ed25519 public key of full order. A small-order key is
+/// refused because a signature "under" it can be forged, and this key will
+/// gate every owner route of the channel.
+///
+/// # Errors
+///
+/// [`OwnerHandoverError::BadLength`] or [`OwnerHandoverError::BadKey`].
+pub fn parse_owner_handover_body(body: &[u8]) -> Result<VerifyingKey, OwnerHandoverError> {
+    let bytes: [u8; OWNER_HANDOVER_BODY_LEN] = body
+        .try_into()
+        .map_err(|_| OwnerHandoverError::BadLength { got: body.len() })?;
+    let key = VerifyingKey::from_bytes(&bytes).map_err(|_| OwnerHandoverError::BadKey)?;
+    if key.is_weak() {
+        return Err(OwnerHandoverError::BadKey);
+    }
+    Ok(key)
+}
+
 /// The owner-side signer of one channel. Clock and nonce are the caller's,
 /// so one type serves the host, the browser and a native client.
 pub struct ChannelOwnerSigner {
@@ -315,6 +372,103 @@ impl ChannelOwnerSigner {
             nonce,
             signature: self.key.sign(&bytes).to_bytes(),
         }
+    }
+}
+
+#[cfg(test)]
+mod handover_tests {
+    use super::*;
+
+    const CHANNEL: [u8; CHANNEL_ID_LEN] = [0x0C; CHANNEL_ID_LEN];
+
+    #[test]
+    fn the_body_is_the_new_key_and_parses_back() {
+        let new_owner = ChannelOwnerSigner::from_account_seed(&[2; 32], &CHANNEL).verifying_key();
+        let body = owner_handover_body(&new_owner);
+        assert_eq!(body.len(), OWNER_HANDOVER_BODY_LEN);
+        assert_eq!(body, new_owner.to_bytes());
+        assert_eq!(parse_owner_handover_body(&body), Ok(new_owner));
+    }
+
+    #[test]
+    fn every_other_length_and_an_unusable_key_are_refused() {
+        let body = owner_handover_body(
+            &ChannelOwnerSigner::from_account_seed(&[2; 32], &CHANNEL).verifying_key(),
+        );
+        for len in [0usize, 1, 31, 33, 64] {
+            let mut bytes = body.to_vec();
+            bytes.resize(len, 0x11);
+            assert_eq!(
+                parse_owner_handover_body(&bytes),
+                Err(OwnerHandoverError::BadLength { got: len })
+            );
+        }
+        // The identity point: decodes, small order.
+        let mut weak = [0u8; 32];
+        weak[0] = 1;
+        assert_eq!(
+            parse_owner_handover_body(&weak),
+            Err(OwnerHandoverError::BadKey)
+        );
+    }
+
+    /// The handover is authorised by the OLD owner key over a body that is
+    /// the NEW key: the proof for one new key does not cover another, the
+    /// new key cannot sign its own appointment, and another channel's path
+    /// is another request.
+    #[test]
+    fn the_old_owner_key_signs_for_exactly_one_new_key() {
+        let old = ChannelOwnerSigner::from_account_seed(&[1; 32], &CHANNEL);
+        let new = ChannelOwnerSigner::from_account_seed(&[2; 32], &CHANNEL);
+        let other = ChannelOwnerSigner::from_account_seed(&[3; 32], &CHANNEL);
+        let body = owner_handover_body(&new.verifying_key());
+        let path = "/v1/channels/0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c/owner";
+        let req = OwnerRequest {
+            method: "PUT",
+            canonical_path: path,
+            query: "",
+            body: &body,
+        };
+        let now = 1_800_000_000_000;
+        let proof = old.sign_at(&req, now, [7; OWNER_PROOF_NONCE_LEN]);
+        assert_eq!(
+            verify_owner_proof(&proof, &req, &old.verifying_key(), now),
+            Ok(())
+        );
+        // Under the new key (it is not the owner yet).
+        assert_eq!(
+            verify_owner_proof(&proof, &req, &new.verifying_key(), now),
+            Err(OwnerProofError::BadSignature)
+        );
+        // For another new key.
+        let other_body = owner_handover_body(&other.verifying_key());
+        assert_eq!(
+            verify_owner_proof(
+                &proof,
+                &OwnerRequest {
+                    body: &other_body,
+                    ..req
+                },
+                &old.verifying_key(),
+                now
+            ),
+            Err(OwnerProofError::BadSignature)
+        );
+        // On another channel.
+        assert_eq!(
+            verify_owner_proof(
+                &proof,
+                &OwnerRequest {
+                    canonical_path: "/v1/channels/0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d/owner",
+                    ..req
+                },
+                &old.verifying_key(),
+                now
+            ),
+            Err(OwnerProofError::BadSignature)
+        );
+        // The new account seed derives a different owner key for the channel.
+        assert_ne!(old.verifying_key(), new.verifying_key());
     }
 }
 

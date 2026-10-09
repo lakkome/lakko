@@ -674,6 +674,11 @@ final class MultiJoinerCall {
             // (role-gated in `ChatRepository.receiveGroupClosed`), never the
             // SFU signal-relay. Out of place here — drop.
             break
+        case .keyRotation:
+            // ADR-0066 section 3.3 — the account's key-rotation envelope is
+            // meaningful ONLY in the account's own DeviceGroup. Anywhere else
+            // it is dropped, never opened and never rendered.
+            break
         }
     }
 

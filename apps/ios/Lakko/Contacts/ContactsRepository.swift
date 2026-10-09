@@ -532,6 +532,11 @@ public final class ContactsRepository: ObservableObject {
                 refreshing: false,
                 lastError: welcomeJoinFailure ?? carriedJoinFailure
             )
+            // ADR-0066 Stage A — after a rotation of the account keys this
+            // account's conversation leaves stay bound to the OLD key, and a
+            // Welcome is addressed to the mailbox of the key a leaf's binding
+            // names: the old mailbox keeps receiving them.
+            await pollPredecessorMailboxes(accountIdB64: pollAccountIdB64)
         } catch {
             // A cancelled poll (the screen was left, the session ended, the
             // long-poll was superseded) is not a failure: keep whatever the
@@ -547,6 +552,79 @@ public final class ContactsRepository: ObservableObject {
             // polling loop retries on its next iteration.
             NSLog("contacts inbox: poll failed: \(error)")
             state = state.with(refreshing: false, lastError: Self.inboxFetchFailureMessage)
+        }
+    }
+
+    /// When the predecessor mailboxes were last read (unix ms), per process.
+    private var lastPredecessorPollMs: Int64 = 0
+
+    /// ADR-0066 section 3.5 ("the old mailbox is read with the old key") —
+    /// read the mailbox of each of this account's own PREDECESSOR keys: the
+    /// Welcomes sealed to this account's leaves (whose bindings still name
+    /// the old key in Stage A) and the contact requests of people who have
+    /// not yet seen the new key. A short read with a cursor of its own, at
+    /// most once per ``PredecessorMailbox/pollIntervalMs``. Best effort: a
+    /// failure is logged and the next round reads again.
+    private func pollPredecessorMailboxes(accountIdB64: String) async {
+        let seeds = KeychainOwnPredecessorStore().load(accountIdB64: accountIdB64)
+        guard !seeds.isEmpty else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        guard PredecessorMailbox.due(lastPollMs: lastPredecessorPollMs, nowMs: now) else { return }
+        lastPredecessorPollMs = now
+        let cursors = PredecessorMailbox.CursorStore()
+        for seed in seeds {
+            guard let identity = try? Identity.fromSeed(seed: seed) else { continue }
+            let keyB64 = base64Encode(identity.signaturePublicKey())
+            do {
+                let result = try await clientFactory().pollStrangerInbox(
+                    mySignaturePubkey: identity.signaturePublicKey(),
+                    myX25519Secret: identity.x25519SecretKey(),
+                    after: cursors.cursor(accountIdB64: accountIdB64, keyB64: keyB64),
+                    waitSecs: 0,
+                    mailboxSigner: dsMailboxSigner(identity: identity)
+                )
+                guard boundAccountIdB64 == accountIdB64 else { return }
+                var requests: [IncomingContactRequest] = []
+                for event in result.events {
+                    switch event {
+                    case .welcome(_, let welcomeBytes, _):
+                        do {
+                            _ = try await chatRepository?.joinGroupFromWelcome(welcomeBytes: welcomeBytes)
+                        } catch {
+                            NSLog("contacts inbox: a predecessor-mailbox Welcome did not open as a chat: \(error)")
+                        }
+                    case .contactRequest(let request, let replyGrant):
+                        requests.append(request)
+                        if let replyGrant {
+                            ReachCenter.shared.keep(
+                                replyGrant, carrier: .request,
+                                fromAccountKeyB64: base64Encode(request.fromPubkey), scopeHex: nil)
+                        }
+                        if let profile = request.profile {
+                            ProfileDirectory.shared.acceptReceived(
+                                profile, signatureKeyB64: base64Encode(request.fromPubkey))
+                        }
+                    case .contactAck:
+                        // An ack answers a request this account sent under
+                        // its OLD key; the Welcome that follows it creates the
+                        // chat, and the sent row is retired when it does.
+                        continue
+                    }
+                }
+                guard boundAccountIdB64 == accountIdB64 else { return }
+                if !requests.isEmpty {
+                    let merged = ContactsInboxMerge.merge(
+                        fetched: requests, pending: state.pending, accepted: state.accepted)
+                    if !merged.kept.isEmpty {
+                        // `with` clears `lastError` unless it is passed.
+                        state = state.with(
+                            pending: state.pending + merged.kept, lastError: state.lastError)
+                    }
+                }
+                cursors.advance(accountIdB64: accountIdB64, keyB64: keyB64, to: result.cursor)
+            } catch {
+                NSLog("contacts inbox: a predecessor mailbox could not be read: \(type(of: error))")
+            }
         }
     }
 
@@ -1549,5 +1627,49 @@ public struct GeneratedInvite: Equatable {
         self.expiryMs = expiryMs
         self.maxUses = maxUses
         self.createdAtMs = createdAtMs
+    }
+}
+
+/// ADR-0066 Stage A — the mailbox of an account's own predecessor key: how
+/// often it is read, and the cursor it is read from.
+enum PredecessorMailbox {
+
+    /// At most one read per minute (chosen, not measured): it carries
+    /// Welcomes and first contact requests, never chat.
+    static let pollIntervalMs: Int64 = 60_000
+
+    static func due(lastPollMs: Int64, nowMs: Int64) -> Bool {
+        lastPollMs == 0 || nowMs - lastPollMs >= pollIntervalMs
+    }
+
+    /// The per-(account, predecessor key) mailbox cursors, in `UserDefaults`
+    /// (a public key and a row id). Cleared by the account wipe.
+    struct CursorStore {
+        static let prefix = "lakko.contacts.predecessor-inbox-cursor.v1."
+        private let defaults: UserDefaults
+
+        init(defaults: UserDefaults = .standard) {
+            self.defaults = defaults
+        }
+
+        private static func key(accountIdB64: String) -> String { prefix + accountIdB64 }
+
+        func cursor(accountIdB64: String, keyB64: String) -> Int64 {
+            ((defaults.dictionary(forKey: Self.key(accountIdB64: accountIdB64)) as? [String: NSNumber])?[keyB64])?
+                .int64Value ?? 0
+        }
+
+        /// Move the cursor forward; it never goes back.
+        func advance(accountIdB64: String, keyB64: String, to polled: Int64) {
+            var map = (defaults.dictionary(forKey: Self.key(accountIdB64: accountIdB64)) as? [String: NSNumber]) ?? [:]
+            let current = map[keyB64]?.int64Value ?? 0
+            guard polled > current else { return }
+            map[keyB64] = NSNumber(value: polled)
+            defaults.set(map, forKey: Self.key(accountIdB64: accountIdB64))
+        }
+
+        func clear(accountIdB64: String) {
+            defaults.removeObject(forKey: Self.key(accountIdB64: accountIdB64))
+        }
     }
 }

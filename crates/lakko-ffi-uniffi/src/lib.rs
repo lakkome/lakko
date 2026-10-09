@@ -37,6 +37,7 @@ use lakko_mls::{
     RoleTable as MlsRoleTable,
 };
 
+pub mod account_statement;
 pub mod anon_token;
 pub mod attachments;
 pub mod auth;
@@ -50,6 +51,7 @@ pub mod ds_proof;
 pub mod ds_statement;
 pub mod feed;
 pub mod key_reset;
+pub mod key_rotation;
 pub mod l10n;
 pub mod mnemonic;
 pub mod pairing;
@@ -639,6 +641,29 @@ pub enum FfiError {
     /// weeks-old reset asks for a fresh sign-in rather than refusing.
     #[error("key-reset attestation is stale (signed_at outside the freshness window)")]
     KeyResetAttestationStale,
+
+    // ------------------------------------------------------------------
+    // ADR-0066 account statement — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// An account statement (ADR-0066 section 0.3) could not be signed: the
+    /// account seed, the account id or the device id has the wrong length.
+    /// The message is `"<code>: <reason>"` with the stable codes
+    /// `bad-seed-length`, `bad-account-id-length`, `bad-device-id-length`.
+    #[error("{0}")]
+    AccountStatement(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0066 key rotation — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A key-rotation envelope, or a root endorsement, was refused
+    /// (ADR-0066 part 3). The message is `"<code>: <reason>"` with the
+    /// stable codes `wrongDomain`, `truncated`, `unknownVersion`,
+    /// `badLength` (the envelope's wire shape), `bad-entropy-length`,
+    /// `bad-proof-length`, `bad-key-length`, `bad-seed-length`,
+    /// `bad-journal-id-length`, `proof-refused`, `entropy-mismatch`,
+    /// `same-key`.
+    #[error("{0}")]
+    KeyRotation(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

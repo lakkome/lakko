@@ -227,6 +227,11 @@ export class DiscoveryClientArgError extends Error {
 /** Server returned a non-2xx status. Carries the original status
  *  + endpoint so the UI can branch on (e.g.) 409 = taken,
  *  404 = unknown. */
+/** The header carrying an account statement to discovery (ADR-0066 section
+ *  2.2). The core names it too (`accountStatementHeaderName()`); a test pins
+ *  the two together. */
+export const ACCOUNT_STATEMENT_HEADER = "x-lakko-account-statement";
+
 export class DiscoveryHttpError extends Error {
   override name = "DiscoveryHttpError";
   constructor(
@@ -1026,19 +1031,27 @@ export class DiscoveryClient {
 
   /** `DELETE /discovery/keypackage/device/{device_id_b64url}` — remove one of the
    *  authenticated account's device KeyPackages (ADR-0050 device removal).
-   *  Idempotent (204). */
-  async deleteKeyPackage(deviceId: Uint8Array): Promise<void> {
+   *  Idempotent (204).
+   *
+   *  ADR-0066 section 2.2: the session's OWN device row needs nothing more;
+   *  ANOTHER device's row needs `statement`, the 138-byte `device-revoke`
+   *  account statement for that id (`signDeviceRevokeStatement`), sent as
+   *  the `x-lakko-account-statement` header. Without a valid one the server
+   *  answers `403 {"error":"account-key-required"}`. Every delete tombstones
+   *  the id for 30 days, the device's own included. */
+  async deleteKeyPackage(deviceId: Uint8Array, statement?: Uint8Array): Promise<void> {
     if (deviceId.length !== 32) {
       throw new DiscoveryClientArgError("deviceId must be 32 bytes");
     }
     const endpoint = `/discovery/keypackage/device/${base64UrlEncodeNoPad(deviceId)}`;
     const url = `${this.baseUrl}${endpoint}`;
+    const headers: Record<string, string> = { ...this.authHeaders() };
+    if (statement !== undefined) {
+      headers[ACCOUNT_STATEMENT_HEADER] = base64UrlEncodeNoPad(statement);
+    }
     let response: Response;
     try {
-      response = await fetch(url, {
-        method: "DELETE",
-        headers: { ...this.authHeaders() },
-      });
+      response = await sessionFetch(url, { method: "DELETE", headers });
     } catch (err) {
       throw new DiscoveryNetworkError(`${endpoint} (DELETE)`, err);
     }

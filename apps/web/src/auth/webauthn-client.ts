@@ -223,6 +223,8 @@ interface ServerPublicKeyCredentialRequestOptions {
 export interface AuthFinishRequest {
   readonly state_id: string;
   readonly credential: AuthPublicKeyCredentialJSON;
+  /** ADR-0066 section 0.4: this device's id; absent = an unbound session. */
+  readonly device_id_b64?: string;
 }
 
 /** `POST /webauthn/auth/finish`: the account id plus the session pair
@@ -457,6 +459,10 @@ export class WebauthnClient {
       /** ADR-0064 decision 6: evaluate the PRF extension with this salt so the
        *  assertion also yields the credential's 32-byte secret. */
       prfSalt?: Uint8Array;
+      /** ADR-0066 section 0.4: this device's id (URL-safe base64, no
+       *  padding), when it is known for the account being signed in to;
+       *  the session then names the device from the start. */
+      deviceIdB64?: string;
     } = {},
   ): Promise<AuthFinishResponse & PasskeyCeremonyExtras> {
     if (!WebauthnClient.isWebauthnAvailable()) {
@@ -491,6 +497,7 @@ export class WebauthnClient {
       {
         state_id: start.state_id,
         credential: encodeAuthCredential(pk),
+        ...(options.deviceIdB64 !== undefined ? { device_id_b64: options.deviceIdB64 } : {}),
       },
     );
     return { ...finish, ...ceremonyExtras(pk) };

@@ -114,6 +114,9 @@ private const val MILLIS_PER_SECOND: Long = 1_000L
  *  The fresh device publishes it after it has landed a session. */
 private const val ADMIT_DEVICE_WAIT_MS: Long = 180_000L
 private const val ADMIT_DEVICE_POLL_MS: Long = 3_000L
+/** ADR-0066 - how long `admitDevice` waits for a readable DeviceGroup roster. */
+private const val OWN_ROSTER_WAITS: Int = 10
+private const val OWN_ROSTER_WAIT_MS: Long = 500L
 
 /** ADR-0053 — at most one knock-queue read per group in this window. */
 private const val KNOCK_POLL_MIN_INTERVAL_MS: Long = 10_000L
@@ -292,6 +295,38 @@ public class ChatRepository(
      * ADR-0050 is this device's bound leaf identity.
      */
     private val accountIdentity = AtomicReference<Identity?>(null)
+
+    /** ADR-0066 part 3 - the account identity the directory serves, when it
+     *  is NOT the conversation identity ([accountIdentity]): set after a
+     *  rotation of the account keys, `null` otherwise. Used only for the
+     *  mailbox of the published key. */
+    private val publishedAccountIdentity = AtomicReference<Identity?>(null)
+
+    /**
+     * Keep [publishedAccountIdentity] in step with the session's current
+     * account seed. [conversation] is the conversation identity when the
+     * caller has not installed it yet.
+     */
+    private fun refreshPublishedAccountIdentity(currentSeed: ByteArray, conversation: Identity? = null) {
+        try {
+            val current = Identity.fromSeed(currentSeed)
+            val held = conversation ?: accountIdentity.get()
+            val same = held != null && held.signaturePublicKey().contentEquals(current.signaturePublicKey())
+            if (same) {
+                current.close()
+                publishedAccountIdentity.getAndSet(null)?.close()
+                return
+            }
+            val before = publishedAccountIdentity.get()
+            if (before != null && before.signaturePublicKey().contentEquals(current.signaturePublicKey())) {
+                current.close()
+                return
+            }
+            publishedAccountIdentity.getAndSet(current)?.close()
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "published account identity not refreshed", cause)
+        }
+    }
 
     /**
      * Account id (base64) of the session that bootstrapped this
@@ -575,6 +610,10 @@ public class ChatRepository(
         )
         val existing = currentAccountIdB64.get()
         if (existing == newAccountIdB64) {
+            // ADR-0066 part 3 - the account keys were rotated in this
+            // session: the published identity (and its mailbox) is the new
+            // one; the conversation identity stays the predecessor.
+            refreshPublishedAccountIdentity(secrets.accountIdentitySeed)
             // ADR-0053 — a re-authentication of the same account still claims
             // both mailboxes ("after every login").
             claimOwnMailboxesBestEffort()
@@ -588,7 +627,25 @@ public class ChatRepository(
         }
         // ADR-0017: the AccountIdentity is seeded from the stable BIP39
         // phrase seed, NOT the password export key.
-        val account = Identity.fromSeed(secrets.accountIdentitySeed)
+        //
+        // ADR-0066 part 3, Stage A: after a rotation of the account keys the
+        // conversation leaves that exist stay bound to the PREDECESSOR key
+        // (no leaf is moved in place), so the account identity the chat
+        // layer acts as - role tables, registrar seeds, the mailbox Welcomes
+        // for those bindings arrive in, journal roots of owned groups - is
+        // the predecessor's. The identity the directory serves is kept
+        // beside it for the mailbox of the published key.
+        val conversationSeed = me.lakko.app.auth.conversationAccountSeedOf(
+            applicationContext,
+            newAccountIdB64,
+            secrets.accountIdentitySeed,
+        )
+        val account = try {
+            Identity.fromSeed(conversationSeed)
+        } finally {
+            conversationSeed.fill(0)
+        }
+        refreshPublishedAccountIdentity(secrets.accountIdentitySeed, conversation = account)
         // ADR-0050: every conversation leaf is this device's identity, bound to
         // the account key. A missing device seed falls back to a second unbound
         // instance of the account identity (the pre-ADR-0050 behaviour).
@@ -596,7 +653,17 @@ public class ChatRepository(
             applicationContext,
             newAccountIdB64,
             account,
-        ) ?: Identity.fromSeed(secrets.accountIdentitySeed)
+        ) ?: me.lakko.app.auth.conversationAccountSeedOf(
+            applicationContext,
+            newAccountIdB64,
+            secrets.accountIdentitySeed,
+        ).let { seed ->
+            try {
+                Identity.fromSeed(seed)
+            } finally {
+                seed.fill(0)
+            }
+        }
         // Cold start: the restore below is the single heaviest thing the app
         // does before its lists can render — the Keystore unwrap of the
         // snapshot, `restoreStorage` of the whole provider, one `loadGroup`
@@ -6648,6 +6715,25 @@ public class ChatRepository(
         val account = keyPackageAccount.get()
             ?: throw IllegalStateException("admitDevice: no session")
         val found = awaitDeviceKeyPackage(account.accountId, deviceKey)
+        // ADR-0066 section 2.3 — "add my own device" obeys the same rule as
+        // the re-admission arm: only a device the account's DeviceGroup roster
+        // lists. Read after the wait, so a device removed meanwhile (or one
+        // that was never let in) is not put into any chat.
+        // The device-sync runtime reopens its handle right after a local add;
+        // a roster that is momentarily unreadable is waited for, briefly.
+        var deviceRoster = ownDeviceRoster()
+        var waits = 0
+        while (deviceRoster == null && waits < OWN_ROSTER_WAITS) {
+            delay(OWN_ROSTER_WAIT_MS)
+            deviceRoster = ownDeviceRoster()
+            waits += 1
+        }
+        if (!DeviceReadmission.ownDeviceAdmissible(DsClient.pseudonymHex(deviceKey), deviceRoster)) {
+            throw ChatError(
+                "the device is not in this account's device list; it is not added to any chat",
+                IllegalStateException("device absent from the DeviceGroup roster"),
+            )
+        }
         return fanOut { groupIdHex ->
             addKeyPackageToGroup(groupIdHex, identity, found, skipIfPresent = true, accountId = account.accountId)
         }
@@ -6681,7 +6767,8 @@ public class ChatRepository(
     /**
      * ADR-0050 section 2.10 — retire a device just removed from the DeviceGroup
      * from EVERY chat this device is in (its one leaf per chat, the account's
-     * other devices untouched), then delete its directory KeyPackage.
+     * other devices untouched). `failed == 0` in the result means every chat
+     * answered; the owed removal retries until it does (ADR-0066).
      */
     public suspend fun retireDevice(deviceKey: ByteArray): DeviceFanOut =
         withContext(mlsDispatcher) { retireDeviceOnMlsThread(deviceKey = deviceKey) }
@@ -6689,23 +6776,21 @@ public class ChatRepository(
     private suspend fun retireDeviceOnMlsThread(deviceKey: ByteArray): DeviceFanOut {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped — call bootstrap() first")
-        val account = keyPackageAccount.get()
-        val result = fanOut { groupIdHex -> retireLeafFromGroup(groupIdHex, identity, deviceKey) }
-        // The directory row last: a peer that fetched it meanwhile only produced
-        // a Welcome nobody will open.
-        if (account != null) {
-            try {
-                keyPackageDiscoveryFactory().use { client ->
-                    client.setSessionToken(account.sessionToken)
-                    client.deleteKeyPackage(deviceKey)
-                }
-            } catch (cause: kotlinx.coroutines.CancellationException) {
-                throw cause
-            } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0050 retire device: directory KeyPackage not deleted", cause)
-            }
-        }
-        return result
+        // ADR-0066 section 2.3 — the directory row is deleted BEFORE this, by
+        // the removal operation itself and with the account statement another
+        // device's row needs (`DeviceRemovalRunner`, step 3). Nothing is
+        // deleted here any more: a session may delete only its own row
+        // without that statement.
+        return fanOut { groupIdHex -> retireLeafFromGroup(groupIdHex, identity, deviceKey) }
+    }
+
+    /**
+     * ADR-0066 — the device keys (hex, the roster encoding of this class) in
+     * the account's DeviceGroup roster, or `null` when it cannot be read now.
+     * Read from the device-sync runtime's live handle; replaceable in tests.
+     */
+    public var ownDeviceRoster: () -> Set<String>? = {
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.deviceRosterHex()
     }
 
     /** Fire-and-forget [admitDevice] on a process-lifetime scope: the wait for
@@ -6897,6 +6982,8 @@ public class ChatRepository(
             ownPersonKey = ownPerson,
             accounts = accounts,
             removed = DeviceReadmission.removed(applicationContext, account.accountIdB64, groupIdHex),
+            // ADR-0066 — own devices only from the DeviceGroup roster.
+            ownDeviceRoster = ownDeviceRoster(),
         )
         if (plan.admit.isEmpty() && plan.retire.isEmpty()) return
         var proposed = 0
@@ -7041,6 +7128,7 @@ public class ChatRepository(
         currentAccountIdB64.set(null)
         canonicalIdentity.set(null)
         accountIdentity.getAndSet(null)?.close()
+        publishedAccountIdentity.getAndSet(null)?.close()
         // ADR-0059 section 6 — the in-memory shared-channels row (the sealed
         // file stays for the next sign-in unless forget-device deletes it).
         sharedChannels.clear()
@@ -7093,6 +7181,7 @@ public class ChatRepository(
         if (discoveryLazy.isInitialized()) discovery.close()
         canonicalIdentity.getAndSet(null)?.close()
         accountIdentity.getAndSet(null)?.close()
+        publishedAccountIdentity.getAndSet(null)?.close()
         synchronized(groups) {
             for (rec in groups.values) rec.group.close()
             groups.clear()
@@ -8660,7 +8749,9 @@ public class ChatRepository(
      * at every bootstrap, i.e. after every signup, login and restore.
      */
     private fun claimOwnMailboxesBestEffort() {
-        val identities = listOfNotNull(accountIdentity.get(), canonicalIdentity.get())
+        // ADR-0066 part 3: and the mailbox of the PUBLISHED account key when
+        // it differs from the conversation identity's (after a rotation).
+        val identities = listOfNotNull(accountIdentity.get(), publishedAccountIdentity.get(), canonicalIdentity.get())
         for (identity in identities) {
             val (pseudonym, signer) = try {
                 val ffi = uniffi.lakko_ffi_uniffi.dsMailboxSigner(identity)

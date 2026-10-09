@@ -147,8 +147,9 @@ pub use meta::{
     CHANNEL_META_MAX_LEN, CHANNEL_META_MIN_LEN, CHANNEL_META_VERSION_V2,
 };
 pub use owner::{
-    channel_owner_seed, verify_owner_proof, ChannelOwnerSigner, OwnerProof, OwnerProofError,
-    OwnerRequest, OWNER_KEY_DOMAIN, OWNER_PROOF_DOMAIN, OWNER_PROOF_HEADER_NAME,
+    channel_owner_seed, owner_handover_body, parse_owner_handover_body, verify_owner_proof,
+    ChannelOwnerSigner, OwnerHandoverError, OwnerProof, OwnerProofError, OwnerRequest,
+    OWNER_HANDOVER_BODY_LEN, OWNER_KEY_DOMAIN, OWNER_PROOF_DOMAIN, OWNER_PROOF_HEADER_NAME,
     OWNER_PROOF_WINDOW_MS,
 };
 pub use post::{

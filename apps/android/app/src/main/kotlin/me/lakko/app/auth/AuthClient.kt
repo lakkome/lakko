@@ -228,13 +228,17 @@ public class AuthClient(
      */
     public suspend fun deviceAuthorizeRedeem(
         grantTokenB64: String,
+        deviceId: ByteArray? = null,
     ): DeviceAuthorizeRedeemResult {
         if (grantTokenB64.isEmpty()) {
             throw AuthClientArgError("grantTokenB64 must be non-empty")
         }
         val resp: DeviceAuthorizeRedeemResponse = post(
             "/device/authorize/redeem",
-            DeviceAuthorizeRedeemRequest(grant_token_b64 = grantTokenB64),
+            DeviceAuthorizeRedeemRequest(
+                grant_token_b64 = grantTokenB64,
+                device_id_b64 = deviceIdField(deviceId),
+            ),
         )
         val accountId = try {
             base64UrlDecodeNoPad(resp.account_id_b64)
@@ -373,6 +377,7 @@ public class AuthClient(
     public suspend fun totpRecover(
         handle: ByteArray,
         code: String,
+        deviceId: ByteArray? = null,
     ): TotpRecoverResult {
         requireHandle(handle)
         val normalized = normalizeTotpCode(code)
@@ -382,6 +387,7 @@ public class AuthClient(
             TotpRecoverRequest(
                 handle = base64UrlEncodeNoPad(handle),
                 code = normalized,
+                device_id_b64 = deviceIdField(deviceId),
             ),
         )
         return TotpRecoverResult(
@@ -436,15 +442,19 @@ public class AuthClient(
         password: ByteArray,
         enrolRecovery: Boolean = true,
         onProofSolved: () -> Unit = {},
+        /** ADR-0066 - this device's id for the account id the signup just
+         *  generated (the only landing that knows its account beforehand
+         *  by construction); `null` lands a session that names no device. */
+        deviceIdFor: ((accountId: ByteArray) -> ByteArray?)? = null,
     ): SignupResult {
         if (password.isEmpty()) {
             throw AuthClientArgError("password must be non-empty")
         }
         return try {
-            signupOnce(password, enrolRecovery, onProofSolved)
+            signupOnce(password, enrolRecovery, onProofSolved, deviceIdFor)
         } catch (e: AuthHttpError) {
             if (e.status != HTTP_GONE || e.endpoint != "/signup/finish") throw e
-            signupOnce(password, enrolRecovery, onProofSolved)
+            signupOnce(password, enrolRecovery, onProofSolved, deviceIdFor)
         }
     }
 
@@ -452,6 +462,7 @@ public class AuthClient(
         password: ByteArray,
         enrolRecovery: Boolean,
         onProofSolved: () -> Unit,
+        deviceIdFor: ((accountId: ByteArray) -> ByteArray?)?,
     ): SignupResult {
         val accountId = generateAccountId()
         val accountIdB64 = base64Encode(accountId)
@@ -516,6 +527,7 @@ public class AuthClient(
                             account_id = accountIdB64,
                             password_upload = passwordOut.uploadB64(),
                             recovery_upload = recoveryUploadB64,
+                            device_id_b64 = deviceIdField(deviceIdFor?.invoke(accountId)),
                         ),
                     )
                     if (!finishResp.ok) {
@@ -568,6 +580,7 @@ public class AuthClient(
     public suspend fun login(
         handle: ByteArray,
         password: ByteArray,
+        deviceId: ByteArray? = null,
     ): LoginResult {
         if (password.isEmpty()) {
             throw AuthClientArgError("password must be non-empty")
@@ -588,6 +601,7 @@ public class AuthClient(
                     LoginFinishRequest(
                         session_id = startResp.session_id,
                         finalize = out.finalizeB64(),
+                        device_id_b64 = deviceIdField(deviceId),
                     ),
                 )
                 if (!finishResp.ok) {
@@ -651,6 +665,7 @@ public class AuthClient(
         handle: ByteArray,
         mnemonicSeed: ByteArray,
         newPassword: ByteArray,
+        deviceId: ByteArray? = null,
     ): RecoverResult {
         requireHandle(handle)
         if (mnemonicSeed.isEmpty()) {
@@ -692,6 +707,7 @@ public class AuthClient(
                                 session_id = startResp.session_id,
                                 recovery_finalize = recoveryOut.finalizeB64(),
                                 new_password_upload = passwordOut.uploadB64(),
+                                device_id_b64 = deviceIdField(deviceId),
                             ),
                         )
                         if (!finishResp.ok) {
@@ -740,6 +756,7 @@ public class AuthClient(
     public suspend fun recoveryLogin(
         handle: ByteArray,
         seed: ByteArray,
+        deviceId: ByteArray? = null,
     ): TotpRecoverResult {
         requireHandle(handle)
         if (seed.isEmpty()) {
@@ -766,6 +783,7 @@ public class AuthClient(
                     LoginFinishRequest(
                         session_id = startResp.session_id,
                         finalize = out.finalizeB64(),
+                        device_id_b64 = deviceIdField(deviceId),
                     ),
                 )
                 if (!finishResp.ok) {
@@ -839,6 +857,118 @@ public class AuthClient(
      *   too-many-attempts` (with [AuthHttpError.retryAfterSecs]), `503
      *   rate-limiter-unavailable` / `key-reset-disabled`.
      */
+    // -----------------------------------------------------------------
+    // ADR-0066 - logout, device binding, device removal
+    // -----------------------------------------------------------------
+
+    /**
+     * `POST /auth/session/logout` (bearer, no body) -> `204`. Afterwards
+     * this device's bearer gets a plain `401` and its refresh credential
+     * `401 refresh-invalid`; never `device-revoked`, so a logout wipes
+     * nothing. A session that names no device answers `204` too and nothing
+     * is recorded server-side.
+     */
+    public suspend fun sessionLogout(sessionToken: String) {
+        requireSession(sessionToken)
+        postNoContent("/auth/session/logout", bearer = sessionToken)
+    }
+
+    /**
+     * `POST /auth/session/bind-device` (bearer): name [deviceId] as the
+     * device of a session that landed without one. [refreshToken] is the
+     * refresh credential of the same session. Returns the pair that names
+     * the device; the caller drops the unbound one. `409
+     * device-already-bound` when the session names another device, `401
+     * device-revoked` when that device was removed.
+     */
+    public suspend fun bindDevice(sessionToken: String, deviceId: ByteArray, refreshToken: String): SessionPair {
+        requireSession(sessionToken)
+        if (refreshToken.isEmpty()) throw AuthClientArgError("refreshToken must be non-empty")
+        if (deviceId.size != DEVICE_ID_LEN) throw AuthClientArgError("deviceId must be $DEVICE_ID_LEN bytes")
+        val resp: SessionRefreshResponse = post(
+            "/auth/session/bind-device",
+            BindDeviceRequest(device_id_b64 = base64UrlEncodeNoPad(deviceId), refresh_token = refreshToken),
+            bearer = sessionToken,
+        )
+        return SessionPair(
+            accessToken = resp.session_token,
+            accessExpiresAtMs = resp.session_expires_at_ms,
+            refreshToken = resp.refresh_token,
+            refreshExpiresAtMs = resp.refresh_expires_at_ms,
+            keyGeneration = resp.key_generation,
+        )
+    }
+
+    /**
+     * `POST /account/devices/revoke` (bearer) -> `204`: sign ANOTHER device
+     * of the account out at auth, for good. [statement] is the 138-byte
+     * `device-revoke` account statement (valid 120 s: signed right before
+     * sending, never stored). `403 fresh-auth-required` without a usable
+     * proof; `403 account-key-required` when the account has no recorded
+     * identity key or the statement is refused; `400` for a bad id or this
+     * device's own.
+     */
+    public suspend fun revokeDevice(
+        sessionToken: String,
+        freshGrant: String,
+        deviceId: ByteArray,
+        statement: ByteArray,
+    ) {
+        requireSession(sessionToken)
+        if (freshGrant.isEmpty()) throw AuthClientArgError("freshGrant must be non-empty")
+        if (deviceId.size != DEVICE_ID_LEN) throw AuthClientArgError("deviceId must be $DEVICE_ID_LEN bytes")
+        postNoContent(
+            "/account/devices/revoke",
+            bearer = sessionToken,
+            body = DeviceRevokeRequest(
+                fresh_grant = freshGrant,
+                device_id_b64 = base64UrlEncodeNoPad(deviceId),
+                statement_b64 = base64UrlEncodeNoPad(statement),
+            ),
+        )
+    }
+
+    /** The `device_id_b64` field of a landing: absent for no device. */
+    private fun deviceIdField(deviceId: ByteArray?): String? {
+        if (deviceId == null) return null
+        if (deviceId.size != DEVICE_ID_LEN) throw AuthClientArgError("deviceId must be $DEVICE_ID_LEN bytes")
+        return base64UrlEncodeNoPad(deviceId)
+    }
+
+    /** A POST whose success is a bodiless `204`. */
+    private suspend inline fun <reified Req : Any> postNoContent(endpoint: String, bearer: String, body: Req) {
+        expectSuccess(endpoint) {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Authorization, "Bearer $bearer")
+            setBody(body)
+        }
+    }
+
+    private suspend fun postNoContent(endpoint: String, bearer: String) {
+        expectSuccess(endpoint) { header(HttpHeaders.Authorization, "Bearer $bearer") }
+    }
+
+    private suspend inline fun expectSuccess(endpoint: String, crossinline configure: HttpRequestBuilder.() -> Unit) {
+        val response: HttpResponse = try {
+            client.request("$baseUrl$endpoint") {
+                this.method = HttpMethod.Post
+                configure()
+            }
+        } catch (cause: Throwable) {
+            throw AuthNetworkError(endpoint, cause)
+        }
+        if (response.status.isSuccess()) return
+        val text = response.safeReadBody()
+        throw AuthHttpError(
+            status = response.status.value,
+            endpoint = endpoint,
+            body = text,
+            code = me.lakko.app.anon.errorCodeOf(text),
+            retryAfterSecs = me.lakko.app.anon.longFieldOf(text, "retry_after_secs")
+                ?: response.headers[HttpHeaders.RetryAfter]?.trim()?.toLongOrNull(),
+        )
+    }
+
     public suspend fun resetAccountKeys(
         sessionToken: String,
         freshGrant: String,
@@ -895,6 +1025,375 @@ public class AuthClient(
                 ),
             )
         }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0066 part 1: taking the account back
+    // -----------------------------------------------------------------
+
+    /**
+     * `POST /account/recall/status` (anonymous): whether the account can be
+     * taken back from the device that holds [oldAccountSeed] (the 32-byte
+     * Ed25519 seed of the account identity from before the reset), until
+     * when, and how many password attempts are left. `401 recall-refused`
+     * ([recallFailureOf]) means it cannot.
+     */
+    public suspend fun recallStatus(accountId: ByteArray, oldAccountSeed: ByteArray): RecallStatus {
+        // ADR-0066 T5 item 24: a device with a wrong clock is told the
+        // server's time (never "no anchor") and signs again at it, once.
+        val res: RecallStatusResponse = sendWithStaleStatementRetry { signAtMs ->
+            val kind = uniffi.lakko_ffi_uniffi.AccountStatementKind.RECALL_STATUS
+            val statement = if (signAtMs == null) {
+                uniffi.lakko_ffi_uniffi.signAccountStatement(oldAccountSeed, kind, accountId, ByteArray(0))
+            } else {
+                uniffi.lakko_ffi_uniffi.signAccountStatementAt(oldAccountSeed, kind, accountId, ByteArray(0), signAtMs)
+            }
+            post(
+                "/account/recall/status",
+                RecallStatusRequest(statement_b64 = base64UrlEncodeNoPad(statement)),
+            )
+        }
+        return RecallStatus(
+            anchorSeq = res.anchor_seq,
+            expiresAtMs = res.expires_at_ms,
+            changedAtMs = res.changed_at_ms,
+            attemptsRemaining = res.attempts_remaining,
+        )
+    }
+
+    /**
+     * Take the account back (`POST /account/recall/start` then `/finish`,
+     * both anonymous): prove the anchor's key and the password the account
+     * had BEFORE the reset, and in the same exchange set a new password, a
+     * new recovery credential ([newSeed], the 64-byte seed of a new phrase)
+     * and a new identity key. The answer is the key reset's: the caller
+     * carries on exactly as after `reset/finish`.
+     *
+     * A wrong [oldPassword] is noticed on THIS device (the OPAQUE login
+     * cannot finish) and `finish` is never called; it throws
+     * [RecallWrongPassword], as does the server's `401 wrong-password`. Each
+     * accepted `start` is one of the anchor's attempts either way.
+     */
+    public suspend fun recallAccount(
+        accountId: ByteArray,
+        oldAccountSeed: ByteArray,
+        anchorSeq: Long,
+        oldPassword: ByteArray,
+        newPassword: ByteArray,
+        newSeed: ByteArray,
+        newSignaturePubkey: ByteArray,
+        deviceId: ByteArray? = null,
+    ): RecallResult {
+        if (oldPassword.isEmpty() || newPassword.isEmpty()) {
+            throw AuthClientArgError("passwords must be non-empty")
+        }
+        if (newSeed.isEmpty()) throw AuthClientArgError("seed must be non-empty")
+        if (newSignaturePubkey.size != PUBKEY_LEN) {
+            throw AuthClientArgError("newSignaturePubkey must be $PUBKEY_LEN bytes (Ed25519)")
+        }
+        if (anchorSeq < 0) throw AuthClientArgError("anchorSeq must not be negative")
+        val accountIdB64Url = base64UrlEncodeNoPad(accountId)
+        OpaqueLogin.startPassword(oldPassword).use { login ->
+            OpaqueRegister.startPassword(newPassword).use { passwordReg ->
+                OpaqueRegister.startRecovery(newSeed).use { recoveryReg ->
+                    val loginRequest = login.requestB64()
+                    // A stale statement is told the server's time and signed
+                    // again at it, once; nothing was counted (T5 item 24).
+                    val start: RecallStartResponse = sendWithStaleStatementRetry { signAtMs ->
+                        val startStatement = if (signAtMs == null) {
+                            uniffi.lakko_ffi_uniffi.signRecallStartStatement(
+                                oldAccountSeed,
+                                accountId,
+                                anchorSeq.toULong(),
+                                loginRequest,
+                            )
+                        } else {
+                            uniffi.lakko_ffi_uniffi.signAccountStatementAt(
+                                oldAccountSeed,
+                                uniffi.lakko_ffi_uniffi.AccountStatementKind.RECALL_START,
+                                accountId,
+                                uniffi.lakko_ffi_uniffi.recallStartStatementBody(anchorSeq.toULong(), loginRequest),
+                                signAtMs,
+                            )
+                        }
+                        post(
+                            "/account/recall/start",
+                            RecallStartRequest(
+                                account_id_b64 = accountIdB64Url,
+                                anchor_seq = anchorSeq,
+                                statement_b64 = base64UrlEncodeNoPad(startStatement),
+                                login_request = loginRequest,
+                                password_request = passwordReg.requestB64(),
+                                recovery_request = recoveryReg.requestB64(),
+                            ),
+                        )
+                    }
+                    val serverNonce = try {
+                        base64UrlDecodeNoPad(start.server_nonce_b64)
+                    } catch (_: IllegalArgumentException) {
+                        throw AuthHttpError(HTTP_OK, "/account/recall/start", "malformed server_nonce_b64")
+                    }
+                    // The password check. A failure here is the OLD password
+                    // being wrong; nothing more is sent.
+                    val loginOut = try {
+                        login.finish(oldPassword, start.login_response)
+                    } catch (_: uniffi.lakko_ffi_uniffi.FfiException) {
+                        throw RecallWrongPassword()
+                    }
+                    try {
+                        val passwordUpload = passwordReg.finish(newPassword, start.password_response)
+                            .use { it.uploadB64() }
+                        val recoveryUpload = recoveryReg.finish(newSeed, start.recovery_response)
+                            .use { it.uploadB64() }
+                        val loginFinish = loginOut.finalizeB64()
+                        val deviceIdB64 = deviceIdField(deviceId)
+                        val pubkeyB64 = base64UrlEncodeNoPad(newSignaturePubkey)
+                        fun requestSignedAt(signAtMs: Long?): RecallFinishRequest {
+                            val statement = if (signAtMs == null) {
+                                uniffi.lakko_ffi_uniffi.signRecallStatement(
+                                    oldAccountSeed,
+                                    accountId,
+                                    serverNonce,
+                                    newSignaturePubkey,
+                                    passwordUpload,
+                                    recoveryUpload,
+                                )
+                            } else {
+                                uniffi.lakko_ffi_uniffi.signAccountStatementAt(
+                                    oldAccountSeed,
+                                    uniffi.lakko_ffi_uniffi.AccountStatementKind.RECALL,
+                                    accountId,
+                                    uniffi.lakko_ffi_uniffi.recallStatementBody(
+                                        serverNonce,
+                                        newSignaturePubkey,
+                                        passwordUpload,
+                                        recoveryUpload,
+                                    ),
+                                    signAtMs,
+                                )
+                            }
+                            return RecallFinishRequest(
+                                session_id = start.session_id,
+                                account_id_b64 = accountIdB64Url,
+                                anchor_seq = anchorSeq,
+                                login_finish = loginFinish,
+                                password_upload = passwordUpload,
+                                recovery_upload = recoveryUpload,
+                                new_signature_pubkey_b64 = pubkeyB64,
+                                device_id_b64 = deviceIdB64,
+                                statement_b64 = base64UrlEncodeNoPad(statement),
+                            )
+                        }
+                        // A stale statement changed nothing and consumed
+                        // nothing: sign at the server's time, once. From
+                        // then on the request is fixed, and a lost answer is
+                        // asked again with the SAME bytes (T5 item 25).
+                        return sendWithStaleStatementRetry { signAtMs ->
+                            sendRecallFinish(requestSignedAt(signAtMs))
+                        }
+                    } finally {
+                        loginOut.close()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Send one `recall/finish` [request]; while no answer is read
+     * ([recallFinishRetryDelayMs]) the BYTE-IDENTICAL request is sent again,
+     * which the server answers `200` again with the same attestation for the
+     * attempt's ten minutes. When the repeats are used up the request is
+     * handed back in [RecallFinishUnanswered] so the caller keeps it, and the
+     * phrase it would make the account's, and asks again later
+     * ([recallFinishResend]).
+     */
+    private suspend fun sendRecallFinish(request: RecallFinishRequest): RecallResult {
+        val firstSentAtMs = System.currentTimeMillis()
+        var repeats = 0
+        while (true) {
+            try {
+                return recallFinishOnce(request)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (err: Throwable) {
+                val wait = recallFinishRetryDelayMs(err, repeats, firstSentAtMs, System.currentTimeMillis())
+                if (wait == null) {
+                    if (recallFinishAnswerLost(err)) throw RecallFinishUnanswered(request, firstSentAtMs, err)
+                    throw err
+                }
+                repeats += 1
+                kotlinx.coroutines.delay(wait)
+            }
+        }
+    }
+
+    /** Ask an unanswered `recall/finish` again with the request it was sent
+     *  with. `401 recall-refused` when the first never landed or its ten
+     *  minutes are over. */
+    public suspend fun recallFinishResend(request: RecallFinishRequest): RecallResult = recallFinishOnce(request)
+
+    private suspend fun recallFinishOnce(request: RecallFinishRequest): RecallResult {
+        val finish: RecallFinishResponse = post("/account/recall/finish", request)
+        val attestation = try {
+            base64UrlDecodeNoPad(finish.key_reset_attest_b64)
+        } catch (_: IllegalArgumentException) {
+            throw AuthHttpError(HTTP_OK, "/account/recall/finish", "malformed key_reset_attest_b64")
+        }
+        if (attestation.size != KEY_RESET_ATTESTATION_LEN) {
+            throw AuthHttpError(
+                HTTP_OK,
+                "/account/recall/finish",
+                "key reset attestation of ${attestation.size} bytes",
+            )
+        }
+        return RecallResult(
+            reset = KeyResetResult(
+                attestation = attestation,
+                keyGeneration = finish.key_generation,
+                session = SessionPair(
+                    accessToken = finish.session_token,
+                    accessExpiresAtMs = finish.session_expires_at_ms,
+                    refreshToken = finish.refresh_token,
+                    refreshExpiresAtMs = finish.refresh_expires_at_ms,
+                    keyGeneration = finish.key_generation,
+                ),
+            ),
+            freshGrant = finish.fresh_grant,
+            freshGrantExpiresAtMs = finish.fresh_grant_expires_at_ms,
+        )
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0066 part 3: rotating the account keys, keeping the devices
+    // -----------------------------------------------------------------
+
+    /**
+     * `POST /account/keys/rotate/{start,finish}` (bearer): the reset's
+     * exchange with a supersession proof by the CURRENT account key over
+     * [newSignaturePubkey]. The server verifies the proof against the key it
+     * recorded, replaces the recovery credential with one made from [seed]
+     * (the NEW 64-byte phrase seed), keeps the passkeys, the password, TOTP
+     * and the device floors, deletes the passkey vaults, and gives each id
+     * of [revokeDeviceIds] (at most [MAX_ROTATE_REVOKE_IDS]) a floor in the
+     * same transaction. The answer is the reset's, without a grant.
+     *
+     * Nothing changes server-side when `start` fails or `finish` is never
+     * sent.
+     *
+     * @throws AuthHttpError in the server's order: `403 fresh-auth-required`,
+     *   `400`, `403 account-key-required`, `429 too-many-attempts`.
+     */
+    public suspend fun rotateAccountKeys(
+        sessionToken: String,
+        freshGrant: String,
+        seed: ByteArray,
+        newSignaturePubkey: ByteArray,
+        supersessionProof: ByteArray,
+        revokeDeviceIds: List<ByteArray>,
+    ): KeyResetResult {
+        requireSession(sessionToken)
+        if (freshGrant.isEmpty()) throw AuthClientArgError("freshGrant must be non-empty")
+        if (seed.isEmpty()) throw AuthClientArgError("seed must be non-empty")
+        if (newSignaturePubkey.size != PUBKEY_LEN) {
+            throw AuthClientArgError("newSignaturePubkey must be $PUBKEY_LEN bytes (Ed25519)")
+        }
+        if (supersessionProof.size != SUPERSESSION_PROOF_LEN) {
+            throw AuthClientArgError("supersessionProof must be $SUPERSESSION_PROOF_LEN bytes")
+        }
+        if (revokeDeviceIds.size > MAX_ROTATE_REVOKE_IDS) {
+            throw AuthClientArgError("at most $MAX_ROTATE_REVOKE_IDS devices can be revoked with a rotation")
+        }
+        OpaqueRegister.startRecovery(seed).use { reg ->
+            val start: KeyResetStartResponse = post(
+                "/account/keys/rotate/start",
+                KeyResetStartRequest(fresh_grant = freshGrant, recovery_request = reg.requestB64()),
+                bearer = sessionToken,
+            )
+            val upload = reg.finish(seed, start.recovery_response).use { it.uploadB64() }
+            val finish: KeyResetFinishResponse = post(
+                "/account/keys/rotate/finish",
+                KeyRotateFinishRequest(
+                    fresh_grant = freshGrant,
+                    recovery_upload = upload,
+                    new_signature_pubkey_b64 = base64UrlEncodeNoPad(newSignaturePubkey),
+                    supersession_proof_b64 = base64UrlEncodeNoPad(supersessionProof),
+                    revoke_device_ids_b64 = revokeDeviceIds.map { base64UrlEncodeNoPad(it) },
+                ),
+                bearer = sessionToken,
+            )
+            val attestation = try {
+                base64UrlDecodeNoPad(finish.key_reset_attest_b64)
+            } catch (_: IllegalArgumentException) {
+                throw AuthHttpError(HTTP_OK, "/account/keys/rotate/finish", "malformed key_reset_attest_b64")
+            }
+            if (attestation.size != KEY_RESET_ATTESTATION_LEN) {
+                throw AuthHttpError(
+                    HTTP_OK,
+                    "/account/keys/rotate/finish",
+                    "key reset attestation of ${attestation.size} bytes",
+                )
+            }
+            return KeyResetResult(
+                attestation = attestation,
+                keyGeneration = finish.key_generation,
+                session = SessionPair(
+                    accessToken = finish.session_token,
+                    accessExpiresAtMs = finish.session_expires_at_ms,
+                    refreshToken = finish.refresh_token,
+                    refreshExpiresAtMs = finish.refresh_expires_at_ms,
+                    keyGeneration = finish.key_generation,
+                ),
+            )
+        }
+    }
+
+    /**
+     * The kept device's session after a rotation (ADR-0066 section 3.3):
+     * `POST /auth/session/refresh` with a kind-4 statement by the NEW
+     * account key over [refreshToken]. A valid credential of a lower
+     * generation is exchanged for a pair at the current one naming the same
+     * device. A `statement-stale` answer is signed again at the server's
+     * time, once.
+     *
+     * @throws AuthHttpError `401 key-generation-superseded` (the statement
+     *   was not accepted: this device does not hold the account's key),
+     *   `401 device-revoked` (this device was the one removed), `401
+     *   refresh-invalid`, `429`.
+     */
+    public suspend fun sessionUpgrade(
+        refreshToken: String,
+        accountId: ByteArray,
+        newAccountEd25519Seed: ByteArray,
+    ): SessionPair {
+        if (refreshToken.isEmpty()) throw AuthClientArgError("refreshToken must be non-empty")
+        val resp: SessionRefreshResponse = sendWithStaleStatementRetry { signAtMs ->
+            val statement = if (signAtMs == null) {
+                uniffi.lakko_ffi_uniffi.signSessionUpgradeStatement(newAccountEd25519Seed, accountId, refreshToken)
+            } else {
+                uniffi.lakko_ffi_uniffi.signAccountStatementAt(
+                    newAccountEd25519Seed,
+                    uniffi.lakko_ffi_uniffi.AccountStatementKind.SESSION_UPGRADE,
+                    accountId,
+                    uniffi.lakko_ffi_uniffi.sessionUpgradeStatementBody(refreshToken),
+                    signAtMs,
+                )
+            }
+            post(
+                "/auth/session/refresh",
+                SessionRefreshRequest(
+                    refresh_token = refreshToken,
+                    key_statement_b64 = base64UrlEncodeNoPad(statement),
+                ),
+            )
+        }
+        return SessionPair(
+            accessToken = resp.session_token,
+            accessExpiresAtMs = resp.session_expires_at_ms,
+            refreshToken = resp.refresh_token,
+            refreshExpiresAtMs = resp.refresh_expires_at_ms,
+            keyGeneration = resp.key_generation,
+        )
     }
 
     // -----------------------------------------------------------------
@@ -1239,11 +1738,18 @@ public class AuthClient(
 
         private const val ACCOUNT_ID_LEN: Int = 16
 
+        /** ADR-0066 - a device id is its 32-byte leaf signature key. */
+        public const val DEVICE_ID_LEN: Int = 32
+
         /** Ed25519 identity pubkey length (ADR-0036 genesis-attest mint). */
         private const val PUBKEY_LEN: Int = 32
 
         /** The fixed layout of the ADR-0065 key-reset attestation. */
         public const val KEY_RESET_ATTESTATION_LEN: Int = 177
+        /** A supersession proof is this many bytes (ADR-0016). */
+        public const val SUPERSESSION_PROOF_LEN: Int = 145
+        /** `rotate/finish` revokes at most this many devices. */
+        public const val MAX_ROTATE_REVOKE_IDS: Int = 8
 
         /** A 2xx whose body failed a shape check. */
         private const val HTTP_OK: Int = 200
@@ -1450,6 +1956,16 @@ public class KeyResetResult(
     /** The pair issued at [keyGeneration]; the caller's old one is gone. */
     public val session: SessionPair,
 )
+
+/** Result of [AuthClient.recallAccount]: the key reset's result and the
+ *  fresh-auth proof the exchange earned. */
+public class RecallResult(
+    public val reset: KeyResetResult,
+    public val freshGrant: String?,
+    public val freshGrantExpiresAtMs: Long?,
+) {
+    override fun toString(): String = "RecallResult(<redacted>)"
+}
 
 /** Result of [AuthClient.totpEnrollStart] (ADR-0018 factor (c)) —
  *  the provisioning material the authenticator app consumes. The

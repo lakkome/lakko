@@ -39,7 +39,7 @@ import {
 } from "solid-js";
 
 import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
-import { useAuth } from "../auth/AuthContext";
+import { conversationSeedOf, useAuth } from "../auth/AuthContext";
 import { base64Decode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { ProfilePublishScheduler } from "../profile/publish-scheduler";
@@ -133,13 +133,15 @@ export function PinProvider(props: { children: JSX.Element }): JSX.Element {
   async function liveRole(group: WasmGroup): Promise<PushRotationRole> {
     // The role table names ACCOUNT keys (ADR-0050), so the account identity
     // is what `ownRole` is asked with.
-    const account = chats.accountIdentity();
+    // ADR-0066 section 3.5: the role table names the key the leaves are bound
+    // to, which after a proven rotation is the predecessor.
+    const account = chats.conversationAccountIdentity();
     if (account !== null) return readPushRotationRole(group, account);
     const secrets = auth.identitySecrets();
     if (secrets === null) return null;
     try {
       const wasm = await loadWasm();
-      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+      const identity = wasm.Identity.fromSeed(conversationSeedOf(secrets));
       try {
         return await readPushRotationRole(group, identity);
       } finally {

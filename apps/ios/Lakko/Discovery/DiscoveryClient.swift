@@ -584,7 +584,14 @@ public final class DiscoveryClient {
     /// `DELETE /discovery/keypackage/device/{device_id_b64url}` — remove one
     /// of the authenticated account's device KeyPackages (ADR-0050 device
     /// removal). Bearer-auth; idempotent (204).
-    public func deleteKeyPackage(deviceId: Data) async throws {
+    ///
+    /// ADR-0066 section 2.2: a device deletes its OWN row with the session
+    /// alone. ANOTHER device's row needs `accountStatement`, the 138-byte
+    /// `device-revoke` account statement over that id, sent base64url in the
+    /// `x-lakko-account-statement` header; without it the server answers
+    /// `403 account-key-required`. Every delete tombstones the id for 30
+    /// days, the device's own included.
+    public func deleteKeyPackage(deviceId: Data, accountStatement: Data? = nil) async throws {
         guard deviceId.count == 32 else {
             throw DiscoveryClientError.argument("deviceId must be 32 bytes")
         }
@@ -593,6 +600,11 @@ public final class DiscoveryClient {
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         attachAuthorizationHeader(to: &request)
+        if let accountStatement {
+            request.setValue(
+                base64UrlEncodeNoPad(accountStatement),
+                forHTTPHeaderField: accountStatementHeaderName())
+        }
         let raw: (Data, URLResponse)
         do {
             raw = try await AntiCensorshipTransport.perform(

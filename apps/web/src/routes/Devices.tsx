@@ -20,6 +20,7 @@
 import {
   createSignal,
   createEffect,
+  on,
   onCleanup,
   Show,
   Switch,
@@ -32,6 +33,11 @@ import { Icon } from "../ui/icons";
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient } from "../auth/client";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
+import { deviceIdB64Url } from "../auth/session-device";
+import { useDeviceRemoval } from "../devices/removal-runtime";
+import { removalRowState } from "../devices/removal";
+import { REMOVE_DEVICE_COPY, ROTATE_COPY, revokeFailureLine } from "../devices/removal-copy";
+import { ModalLayer } from "../ui/ModalLayer";
 import { getDeviceKey } from "../auth/key-store";
 import {
   WebauthnClient,
@@ -43,11 +49,9 @@ import {
   runScanFlow,
   type JoinSession,
 } from "../devices/orchestrator";
-import {
-  listDevices,
-  removeDeviceAt,
-  type DeviceListItem,
-} from "../devices/remove";
+import { listDevices, type DeviceListItem } from "../devices/remove";
+import { useKeyRotation, type RotateResult } from "../devices/key-rotation-runtime";
+import { rotationCommitted, rotationStepLine, type RotationStepLine } from "../devices/key-rotation";
 import { ownPairingHandle } from "../devices/pairing";
 import { recoveryHalfFor } from "../devices/recovery-sender";
 import QRCode from "qrcode";
@@ -249,17 +253,68 @@ function DevicesListView(props: {
   /** UX 17.5: the row is a device the notice is about. */
   const isNew = (device: DeviceListItem): boolean =>
     !device.isSelf && addedNotice().newKeys.includes(bytesToHex(device.signaturePublicKey));
-  // Same auth context the outer page reads — used to bind the device-
-  // removal action to a fresh passkey gesture (G-13).
   const auth = useAuth();
-  // ADR-0050 section 2.10 — the removal fan-out over every chat.
-  const receive = useBackgroundReceive();
+  // ADR-0066 section 2.3: removing a device is one operation with an owed
+  // record (`devices/removal.ts`); the sheet below starts it.
+  const removal = useDeviceRemoval();
   type State =
     | { kind: "loading" }
     | { kind: "ready"; devices: readonly DeviceListItem[] }
-    | { kind: "removing"; leafIndex: number; devices: readonly DeviceListItem[] }
     | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "loading" });
+  // The remove sheet (UX 18.1): the device it is about and its label.
+  const [sheet, setSheet] = createSignal<{ device: DeviceListItem; label: string } | null>(null);
+  const [working, setWorking] = createSignal(false);
+  const [sheetLine, setSheetLine] = createSignal<(() => string) | null>(null);
+  // The row whose owed removal is being continued from its retry button.
+  const [retrying, setRetrying] = createSignal<string | null>(null);
+  const [rowLine, setRowLine] = createSignal<(() => string) | null>(null);
+  const [doneLine, setDoneLine] = createSignal(false);
+  // UX 18.1: why the device is removed. Neither is chosen at first and the
+  // main button waits for one. "stolen" removes the device AND changes the
+  // account keys (ADR-0066 part 3).
+  const rotation = useKeyRotation();
+  const [reason, setReason] = createSignal<"unused" | "stolen" | null>(null);
+  // The device was removed and the keys were not changed: `Try again` /
+  // `Not now`, in the sheet (or, after a reload, in the sheet opened from
+  // the list's line).
+  const [notStarted, setNotStarted] = createSignal(false);
+  // The sheet opened from the list's line for a rotation left unfinished.
+  const [retryOpen, setRetryOpen] = createSignal(false);
+  const [rotateDone, setRotateDone] = createSignal(false);
+  /** A rotation whose device was removed but whose keys were not changed. */
+  const rotationLeftover = (): boolean => {
+    const r = rotation.record();
+    return r !== null && !rotationCommitted(r) && r.done.includes("remove");
+  };
+  const activeLine = (): RotationStepLine | null => {
+    const step = rotation.activeStep();
+    return step === null ? null : rotationStepLine(step);
+  };
+
+  const username = (): string => {
+    const s = auth.state();
+    return s.kind === "session" ? s.account.username : "";
+  };
+  const gate = createProofGate({
+    auth,
+    copy: PROOF_COPY.removeDevice,
+    busy: working,
+    sessionToken: () =>
+      sheet() !== null || retryOpen() ? (auth.identitySecrets()?.sessionToken ?? null) : null,
+    usernameKnown: () => username().trim().length > 0,
+  });
+
+  /** The owed record of a row, by the device's id. */
+  const recordOf = (device: DeviceListItem) => {
+    const id = deviceIdB64Url(device.signaturePublicKey);
+    return removal.owed().find((r) => r.deviceIdB64 === id) ?? null;
+  };
+  const rowState = (device: DeviceListItem) => removalRowState(recordOf(device));
+  /** Signed out at the server; the rest is still owed. */
+  const finishing = (device: DeviceListItem): boolean => rowState(device) !== "normal";
+  /** The owed step waits on the person's passkey (`Finish removing`). */
+  const needsPerson = (device: DeviceListItem): boolean => rowState(device) === "needs-person";
 
   async function load(): Promise<void> {
     setState({ kind: "loading" });
@@ -280,97 +335,310 @@ function DevicesListView(props: {
     }
   }
 
-  async function remove(leafIndex: number): Promise<void> {
-    const current = state();
-    const devices =
-      current.kind === "ready" || current.kind === "removing"
-        ? current.devices
-        : [];
-    setState({ kind: "removing", leafIndex, devices });
+  /**
+   * G-13 (ADR-0014 / ADR-0015): the passkey attestation bound to the removed
+   * leaf, carried with the DeviceGroup Remove commit so peers can verify it.
+   * `null` when the account has no passkey (a 404 from the ceremony start;
+   * the DeviceGroup policy is off there). A cancelled gesture or any other
+   * failure throws, and the caller removes nothing (fail-closed).
+   */
+  async function removalAttestation(target: DeviceListItem): Promise<Uint8Array | null> {
+    const sessionToken = auth.identitySecrets()?.sessionToken ?? null;
+    if (sessionToken === null) return null;
+    const wc = new WebauthnClient();
+    wc.setSessionToken(sessionToken);
     try {
-      const deviceKey = await getDeviceKey(props.accountIdB64);
-      if (deviceKey === null) {
-        setState({ kind: "error", message: noDeviceKey });
+      const actionHashB64 = await actionHashForRemoveDevice(target.signaturePublicKey);
+      const result = await wc.assertAction(actionHashB64);
+      return base64UrlDecodeNoPad(result.attestation_b64);
+    } catch (err) {
+      if (err instanceof WebauthnHttpError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
+  function openSheet(device: DeviceListItem, label: string): void {
+    gate.clear();
+    setSheetLine(null);
+    setRowLine(null);
+    setDoneLine(false);
+    setRotateDone(false);
+    setReason(null);
+    setNotStarted(false);
+    closeWhenDone = false;
+    setSheet({ device, label });
+  }
+
+  /** The list's line for a rotation left unfinished: the same sheet, with
+   *  the proof block and `Try again` / `Not now`. */
+  function openRetrySheet(): void {
+    gate.clear();
+    setSheetLine(null);
+    setReason("stolen");
+    setNotStarted(true);
+    closeWhenDone = false;
+    setRetryOpen(true);
+  }
+
+  // `Esc` closes the dialog element even while the removal is running; the
+  // state then follows it once the run has its answer (the row shows it).
+  let closeWhenDone = false;
+  function closeSheet(): void {
+    if (working()) {
+      closeWhenDone = true;
+      return;
+    }
+    gate.clear();
+    setSheetLine(null);
+    setSheet(null);
+    setRetryOpen(false);
+    setNotStarted(false);
+  }
+
+  /** What a run of the rotation came to, for the sheet (UX 18.1's table). */
+  async function showRotation(result: RotateResult, grant: string | null): Promise<void> {
+    if (result.kind === "blocked") {
+      setSheetLine(() => REMOVE_DEVICE_COPY.blocked);
+      return;
+    }
+    if (result.kind === "not-ready") {
+      setSheetLine(() => () => t("common.error.session_not_ready"));
+      return;
+    }
+    const outcome = result.outcome;
+    if (outcome.kind === "not-removed") {
+      // Nothing was removed: the removal's own states.
+      if (outcome.failure === "proof-required" || outcome.failure === "rate-limited") {
+        const failure = gate.failed(result.error ?? new FreshAuthRequiredError(), grant);
+        if (failure.kind === "other") setSheetLine(() => REMOVE_DEVICE_COPY.notRevoked);
         return;
       }
+      setSheetLine(() => revokeFailureLine(outcome.failure));
+      return;
+    }
+    if (outcome.kind === "not-started") {
+      // The device WAS removed; the keys are unchanged.
+      setNotStarted(true);
+      if (outcome.reason === "proof-required" || outcome.reason === "rate-limited") {
+        // The block words these: the proof again, or the wait.
+        gate.failed(result.error ?? new FreshAuthRequiredError(), grant);
+      }
+      setSheetLine(() =>
+        outcome.reason === "account-key-required" ? REMOVE_DEVICE_COPY.tryLater : ROTATE_COPY.notStarted,
+      );
+      await load();
+      return;
+    }
+    // The keys were changed. Publishing still owed: the words are withheld
+    // with the existing "publish owed" copy and retried by itself. Complete:
+    // the new-phrase screen is up, then this line.
+    setWorking(false);
+    gate.clear();
+    setSheet(null);
+    setRetryOpen(false);
+    setNotStarted(false);
+    if (outcome.kind === "complete") setRotateDone(true);
+    await load();
+  }
 
-      // G-13 (ADR-0014): gate the eviction on a fresh passkey gesture
-      // cryptographically bound to the removed leaf — but only if the
-      // account actually has a passkey. OPAQUE-only accounts (no passkey)
-      // fall through on session-token auth alone (a 404 from the ceremony
-      // start signals "no credentials"). A user-cancelled gesture or any
-      // other failure aborts the removal (fail-closed).
-      const sessionToken = auth.identitySecrets()?.sessionToken ?? null;
-      const target = devices.find((d) => d.leafIndex === leafIndex);
-      const targetWasNew = target !== undefined && isNew(target);
-      // G-13 (ADR-0015): the passkey ceremony yields an attestation bound to
-      // the leaf being removed; carry it with the Remove commit so peers can
-      // verify it. A 404 means the account has no passkey (OPAQUE-only) —
-      // proceed without an attestation (the DeviceGroup policy is off there).
-      let attestation: Uint8Array | null = null;
-      if (sessionToken !== null && target !== undefined) {
-        const wc = new WebauthnClient();
-        wc.setSessionToken(sessionToken);
-        try {
-          const actionHashB64 = await actionHashForRemoveDevice(
-            target.signaturePublicKey,
-          );
-          const result = await wc.assertAction(actionHashB64);
-          attestation = base64UrlDecodeNoPad(result.attestation_b64);
-        } catch (err) {
-          if (!(err instanceof WebauthnHttpError && err.status === 404)) {
-            throw err;
-          }
+  /** `Remove and change keys`, and `Try again`. */
+  async function onConfirmRotate(): Promise<void> {
+    if (working()) return;
+    const open = sheet();
+    setSheetLine(null);
+    setWorking(true);
+    try {
+      const grant = await gate.ensure();
+      if (grant === null) return;
+      if (open === null || notStarted()) {
+        // The record names the device; its removal already has its answer.
+        await showRotation(await rotation.retry(grant), grant);
+        return;
+      }
+      const target = open.device;
+      const targetWasNew = isNew(target);
+      let attestation: Uint8Array | null;
+      try {
+        attestation = await removalAttestation(target);
+      } catch (err) {
+        setSheetLine(() => failureText(err, "settings.devices.error.remove"));
+        return;
+      }
+      const result = await rotation.rotate(target.signaturePublicKey, grant, attestation);
+      if (result.kind === "ran" && result.outcome.kind !== "not-removed" && targetWasNew) {
+        props.onRemovedNew();
+      }
+      await showRotation(result, grant);
+    } catch (err) {
+      setSheetLine(() => failureText(err, "settings.devices.error.remove"));
+    } finally {
+      setWorking(false);
+      if (closeWhenDone) {
+        closeWhenDone = false;
+        closeSheet();
+      }
+    }
+  }
+
+  /** `Not now`: the device stays removed, the keys stay as they are. */
+  async function onNotNow(): Promise<void> {
+    if (working()) return;
+    await rotation.notNow();
+    closeSheet();
+    await load();
+  }
+
+  /** The sheet's main button. Nothing is removed before the proof passes;
+   *  nothing else happens when the sign-out at the server is refused. */
+  async function onConfirmRemove(): Promise<void> {
+    if (reason() === "stolen") {
+      await onConfirmRotate();
+      return;
+    }
+    const open = sheet();
+    if (open === null || working() || reason() === null) return;
+    const target = open.device;
+    setSheetLine(null);
+    setWorking(true);
+    try {
+      if (removal.blocked()) {
+        setSheetLine(() => REMOVE_DEVICE_COPY.blocked);
+        return;
+      }
+      const grant = await gate.ensure();
+      if (grant === null) return;
+      const targetWasNew = isNew(target);
+      let attestation: Uint8Array | null;
+      try {
+        attestation = await removalAttestation(target);
+      } catch (err) {
+        // The gesture was dismissed or failed: the device was not removed.
+        setSheetLine(() => failureText(err, "settings.devices.error.remove"));
+        return;
+      }
+      const result = await removal.remove(target.signaturePublicKey, grant, attestation);
+      if (result.kind === "blocked") {
+        setSheetLine(() => REMOVE_DEVICE_COPY.blocked);
+        return;
+      }
+      if (result.kind === "not-ready") {
+        setSheetLine(() => () => t("common.error.session_not_ready"));
+        return;
+      }
+      const outcome = result.outcome;
+      if (outcome.kind === "not-revoked") {
+        if (outcome.failure === "proof-required" || outcome.failure === "rate-limited") {
+          // The block words these: the proof again (no error), or the wait.
+          const failure = gate.failed(result.revokeError ?? new FreshAuthRequiredError(), grant);
+          if (failure.kind === "other") setSheetLine(() => REMOVE_DEVICE_COPY.notRevoked);
+          return;
         }
+        setSheetLine(() => revokeFailureLine(outcome.failure));
+        return;
       }
-
-      await removeDeviceAt({
-        accountIdBytes: props.accountIdBytes,
-        accountIdB64: props.accountIdB64,
-        deviceKey,
-        leafIndex,
-        attestation,
-      });
-      // ADR-0050 section 2.10 — the device is out of the DeviceGroup; now out
-      // of every chat and out of the directory. Runs on after the list reload;
-      // a chat it fails on is logged and retried by nothing (the leaf stays
-      // until a member removes it by hand), so the warning is worth reading.
-      if (target !== undefined) {
-        void receive.retireDevice(target.signaturePublicKey).catch((err: unknown) => {
-          // eslint-disable-next-line no-console
-          console.warn("ADR-0050 retire device: fan-out failed", err);
-        });
-      }
+      // Signed out at the server: the sheet closes. A removal still
+      // finishing shows on the row; nothing is an error from here.
+      setWorking(false);
+      gate.clear();
+      setSheet(null);
+      if (outcome.kind === "complete") setDoneLine(true);
       if (targetWasNew) props.onRemovedNew();
-      // Re-fetch — the new epoch has its own leaf numbering.
       await load();
     } catch (err) {
-      setState({ kind: "error", message: failureText(err, "settings.devices.error.remove") });
+      setSheetLine(() => failureText(err, "settings.devices.error.remove"));
+    } finally {
+      setWorking(false);
+      if (closeWhenDone) {
+        closeWhenDone = false;
+        closeSheet();
+      }
+    }
+  }
+
+  /** `Finish removing`: a removal that was signed out at the server but
+   *  needs the passkey gesture again to leave the device list (after a
+   *  relaunch, or once the first attestation aged out). */
+  async function onRetryRow(device: DeviceListItem): Promise<void> {
+    const id = deviceIdB64Url(device.signaturePublicKey);
+    if (retrying() !== null) return;
+    setRetrying(id);
+    setRowLine(null);
+    try {
+      // The passkey again, then the owed steps from the record.
+      const attestation = await removalAttestation(device);
+      const result = await removal.remove(device.signaturePublicKey, null, attestation);
+      if (result.kind === "ran" && result.outcome.kind === "complete") setDoneLine(true);
+      await load();
+    } catch (err) {
+      setRowLine(() => failureText(err, "settings.devices.error.remove"));
+    } finally {
+      setRetrying(null);
     }
   }
 
   createEffect(() => {
     void load();
   });
+  // A record that finished elsewhere (the whole-session runtime) removes a
+  // row: read the list again when the set of records changes.
+  createEffect(
+    on(
+      () => removal.owed().length,
+      () => void load(),
+      { defer: true },
+    ),
+  );
 
   return (
     <div class="lk-stack" style={{ gap: "8px" }}>
       <h2>{t("settings.devices.list.title")}</h2>
       <p class="lk-card-desc">{t("settings.devices.list.lede")}</p>
+      {/* ADR-0066 T1 point 15: while a key-reset publish is owed, auth and the
+          directory hold different account keys; no removal runs then. */}
+      <Show when={removal.blocked()}>
+        <p class="form-info" role="status">{REMOVE_DEVICE_COPY.blocked()}</p>
+      </Show>
+      <Show when={doneLine()}>
+        <p class="form-info" role="status">{REMOVE_DEVICE_COPY.done()}</p>
+      </Show>
+      <Show when={rotateDone()}>
+        <p class="form-info" role="status">{ROTATE_COPY.done()}</p>
+      </Show>
+      {/* UX 18.1: the device was removed, the keys were not changed (a
+          rotation left unfinished, also after a relaunch). */}
+      <Show when={rotationLeftover() && sheet() === null && !retryOpen()}>
+        <div class="form-error" role="alert">
+          <p>{ROTATE_COPY.notStarted()}</p>
+          <div class="lk-actions">
+            <button type="button" class="small ghost" onClick={() => void onNotNow()}>
+              {ROTATE_COPY.notNow()}
+            </button>
+            <button type="button" class="small" onClick={openRetrySheet}>
+              {ROTATE_COPY.retry()}
+            </button>
+          </div>
+        </div>
+      </Show>
+      <Show when={rowLine()}>
+        {(line) => (
+          <p class="form-error" role="alert">
+            {line()()}
+          </p>
+        )}
+      </Show>
       <Switch>
         <Match when={state().kind === "loading"}>
           <p class="lk-muted">{t("common.loading")}</p>
         </Match>
-        <Match when={state().kind === "ready" || state().kind === "removing"}>
+        <Match when={state().kind === "ready"}>
           {(_) => {
-            const s = state();
-            const devices =
-              s.kind === "ready" || s.kind === "removing" ? s.devices : [];
-            const removingLeaf =
-              s.kind === "removing" ? s.leafIndex : null;
+            const devices = (): readonly DeviceListItem[] => {
+              const s = state();
+              return s.kind === "ready" ? s.devices : [];
+            };
             return (
               <ul class="lk-list tight" aria-label={t("settings.devices.title")}>
-                <For each={devices}>
+                <For each={devices()}>
                   {(device, i) => (
                     <li
                       class="lk-card-row"
@@ -393,17 +661,42 @@ function DevicesListView(props: {
                         <Show when={device.isSelf}>
                           <span class="lk-card-row-sub">{t("settings.devices.this_device.sub")}</span>
                         </Show>
+                        {/* UX 18.1: signed out, the removal still finishing.
+                            No Remove control and no error. */}
+                        <Show when={finishing(device)}>
+                          <span class="lk-card-row-sub" role="status">
+                            {REMOVE_DEVICE_COPY.pending()}
+                          </span>
+                        </Show>
                       </div>
                       <Show when={!device.isSelf} fallback={<span />}>
-                        <button
-                          type="button"
-                          class="ghost small"
-                          style={{ color: "var(--danger)" }}
-                          disabled={removingLeaf !== null}
-                          onClick={() => void remove(device.leafIndex)}
+                        <Show
+                          when={!finishing(device)}
+                          fallback={
+                            // Only when the owed step is waiting on the
+                            // person: the passkey again, then the rest.
+                            <Show when={needsPerson(device)} fallback={<span />}>
+                              <button
+                                type="button"
+                                class="ghost small"
+                                disabled={retrying() !== null || removal.blocked()}
+                                onClick={() => void onRetryRow(device)}
+                              >
+                                {REMOVE_DEVICE_COPY.finish()}
+                              </button>
+                            </Show>
+                          }
                         >
-                          {removingLeaf === device.leafIndex ? t("common.removing") : t("common.remove")}
-                        </button>
+                          <button
+                            type="button"
+                            class="ghost small"
+                            style={{ color: "var(--danger)" }}
+                            disabled={removal.blocked()}
+                            onClick={() => openSheet(device, deviceRowLabel(i(), false))}
+                          >
+                            {t("common.remove")}
+                          </button>
+                        </Show>
                       </Show>
                     </li>
                   )}
@@ -427,6 +720,109 @@ function DevicesListView(props: {
           }}
         </Match>
       </Switch>
+      {/* UX 18.1: the app's own sheet, never a system dialog. The proof
+          block sits in it; the main button is the only way forward. */}
+      <ModalLayer
+        open={sheet() !== null || retryOpen()}
+        title={reason() === "stolen" ? ROTATE_COPY.title() : REMOVE_DEVICE_COPY.title(sheet()?.label ?? "")}
+        onClose={closeSheet}
+      >
+        <div class="lk-stack" style={{ gap: "12px" }}>
+          <Show when={reason() !== "stolen"}>
+            <p>{REMOVE_DEVICE_COPY.body()}</p>
+          </Show>
+          {/* The reason pair: one group, neither chosen at first. Hidden once
+              the device is removed (the rotation is being retried). */}
+          <Show when={!notStarted() && !(working() && reason() === "stolen")}>
+            <div role="radiogroup" aria-label={REMOVE_DEVICE_COPY.title(sheet()?.label ?? "")} class="lk-stack" style={{ gap: "6px" }}>
+              <label class="lk-row" style={{ gap: "8px" }}>
+                <input
+                  type="radio"
+                  name="lk-remove-reason"
+                  checked={reason() === "unused"}
+                  disabled={working()}
+                  onChange={() => setReason("unused")}
+                />
+                <span>{ROTATE_COPY.reasonUnused()}</span>
+              </label>
+              <label class="lk-row" style={{ gap: "8px" }}>
+                <input
+                  type="radio"
+                  name="lk-remove-reason"
+                  checked={reason() === "stolen"}
+                  disabled={working()}
+                  onChange={() => setReason("stolen")}
+                />
+                <span>{ROTATE_COPY.reasonStolen()}</span>
+              </label>
+            </div>
+          </Show>
+          <Show when={reason() === "stolen"}>
+            <Show
+              when={working()}
+              fallback={
+                <Show when={!notStarted()}>
+                  <p>{ROTATE_COPY.lede()}</p>
+                  <ul class="lk-list tight">
+                    <For each={ROTATE_COPY.effects()}>{(line) => <li>{line}</li>}</For>
+                  </ul>
+                </Show>
+              }
+            >
+              {/* One line active at a time, no percentage; each is announced
+                  once when it becomes active. */}
+              <ol class="lk-list tight" aria-live="polite">
+                <li aria-current={activeLine() === "remove" ? "step" : undefined} classList={{ "lk-muted": activeLine() !== "remove" }}>
+                  {ROTATE_COPY.stepRemove()}
+                </li>
+                <li aria-current={activeLine() === "keys" ? "step" : undefined} classList={{ "lk-muted": activeLine() !== "keys" }}>
+                  {ROTATE_COPY.stepKeys()}
+                </li>
+                <li aria-current={activeLine() === "devices" ? "step" : undefined} classList={{ "lk-muted": activeLine() !== "devices" }}>
+                  {ROTATE_COPY.stepDevices()}
+                </li>
+              </ol>
+            </Show>
+          </Show>
+          <ProofBlock gate={gate} />
+          <Show when={sheetLine()}>
+            {(line) => (
+              <div class="form-error" role="alert">
+                {line()()}
+              </div>
+            )}
+          </Show>
+          <div class="lk-actions">
+            <Show
+              when={notStarted()}
+              fallback={
+                // Cancel is disabled from the first step.
+                <button type="button" disabled={working()} onClick={closeSheet}>
+                  {REMOVE_DEVICE_COPY.cancel()}
+                </button>
+              }
+            >
+              <button type="button" disabled={working()} onClick={() => void onNotNow()}>
+                {ROTATE_COPY.notNow()}
+              </button>
+            </Show>
+            <button
+              type="button"
+              class="primary danger"
+              disabled={working() || reason() === null || !gate.view().ready}
+              onClick={() => void onConfirmRemove()}
+            >
+              {notStarted()
+                ? ROTATE_COPY.retry()
+                : reason() === "stolen"
+                  ? ROTATE_COPY.confirm()
+                  : working()
+                    ? REMOVE_DEVICE_COPY.working()
+                    : REMOVE_DEVICE_COPY.confirm()}
+            </button>
+          </div>
+        </div>
+      </ModalLayer>
     </div>
   );
 }

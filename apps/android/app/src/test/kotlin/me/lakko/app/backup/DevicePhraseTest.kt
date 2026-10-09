@@ -106,7 +106,7 @@ class DevicePhraseTest {
     }
 
     @Test
-    fun `the landing paths are the seven ways a device comes to hold keys`() {
+    fun `the landing paths are the eight ways a device comes to hold keys`() {
         assertEquals(
             listOf(
                 "signup",
@@ -116,6 +116,8 @@ class DevicePhraseTest {
                 "device-pairing",
                 "device-restore",
                 "fresh-identity",
+                // ADR-0066 part 3: the keys were changed, the devices kept.
+                "key-rotation",
             ),
             DevicePhrase.LandingPath.entries.map { it.tag },
         )

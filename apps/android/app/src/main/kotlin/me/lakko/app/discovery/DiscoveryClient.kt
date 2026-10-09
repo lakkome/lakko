@@ -887,8 +887,19 @@ public class DiscoveryClient(
      * `DELETE /discovery/keypackage/device/{device_id_b64url}` — remove one of
      * the authenticated account's device KeyPackages (ADR-0050 device removal).
      * Bearer-auth; idempotent (204).
+     *
+     * ADR-0066 section 2.2: the session's OWN device row needs nothing more.
+     * ANOTHER device's row needs [statement], the 138-byte `device-revoke`
+     * account statement for that id, sent as the `x-lakko-account-statement`
+     * header ([statementHeaderName]; base64url without padding); without it
+     * the server answers `403 account-key-required`. Every delete tombstones
+     * the id for 30 days, a device's own included.
      */
-    public suspend fun deleteKeyPackage(deviceId: ByteArray) {
+    public suspend fun deleteKeyPackage(
+        deviceId: ByteArray,
+        statement: ByteArray? = null,
+        statementHeaderName: String = ACCOUNT_STATEMENT_HEADER,
+    ) {
         if (deviceId.size != DEVICE_ID_LEN) {
             throw DiscoveryClientArgError("deviceId must be $DEVICE_ID_LEN bytes")
         }
@@ -898,6 +909,9 @@ public class DiscoveryClient(
             client.delete(url) {
                 sessionToken?.let {
                     header(io.ktor.http.HttpHeaders.Authorization, "Bearer $it")
+                }
+                if (statement != null) {
+                    header(statementHeaderName, me.lakko.app.auth.base64UrlEncodeNoPad(statement))
                 }
             }
         } catch (cause: Throwable) {
@@ -1710,6 +1724,11 @@ public class DiscoveryClient(
     }
 
     public companion object {
+        /** ADR-0066 - the header a statement rides in on a route with no
+         *  JSON body. The native core names it (`accountStatementHeaderName`);
+         *  this is the same value for code that runs without the core. */
+        public const val ACCOUNT_STATEMENT_HEADER: String = "x-lakko-account-statement"
+
         /**
          * Default discovery service URL — `<LAKKO_API_BASE_URL>/discovery`
          * ([ApiEndpoints]), or the Android emulator loopback alias +

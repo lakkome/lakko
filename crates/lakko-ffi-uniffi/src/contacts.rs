@@ -2275,6 +2275,18 @@ pub enum FfiIncomingEnvelopeKind {
     /// admin only — a plain member's notice is dropped), then keep it only
     /// when [`group_closed_is_newer`] for that group.
     GroupClosed,
+    /// Another device of this account is changing the account keys
+    /// (ADR-0066 section 3.3). The decoded envelope rides the `key_rotation`
+    /// field of [`FfiIncomingEnvelope`]; `payload` is empty. Never render
+    /// it. Appended last so every earlier variant keeps its ordinal.
+    ///
+    /// Meaningful ONLY in the account's own DeviceGroup: met anywhere else,
+    /// drop it. There, pass the original plaintext to
+    /// `verifyKeyRotationEnvelope` with the account key this device holds,
+    /// store the result as pending, and adopt it only once the server-side
+    /// change is visible. The envelope carries the new account's entropy:
+    /// never log it.
+    KeyRotation,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2338,6 +2350,11 @@ pub struct FfiIncomingEnvelope {
     /// every other kind. Defaults to `None` so existing initialisers compile.
     #[uniffi(default = None)]
     pub group_closed: Option<FfiGroupClosed>,
+    /// Set only for `KeyRotation` (ADR-0066): the decoded envelope, shape
+    /// only. `None` for every other kind. Defaults to `None` so existing
+    /// initialisers compile.
+    #[uniffi(default = None)]
+    pub key_rotation: Option<crate::key_rotation::FfiKeyRotation>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -2429,6 +2446,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             }),
             ..FfiIncomingEnvelope::of(K::GroupClosed)
         },
+        IncomingEnvelope::KeyRotation(rotation) => FfiIncomingEnvelope {
+            key_rotation: Some(rotation.into()),
+            ..FfiIncomingEnvelope::of(K::KeyRotation)
+        },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
             ..FfiIncomingEnvelope::of(K::IntroMessage)
@@ -2455,6 +2476,7 @@ impl FfiIncomingEnvelope {
             committer_delegation: None,
             shared_channels: None,
             group_closed: None,
+            key_rotation: None,
         }
     }
 }

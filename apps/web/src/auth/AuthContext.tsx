@@ -77,9 +77,35 @@ import {
   useContext,
 } from "solid-js";
 
-import { AuthClient, AuthHttpError, AuthNetworkError } from "./client";
+import {
+  AuthClient,
+  AuthHttpError,
+  AuthNetworkError,
+  RecallWrongPasswordError,
+  ACCOUNT_STATEMENT_KIND_SESSION_UPGRADE,
+  type RecallPendingFinish,
+  type RecallResult,
+  type KeyResetResult,
+} from "./client";
 import { loadPersistedAccount, savePersistedAccount } from "./persisted-account";
-import { wipeAccountLocalData } from "./wipe-account";
+import { wipeAccountLocalData, wipeAccountStaged } from "./wipe-account";
+import {
+  deleteRecallRecord,
+  getRecallRecord,
+  hasRecallRecord,
+  listRecallAccounts,
+  putRecallRecord,
+  type RecallRecord,
+} from "./recall-record";
+import {
+  recallAttemptFailure,
+  recallExpired,
+  recallStatusVerdict,
+  signOutWipe,
+  type RecallAttemptFailure,
+  type RecallCheck,
+  type RecallEndNotice,
+} from "./recall";
 import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "./account-id";
 import { resolveRecoverUsername } from "./recover-resolution";
 import {
@@ -215,6 +241,38 @@ import {
   type KeyResetOwed,
   type KeyResetStep,
 } from "./key-reset-owed";
+import {
+  EMPTY_KEY_ROTATION_STATE,
+  conversationSeed,
+  deleteKeyRotationState,
+  getKeyRotationState,
+  updateKeyRotationState,
+  withPredecessorSeed,
+  type KeyRotationState,
+  type PreparedRotation,
+} from "./key-rotation-store";
+import {
+  SUPERSESSION_WINDOW_SECS,
+  clearRotatedNotice,
+  clearRotation,
+  markRotatedNotice,
+  pendingFor,
+  readRotation,
+  rotatedNoticeOwed,
+  rotationIntake,
+  rotationWithholdsPhrase,
+  supersededStep,
+  upgradeVerdict,
+  withPendingRotation,
+  type CommitProbe,
+  type DirectoryUploadMode,
+  type PendingRotation,
+  type UpgradeVerdict,
+} from "../devices/key-rotation";
+import { awaitKeyRotationPort } from "../devices/sync/key-rotation-port";
+import { rootEndorsementFor } from "../devices/lifecycle";
+import { transferRoot, transferRootWithAttestation } from "../ds/ownership";
+import { DsClient } from "../ds/client";
 import { clearRestored, markRestored } from "./restore-marker";
 import {
   openPasskeyVault,
@@ -232,6 +290,26 @@ import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { KeyedError } from "../l10n/keyed-error";
 import { t } from "../l10n";
+import {
+  bindDecision,
+  bindRefusal,
+  deviceIdB64Url,
+  genesisMintNeeded,
+  genesisMintOutcome,
+  landingDeviceId,
+  readGenesisRecorded,
+  readKnownDeviceId,
+  writeGenesisRecorded,
+  writeKnownDeviceId,
+  type LandingTarget,
+} from "./session-device";
+import {
+  clearLogoutOwed,
+  isLogoutOwed,
+  markLogoutOwed,
+  runServerLogout,
+  type LogoutAttempt,
+} from "./logout-owed";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -376,6 +454,11 @@ export interface IdentitySecrets {
    *  that builds the canonical identity reads THIS, not
    *  `exportKey`. */
   readonly accountIdentitySeed: Uint8Array;
+  /** ADR-0066 section 3.5: after a proven key rotation, the 64-byte seed of
+   *  the account key the conversation leaves are still bound to (the proven
+   *  predecessor this device holds). Absent when the account never rotated.
+   *  Read through {@link conversationSeedOf}. */
+  readonly conversationIdentitySeed?: Uint8Array;
   /** The access token of the session pair (ADR-0065). Fifteen minutes
    *  long: a consumer that captures it is not wrong, because every bearer
    *  request goes through `sessionFetch`, which swaps in the live token;
@@ -386,6 +469,13 @@ export interface IdentitySecrets {
   /** The key generation the pair was issued under: what a landing compares
    *  with the generation the directory publishes (`landing-rule.ts`). */
   readonly keyGeneration: bigint;
+}
+
+/** The seed of the account identity to use INSIDE a conversation (the role
+ *  table, the journal ownership): the predecessor's while one is held, else
+ *  the account's (ADR-0066 section 3.5). */
+export function conversationSeedOf(secrets: IdentitySecrets): Uint8Array {
+  return secrets.conversationIdentitySeed ?? secrets.accountIdentitySeed;
 }
 
 /**
@@ -399,14 +489,55 @@ export interface IdentitySecrets {
  *   - `identity-mismatch`: a landing that found a different key at the same
  *     generation (an anomaly, not a known reset). The screen blocks and the
  *     wipe runs on the person's tap ("Sign out").
+ *   - `device-removed`: this device was removed from the account on another
+ *     device (ADR-0066). The wipe runs by itself; "Removing..." then
+ *     "Sign in".
  */
 export type SignedOutState =
   | {
       readonly reason: "keys-reset";
       readonly phase: "removing" | "removed";
       readonly username: string;
+      /** Set when the take-the-account-back form ended this way (UX 18.4:
+       *  "No more tries", "Not possible any more"); drawn above the body. */
+      readonly notice?: RecallEndNotice;
+    }
+  /** ADR-0066 section 1.1 (UX 18.4): the keys were reset on another device
+   *  and this device held them. The staged wipe ran; only the recall record
+   *  is left. The screen asks "Was it you?". Driven by the record, so it is
+   *  up again after a reload. */
+  | {
+      readonly reason: "recall";
+      readonly username: string;
+      /** When this device learned of the reset, unix ms. */
+      readonly learnedAtMs: number;
+    }
+  /** ADR-0066 section 2.3 (UX 18.2): another device of the account removed
+   *  this one (auth answered `401 device-revoked`, or this device applied
+   *  its own removal from the DeviceGroup). The wipe runs by itself, all of
+   *  it, with no recall record; then one button, "Sign in". */
+  | {
+      readonly reason: "device-removed";
+      readonly phase: "removing" | "removed";
+      readonly username: string;
     }
   | { readonly reason: "identity-mismatch"; readonly phase: "blocked" | "removing" | "removed"; readonly username: string };
+
+/** The "Was it you?" screen's actions (ADR-0066 part 1). */
+export interface RecallApi {
+  /** Ask the server whether the account can still be taken back from this
+   *  device. Never throws; an expired record reads `closed` without a
+   *  request. */
+  check(): Promise<RecallCheck>;
+  /** "Yes, it was me" confirmed, or taking back is not possible any more:
+   *  destroy the record and finish the wipe (the signed-out screen, then
+   *  "Sign in"). `notice` words why when the form was open. */
+  end(notice: RecallEndNotice | null): Promise<void>;
+  /** "Take the account back": the old password proves it, the account gets
+   *  the new password, new keys and a new phrase. `null` when it landed
+   *  (the phrase screen is up); otherwise why it did not. Never throws. */
+  takeBack(oldPassword: string, newPassword: string): Promise<RecallAttemptFailure | null>;
+}
 
 /** Public surface of the auth context. */
 export interface AuthApi {
@@ -457,6 +588,20 @@ export interface AuthApi {
    *  the wipe; once `removed`, clears the screen so the sign-in page can
    *  show. */
   confirmSignedOut(): Promise<void>;
+  /** ADR-0066 part 1 (UX 18.4): the actions of the "Was it you?" screen.
+   *  Each is a no-op (or `unknown` / `closed`) when no recall record is
+   *  held. */
+  readonly recall: RecallApi;
+  /** The account was taken back on this device in this page session: the
+   *  one line at the top of the chat list (`devices.recall.done`). */
+  readonly recallDone: Accessor<boolean>;
+  dismissRecallDone(): void;
+  /** ADR-0066 section 2.3: this device applied its own removal from the
+   *  account's DeviceGroup (`DeviceGroup.isActive` is `false`), which is
+   *  proof of removal by a device of the account. Shows the removed screen
+   *  and wipes everything by itself. Called by the DeviceGroup sync runtime;
+   *  a no-op for an account that is not the signed-in one. */
+  reportDeviceRemoved(accountIdB64: string): void;
   /** UX 15.3: the keys were reset on THIS device in this page session, so
    *  Settings > Devices and Settings > Passkeys show their one-session
    *  note. */
@@ -583,9 +728,69 @@ export interface AuthApi {
    *  words on this device, clears their budget (the stored phrase and
    *  everything else stay) and throws `ThreeWordsSuspendedError`. */
   recoverWithThreeWords(positions: Uint8Array, words: readonly string[]): Promise<boolean>;
+  /**
+   * ADR-0066 part 3 (Stage A): changing the account keys with the other
+   * devices kept. The auth layer's half; `devices/key-rotation.ts` decides
+   * and `devices/key-rotation-runtime.ts` runs the operation.
+   */
+  readonly keyRotation: {
+    /** Reactive: a kept device is fetching the new keys (UX 18.3). */
+    readonly updating: Accessor<boolean>;
+    /** Reactive: this device adopted keys changed on another device and the
+     *  line saying so was not dismissed yet. */
+    noticeOwed(): boolean;
+    dismissNotice(): void;
+    /** The rotation record changed (the runtime tells the readers). */
+    recordChanged(): void;
+    /** A `ServiceEnvelope` body from the account's own DeviceGroup: stores
+     *  a verified `key-rotation` envelope as pending. Resolves `true` when
+     *  the bytes were one (nothing else is to be done with them). */
+    intake(envelope: Uint8Array): Promise<boolean>;
+    /** Rotating device, step 3: the new phrase and the proof, sealed on this
+     *  device; returns the envelope to post into the DeviceGroup. */
+    prepare(deviceIdB64: string): Promise<{
+      readonly envelope: Uint8Array;
+      readonly newSignaturePubkeyB64: string;
+      readonly preparedAtMs: number;
+    }>;
+    /** Steps 5-7: `rotate/{start,finish}`, then the new keys are stored and
+     *  put into this session. Throws `AuthHttpError` / `AuthNetworkError`. */
+    commit(
+      grant: string,
+      revokeDeviceIds: readonly Uint8Array[],
+    ): Promise<{
+      readonly keyGeneration: bigint;
+      readonly attestationB64Url: string;
+      readonly signedAtMs: number;
+    }>;
+    /** Whether a commit whose answer was lost landed (and adopt if so). */
+    probeCommit(): Promise<CommitProbe>;
+    /** Step 8. Throws `DiscoveryHttpError` on a refusal. */
+    uploadIdentity(
+      mode: DirectoryUploadMode,
+      attestationB64Url: string | null,
+      proofB64: string | null,
+    ): Promise<void>;
+    /** The prepared proof (standard base64) while it is held. */
+    preparedProofB64(): Promise<string | null>;
+    /** Step 9, the DeviceGroup journal. Throws the DS client's error. */
+    transferDeviceGroupRoot(attestationB64Url: string | null): Promise<void>;
+    /** The 64-byte seed of the key that was the account's before the last
+     *  rotation (the channel owner handover and the journal takeovers sign
+     *  with it), or `null`. */
+    predecessorSigningSeed(): Promise<Uint8Array | null>;
+    /** Step 12: show the new words (the existing new-phrase screen). */
+    showNewPhrase(): Promise<void>;
+    /** "Not now": forget what was prepared. */
+    discardPrepared(): Promise<void>;
+    /** A publishing step was told this session is of a superseded
+     *  generation. */
+    reportSuperseded(): void;
+  };
   /** Whether this device still owes the directory or the device list the
    *  signed-in account's new keys (ADR-0065: a reset whose publish has not
-   *  succeeded). While it does, the phrase is not shown anywhere. */
+   *  succeeded; ADR-0066: a key rotation with a publishing step owed). While
+   *  it does, the phrase is not shown anywhere. */
   publishOwed(): boolean;
   /** Retry the owed publishing steps for the signed-in account with the
    *  seed this session holds. Resolves when nothing is owed (any more).
@@ -857,6 +1062,18 @@ function plainStorage(): Storage | undefined {
   return typeof localStorage === "undefined" ? undefined : localStorage;
 }
 
+/** The `recall-status` kind of an account statement (ADR-0066 section 0.3). */
+const ACCOUNT_STATEMENT_RECALL_STATUS = 1;
+/** How long a kept device waits before it asks again for the new keys. */
+const ADOPTION_RETRY_MS = 20_000;
+/** How long the adoption waits for the DeviceGroup handle of a page that
+ *  just restored its session. */
+const KEY_ROTATION_PORT_WAIT_MS = 20_000;
+/** How long an unanswered `recall/finish` is asked again before a new
+ *  attempt is opened: the server keeps the outcome for the attempt's own ten
+ *  minutes (ADR-0066 T5 item 25); a little under it. */
+const RECALL_FINISH_RETRY_WINDOW_MS = 9 * 60 * 1000;
+
 const loadPersisted = loadPersistedAccount;
 const savePersisted = savePersistedAccount;
 
@@ -929,6 +1146,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   const [signedOut, setSignedOut] = createSignal<SignedOutState | null>(null);
   // UX 15.3: the keys were reset on this device in this page session.
   const [keyResetNote, setKeyResetNote] = createSignal(false);
+  // ADR-0066 part 1: the recall record this page holds open (the "Was it
+  // you?" screen), with the device key that seals it; and whether the
+  // account was taken back in this page session.
+  let recallHeld: { readonly record: RecallRecord; readonly deviceKey: CryptoKey } | null = null;
+  const [recallDone, setRecallDone] = createSignal(false);
   // ADR-0065 section 4.2, last paragraph: an attestation older than the
   // client-side bound is applied only after an explicit sign-in in this page
   // (a silent restore is not one).
@@ -987,6 +1209,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
   function installSession(accountIdB64: string, pair: SessionPair): void {
+    // A new session for the account: whatever logout was still owed for an
+    // earlier one must not sign THIS one out at the next launch.
+    clearLogoutOwed(plainStorage(), accountIdB64);
     sessionTokens.install(accountIdB64, pair);
     discovery.setSessionToken(pair.sessionToken);
     anonTokens.setSessionToken(pair.sessionToken);
@@ -999,6 +1224,127 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     sessionTokens.clear();
     discovery.setSessionToken(null);
     anonTokens.setSessionToken(null);
+  }
+  /** ADR-0066 section 0.4: the `device_id_b64` a landing for `target`
+   *  asserts, or `undefined` when this browser does not know the device
+   *  identity of that account yet (the session is bound afterwards). */
+  function landingDevice(target: LandingTarget): string | undefined {
+    return landingDeviceId({
+      cached: loadPersisted(),
+      target,
+      knownDeviceId: (accountIdB64) => readKnownDeviceId(plainStorage(), accountIdB64),
+    });
+  }
+  /**
+   * ADR-0066 section 0.4: make the held session name THIS device (its
+   * conversation leaf key, the id of its directory row). A session that
+   * landed before the device identity existed (a signup, a first sign-in on
+   * this browser) is replaced once through `bind-device`; one that already
+   * names the device costs nothing. `force` skips the token hint (discovery
+   * answered `device-mismatch`).
+   *
+   * Throws what the bind threw when the session could not be bound; the
+   * refusals that end the session are acted on here first.
+   */
+  async function ensureSessionDeviceBound(accountIdB64: string, force = false): Promise<void> {
+    const own = chats.identity()?.signaturePublicKey;
+    if (own === undefined || sessionTokens.accountIdB64() !== accountIdB64) return;
+    const ownId = deviceIdB64Url(own);
+    // A due refresh first, so the bearer and the refresh credential sent
+    // together are the newest pair.
+    await sessionTokens.current();
+    const pair = sessionTokens.pair();
+    if (pair === null || sessionTokens.accountIdB64() !== accountIdB64) return;
+    if (bindDecision({ sessionToken: pair.sessionToken, ownDeviceIdB64: ownId, force }) === "bound") {
+      return;
+    }
+    let bound: SessionPair;
+    try {
+      bound = await client.sessionBindDevice(pair.sessionToken, pair.refreshToken, ownId);
+    } catch (err) {
+      if (err instanceof AuthHttpError) {
+        const refusal = bindRefusal(err.status, err.errorCode);
+        // eslint-disable-next-line no-console
+        console.warn(`session bind-device refused (${refusal})`);
+        if (refusal === "device-revoked") sessionTokens.reportDeviceRevoked();
+        else if (refusal === "superseded") sessionTokens.reportSuperseded();
+        else if (refusal === "sign-in-again" || refusal === "session-ended") endExpiredSession();
+      }
+      throw err;
+    }
+    // A sign-out or another landing while the bind was out owns the state.
+    if (sessionTokens.accountIdB64() !== accountIdB64) return;
+    // The unbound pair is dropped: the bound one replaces it everywhere.
+    await adoptProofSession(accountIdB64, bound);
+  }
+  /**
+   * ADR-0066 section 0.1: auth records the account's identity key on the
+   * FIRST genesis mint and attests only that key afterwards; without a
+   * recorded key no device can be removed. So the mint runs at signup and on
+   * every landing until it has succeeded once for the key this device holds
+   * (a per-account mark in plain storage, keyed on the key, so a key reset
+   * mints again for the new one). Returns the attestation when minted.
+   */
+  async function mintGenesisAndRecord(
+    accountIdB64: string,
+    sessionToken: string,
+    identity: WasmIdentity,
+  ): Promise<Uint8Array | undefined> {
+    const ownKeyB64 = base64Encode(identity.signaturePublicKey);
+    try {
+      const attestation = await client.genesisAttest(sessionToken, identity.signaturePublicKey);
+      writeGenesisRecorded(plainStorage(), accountIdB64, ownKeyB64);
+      return attestation;
+    } catch (err) {
+      const outcome = genesisMintOutcome({
+        ok: false,
+        ...(err instanceof AuthHttpError ? { status: err.status, errorCode: err.errorCode } : {}),
+      });
+      // eslint-disable-next-line no-console
+      console.warn(
+        outcome === "mismatch"
+          ? "genesis-attest: auth holds another identity key for this account"
+          : "genesis-attest mint failed; it is tried again at the next landing",
+        err instanceof AuthHttpError ? err.status : err,
+      );
+      return undefined;
+    }
+  }
+  /** The landing half of the rule above: mint unless already recorded for
+   *  this key. Never throws. */
+  async function ensureGenesisRecorded(accountIdB64: string, canonical: WasmIdentity): Promise<void> {
+    try {
+      const ownKeyB64 = base64Encode(canonical.signaturePublicKey);
+      if (!genesisMintNeeded(readGenesisRecorded(plainStorage(), accountIdB64), ownKeyB64)) return;
+      const token = await sessionTokens.current();
+      if (token === null || sessionTokens.accountIdB64() !== accountIdB64) return;
+      await mintGenesisAndRecord(accountIdB64, token, canonical);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("genesis-attest (landing) failed", err);
+    }
+  }
+  /** `POST /auth/session/logout` for `pair` (ADR-0066 section 2.1), with a
+   *  refresh first when the access token expired. Never throws. */
+  function serverLogout(pair: SessionPair | null): Promise<LogoutAttempt> {
+    return runServerLogout(pair, {
+      now: () => Date.now(),
+      refresh: async (refreshToken) => {
+        try {
+          return { token: (await client.sessionRefresh(refreshToken)).sessionToken };
+        } catch (err) {
+          return { status: err instanceof AuthHttpError ? err.status : null };
+        }
+      },
+      logout: async (sessionToken) => {
+        try {
+          await client.sessionLogout(sessionToken);
+          return 204;
+        } catch (err) {
+          return err instanceof AuthHttpError ? err.status : null;
+        }
+      },
+    });
   }
   /** Persist `pair` under the account's device key. Best effort: logged. */
   async function persistSessionPair(accountIdB64: string, pair: SessionPair, context: string): Promise<void> {
@@ -1052,6 +1398,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         case "superseded":
           void signOutAfterKeyReset(event.accountIdB64);
           return;
+        case "device-revoked":
+          void signOutAfterDeviceRemoved(event.accountIdB64);
+          return;
         case "refresh-invalid":
           endExpiredSession();
           return;
@@ -1078,6 +1427,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // 1.16e5: drop active groups on logout/forgetDevice so MLS
   // state doesn't bleed across user sessions on the same tab.
   const chats = useChats();
+
+  // ADR-0066 section 0.4: a landing may hand the secrets the pair it was
+  // given while `bind-device` has already replaced it. Every reader of
+  // `identitySecrets().sessionToken` then gets the live (device-bound) one.
+  createEffect(() => {
+    const secrets = identitySecrets();
+    if (secrets === null) return;
+    const live = sessionTokens.pair();
+    if (live === null || live.sessionToken === secrets.sessionToken) return;
+    if (sessionTokens.accountIdB64() !== base64Encode(secrets.accountId)) return;
+    if (!sessionTokens.manages(secrets.sessionToken)) return;
+    setIdentitySecrets({
+      ...secrets,
+      sessionToken: live.sessionToken,
+      sessionExpiresAtMs: live.sessionExpiresAtMs,
+      keyGeneration: live.keyGeneration,
+    });
+  });
 
   // Whatever path installed the session, bind its username's login handle
   // (see `loginHandleSync` above). Runs when the session lands and whenever
@@ -1146,13 +1513,31 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     createKeyPackage: (ctx) => ctx.identity.createKeyPackage(),
     persistDurable: (ctx) =>
       chats.persistSnapshotDurable(ctx.accountIdB64, ctx.identity),
-    // ADR-0050: the row is keyed by this device's leaf key.
-    upload: (ctx, keyPackage) =>
-      discovery.uploadKeyPackage(
-        ctx.accountIdBytes,
-        keyPackage,
-        ctx.identity.signaturePublicKey,
-      ),
+    // ADR-0050: the row is keyed by this device's leaf key. ADR-0066
+    // section 2.2: the session must name that same device, so it is bound
+    // first; `device-mismatch` means the hint was wrong (bind for real, try
+    // once more), and discovery's `device-revoked` is not proof of removal:
+    // auth is asked, and its answer is acted on by the session listener.
+    upload: async (ctx, keyPackage) => {
+      const send = (): Promise<void> =>
+        discovery.uploadKeyPackage(ctx.accountIdBytes, keyPackage, ctx.identity.signaturePublicKey);
+      await ensureSessionDeviceBound(ctx.accountIdB64);
+      try {
+        await send();
+      } catch (err) {
+        if (err instanceof DiscoveryHttpError && err.status === 403) {
+          if (err.errorCode === "device-mismatch") {
+            await ensureSessionDeviceBound(ctx.accountIdB64, true);
+            await send();
+            return;
+          }
+          if (err.errorCode === "device-revoked") {
+            void sessionTokens.refreshOnce();
+          }
+        }
+        throw err;
+      }
+    },
   });
 
   /** Session-start KeyPackage publish on the explicit auth flows. Awaited
@@ -1290,6 +1675,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // not findable yet, so the words are withheld until both publishing
     // steps landed (`settleOwedKeyResetPublish` calls back here then).
     if (isKeyResetOwed(storage, accountIdB64)) return;
+    // ADR-0066 part 3: the same while a key rotation still owes a step.
+    if (readRotation(storage, accountIdB64) !== null) return;
     try {
       const deviceKey = await getDeviceKey(accountIdB64);
       const phrase =
@@ -1324,12 +1711,38 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     wasm: Wasm,
     canonical: WasmIdentity,
     accountIdB64: string,
-  ): Promise<void> {
+  ): Promise<Uint8Array | null> {
     chats.setAccountIdentity(canonical);
     let device: WasmIdentity | null = null;
+    // ADR-0066 section 3.5 (Stage A): after a proven key rotation the
+    // conversation leaves stay bound to the account key of before it, and a
+    // re-bound device would misjudge its own standing in every group it is
+    // in (fact 14). So the binding this device holds, and any it mints, is
+    // under the OLDEST proven predecessor it holds the seed of; `canonical`
+    // (the new key) is the directory identity.
+    let conversationSeedBytes: Uint8Array | null = null;
+    let bindingAccount: WasmIdentity = canonical;
     try {
       const deviceKey = await getDeviceKey(accountIdB64);
       if (deviceKey !== null) {
+        try {
+          conversationSeedBytes = conversationSeed(await getKeyRotationState(accountIdB64, deviceKey));
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("key-rotation state unreadable; treating the account as never rotated", err);
+        }
+        if (conversationSeedBytes !== null) {
+          const predecessor = wasm.Identity.fromSeed(conversationSeedBytes);
+          if (bytesEqual(predecessor.signaturePublicKey, canonical.signaturePublicKey)) {
+            // The "predecessor" is the key this session holds: nothing rotated.
+            predecessor.free();
+            conversationSeedBytes = null;
+          } else {
+            chats.setPredecessorAccountIdentity(predecessor);
+            bindingAccount = predecessor;
+          }
+        }
+        if (conversationSeedBytes === null) chats.setPredecessorAccountIdentity(null);
         const seed = await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
         const stored = await getDeviceBinding(accountIdB64);
         if (stored !== null) {
@@ -1341,7 +1754,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             // to this account. Re-mint whenever the bound key is not the
             // session's canonical key.
             const bound = device.accountPublicKey;
-            if (bound === undefined || !bytesEqual(bound, canonical.signaturePublicKey)) {
+            if (bound === undefined || !bytesEqual(bound, bindingAccount.signaturePublicKey)) {
               // eslint-disable-next-line no-console
               console.warn("stored device binding names another account key, re-minting");
               device.free();
@@ -1357,7 +1770,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         if (device === null) {
           device = wasm.Identity.fromSeedBound(
             seed,
-            canonical.ed25519Seed,
+            bindingAccount.ed25519Seed,
             BigInt(Math.floor(Date.now() / 1000)),
           );
           const binding = device.deviceBinding;
@@ -1374,9 +1787,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // free the instance `setAccountIdentity` holds, so hand the chats a
       // second instance of the same seed.
       chats.setIdentity(wasm.Identity.fromSeed(canonical.ed25519Seed));
-      return;
+    } else {
+      chats.setIdentity(device);
     }
-    chats.setIdentity(device);
+    // ADR-0066 section 0.4: the id this device's sessions name (its leaf
+    // key, the id of its directory row), recorded so the next landing for
+    // this account can assert it before any wrapped store is opened.
+    const installed = chats.identity()?.signaturePublicKey;
+    if (installed !== undefined) {
+      writeKnownDeviceId(plainStorage(), accountIdB64, deviceIdB64Url(installed));
+    }
+    return conversationSeedBytes;
   }
 
   /**
@@ -1529,7 +1950,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // attestation (soft-fail), plus the ADR-0065 attestation that lets
     // discovery accept a key change without a supersession proof.
     const leafAuth = await mintLeafGenesisAuth(canonical, accountIdBytes);
-    const genesisAttest = await mintGenesisAttestation(client, sessionTokens.peek() ?? "", canonical);
+    // ADR-0066 section 0.1: `reset/finish` already recorded the new key at
+    // auth; this mint is the idempotent call for it and writes the mark.
+    const genesisAttest = await mintGenesisAndRecord(
+      base64Encode(accountIdBytes),
+      sessionTokens.peek() ?? "",
+      canonical,
+    );
     try {
       await uploadIdentityBundle(
         discovery,
@@ -1669,7 +2096,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    * journal). The push-gw rows are unsubscribed (anonymous tokens, best
    * effort), because nothing else can tear them down (G-36).
    */
-  async function wipeAfterSignOut(accountIdB64: string): Promise<void> {
+  async function wipeAfterSignOut(
+    accountIdB64: string,
+    mode: "full" | "staged" = "full",
+  ): Promise<void> {
     dropSession();
     // ADR-0042, "A wake is shown only for the signed-in account": the local
     // service-worker wake binding goes first (no network), so every wake
@@ -1690,7 +2120,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       fresh.seed.fill(0);
       setPendingFreshPhrase(null);
     }
-    await wipeAccountLocalData(accountIdB64);
+    // ADR-0066 section 1.1: the staged wipe is the same list minus the
+    // recall record and the device key that seals it.
+    if (mode === "staged") await wipeAccountStaged(accountIdB64);
+    else await wipeAccountLocalData(accountIdB64);
     try {
       await unsubscribeFromPush();
     } catch {
@@ -1700,20 +2133,467 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     setState({ kind: "anon" });
   }
 
-  /** A `401 key-generation-superseded`, or a landing that found a higher
-   *  generation published: the screen, then the automatic wipe. Once per
-   *  account per page. */
+  /**
+   * The recall record a superseded device keeps (ADR-0066 section 1.1), or
+   * `null` when it keeps none: no device key, no account key on this device,
+   * or the record could not be written. An existing record (another tab of
+   * this account wrote it, or an earlier page) is used as it is, unless it
+   * has outlived the window. Must run BEFORE the wipe: the account seed the
+   * record is made from is among what the wipe deletes.
+   */
+  async function prepareRecallRecord(
+    accountIdB64: string,
+    username: string,
+  ): Promise<{ readonly record: RecallRecord; readonly deviceKey: CryptoKey } | null> {
+    let deviceKey: CryptoKey | null = null;
+    try {
+      deviceKey = await getDeviceKey(accountIdB64);
+    } catch {
+      deviceKey = null;
+    }
+    if (deviceKey === null) return null;
+    try {
+      const existing = await getRecallRecord(accountIdB64, deviceKey);
+      if (existing !== null) {
+        return recallExpired(existing.learnedAtMs, Date.now()) ? null : { record: existing, deviceKey };
+      }
+    } catch {
+      // An unreadable row is replaced below, or wiped with everything else.
+    }
+    const secrets = identitySecrets();
+    let seed: Uint8Array | null =
+      secrets !== null &&
+      base64Encode(secrets.accountId) === accountIdB64 &&
+      secrets.accountIdentitySeed.length === ACCOUNT_IDENTITY_SEED_LENGTH
+        ? secrets.accountIdentitySeed.slice()
+        : null;
+    if (seed === null) {
+      try {
+        seed = await getAccountIdentitySeed(accountIdB64, deviceKey);
+      } catch {
+        seed = null;
+      }
+    }
+    if (
+      signOutWipe({ cause: "keys-reset", holdsAccountKey: seed !== null, deviceKeyPresent: true }) !==
+        "staged" ||
+      seed === null
+    ) {
+      return null;
+    }
+    try {
+      const wasm = await loadWasm();
+      const identity = wasm.Identity.fromSeed(seed);
+      let oldSeed: Uint8Array;
+      try {
+        oldSeed = identity.ed25519Seed;
+      } finally {
+        identity.free();
+      }
+      const record: RecallRecord = { accountIdB64, oldSeed, username, learnedAtMs: Date.now() };
+      await putRecallRecord(record, deviceKey);
+      return { record, deviceKey };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "the recall record could not be written; wiping everything",
+        err instanceof Error ? err.name : "unknown",
+      );
+      return null;
+    } finally {
+      seed.fill(0);
+    }
+  }
+
+  /** Whether the session pair STORED for the account is of a higher key
+   *  generation than the one this page was just refused with. Any doubt
+   *  reads `false` (the wipe runs). */
+  async function newerKeysStoredByAnotherTab(
+    accountIdB64: string,
+    supersededGeneration: bigint | null,
+  ): Promise<boolean> {
+    if (supersededGeneration === null) return false;
+    try {
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) return false;
+      const stored = await getSessionPair(accountIdB64, deviceKey);
+      return stored !== null && stored.keyGeneration > supersededGeneration;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * A `401 key-generation-superseded`, or a landing that found a higher
+   * generation published. The screen, then the wipe, by itself, once per
+   * page: STAGED on a device that held the account's keys (everything goes
+   * but the recall record, then "Was it you?"), FULL on one that never did
+   * (the signed-out screen, then "Sign in").
+   */
   async function signOutAfterKeyReset(accountIdB64: string): Promise<void> {
     const current = signedOut();
-    if (current !== null && current.reason === "keys-reset") return;
+    if (current !== null && (current.reason === "keys-reset" || current.reason === "recall")) return;
+    // ADR-0066 section 3.3: "superseded" is also what a kept device is told
+    // after the keys were changed WITH the devices kept. It adopts the new
+    // keys when it holds (or finds in its DeviceGroup journal) the envelope
+    // for them; only otherwise is this a reset.
+    const adoption = await adoptRotationOnce(accountIdB64);
+    if (adoption === "adopted") return;
+    if (adoption === "device-revoked") {
+      await signOutAfterDeviceRemoved(accountIdB64);
+      return;
+    }
+    if (adoption === "sign-in") {
+      setKeysUpdating(false);
+      endExpiredSession();
+      return;
+    }
+    if (adoption === "later") {
+      // No verdict (offline, the journal not read yet): never a wipe.
+      setKeysUpdating(true);
+      if (adoptionRetryTimer !== null) clearTimeout(adoptionRetryTimer);
+      adoptionRetryTimer = setTimeout(() => {
+        adoptionRetryTimer = null;
+        void signOutAfterKeyReset(accountIdB64);
+      }, ADOPTION_RETRY_MS);
+      return;
+    }
+    setKeysUpdating(false);
     const username = signedOutUsername(accountIdB64);
     // eslint-disable-next-line no-console
     console.warn("the account's keys were reset on another device; this device is signed out and wiped");
+    const supersededGeneration =
+      (sessionTokens.pair() ?? sessionTokens.supersededPair(accountIdB64))?.keyGeneration ?? null;
     setSignedOut({ reason: "keys-reset", phase: "removing", username });
+    if (await newerKeysStoredByAnotherTab(accountIdB64, supersededGeneration)) {
+      // Another tab of this browser already took the account back (or
+      // reset its keys) and stored the new generation: this page is only
+      // stale. Wiping here would destroy that tab's new keys.
+      // eslint-disable-next-line no-console
+      console.warn("a newer key generation is stored on this device; reloading instead of wiping");
+      dropSession();
+      if (typeof window !== "undefined") window.location.reload();
+      return;
+    }
+    let kept: Awaited<ReturnType<typeof prepareRecallRecord>> = null;
+    try {
+      kept = await prepareRecallRecord(accountIdB64, username);
+      await wipeAfterSignOut(accountIdB64, kept === null ? "full" : "staged");
+    } finally {
+      if (kept !== null) {
+        recallHeld = kept;
+        setSignedOut({
+          reason: "recall",
+          username: kept.record.username,
+          learnedAtMs: kept.record.learnedAtMs,
+        });
+      } else {
+        setSignedOut({ reason: "keys-reset", phase: "removed", username });
+      }
+    }
+  }
+
+  /** One recall action at a time across the tabs of this browser, where the
+   *  platform has Web Locks; within the page otherwise. */
+  let recallQueue: Promise<unknown> = Promise.resolve();
+  function withRecallLock<T>(accountIdB64: string, run: () => Promise<T>): Promise<T> {
+    const queued = recallQueue.then(
+      () => runUnderRecallWebLock(accountIdB64, run),
+      () => runUnderRecallWebLock(accountIdB64, run),
+    );
+    recallQueue = queued.catch(() => undefined);
+    return queued;
+  }
+  function runUnderRecallWebLock<T>(accountIdB64: string, run: () => Promise<T>): Promise<T> {
+    const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
+    if (locks === undefined) return run();
+    return locks.request(`lakko-recall:${accountIdB64}`, run) as Promise<T>;
+  }
+
+  /**
+   * The record is gone although this page still shows its screen: another
+   * tab of this browser answered (it took the account back, or finished the
+   * wipe). Nothing is wiped from here; the page reads the stores again.
+   */
+  function recallResolvedElsewhere(): void {
+    recallHeld?.record.oldSeed.fill(0);
+    recallHeld = null;
+    setSignedOut(null);
+    setStateSignal({ kind: "loading" });
+    void restoreSessionOnLoad();
+  }
+
+  /** Destroy the recall record and finish the wipe (the device key and
+   *  whatever a failed step left), then the signed-out screen's last state. */
+  async function finishRecallWipe(notice: RecallEndNotice | null): Promise<void> {
+    const held = recallHeld;
+    if (held === null) return;
+    const accountIdB64 = held.record.accountIdB64;
+    await withRecallLock(accountIdB64, async () => {
+      if (recallHeld !== held) return;
+      let present = true;
+      try {
+        present = await hasRecallRecord(accountIdB64);
+      } catch {
+        present = true;
+      }
+      if (!present) {
+        recallResolvedElsewhere();
+        return;
+      }
+      const username = held.record.username;
+      const ending = notice === null ? {} : { notice };
+      setSignedOut({ reason: "keys-reset", phase: "removing", username, ...ending });
+      held.record.oldSeed.fill(0);
+      recallHeld = null;
+      try {
+        await wipeAccountLocalData(accountIdB64);
+      } finally {
+        setSignedOut({ reason: "keys-reset", phase: "removed", username, ...ending });
+      }
+    });
+  }
+
+  /** `POST /account/recall/status` for the held record. */
+  async function recallCheck(): Promise<RecallCheck> {
+    const held = recallHeld;
+    if (held === null) return { kind: "unknown", offline: false };
+    if (recallExpired(held.record.learnedAtMs, Date.now())) return { kind: "closed" };
+    try {
+      const wasm = await loadWasm();
+      const accountIdBytes = base64Decode(held.record.accountIdB64);
+      // T5 item 24: `statement-stale` is re-signed at the server's time; it
+      // never closes the record.
+      const body = await client.recallStatus((signAtMs) =>
+        signAtMs === null
+          ? wasm.signAccountStatement(
+              held.record.oldSeed,
+              ACCOUNT_STATEMENT_RECALL_STATUS,
+              accountIdBytes,
+              new Uint8Array(0),
+            )
+          : wasm.signAccountStatementAt(
+              held.record.oldSeed,
+              ACCOUNT_STATEMENT_RECALL_STATUS,
+              accountIdBytes,
+              new Uint8Array(0),
+              BigInt(signAtMs),
+            ),
+      );
+      return recallStatusVerdict({ status: 200, errorCode: null, body }, Date.now());
+    } catch (err) {
+      if (err instanceof AuthHttpError) {
+        return recallStatusVerdict(
+          { status: err.status, errorCode: err.errorCode, body: null },
+          Date.now(),
+        );
+      }
+      if (!(err instanceof AuthNetworkError)) {
+        // eslint-disable-next-line no-console
+        console.warn("recall status failed", err instanceof Error ? err.name : "unknown");
+      }
+      return { kind: "unknown", offline: err instanceof AuthNetworkError };
+    }
+  }
+
+  /** A `recall/finish` that was sent and not (yet) answered, with the phrase
+   *  it would make the account's. In memory only: a reload loses it, and the
+   *  next attempt is a new one. */
+  let recallPending: {
+    readonly accountIdB64: string;
+    readonly finish: RecallPendingFinish;
+    readonly seed: Uint8Array;
+    readonly phrase: string;
+    readonly newPubkey: Uint8Array;
+    readonly preparedAtMs: number;
+  } | null = null;
+
+  /** Take the account back (ADR-0066 part 1). From the server's answer on
+   *  it is the key reset's client order (`adoptKeyResetOutcome`). */
+  function recallTakeBack(
+    oldPassword: string,
+    newPassword: string,
+  ): Promise<RecallAttemptFailure | null> {
+    const held = recallHeld;
+    if (held === null) return Promise.resolve({ kind: "closed" });
+    const accountIdB64 = held.record.accountIdB64;
+    return withRecallLock(accountIdB64, async (): Promise<RecallAttemptFailure | null> => {
+      if (recallHeld !== held) return { kind: "closed" };
+      const accountIdBytes = base64Decode(accountIdB64);
+      const failureOf = (err: unknown): RecallAttemptFailure => {
+        if (err instanceof RecallWrongPasswordError) {
+          return recallAttemptFailure({
+            wrongPasswordLocally: true,
+            status: null,
+            errorCode: null,
+            retryAfterSecs: null,
+          });
+        }
+        if (err instanceof AuthHttpError) {
+          return recallAttemptFailure({
+            wrongPasswordLocally: false,
+            status: err.status,
+            errorCode: err.errorCode,
+            retryAfterSecs: err.retryAfter,
+          });
+        }
+        if (err instanceof AuthNetworkError) {
+          return recallAttemptFailure({
+            wrongPasswordLocally: false,
+            status: null,
+            errorCode: null,
+            retryAfterSecs: null,
+          });
+        }
+        // eslint-disable-next-line no-console
+        console.warn("recall failed", err instanceof Error ? err.name : "unknown");
+        return { kind: "error" };
+      };
+      const dropPending = (): void => {
+        const p = recallPending;
+        if (p === null) return;
+        p.seed.fill(0);
+        p.finish.dispose();
+        recallPending = null;
+      };
+      let reset: RecallResult | null = null;
+      let seed: Uint8Array;
+      let phrase: string;
+      let newPubkey: Uint8Array;
+      // ADR-0066 T5 item 25: a finish that was sent and never answered may
+      // have LANDED. Ask it again with the same bytes (the server answers an
+      // identical finish 200 again for the attempt's ten minutes) before
+      // anything new is generated: the phrase of that attempt is the
+      // account's if it did.
+      const earlier = recallPending;
+      if (earlier !== null && earlier.accountIdB64 === accountIdB64) {
+        if (Date.now() - earlier.preparedAtMs < RECALL_FINISH_RETRY_WINDOW_MS) {
+          try {
+            reset = await client.recallFinish(earlier.finish);
+          } catch (err) {
+            if (err instanceof AuthNetworkError || (err instanceof AuthHttpError && err.status >= 500)) {
+              // Still no answer: keep the request and the phrase.
+              return failureOf(err);
+            }
+            // The server chose an answer: that attempt did not land (or its
+            // ten minutes are over). A new attempt follows.
+          }
+        }
+      }
+      if (reset !== null && earlier !== null) {
+        seed = earlier.seed.slice();
+        phrase = earlier.phrase;
+        newPubkey = earlier.newPubkey;
+        dropPending();
+      } else {
+        dropPending();
+        // The anchor to prove against, confirmed now.
+        const check = await recallCheck();
+        if (check.kind === "closed" || check.kind === "exhausted") return { kind: "closed" };
+        if (check.kind === "unknown") return check.offline ? { kind: "offline" } : { kind: "error" };
+        const wasm = await loadWasm();
+        // A brand-new phrase and identity: the old key authorises the recall
+        // and does not return (ADR-0066 section 1.2).
+        const mnemonic = wasm.RecoveryMnemonic.generate();
+        phrase = mnemonic.phrase;
+        seed = mnemonic.toSeed();
+        mnemonic.free();
+        const canonical = wasm.Identity.fromSeed(seed);
+        newPubkey = canonical.signaturePublicKey;
+        canonical.free();
+        let prepared: RecallPendingFinish;
+        try {
+          prepared = await client.recallPrepare({
+            accountId: accountIdBytes,
+            oldAccountSeed: held.record.oldSeed,
+            anchorSeq: check.status.anchorSeq,
+            oldPassword: utf8(oldPassword),
+            newPassword: utf8(newPassword),
+            newSeed: seed.slice(),
+            newSignaturePubkey: newPubkey,
+          });
+        } catch (err) {
+          seed.fill(0);
+          return failureOf(err);
+        }
+        // From here the request may land without its answer reaching this
+        // device: the request bytes and the phrase are kept until it does.
+        recallPending = {
+          accountIdB64,
+          finish: prepared,
+          seed: seed.slice(),
+          phrase,
+          newPubkey,
+          preparedAtMs: Date.now(),
+        };
+        try {
+          reset = await client.recallFinish(prepared);
+        } catch (err) {
+          seed.fill(0);
+          if (!(err instanceof AuthNetworkError || (err instanceof AuthHttpError && err.status >= 500))) {
+            // An answer the server chose: the attempt is over.
+            dropPending();
+          }
+          return failureOf(err);
+        }
+        dropPending();
+      }
+      // The account is this device's again. The staged wipe dropped the
+      // restore marker; a reload must find the account.
+      savePersisted({ v: 1, accountIdB64, username: held.record.username });
+      explicitSignInThisPage = true;
+      if (reset.freshGrant !== null) freshGrants.put(accountIdB64, reset.freshGrant);
+      await adoptKeyResetOutcome({
+        accountIdB64,
+        accountIdBytes,
+        username: held.record.username,
+        deviceKey: held.deviceKey,
+        seed,
+        phrase,
+        newPubkey,
+        reset,
+        afterPersist: async () => {
+          // The server answered 200 and the new keys are stored: the record
+          // has done its work.
+          held.record.oldSeed.fill(0);
+          recallHeld = null;
+          try {
+            await deleteRecallRecord(accountIdB64);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "the recall record could not be deleted",
+              err instanceof Error ? err.name : "unknown",
+            );
+          }
+          setRecallDone(true);
+          setSignedOut(null);
+        },
+      });
+      return null;
+    });
+  }
+
+  /**
+   * ADR-0066 section 2.3 (UX 18.2): this device was removed from the account
+   * on another device. Auth said so (`401 device-revoked`), or this device
+   * applied its own removal from the DeviceGroup. Stop every writer, show
+   * the removed screen, and wipe EVERYTHING by itself: no button, and no
+   * recall record (a removal changes no keys, so there is nothing to take
+   * back). The same wipe as after a key reset, which already makes no call
+   * that needs a session. Once per page.
+   */
+  async function signOutAfterDeviceRemoved(accountIdB64: string): Promise<void> {
+    const current = signedOut();
+    if (current !== null && current.reason !== "identity-mismatch") return;
+    const username = signedOutUsername(accountIdB64);
+    // eslint-disable-next-line no-console
+    console.warn("this device was removed from the account; it is signed out and wiped");
+    setSignedOut({ reason: "device-removed", phase: "removing", username });
     try {
       await wipeAfterSignOut(accountIdB64);
     } finally {
-      setSignedOut({ reason: "keys-reset", phase: "removed", username });
+      setSignedOut({ reason: "device-removed", phase: "removed", username });
     }
   }
 
@@ -1756,7 +2636,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
     // The keys are on this device now; nothing is left to explain.
     setRestoreNotice(null);
-    await installSessionIdentities(args.wasm, canonical, args.accountIdB64);
+    const conversationIdentitySeed = await installSessionIdentities(
+      args.wasm,
+      canonical,
+      args.accountIdB64,
+    );
     keyPackageAccount = {
       accountIdBytes: args.accountIdBytes,
       accountIdB64: args.accountIdB64,
@@ -1775,6 +2659,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       accountId: args.accountIdBytes,
       exportKey: args.exportKey,
       accountIdentitySeed: args.accountIdentitySeed,
+      ...(conversationIdentitySeed !== null ? { conversationIdentitySeed } : {}),
       sessionToken: args.session.sessionToken,
       sessionExpiresAtMs: args.session.sessionExpiresAtMs,
       keyGeneration: args.session.keyGeneration,
@@ -1801,6 +2686,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // upload, a reload included; a stale device shows the signed-out
         // screen over the session that just landed.
         const verdict = await checkPublished(true);
+        if (chats.accountIdentity() === canonical && !landingSignsOut(verdict)) {
+          // ADR-0066: the restored session names this device (it was bound
+          // when it landed; a no-op then), and the account key is recorded
+          // at auth (until it has succeeded once).
+          await ensureSessionDeviceBound(args.accountIdB64).catch((err: unknown) => {
+            // eslint-disable-next-line no-console
+            console.warn("session bind-device (session restore) failed", err);
+          });
+          await ensureGenesisRecorded(args.accountIdB64, canonical);
+        }
         if (chats.identity() !== canonical || landingSignsOut(verdict)) return;
         // A KeyPackage on every session start, reload included: the one the
         // directory serves may have been consumed by a Welcome this device
@@ -1818,8 +2713,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
     // Create -> durable persist -> upload (see `chat/keypackage-publisher.ts`).
     // The persist inside it also captures the rehydrated state, which is what
-    // the separate post-login snapshot write used to do.
+    // the separate post-login snapshot write used to do. The upload binds the
+    // session to this device first (ADR-0066 section 0.4).
     await publishKeyPackageBestEffort("sign-in");
+    // The bind may have ended the session (this device was removed, or the
+    // session named another device): nothing lands then.
+    if (sessionTokens.accountIdB64() !== args.accountIdB64) return;
+    // ADR-0066 section 0.1: record the account key at auth, on every landing
+    // until it has succeeded once.
+    await ensureGenesisRecorded(args.accountIdB64, canonical);
 
     setIdentitySecrets(secrets);
     setPendingRecovery(null);
@@ -2020,10 +2922,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   ): Promise<Awaited<ReturnType<WebauthnClient["loginWithPasskey"]>>> {
     const webauthn = new WebauthnClient();
     try {
+      // ADR-0066 section 0.4: a discoverable ceremony does not know the
+      // account before it finishes, so it asserts no device (the session is
+      // bound afterwards); one limited to an account asserts that account's.
+      const deviceIdB64 = accountIdB64 === undefined ? undefined : landingDevice({ accountIdB64 });
       return await webauthn.loginWithPasskey(
         accountIdB64 === undefined
           ? { prfSalt: PASSKEY_PRF_SALT }
-          : { accountIdB64, prfSalt: PASSKEY_PRF_SALT },
+          : {
+              accountIdB64,
+              prfSalt: PASSKEY_PRF_SALT,
+              ...(deviceIdB64 !== undefined ? { deviceIdB64 } : {}),
+            },
       );
     } catch (err) {
       if (err instanceof WebauthnUserCancelledError) {
@@ -2137,13 +3047,79 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     void restoreSessionOnLoad();
   });
 
+  /**
+   * A recall record on this browser (ADR-0066 section 1.1): the "Was it
+   * you?" screen is owed, whatever else the stores say. A row that cannot be
+   * opened (no device key, damaged) can take nothing back and is dropped; a
+   * record past the window ends here (the rest of the wipe).
+   */
+  async function restoreOwedRecall(): Promise<boolean> {
+    let accounts: string[];
+    try {
+      accounts = await listRecallAccounts();
+    } catch {
+      return false;
+    }
+    for (const accountIdB64 of accounts) {
+      let deviceKey: CryptoKey | null = null;
+      let record: RecallRecord | null = null;
+      try {
+        deviceKey = await getDeviceKey(accountIdB64);
+        record = deviceKey === null ? null : await getRecallRecord(accountIdB64, deviceKey);
+      } catch {
+        record = null;
+      }
+      if (deviceKey === null || record === null) {
+        try {
+          await deleteRecallRecord(accountIdB64);
+        } catch {
+          // best-effort
+        }
+        continue;
+      }
+      if (state().kind !== "loading") return true;
+      recallHeld = { record, deviceKey };
+      setState({ kind: "anon" });
+      if (recallExpired(record.learnedAtMs, Date.now())) {
+        await finishRecallWipe(null);
+      } else {
+        setSignedOut({
+          reason: "recall",
+          username: record.username,
+          learnedAtMs: record.learnedAtMs,
+        });
+      }
+      return true;
+    }
+    return false;
+  }
+
   async function restoreSessionOnLoad(): Promise<void> {
+    if (await restoreOwedRecall()) return;
     const probe = await probeStoredSecrets();
+    // ADR-0066 section 2.3: a logout that could not reach the server left a
+    // marker and the stored pair. That pair is not a session to restore; it
+    // is what the ONE retry signs out with, and it goes whatever the answer.
+    const logoutOwed =
+      probe.cachedAccount !== null && isLogoutOwed(plainStorage(), probe.cachedAccount.accountIdB64);
+    if (logoutOwed && probe.cachedAccount !== null) {
+      const account = probe.cachedAccount.accountIdB64;
+      const pair = probe.sessionPair;
+      clearLogoutOwed(plainStorage(), account);
+      void serverLogout(pair).finally(() => {
+        // Unless a sign-in installed a new session meanwhile.
+        if (sessionTokens.accountIdB64() === account) return;
+        void deleteSessionToken(account).catch(() => {
+          /* best-effort */
+        });
+      });
+    }
     const decision = decideSilentRestore({
       cachedAccount: probe.cachedAccount,
       deviceKeyPresent: probe.deviceKey !== null,
       sessionPair: probe.sessionPair,
       identitySeedPresent: probe.identitySeed !== null,
+      logoutOwed,
       nowMs: Date.now(),
     });
     // An explicit sign-in that completed while the probe was reading IDB
@@ -2176,7 +3152,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     explicitSignInThisPage = false;
     sessionTokens.install(decision.accountIdB64, decision.sessionPair);
     const refresh = await sessionTokens.refreshOnce();
-    if (refresh === "superseded" || refresh === "invalid") {
+    if (refresh === "superseded" || refresh === "device-revoked" || refresh === "invalid") {
       seed.fill(0);
       return;
     }
@@ -2229,7 +3205,859 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     return record !== null && remainingKeyResetSteps(record.done).length > 0 ? record : null;
   };
 
+  /**
+   * What a device does once the server answered a key reset (ADR-0065
+   * section 2.3 from step 3 on), shared by "Reset account keys"
+   * (`mintFreshIdentity`) and by taking the account back (ADR-0066 part 1:
+   * from here a recall IS a reset). The new pair, the seed and the phrase
+   * are stored and the "publish owed" record written before any further
+   * network call; then the phrase screen's state, then the attested
+   * publishing steps. Never a second code path for the recall.
+   */
+  async function adoptKeyResetOutcome(ctx: {
+    readonly accountIdB64: string;
+    readonly accountIdBytes: Uint8Array;
+    readonly username: string;
+    /** The account's device key when this device has one; `null` mints one
+     *  from the new seed. */
+    readonly deviceKey: CryptoKey | null;
+    /** The 64-byte seed of the NEW phrase. Owned by the parked phrase from
+     *  here on. */
+    readonly seed: Uint8Array;
+    readonly phrase: string;
+    readonly newPubkey: Uint8Array;
+    readonly reset: KeyResetResult;
+    /** Runs once everything local is stored, before the state moves. */
+    readonly afterPersist?: () => void | Promise<void>;
+  }): Promise<void> {
+    // 3. Persist immediately, before any further network call: the new
+    // pair (the old one is superseded by the same transaction), the seed
+    // and the phrase under the device key, and the "publish owed" record
+    // with the attestation. From here on a crash or a failure is a retry
+    // of the publishing steps, never a second ctx.reset.
+    installSession(ctx.accountIdB64, ctx.reset.session);
+    let deviceKey = ctx.deviceKey;
+    if (deviceKey === null) {
+      // The ACCESS-only fresh-browser case (no password, hence no OPAQUE
+      // export key): bootstrap a device key from the new seed, as
+      // `provideRecoveryPhrase` / `completeFromDeviceRestore` do. When a
+      // device key IS parked, reuse it: minting a new one would orphan
+      // its wrapped stores.
+      deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
+        ctx.seed,
+        ctx.accountIdB64,
+      );
+      try {
+        await putDeviceKey(ctx.accountIdB64, deviceKey);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("device-key persist (reset) failed", err);
+      }
+    }
+    try {
+      await putAccountIdentitySeed(ctx.accountIdB64, ctx.seed, deviceKey);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("account-identity-seed persist (reset) failed", err);
+    }
+    await persistSessionPair(ctx.accountIdB64, ctx.reset.session, "reset");
+    // The device holds the new keys, so it holds the new phrase (the local
+    // three-word check, the hand-over to a new device, "Show recovery
+    // phrase"). The signup-phrase marker makes a reload show the words
+    // first, once nothing is owed.
+    await storeDevicePhrase(ctx.accountIdB64, ctx.phrase, deviceKey, "fresh-identity");
+    markSignupPhraseOwed(plainStorage(), ctx.accountIdB64);
+    const record: KeyResetOwed = {
+      v: 1,
+      attestationB64Url: ctx.reset.attestationB64Url,
+      keyGeneration: ctx.reset.session.keyGeneration.toString(),
+      newSignaturePubkeyB64: base64Encode(ctx.newPubkey),
+      signedAtMs: keyResetAttestationSignedAtMs(ctx.reset.attestation),
+      done: { directory: false, deviceGroup: false },
+    };
+    writeKeyResetOwed(plainStorage(), ctx.accountIdB64, record);
+    // ADR-0066 section 3.5: a reset makes every predecessor, proven or not,
+    // a superseded key, and ends a rotation this device was finishing.
+    clearRotation(plainStorage(), ctx.accountIdB64);
+    clearRotatedNotice(plainStorage(), ctx.accountIdB64);
+    chats.setPredecessorAccountIdentity(null);
+    try {
+      await deleteKeyRotationState(ctx.accountIdB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("key-rotation state not cleared after a reset", err);
+    }
+    // The old DeviceGroup, its registrar state and the chats' routing
+    // belong to the old generation: the re-founding below replaces them.
+    try {
+      await deleteOutboxForAccount(ctx.accountIdB64);
+      clearObservationsForAccount(ctx.accountIdB64);
+      clearUnappliedForAccount(ctx.accountIdB64);
+      clearOwnRequestsForAccount(ctx.accountIdB64);
+      clearBeaconObservationsForAccount(ctx.accountIdB64);
+      clearLastObservedOwnerForAccount(ctx.accountIdB64);
+      clearLeaveRequestedForAccount(ctx.accountIdB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("clearing the old generation's chat bookkeeping failed", err);
+    }
+    setKeyResetNote(true);
+
+    // Stash the completion context and flip to `save-fresh-phrase`: the
+    // flow is committed past the restore prompt. The words are withheld
+    // while the publish is owed; `confirmFreshPhraseSaved` lands the
+    // session once the person acknowledged them.
+    setPendingFreshPhrase({
+      seed: ctx.seed,
+      accountIdBytes: ctx.accountIdBytes,
+      accountIdB64: ctx.accountIdB64,
+      session: ctx.reset.session,
+      username: ctx.username,
+      phrase: ctx.phrase,
+      deviceKey,
+    });
+    setPendingRecovery(null);
+    // The new keys are stored: a recall drops its record and its screen
+    // here, before the phrase screen is put up.
+    await ctx.afterPersist?.();
+    setState({
+      kind: "save-fresh-phrase",
+      account: {
+        accountId: ctx.accountIdB64,
+        username: ctx.username,
+      },
+    });
+
+    // 4-5. Publish: the directory (with the attestation), then the
+    // DeviceGroup journal (the attested reset). A failure leaves the
+    // record for "Try again" and the next session start; the screen says
+    // what happened.
+    try {
+      await retryKeyResetPublish(
+        ctx.accountIdB64,
+        ctx.accountIdBytes,
+        ctx.seed,
+        deviceKey,
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "publishing the reset keys did not finish; the phrase screen offers a retry",
+        err instanceof Error ? err.name : "unknown",
+      );
+    } finally {
+      setOwedVersion((v) => v + 1);
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // ADR-0066 part 3 (Stage A): the account keys changed WITH the devices
+  // kept. `devices/key-rotation.ts` decides; this is the auth layer's half.
+  // -------------------------------------------------------------------
+
+  /** A kept device is fetching the new keys (UX 18.3: `Updating keys...`). */
+  const [keysUpdating, setKeysUpdating] = createSignal(false);
+  /** Bumped when the rotation record or the "keys were changed" line moves. */
+  const [rotationVersion, setRotationVersion] = createSignal(0);
+  let adoptionRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  onCleanup(() => {
+    if (adoptionRetryTimer !== null) clearTimeout(adoptionRetryTimer);
+  });
+
+  /** The phrase and the 64-byte seed of a 16-byte entropy. */
+  function phraseOfEntropy(wasm: Wasm, entropy: Uint8Array): { phrase: string; seed: Uint8Array } {
+    const mnemonic = wasm.RecoveryMnemonic.fromEntropy(entropy);
+    try {
+      return { phrase: mnemonic.phrase, seed: mnemonic.toSeed() };
+    } finally {
+      mnemonic.free();
+    }
+  }
+
+  function publicKeyOfSeed(wasm: Wasm, seed: Uint8Array): Uint8Array {
+    const identity = wasm.Identity.fromSeed(seed);
+    try {
+      return identity.signaturePublicKey;
+    } finally {
+      identity.free();
+    }
+  }
+
+  function ed25519SeedOf(wasm: Wasm, seed: Uint8Array): Uint8Array {
+    const identity = wasm.Identity.fromSeed(seed);
+    try {
+      return identity.ed25519Seed;
+    } finally {
+      identity.free();
+    }
+  }
+
+  /**
+   * Adopt account keys that were changed by a PROVEN rotation (on this
+   * device or on another one): the new seed and phrase replace the old ones,
+   * ALL local data is kept, and the old seed is kept as a predecessor (the
+   * conversation leaves stay bound to it until Stage B).
+   *
+   * The predecessor is written BEFORE the account seed is overwritten: a
+   * crash in between leaves a device that still holds the old key and can
+   * adopt again, never one that lost the key its leaves are bound to.
+   */
+  async function adoptRotatedKeys(ctx: {
+    readonly accountIdB64: string;
+    readonly deviceKey: CryptoKey;
+    /** The 64-byte seed held before the rotation. */
+    readonly oldSeed: Uint8Array;
+    readonly newEntropy: Uint8Array;
+    readonly newPubkeyB64: string;
+  }): Promise<{ readonly phrase: string; readonly seed: Uint8Array; readonly conversationSeed: Uint8Array }> {
+    const wasm = await loadWasm();
+    const { phrase, seed } = phraseOfEntropy(wasm, ctx.newEntropy);
+    if (base64Encode(publicKeyOfSeed(wasm, seed)) !== ctx.newPubkeyB64) {
+      seed.fill(0);
+      throw new Error("key rotation: the entropy does not derive the expected account key");
+    }
+    const next = await updateKeyRotationState(ctx.accountIdB64, ctx.deviceKey, (state) => ({
+      ...withPredecessorSeed(state, ctx.oldSeed),
+      pending: state.pending.filter((p) => p.newSignaturePubkeyB64 !== ctx.newPubkeyB64),
+    }));
+    await putAccountIdentitySeed(ctx.accountIdB64, seed, ctx.deviceKey);
+    await storeDevicePhrase(ctx.accountIdB64, phrase, ctx.deviceKey, "key-rotation");
+    return { phrase, seed, conversationSeed: conversationSeed(next) ?? ctx.oldSeed };
+  }
+
+  /** Put adopted keys into the live session without a reload (the rotating
+   *  device: its sheet goes on). The device identity and every group are
+   *  untouched. */
+  async function swapSessionAccountKeys(
+    accountIdB64: string,
+    seed: Uint8Array,
+    conversationSeedBytes: Uint8Array,
+  ): Promise<void> {
+    const wasm = await loadWasm();
+    // The identity that was the account's moves into the predecessor slot as
+    // the same object (its provider holds the account's PublisherGroups).
+    chats.rotateAccountIdentity(wasm.Identity.fromSeed(seed));
+    const secrets = identitySecrets();
+    const pair = sessionTokens.pair();
+    if (secrets !== null && base64Encode(secrets.accountId) === accountIdB64) {
+      setIdentitySecrets({
+        ...secrets,
+        accountIdentitySeed: seed,
+        conversationIdentitySeed: conversationSeedBytes,
+        ...(pair !== null
+          ? {
+              sessionToken: pair.sessionToken,
+              sessionExpiresAtMs: pair.sessionExpiresAtMs,
+              keyGeneration: pair.keyGeneration,
+            }
+          : {}),
+      });
+    }
+  }
+
+  /** The session upgrade with the statement signed by `seed`'s key. */
+  async function upgradeSessionWith(
+    accountIdBytes: Uint8Array,
+    refreshToken: string,
+    seed: Uint8Array,
+  ): Promise<{ readonly verdict: UpgradeVerdict; readonly pair: SessionPair | null }> {
+    const wasm = await loadWasm();
+    const signingSeed = ed25519SeedOf(wasm, seed);
+    try {
+      const pair = await client.sessionRefreshUpgrade(refreshToken, (signAtMs) =>
+        signAtMs === null
+          ? wasm.signSessionUpgradeStatement(signingSeed, accountIdBytes, refreshToken)
+          : wasm.signAccountStatementAt(
+              signingSeed,
+              ACCOUNT_STATEMENT_KIND_SESSION_UPGRADE,
+              accountIdBytes,
+              wasm.sessionUpgradeStatementBody(refreshToken),
+              BigInt(signAtMs),
+            ),
+      );
+      return { verdict: "accepted", pair };
+    } catch (err) {
+      if (err instanceof AuthHttpError) {
+        return { verdict: upgradeVerdict(err.status, err.errorCode), pair: null };
+      }
+      return { verdict: "later", pair: null };
+    } finally {
+      signingSeed.fill(0);
+    }
+  }
+
+  /** The seed a pending envelope carries. The envelope was verified when it
+   *  was stored; this reads it again by shape only (its proof may since have
+   *  expired, which the server's own check of the key supersedes). */
+  async function seedOfPending(pending: PendingRotation): Promise<{ entropy: Uint8Array; seed: Uint8Array } | null> {
+    const wasm = await loadWasm();
+    try {
+      const decoded = wasm.decodeKeyRotationEnvelope(base64Decode(pending.envelopeB64));
+      try {
+        const entropy = decoded.newEntropy;
+        const { seed } = phraseOfEntropy(wasm, entropy);
+        if (base64Encode(publicKeyOfSeed(wasm, seed)) !== pending.newSignaturePubkeyB64) return null;
+        return { entropy, seed };
+      } finally {
+        decoded.free();
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  type AdoptionOutcome = "adopted" | "reset" | "later" | "device-revoked" | "sign-in";
+
+  let adoptionInFlight: Promise<AdoptionOutcome> | null = null;
+  function adoptRotationOnce(accountIdB64: string): Promise<AdoptionOutcome> {
+    if (adoptionInFlight !== null) return adoptionInFlight;
+    const run = adoptRotation(accountIdB64)
+      .catch((err: unknown): AdoptionOutcome => {
+        // A failure of this client's own plumbing is never read as a reset.
+        // eslint-disable-next-line no-console
+        console.warn("key rotation: adoption failed", err instanceof Error ? err.name : "unknown");
+        return "later";
+      })
+      .finally(() => {
+        adoptionInFlight = null;
+      });
+    adoptionInFlight = run;
+    return run;
+  }
+
+  /**
+   * The order on a superseded device (ADR-0066 section 3.3,
+   * `supersededStep`): exchange the refresh credential with a statement by
+   * the held key, then by each pending envelope's key; the key the server
+   * accepts is the account's. With nothing accepted, read the DeviceGroup
+   * journal to its head ONCE and try what it brought. Only then is it a
+   * reset.
+   */
+  async function adoptRotation(accountIdB64: string): Promise<AdoptionOutcome> {
+    let deviceKey: CryptoKey | null = null;
+    try {
+      deviceKey = await getDeviceKey(accountIdB64);
+    } catch {
+      deviceKey = null;
+    }
+    // A device that never held the keys has nothing to adopt with.
+    if (deviceKey === null) return "reset";
+    let heldSeed: Uint8Array | null = null;
+    try {
+      heldSeed = await getAccountIdentitySeed(accountIdB64, deviceKey);
+    } catch {
+      heldSeed = null;
+    }
+    if (heldSeed === null) return "reset";
+    let pair = sessionTokens.pair() ?? sessionTokens.supersededPair(accountIdB64);
+    if (pair === null) {
+      try {
+        pair = await getSessionPair(accountIdB64, deviceKey);
+      } catch {
+        pair = null;
+      }
+    }
+    // No refresh credential at all: nothing can be exchanged.
+    if (pair === null) return "reset";
+    // UX 18.3: told its session is out of date, not yet holding the new keys.
+    setKeysUpdating(true);
+    const wasm = await loadWasm();
+    const accountIdBytes = base64Decode(accountIdB64);
+    const heldKeyB64 = base64Encode(publicKeyOfSeed(wasm, heldSeed));
+    const tried: string[] = [];
+    let journal: "not-read" | "read" | "unreadable" = "not-read";
+    for (;;) {
+      let state: KeyRotationState;
+      try {
+        state = await getKeyRotationState(accountIdB64, deviceKey);
+      } catch {
+        state = EMPTY_KEY_ROTATION_STATE;
+      }
+      const pending = withPendingRotation(state.pending, null, Date.now(), (preparedAtMs, nowMs) =>
+        wasm.keyRotationPendingExpired(BigInt(Math.max(0, preparedAtMs)), BigInt(nowMs)),
+      );
+      const step = supersededStep({ heldKeyB64, pending, tried, journal });
+      if (step.kind === "reset") return "reset";
+      if (step.kind === "read-journal") {
+        const port = await awaitKeyRotationPort(KEY_ROTATION_PORT_WAIT_MS);
+        if (port === null) {
+          // No DeviceGroup handle in this page. Inside a session that is a
+          // loading order, not a verdict; outside one nothing will load it.
+          return state_isSessionFor(accountIdB64) ? "later" : "reset";
+        }
+        const read = await port.catchUp();
+        if (read === "offline") return "later";
+        journal = read;
+        continue;
+      }
+      for (const keyB64 of step.keysB64) {
+        let seed: Uint8Array;
+        let entropy: Uint8Array | null = null;
+        if (keyB64 === heldKeyB64) {
+          seed = heldSeed;
+        } else {
+          const found = pendingFor(pending, keyB64);
+          const carried = found === null ? null : await seedOfPending(found);
+          if (carried === null) {
+            tried.push(keyB64);
+            continue;
+          }
+          seed = carried.seed;
+          entropy = carried.entropy;
+        }
+        const upgraded = await upgradeSessionWith(accountIdBytes, pair.refreshToken, seed);
+        if (upgraded.verdict === "not-accepted") {
+          tried.push(keyB64);
+          continue;
+        }
+        if (upgraded.verdict === "device-revoked") return "device-revoked";
+        if (upgraded.verdict === "sign-in") return "sign-in";
+        if (upgraded.verdict !== "accepted" || upgraded.pair === null) return "later";
+        // This key is the account's.
+        if (entropy !== null) {
+          await adoptRotatedKeys({
+            accountIdB64,
+            deviceKey,
+            oldSeed: heldSeed,
+            newEntropy: entropy,
+            newPubkeyB64: keyB64,
+          });
+          markRotatedNotice(plainStorage(), accountIdB64);
+        }
+        await persistSessionPair(accountIdB64, upgraded.pair, "key-rotation");
+        installSession(accountIdB64, upgraded.pair);
+        setKeysUpdating(false);
+        setRotationVersion((v) => v + 1);
+        const live = identitySecrets();
+        if (entropy !== null || (live !== null && !bytesEqual(live.accountIdentitySeed, seed))) {
+          // The page's identities are of the old key: land again with the
+          // new one. Every chat and contact is still on this device.
+          // eslint-disable-next-line no-console
+          console.warn("the account keys were changed on another device; this device has the new ones");
+          if (typeof window !== "undefined") window.location.reload();
+        }
+        return "adopted";
+      }
+    }
+  }
+
+  function state_isSessionFor(accountIdB64: string): boolean {
+    const s = state();
+    return s.kind === "session" && s.account.accountId === accountIdB64;
+  }
+
+  /**
+   * A `KeyRotation` envelope from the account's own DeviceGroup (the only
+   * place it means anything; the caller is the DeviceGroup receive loop).
+   * Verified against the key this device holds, or against a key a pending
+   * envelope already names (a device that was away for two rotations), and
+   * stored as PENDING. Nothing else changes. Returns whether the bytes were
+   * a key-rotation envelope at all (so the caller files nothing else).
+   */
+  async function intakeKeyRotation(envelope: Uint8Array): Promise<boolean> {
+    const wasm = await loadWasm();
+    let isRotation = false;
+    try {
+      const dispatched = wasm.dispatchIncomingEnvelope(envelope);
+      try {
+        isRotation = dispatched.kind === wasm.IncomingEnvelopeKind.KeyRotation;
+      } finally {
+        dispatched.free();
+      }
+    } catch {
+      return false;
+    }
+    if (!isRotation) return false;
+    const s = state();
+    const secrets = identitySecrets();
+    if (s.kind !== "session" || secrets === null) return true;
+    const accountIdB64 = s.account.accountId;
+    try {
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) return true;
+      const heldKey = publicKeyOfSeed(wasm, secrets.accountIdentitySeed);
+      const nowMs = Date.now();
+      const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
+      const candidates = [heldKey, ...stateNow.pending.map((p) => base64Decode(p.newSignaturePubkeyB64))];
+      let verified: { newKeyB64: string; preparedAtMs: number } | null = null;
+      for (const key of candidates) {
+        try {
+          const v = wasm.verifyKeyRotationEnvelope(envelope, key, BigInt(Math.floor(nowMs / 1000)));
+          try {
+            verified = {
+              newKeyB64: base64Encode(v.newSignaturePubkey),
+              preparedAtMs: Number(v.preparedAtMs),
+            };
+          } finally {
+            v.free();
+          }
+          break;
+        } catch {
+          // Not by this key; the next candidate.
+        }
+      }
+      const intake = rotationIntake({
+        fromOwnDeviceGroup: true,
+        verified: verified !== null,
+        newKeyIsHeldKey: verified !== null && verified.newKeyB64 === base64Encode(heldKey),
+      });
+      if (intake === "drop" || verified === null) return true;
+      const row: PendingRotation = {
+        newSignaturePubkeyB64: verified.newKeyB64,
+        envelopeB64: base64Encode(envelope),
+        preparedAtMs: verified.preparedAtMs,
+      };
+      await updateKeyRotationState(accountIdB64, deviceKey, (st) => ({
+        ...st,
+        pending: withPendingRotation(st.pending, row, nowMs, (preparedAtMs, now) =>
+          wasm.keyRotationPendingExpired(BigInt(Math.max(0, preparedAtMs)), BigInt(now)),
+        ),
+      }));
+      // The commit may already have landed: ask the directory once. If it
+      // has not, this device learns it at its next refresh.
+      void adoptIfDirectoryShowsPending(accountIdB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("key rotation: the envelope could not be stored", err instanceof Error ? err.name : "unknown");
+    }
+    return true;
+  }
+
+  /** Adopt when the published identity bundle carries a pending key. */
+  async function adoptIfDirectoryShowsPending(accountIdB64: string): Promise<void> {
+    try {
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) return;
+      const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
+      if (stateNow.pending.length === 0) return;
+      const published = await discovery.identityFetch(base64Decode(accountIdB64));
+      if (published === null) return;
+      if (pendingFor(stateNow.pending, published.signature_pubkey) === null) return;
+      setKeysUpdating(true);
+      // The directory shows the key; the session exchange confirms it.
+      void signOutAfterKeyReset(accountIdB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("key rotation: directory check failed", err instanceof Error ? err.name : "unknown");
+    }
+  }
+
+  // ----- The rotating device (ADR-0066 section 3.2) ---------------------
+
+  function rotationSession(): {
+    accountIdB64: string;
+    accountIdBytes: Uint8Array;
+    secrets: IdentitySecrets;
+  } {
+    const s = state();
+    const secrets = identitySecrets();
+    if (s.kind !== "session" || secrets === null) throw new KeyedError("common.error.session_not_ready");
+    return { accountIdB64: s.account.accountId, accountIdBytes: secrets.accountId, secrets };
+  }
+
+  async function rotationDeviceKey(accountIdB64: string): Promise<CryptoKey> {
+    const deviceKey = await getDeviceKey(accountIdB64);
+    if (deviceKey === null) throw new KeyedError("common.error.session_not_ready");
+    return deviceKey;
+  }
+
+  const keyRotationApi: AuthApi["keyRotation"] = {
+    updating: keysUpdating,
+    noticeOwed() {
+      rotationVersion();
+      const s = state();
+      return s.kind === "session" && rotatedNoticeOwed(plainStorage(), s.account.accountId);
+    },
+    dismissNotice() {
+      const s = state();
+      if (s.kind === "session") clearRotatedNotice(plainStorage(), s.account.accountId);
+      setRotationVersion((v) => v + 1);
+    },
+    recordChanged() {
+      setRotationVersion((v) => v + 1);
+    },
+    intake: intakeKeyRotation,
+    async prepare(deviceIdB64) {
+      // Step 3: the new phrase, and the proof signed by the OLD key. Kept
+      // sealed until the commit has its answer, so a retry re-sends the SAME
+      // key (a second envelope for another key would leave the kept devices
+      // holding one that never becomes the account's).
+      const { accountIdB64, secrets } = rotationSession();
+      const deviceKey = await rotationDeviceKey(accountIdB64);
+      const wasm = await loadWasm();
+      const nowMs = Date.now();
+      const nowSecs = Math.floor(nowMs / 1000);
+      const held = (await getKeyRotationState(accountIdB64, deviceKey)).prepared;
+      let prepared: PreparedRotation;
+      if (
+        held !== null &&
+        held.deviceIdB64 === deviceIdB64 &&
+        held.proofExpiresAtSecs - nowSecs > SUPERSESSION_WINDOW_SECS / 2
+      ) {
+        prepared = held;
+      } else {
+        const mnemonic = wasm.RecoveryMnemonic.generate();
+        let entropy: Uint8Array;
+        let seed: Uint8Array;
+        try {
+          entropy = mnemonic.toEntropy();
+          seed = mnemonic.toSeed();
+        } finally {
+          mnemonic.free();
+        }
+        const oldSigningSeed = ed25519SeedOf(wasm, secrets.accountIdentitySeed);
+        const newSigningSeed = ed25519SeedOf(wasm, seed);
+        try {
+          const expiresAt = nowSecs + SUPERSESSION_WINDOW_SECS;
+          const proof = wasm.signSupersessionProof(
+            oldSigningSeed,
+            newSigningSeed,
+            BigInt(nowSecs),
+            BigInt(expiresAt),
+          );
+          prepared = {
+            deviceIdB64,
+            entropyB64: base64Encode(entropy),
+            proofB64: base64Encode(proof),
+            newSignaturePubkeyB64: base64Encode(publicKeyOfSeed(wasm, seed)),
+            preparedAtMs: nowMs,
+            proofExpiresAtSecs: expiresAt,
+          };
+        } finally {
+          oldSigningSeed.fill(0);
+          newSigningSeed.fill(0);
+          seed.fill(0);
+          entropy.fill(0);
+        }
+        const toStore = prepared;
+        await updateKeyRotationState(accountIdB64, deviceKey, (st) => ({ ...st, prepared: toStore }));
+      }
+      return {
+        envelope: wasm.composeKeyRotationEnvelope(
+          BigInt(prepared.preparedAtMs),
+          base64Decode(prepared.entropyB64),
+          base64Decode(prepared.proofB64),
+        ),
+        newSignaturePubkeyB64: prepared.newSignaturePubkeyB64,
+        preparedAtMs: prepared.preparedAtMs,
+      };
+    },
+    async commit(grant, revokeDeviceIds) {
+      const { accountIdB64, secrets } = rotationSession();
+      const deviceKey = await rotationDeviceKey(accountIdB64);
+      const prepared = (await getKeyRotationState(accountIdB64, deviceKey)).prepared;
+      if (prepared === null) throw new Error("key rotation: nothing was prepared");
+      const wasm = await loadWasm();
+      const entropy = base64Decode(prepared.entropyB64);
+      const { seed } = phraseOfEntropy(wasm, entropy);
+      const token = sessionTokens.peek();
+      if (token === null) throw new KeyedError("common.error.session_not_ready");
+      let reset: KeyResetResult;
+      try {
+        reset = await client.rotateAccountKeys({
+          sessionToken: token,
+          freshGrant: grant,
+          newSeed: seed.slice(),
+          newSignaturePubkey: base64Decode(prepared.newSignaturePubkeyB64),
+          proof: base64Decode(prepared.proofB64),
+          revokeDeviceIds,
+        });
+      } catch (err) {
+        seed.fill(0);
+        if (
+          err instanceof AuthHttpError &&
+          isFreshAuthRequired({ status: err.status, errorCode: err.errorCode })
+        ) {
+          freshGrants.spend(grant);
+        }
+        throw err;
+      }
+      seed.fill(0);
+      // The grant was of the previous generation and is spent; the answer
+      // carries none (T5 item 12).
+      freshGrants.clear();
+      // Persist at once, before any further network call. The KEYS first,
+      // then the pair: a crash in between leaves a device that holds the new
+      // key with a superseded session, which the session exchange repairs
+      // (its statement is by the key it holds), and `probeCommit` reads "the
+      // held key is the prepared key" as landed. The other order would leave
+      // a current session over the old key, which nothing could tell apart
+      // from a commit that never happened.
+      const oldSeed = secrets.accountIdentitySeed.slice();
+      const adopted = await adoptRotatedKeys({
+        accountIdB64,
+        deviceKey,
+        oldSeed,
+        newEntropy: entropy,
+        newPubkeyB64: prepared.newSignaturePubkeyB64,
+      });
+      installSession(accountIdB64, reset.session);
+      await persistSessionPair(accountIdB64, reset.session, "key-rotation");
+      // The new words are shown once nothing is owed.
+      markSignupPhraseOwed(plainStorage(), accountIdB64);
+      await swapSessionAccountKeys(accountIdB64, adopted.seed, adopted.conversationSeed);
+      return {
+        keyGeneration: reset.session.keyGeneration,
+        attestationB64Url: reset.attestationB64Url,
+        signedAtMs: keyResetAttestationSignedAtMs(reset.attestation),
+      };
+    },
+    async probeCommit() {
+      // The commit's answer was lost. A refresh with a statement by the
+      // PREPARED key tells: a pair of a higher generation means the commit
+      // landed (the server read the statement only because the credential
+      // was of a lower generation, and accepted it only under the new key).
+      const { accountIdB64, accountIdBytes, secrets } = rotationSession();
+      const deviceKey = await rotationDeviceKey(accountIdB64);
+      const prepared = (await getKeyRotationState(accountIdB64, deviceKey)).prepared;
+      const pair = sessionTokens.pair() ?? sessionTokens.supersededPair(accountIdB64);
+      if (prepared === null || pair === null) return { kind: "unknown" };
+      const wasm = await loadWasm();
+      // The keys are stored before the pair (`commit`), so a device that
+      // already holds the prepared key as its account key committed.
+      if (
+        base64Encode(publicKeyOfSeed(wasm, secrets.accountIdentitySeed)) === prepared.newSignaturePubkeyB64
+      ) {
+        markSignupPhraseOwed(plainStorage(), accountIdB64);
+        return { kind: "landed", keyGeneration: pair.keyGeneration };
+      }
+      const entropy = base64Decode(prepared.entropyB64);
+      const { seed } = phraseOfEntropy(wasm, entropy);
+      try {
+        const upgraded = await upgradeSessionWith(accountIdBytes, pair.refreshToken, seed);
+        if (upgraded.verdict === "not-accepted") return { kind: "not-landed" };
+        if (upgraded.verdict !== "accepted" || upgraded.pair === null) return { kind: "unknown" };
+        if (upgraded.pair.keyGeneration <= pair.keyGeneration) {
+          // The credential was not of a lower generation, so the server did
+          // not read the statement: the account is where it was.
+          installSession(accountIdB64, upgraded.pair);
+          await persistSessionPair(accountIdB64, upgraded.pair, "key-rotation");
+          return { kind: "not-landed" };
+        }
+        const adopted = await adoptRotatedKeys({
+          accountIdB64,
+          deviceKey,
+          oldSeed: secrets.accountIdentitySeed.slice(),
+          newEntropy: entropy,
+          newPubkeyB64: prepared.newSignaturePubkeyB64,
+        });
+        installSession(accountIdB64, upgraded.pair);
+        await persistSessionPair(accountIdB64, upgraded.pair, "key-rotation");
+        markSignupPhraseOwed(plainStorage(), accountIdB64);
+        await swapSessionAccountKeys(accountIdB64, adopted.seed, adopted.conversationSeed);
+        return { kind: "landed", keyGeneration: upgraded.pair.keyGeneration };
+      } finally {
+        seed.fill(0);
+      }
+    },
+    async uploadIdentity(mode, attestationB64Url, proofB64) {
+      // Step 8: the bundle of the NEW identity with the proof AND the
+      // attestation (the proven-rotation arm), or one of the two fallbacks.
+      const { accountIdBytes, secrets } = rotationSession();
+      const wasm = await loadWasm();
+      const canonical = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+      try {
+        const attestation =
+          mode === "proof-only" || attestationB64Url === null
+            ? undefined
+            : base64UrlDecodeNoPad(attestationB64Url);
+        const proof = mode === "attestation-only" || proofB64 === null ? undefined : base64Decode(proofB64);
+        // No genesis self-signature for a rotation: discovery forwards the
+        // proof as the log leaf's authorisation (T5 item 19). The attested
+        // reset fallback is a NEW binding and carries one.
+        const leafAuth =
+          mode === "attestation-only" ? await mintLeafGenesisAuth(canonical, accountIdBytes) : undefined;
+        await uploadIdentityBundle(
+          discovery,
+          accountIdBytes,
+          canonical,
+          proof,
+          leafAuth,
+          undefined,
+          attestation,
+        );
+      } finally {
+        canonical.free();
+      }
+    },
+    async preparedProofB64() {
+      const { accountIdB64 } = rotationSession();
+      const deviceKey = await rotationDeviceKey(accountIdB64);
+      const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
+      return stateNow.prepared?.proofB64 ?? null;
+    },
+    async transferDeviceGroupRoot(attestationB64Url) {
+      // Step 9: the OLD root signs a RootTransfer naming the root of the new
+      // seed; with the attestation, the new account key endorses that root
+      // and the journal records the generation.
+      const { accountIdB64, accountIdBytes, secrets } = rotationSession();
+      const deviceKey = await rotationDeviceKey(accountIdB64);
+      const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
+      const oldSeedB64 = stateNow.predecessorSeedsB64[stateNow.predecessorSeedsB64.length - 1];
+      if (oldSeedB64 === undefined) throw new Error("key rotation: no predecessor seed is held");
+      const wasm = await loadWasm();
+      const journalId = wasm.deviceGroupJournalId(accountIdBytes);
+      const oldAccount = wasm.Identity.fromSeed(base64Decode(oldSeedB64));
+      const newAccount = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+      const oldRoot = wasm.dsJournalRootSigner(oldAccount, journalId);
+      const newRoot = wasm.dsJournalRootSigner(newAccount, journalId);
+      try {
+        const sender = new DsClient();
+        if (attestationB64Url === null) {
+          await transferRoot(sender, journalId, oldRoot, newRoot);
+          return;
+        }
+        const attestStdB64 = base64Encode(base64UrlDecodeNoPad(attestationB64Url));
+        await transferRootWithAttestation(
+          sender,
+          journalId,
+          oldRoot,
+          newRoot,
+          attestStdB64,
+          rootEndorsementFor(wasm, secrets.accountIdentitySeed, journalId, attestStdB64, newRoot.publicKey()),
+        );
+      } finally {
+        oldRoot.free();
+        newRoot.free();
+        oldAccount.free();
+        newAccount.free();
+      }
+    },
+    async predecessorSigningSeed() {
+      const { accountIdB64 } = rotationSession();
+      const deviceKey = await rotationDeviceKey(accountIdB64);
+      const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
+      const oldSeedB64 = stateNow.predecessorSeedsB64[stateNow.predecessorSeedsB64.length - 1];
+      return oldSeedB64 === undefined ? null : base64Decode(oldSeedB64);
+    },
+    async showNewPhrase() {
+      // Step 12: the existing new-phrase screen, once nothing is owed.
+      // The proof and the entropy were kept for the publishing steps; every
+      // one of them has its answer now.
+      const { accountIdB64 } = rotationSession();
+      try {
+        const deviceKey = await rotationDeviceKey(accountIdB64);
+        await updateKeyRotationState(accountIdB64, deviceKey, (st) => ({ ...st, prepared: null }));
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("key rotation: the prepared material was not cleared", err);
+      }
+      setRotationVersion((v) => v + 1);
+      await restoreOwedSignupPhrase(accountIdB64);
+    },
+    async discardPrepared() {
+      const { accountIdB64 } = rotationSession();
+      const deviceKey = await rotationDeviceKey(accountIdB64);
+      await updateKeyRotationState(accountIdB64, deviceKey, (st) => ({ ...st, prepared: null }));
+      setRotationVersion((v) => v + 1);
+    },
+    reportSuperseded() {
+      sessionTokens.reportSuperseded();
+    },
+  };
+
   const api: AuthApi = {
+    keyRotation: keyRotationApi,
     state,
     identitySecrets,
     freshPhrase: () => pendingFreshPhrase()?.phrase ?? null,
@@ -2284,7 +4112,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
         return;
       }
-      if (current.phase === "removed") setSignedOut(null);
+      // "Was it you?" has no such button: its own actions end it.
+      if (current.reason !== "recall" && current.phase === "removed") setSignedOut(null);
+    },
+    recall: {
+      check: recallCheck,
+      end: finishRecallWipe,
+      takeBack: recallTakeBack,
+    },
+    recallDone,
+    dismissRecallDone: () => setRecallDone(false),
+    reportDeviceRemoved(accountIdB64) {
+      const s = state();
+      const live =
+        s.kind !== "anon" && s.kind !== "loading" ? s.account.accountId : sessionTokens.accountIdB64();
+      if (live !== accountIdB64) return;
+      // Off the caller's stack: the sync runtime calls this from inside its
+      // own poll step, and the wipe tears that runtime down.
+      void Promise.resolve().then(() => signOutAfterDeviceRemoved(accountIdB64));
     },
     keyResetNote,
     dismissKeyResetNote: () => setKeyResetNote(false),
@@ -2455,8 +4300,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // ADR-0036: also mint the auth-attested genesis (anti-squatting).
       // Soft-fail — the append accepts the self-sig alone while the
       // operator flag is default-OFF, so this never blocks signup.
-      const signupGenesisAttest = await mintGenesisAttestation(
-        client,
+      // ADR-0066 section 0.1: this first mint is also what records the
+      // account key at auth.
+      const signupGenesisAttest = await mintGenesisAndRecord(
+        accountIdB64,
         result.session.sessionToken,
         canonical,
       );
@@ -2635,8 +4482,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         );
         // ADR-0036: auth-attested genesis alongside the self-sig
         // (soft-fail — never blocks the guest signup).
-        const guestGenesisAttest = await mintGenesisAttestation(
-          client,
+        const guestGenesisAttest = await mintGenesisAndRecord(
+          accountIdB64,
           result.session.sessionToken,
           canonical,
         );
@@ -2684,7 +4531,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       setRestoreNotice(null);
       const result = await accessByName({
         target,
-        run: (handle) => client.login(handle, utf8(password)),
+        run: (handle) =>
+          client.login(handle, utf8(password), landingDevice({ username: target.username })),
         bind: bindByName,
       });
       const accountIdBytes = result.accountId;
@@ -2896,7 +4744,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       try {
         const result = await accessByName({
           target,
-          run: (handle) => client.recover(handle, seed, utf8(newPassword)),
+          run: (handle) =>
+            client.recover(handle, seed, utf8(newPassword), landingDevice({ accountIdB64 })),
           bind: bindByName,
         });
         if (!bytesEqual(result.accountId, secrets.accountId)) {
@@ -3265,7 +5114,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       let signedIn;
       try {
         // Not `accessByName`: nothing is re-bound.
-        signedIn = await client.login(target.handle.wire, utf8(password));
+        // The pair this yields replaces the session's, so it must name the
+        // same device (ADR-0066 section 0.4).
+        signedIn = await client.login(
+          target.handle.wire,
+          utf8(password),
+          landingDevice({ accountIdB64: account.accountIdB64 }),
+        );
       } catch (err) {
         const failure = proofLoginFailure({
           status: err instanceof AuthHttpError ? err.status : null,
@@ -3287,8 +5142,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       if (account === null) throw new KeyedError("common.error.session_not_ready");
       let assertion;
       try {
+        const deviceIdB64 = landingDevice({ accountIdB64: account.accountIdB64 });
         assertion = await new WebauthnClient().loginWithPasskey({
           accountIdB64: account.accountIdB64,
+          ...(deviceIdB64 !== undefined ? { deviceIdB64 } : {}),
         });
       } catch (err) {
         if (err instanceof WebauthnUserCancelledError) throw new ProofCancelledError();
@@ -3399,110 +5256,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // pair it returns carries none.
       freshGrants.clear();
 
-      // 3. Persist immediately, before any further network call: the new
-      // pair (the old one is superseded by the same transaction), the seed
-      // and the phrase under the device key, and the "publish owed" record
-      // with the attestation. From here on a crash or a failure is a retry
-      // of the publishing steps, never a second reset.
-      installSession(pending.accountIdB64, reset.session);
-      let deviceKey = pending.deviceKey;
-      if (deviceKey === null) {
-        // The ACCESS-only fresh-browser case (no password, hence no OPAQUE
-        // export key): bootstrap a device key from the new seed, as
-        // `provideRecoveryPhrase` / `completeFromDeviceRestore` do. When a
-        // device key IS parked, reuse it: minting a new one would orphan
-        // its wrapped stores.
-        deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
-          accountIdentitySeed,
-          pending.accountIdB64,
-        );
-        try {
-          await putDeviceKey(pending.accountIdB64, deviceKey);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("device-key persist (reset) failed", err);
-        }
-      }
-      try {
-        await putAccountIdentitySeed(pending.accountIdB64, accountIdentitySeed, deviceKey);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("account-identity-seed persist (reset) failed", err);
-      }
-      await persistSessionPair(pending.accountIdB64, reset.session, "reset");
-      // The device holds the new keys, so it holds the new phrase (the local
-      // three-word check, the hand-over to a new device, "Show recovery
-      // phrase"). The signup-phrase marker makes a reload show the words
-      // first, once nothing is owed.
-      await storeDevicePhrase(pending.accountIdB64, phrase, deviceKey, "fresh-identity");
-      markSignupPhraseOwed(plainStorage(), pending.accountIdB64);
-      const record: KeyResetOwed = {
-        v: 1,
-        attestationB64Url: reset.attestationB64Url,
-        keyGeneration: reset.session.keyGeneration.toString(),
-        newSignaturePubkeyB64: base64Encode(newPubkey),
-        signedAtMs: keyResetAttestationSignedAtMs(reset.attestation),
-        done: { directory: false, deviceGroup: false },
-      };
-      writeKeyResetOwed(plainStorage(), pending.accountIdB64, record);
-      // The old DeviceGroup, its registrar state and the chats' routing
-      // belong to the old generation: the re-founding below replaces them.
-      try {
-        await deleteOutboxForAccount(pending.accountIdB64);
-        clearObservationsForAccount(pending.accountIdB64);
-        clearUnappliedForAccount(pending.accountIdB64);
-        clearOwnRequestsForAccount(pending.accountIdB64);
-        clearBeaconObservationsForAccount(pending.accountIdB64);
-        clearLastObservedOwnerForAccount(pending.accountIdB64);
-        clearLeaveRequestedForAccount(pending.accountIdB64);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("clearing the old generation's chat bookkeeping failed", err);
-      }
-      setKeyResetNote(true);
-
-      // Stash the completion context and flip to `save-fresh-phrase`: the
-      // flow is committed past the restore prompt. The words are withheld
-      // while the publish is owed; `confirmFreshPhraseSaved` lands the
-      // session once the person acknowledged them.
-      setPendingFreshPhrase({
-        seed: accountIdentitySeed,
-        accountIdBytes: pending.accountIdBytes,
+      // 3-5. Persist, then publish: the one path a recall shares.
+      await adoptKeyResetOutcome({
         accountIdB64: pending.accountIdB64,
-        session: reset.session,
+        accountIdBytes: pending.accountIdBytes,
         username: pending.username,
+        deviceKey: pending.deviceKey,
+        seed: accountIdentitySeed,
         phrase,
-        deviceKey,
+        newPubkey,
+        reset,
       });
-      setPendingRecovery(null);
-      setState({
-        kind: "save-fresh-phrase",
-        account: {
-          accountId: pending.accountIdB64,
-          username: pending.username,
-        },
-      });
-
-      // 4-5. Publish: the directory (with the attestation), then the
-      // DeviceGroup journal (the attested reset). A failure leaves the
-      // record for "Try again" and the next session start; the screen says
-      // what happened.
-      try {
-        await retryKeyResetPublish(
-          pending.accountIdB64,
-          pending.accountIdBytes,
-          accountIdentitySeed,
-          deviceKey,
-        );
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "publishing the reset keys did not finish; the phrase screen offers a retry",
-          err instanceof Error ? err.name : "unknown",
-        );
-      } finally {
-        setOwedVersion((v) => v + 1);
-      }
       return phrase;
     },
     async confirmFreshPhraseSaved() {
@@ -3590,7 +5354,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       try {
         const result = await accessByName({
           target,
-          run: (handle) => client.recover(handle, seed, utf8(newPassword)),
+          run: (handle) =>
+            client.recover(
+              handle,
+              seed,
+              utf8(newPassword),
+              landingDevice({ username: target.username }),
+            ),
           bind: bindByName,
         });
         const accountIdBytes = result.accountId;
@@ -4016,7 +5786,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const resolvedUsername = target.username;
       const result = await accessByName({
         target,
-        run: (handle) => client.totpRecover(handle, code),
+        run: (handle) =>
+          client.totpRecover(handle, code, landingDevice({ username: target.username })),
         bind: bindByName,
       });
       const accountIdBytes = result.accountId;
@@ -4067,7 +5838,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           target,
           run: async (handle) => {
             try {
-              return await client.recoveryLogin(handle, seed);
+              return await client.recoveryLogin(
+                handle,
+                seed,
+                landingDevice({ accountIdB64: found.accountIdB64 }),
+              );
             } catch (err) {
               // Only the sign-in itself is judged here, never the name
               // lookup before it or the re-bind after it.
@@ -4135,7 +5910,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     },
     publishOwed() {
       const st = state();
-      return st.kind === "session" && isKeyResetOwed(plainStorage(), st.account.accountId);
+      rotationVersion();
+      return (
+        st.kind === "session" &&
+        (isKeyResetOwed(plainStorage(), st.account.accountId) ||
+          rotationWithholdsPhrase(readRotation(plainStorage(), st.account.accountId)))
+      );
     },
     async retryOwedPublish() {
       const st = state();
@@ -4166,6 +5946,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // Drop the in-memory Identity secrets — the user just
       // signed out.
       const cached = loadPersisted();
+      // ADR-0066 section 2.1 (UX 18.2, "Log out"): sign this device's
+      // session out at the server too, so a copy of what it held cannot keep
+      // using the account. Best effort and invisible: the local sign-out
+      // below never waits for it. The marker is set first; when the server
+      // could not be told, the stored pair stays (unusable as a session,
+      // `decideSilentRestore`) for ONE retry at the next launch.
+      const heldPair = sessionTokens.pair();
+      const heldAccount = sessionTokens.accountIdB64();
+      const serverSide: Promise<LogoutAttempt> =
+        heldPair !== null && heldAccount !== null
+          ? (markLogoutOwed(plainStorage(), heldAccount), serverLogout(heldPair))
+          : Promise.resolve("done");
       keyPackageAccount = null;
       setIdentitySecrets(null);
       // ADR-0017: drop any parked recovery / fresh-phrase context so a
@@ -4193,9 +5985,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // key stays in IDB so the next login is still cheap; only
       // the per-session bearer dies. Fire-and-forget — the API
       // contract is sync and the deletion is best-effort.
-      if (cached !== null) {
-        void deleteSessionToken(cached.accountIdB64).catch(() => {
-          /* best-effort */
+      //
+      // ADR-0066: the row is deleted once the server holds the logout; while
+      // that is owed it stays for the one retry, and the marker keeps a
+      // reload from restoring a session out of it.
+      const storedFor = heldAccount ?? cached?.accountIdB64 ?? null;
+      if (storedFor !== null) {
+        void serverSide.then((outcome) => {
+          if (outcome !== "done") return;
+          // Unless a sign-in installed a new session meanwhile (it cleared
+          // the marker and owns the row now).
+          if (!isLogoutOwed(plainStorage(), storedFor) && heldAccount !== null) return;
+          clearLogoutOwed(plainStorage(), storedFor);
+          void deleteSessionToken(storedFor).catch(() => {
+            /* best-effort */
+          });
         });
       }
       // 1.20b: drop the push registration too. Logout intent is
@@ -4250,6 +6054,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           }
         }
       }
+      // ADR-0066 section 2.1: the session is signed out at the server too,
+      // so a copy of the credentials this device held stops working. Best
+      // effort, once: the wipe below leaves nothing to retry it with. (The
+      // row delete above tombstoned this device's id; the wipe removes the
+      // device seed, so the next setup on this browser mints a new one.)
+      void serverLogout(sessionTokens.pair());
       // The device-key-wrapped phrase cache is wiped below, so an owed phrase
       // can no longer be shown on this device; drop the in-memory copy (the
       // stored marker goes with the wipe).
@@ -4462,41 +6272,6 @@ async function mintLeafGenesisAuth(
   return Uint8Array.from(
     wasm.signLeafGenesis(identity.ed25519Seed, usernameHash),
   );
-}
-
-/**
- * ADR-0036 (G-30 finding 2): mint the AUTH-attested genesis attestation
- * — the anti-squatting proof that only the OPAQUE-authenticated account
- * could have published this genesis key.
- *
- * Where `mintLeafGenesisAuth` self-signs the binding with the leaf's own
- * key (honest TOFU that only DETECTS squatting), this asks the auth
- * service — bound to the live `sessionToken`, which is proof the caller
- * OPAQUE-authenticated as `account_id` — to sign a
- * `(account_id, username_hash, pubkey, expiry)` binding, so a squatter
- * who cannot authenticate as the victim can never obtain one. It rides
- * alongside the self-signature on the same genesis publish.
- *
- * SOFT-FAIL by design (unlike `mintLeafGenesisAuth`, which is fail-loud):
- * per ADR-0036 the transparency append still accepts the genesis leaf on
- * the self-signature alone while the operator-side
- * `LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST` flag is default-OFF, so a
- * mint failure must NOT block signup. We log and return `undefined` — the
- * attestation is attached only when successfully minted. The flag flips on
- * once all three clients mint (ADR-0036 §"Consequences").
- */
-async function mintGenesisAttestation(
-  client: AuthClient,
-  sessionToken: string,
-  identity: WasmIdentity,
-): Promise<Uint8Array | undefined> {
-  try {
-    return await client.genesisAttest(sessionToken, identity.signaturePublicKey);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("genesis-attest mint failed — publishing on self-sig alone", err);
-    return undefined;
-  }
 }
 
 /**

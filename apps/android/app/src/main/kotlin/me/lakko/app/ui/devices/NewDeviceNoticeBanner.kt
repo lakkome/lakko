@@ -159,3 +159,65 @@ public fun RemovedNewDeviceLine(
 internal fun formatJoinTime(atMs: Long, language: String): String =
     DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.forLanguageTag(language))
         .format(Date(atMs))
+
+/**
+ * `docs/ux/identity-recovery.md` 18.3 - on a KEPT device after "remove and
+ * change keys" ran on another one: while this device is fetching the new
+ * keys, the one line `Updating keys...`; afterwards the dismissible notice
+ * with `Show new phrase`, which opens Settings > Security > Recovery (that
+ * screen asks for the password or the screen lock as it always does).
+ *
+ * Never a full-screen state and never a modal. Rendered above the chat list;
+ * the app as the person left it stays underneath, with every chat.
+ */
+@Composable
+public fun KeysRotatedNotice(
+    repository: me.lakko.app.auth.AuthRepository,
+    onShowPhrase: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val updating by repository.keysUpdating.collectAsStateWithLifecycle()
+    val rotated by repository.keysRotatedNotice.collectAsStateWithLifecycle()
+    if (updating) {
+        Text(
+            t("devices.rotated.updating"),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = modifier
+                .padding(horizontal = 16.dp, vertical = 4.dp)
+                .semantics { liveRegion = LiveRegionMode.Polite },
+        )
+        return
+    }
+    if (!rotated) return
+    val notice = t("devices.rotated.notice")
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(8.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                notice,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Button(
+                    onClick = onShowPhrase,
+                    modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
+                ) { Text(t("devices.rotated.show_phrase")) }
+                TextButton(
+                    onClick = { repository.dismissKeysRotatedNotice() },
+                    modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
+                ) { Text(t("common.dismiss")) }
+            }
+        }
+    }
+}

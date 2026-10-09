@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import me.lakko.app.backup.DevicePhrase
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.push.PushSubscriber
@@ -96,6 +98,9 @@ public class AuthRepository(
     private val discoveryClientFactory: () -> DiscoveryClient = { DiscoveryClient() },
     /** ADR-0054 S5 - username to login handle (the native core). */
     private val loginHandleSource: LoginHandleSource = UniffiLoginHandleSource,
+    /** ADR-0066 - this device's id for an account (its conversation leaf
+     *  signature key); the native core derives it from the device seed. */
+    private val deviceIds: DeviceIdSource = OnDeviceIdSource(applicationContext),
 ) {
     /** 1.20d — dedicated scope for fire-and-forget push
      *  subscribe / unsubscribe coroutines. `SupervisorJob` so
@@ -143,6 +148,29 @@ public class AuthRepository(
         MutableStateFlow(null)
 
     public val keyResetSignOut: StateFlow<KeyResetSignOut?> = mutableKeyResetSignOut.asStateFlow()
+
+    private val recallStore: RecallRecordStore by lazy { RecallRecordStore.onDevice(applicationContext) }
+
+    /**
+     * Non-null while this device holds a recall record: the account's keys
+     * were reset elsewhere, the account's data is already deleted here, and
+     * the app root shows "Was it you?" (UX 18.4) instead of the app, in
+     * every auth state and after a restart (it is loaded from the record at
+     * launch, [rehydrate]).
+     */
+    private val mutableRecall: MutableStateFlow<RecallUi?> = MutableStateFlow(null)
+
+    public val recall: StateFlow<RecallUi?> = mutableRecall.asStateFlow()
+
+    /** `true` for the rest of the session that took the account back: one
+     *  line at the top of the chat list (`devices.recall.done`). Memory only. */
+    private val mutableRecallDone: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    public val recallDone: StateFlow<Boolean> = mutableRecallDone.asStateFlow()
+
+    public fun dismissRecallDone() {
+        mutableRecallDone.value = false
+    }
 
     /**
      * ADR-0065 section 3.3 — the one token provider every request of this
@@ -256,8 +284,41 @@ public class AuthRepository(
      *  publish of a reset's new keys ([RecoveryOwedStore]). */
     private val owedStore: RecoveryOwedStore by lazy { RecoveryOwedStore.onDevice(applicationContext) }
 
+    // ADR-0066 - declared ahead of `init`, which starts the restore that reads them.
+    private val genesisRecorded: GenesisRecordedStore by lazy { GenesisRecordedStore.onDevice(applicationContext) }
+
+    private val logoutOwedStore: LogoutOwedStore by lazy { LogoutOwedStore.onDevice(applicationContext) }
+
+    /** One bind / mint at a time: two landings must not race each other's pair. */
+    private val sessionDutyMutex: Mutex = Mutex()
+
+    /**
+     * Bumped each time a session that was already installed got bound to
+     * this device in the background (a restored session, or a landing whose
+     * bind could not be made at once). The KeyPackage publish of an unbound
+     * session is refused (`403 device-mismatch`), so the app root republishes
+     * when this moves.
+     */
+    private val mutableDeviceBoundRevision: MutableStateFlow<Int> = MutableStateFlow(0)
+
+    public val deviceBoundRevision: StateFlow<Int> = mutableDeviceBoundRevision.asStateFlow()
+
     /** ADR-0065: the attestation and step markers of a reset whose publish is
      *  still owed. */
+    /** ADR-0066 T5 item 25 - a `recall/finish` that was sent and not
+     *  answered, with the phrase it would make the account's. Memory only:
+     *  a process death loses it, and the person then opens another attempt. */
+    private class PendingRecallFinish(
+        val accountIdB64: String,
+        val request: RecallFinishRequest,
+        val firstSentAtMs: Long,
+        val seed: ByteArray,
+        val phrase: String,
+        val newSignaturePubkey: ByteArray,
+    )
+
+    private val pendingRecallFinish = java.util.concurrent.atomic.AtomicReference<PendingRecallFinish?>(null)
+
     private val keyResetOwedStore: KeyResetOwedStore by lazy { KeyResetOwedStore.onDevice(applicationContext) }
 
     /** When the person last signed in on this device, per account, this
@@ -363,7 +424,11 @@ public class AuthRepository(
         // the state flips. `AppRoot` renders its loading screen meanwhile.
         // ADR-0065 - the transport reads this provider on every bearer request.
         SessionTokens.provider = sessionTokenProvider
-        restoreScope.launch { rehydrate() }
+        restoreScope.launch {
+            rehydrate()
+            // ADR-0066 - a logout made offline is told to the server now.
+            retryOwedLogouts()
+        }
         // ADR-0054 S5 - every landed session whose username this device knows
         // binds its login handle (restore, passkey, pairing, another-device
         // confirmation, ...), not only signup and sign-in by name; otherwise
@@ -412,6 +477,10 @@ public class AuthRepository(
      * signed in.
      */
     private fun rehydrate() {
+        // ADR-0066 - a device that was mid-"Was it you?" comes back to it.
+        // The staged wipe left no session, so the decision below lands Anon
+        // underneath; the app root draws the recall screen over it.
+        restoreRecallAtLaunch()
         val decision = decideSessionRestore(
             source = productionRestoreSource(),
             nowMs = System.currentTimeMillis(),
@@ -524,6 +593,10 @@ public class AuthRepository(
      * sign-in screen with nothing wiped ([onRefreshInvalid]).
      */
     private fun installSessionPair(accountIdB64: String, pair: SessionPair) {
+        // ADR-0066 - a logout of an EARLIER session of this account that the
+        // server was not told about must not be replayed now: its floor
+        // would refuse the session that is landing.
+        logoutOwedStore.clear(accountIdB64)
         sessionTokenProvider.install(
             pair = pair,
             persist = { refreshed ->
@@ -539,6 +612,7 @@ public class AuthRepository(
             onRefusal = { refusal ->
                 when (refusal) {
                     SessionRefusal.KeysReset -> onKeysSuperseded(accountIdB64)
+                    SessionRefusal.DeviceRevoked -> onDeviceRevoked(accountIdB64)
                     SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized -> onRefreshInvalid(accountIdB64)
                 }
             },
@@ -552,6 +626,7 @@ public class AuthRepository(
      * session lands.
      */
     private fun installPendingSessionPair(accountIdB64: String, pair: SessionPair) {
+        logoutOwedStore.clear(accountIdB64)
         sessionTokenProvider.install(
             pair = pair,
             persist = { refreshed ->
@@ -564,6 +639,7 @@ public class AuthRepository(
             onRefusal = { refusal ->
                 when (refusal) {
                     SessionRefusal.KeysReset -> onKeysSuperseded(accountIdB64)
+                    SessionRefusal.DeviceRevoked -> onDeviceRevoked(accountIdB64)
                     SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized -> onRefreshInvalid(accountIdB64)
                 }
             },
@@ -589,8 +665,293 @@ public class AuthRepository(
         // Before the secrets (and so before the state flip): a phrase that is
         // still owed must be up by the time the session renders.
         restoreOwedPhrase(accountIdB64)
+        restoreKeysRotatedNotice(accountIdB64)
         mutableIdentitySecrets.value = secrets
         settleOwedPublish(accountIdB64, secrets.accountId, secrets.accountIdentitySeed)
+        runSessionDuties(secrets)
+        // ADR-0066 section 3.3 - a pending key rotation whose key the
+        // directory already serves is adopted at the landing.
+        pushScope.launch {
+            try {
+                checkPendingRotations()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                Log.w("lakko-auth", "pending key rotation not checked: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0066: the session names this device; auth records the account key
+    // -----------------------------------------------------------------
+
+    /** What a landing sends as `device_id_b64` when it expects to land
+     *  [candidateAccountIdB64]; `null` (send nothing, bind afterwards) when
+     *  the account is not known before the request. */
+    private fun landingDeviceId(candidateAccountIdB64: String?): ByteArray? =
+        when (val landing = landingDeviceFor(candidateAccountIdB64) { deviceIds.deviceIdFor(it) }) {
+            is LandingDevice.Named -> landing.deviceId
+            LandingDevice.BindAfter -> null
+        }
+
+    /** The account a sign-in by [typedUsername] is expected to land: the
+     *  one this device holds a session record for under that name. */
+    private fun candidateAccount(typedUsername: String): String? =
+        candidateAccountForName(typedUsername, sessionStore.load())
+
+    /**
+     * The pair to install for a session that just landed as [accountIdB64]:
+     * [pair] itself when it already names this device, else the pair
+     * `bind-device` returns (the unbound one is dropped). A bind that cannot
+     * be made now (offline, a limit) leaves the session unbound and
+     * [runSessionDuties] tries again; nothing here fails a sign-in for that.
+     *
+     * A session that names ANOTHER device id cannot be used by this device
+     * (it cannot publish its KeyPackage and cannot be re-bound): it is ended
+     * at the server, the stale session record that caused the wrong guess
+     * is dropped, and the sign-in is refused so the next one lands cleanly.
+     */
+    private suspend fun boundSession(accountIdB64: String, pair: SessionPair): SessionPair {
+        val deviceId = deviceIds.deviceIdFor(accountIdB64) ?: return pair
+        return when (deviceBindingActionFor(pair.accessToken, deviceId)) {
+            DeviceBindingAction.Bound, DeviceBindingAction.Unknown -> pair
+            DeviceBindingAction.Bind -> when (val outcome = bindDevice(pair, deviceId)) {
+                is BindDeviceOutcome.Bound -> outcome.pair
+                BindDeviceOutcome.AlreadyBoundElsewhere -> refuseForeignLanding(accountIdB64, pair)
+                BindDeviceOutcome.Revoked, BindDeviceOutcome.Superseded -> pair
+                is BindDeviceOutcome.Retry -> {
+                    Log.w("lakko-auth", "the session is not bound to this device yet: ${outcome.cause.javaClass.simpleName}")
+                    pair
+                }
+            }
+            DeviceBindingAction.Foreign -> refuseForeignLanding(accountIdB64, pair)
+        }
+    }
+
+    private suspend fun bindDevice(pair: SessionPair, deviceId: ByteArray): BindDeviceOutcome {
+        var bound: SessionPair? = null
+        val error = try {
+            bound = authClientFactory().use { it.bindDevice(pair.accessToken, deviceId, pair.refreshToken) }
+            null
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            cause
+        }
+        return bindDeviceOutcome(bound, error)
+    }
+
+    private suspend fun refuseForeignLanding(accountIdB64: String, pair: SessionPair): Nothing {
+        Log.w("lakko-auth", "the landed session names another device id; ending it and asking for a new sign-in")
+        try {
+            authClientFactory().use { it.sessionLogout(pair.accessToken) }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            // Best effort: the credentials are dropped here either way.
+        }
+        // The record that named another account under this name is what
+        // made the landing send the wrong id; without it the next sign-in
+        // binds after its answer.
+        if (sessionStore.load()?.accountIdB64 != accountIdB64) sessionStore.clear()
+        throw AuthClientArgError(
+            "the session names another device id",
+            me.lakko.app.l10n.UiText("common.error.session_ended"),
+        )
+    }
+
+    private suspend fun LoginResult.bound(): LoginResult =
+        copy(session = boundSession(base64Encode(accountId), session))
+
+    private suspend fun RecoverResult.bound(): RecoverResult =
+        copy(session = boundSession(base64Encode(accountId), session))
+
+    private suspend fun TotpRecoverResult.bound(): TotpRecoverResult =
+        copy(session = boundSession(base64Encode(accountId), session))
+
+    /**
+     * The duties of a session that is live with the account's keys, run in
+     * the background after every landing and every restore:
+     *
+     *   1. bind the session to this device when it is not (a session
+     *      restored from before the bind, or a bind that failed at the
+     *      landing);
+     *   2. have auth record the account's identity key
+     *      (`POST /auth/genesis/attest`), until that succeeded once for the
+     *      key this device holds - again after a key reset, for the new key.
+     *
+     * Best effort: every failure is retried at the next landing.
+     */
+    private fun runSessionDuties(secrets: IdentitySecrets) {
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val seed = secrets.accountIdentitySeed.copyOf()
+        pushScope.launch {
+            try {
+                sessionDutyMutex.withLock {
+                    bindInstalledSession(accountIdB64)
+                    recordIdentityKey(accountIdB64, seed)
+                }
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "session duties failed: ${cause.javaClass.simpleName}")
+            } finally {
+                seed.fill(0)
+            }
+        }
+    }
+
+    /** Whether the live secrets are [accountIdB64]'s. (Not the auth state:
+     *  a landing publishes its secrets a moment before the state flips.) */
+    private fun secretsAreFor(accountIdB64: String): Boolean =
+        mutableIdentitySecrets.value?.let { base64Encode(it.accountId) == accountIdB64 } == true
+
+    private suspend fun bindInstalledSession(accountIdB64: String) {
+        if (!secretsAreFor(accountIdB64)) return
+        val installed = sessionTokenProvider.peek() ?: return
+        val deviceId = deviceIds.deviceIdFor(accountIdB64) ?: return
+        when (deviceBindingActionFor(installed.accessToken, deviceId)) {
+            DeviceBindingAction.Bound, DeviceBindingAction.Unknown -> return
+            DeviceBindingAction.Foreign -> {
+                Log.w("lakko-auth", "the installed session names another device id: signing out (nothing wiped)")
+                logout()
+                return
+            }
+            DeviceBindingAction.Bind -> Unit
+        }
+        // A fresh access token first, then the pair it belongs to: the bind
+        // wants the bearer and the refresh credential of ONE session.
+        sessionTokenProvider.current() ?: return
+        val pair = sessionTokenProvider.peek() ?: return
+        when (val outcome = bindDevice(pair, deviceId)) {
+            is BindDeviceOutcome.Bound -> {
+                if (!secretsAreFor(accountIdB64)) return
+                sessionTokenProvider.adopt(outcome.pair)
+                mutableDeviceBoundRevision.value += 1
+            }
+            BindDeviceOutcome.AlreadyBoundElsewhere -> {
+                Log.w("lakko-auth", "the session is bound to another device id: signing out (nothing wiped)")
+                logout()
+            }
+            BindDeviceOutcome.Revoked -> onDeviceRevoked(accountIdB64)
+            BindDeviceOutcome.Superseded -> onKeysSuperseded(accountIdB64)
+            is BindDeviceOutcome.Retry ->
+                Log.w("lakko-auth", "bind-device not made: ${outcome.cause.javaClass.simpleName}")
+        }
+    }
+
+    private suspend fun recordIdentityKey(accountIdB64: String, accountIdentitySeed: ByteArray) {
+        if (!secretsAreFor(accountIdB64)) return
+        val pubkey = Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
+        val pubkeyB64 = base64Encode(pubkey)
+        if (!genesisMintNeeded(genesisRecorded.recordedPubkeyB64(accountIdB64), pubkeyB64)) return
+        val token = sessionTokenProvider.current() ?: return
+        val error = try {
+            authClientFactory().use { it.genesisAttest(token, pubkey) }
+            null
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            cause
+        }
+        when (genesisMintOutcome(error)) {
+            GenesisMintOutcome.Recorded -> genesisRecorded.markRecorded(accountIdB64, pubkeyB64)
+            GenesisMintOutcome.Mismatch ->
+                Log.w("lakko-auth", "auth holds another identity key for this account; not recorded")
+            GenesisMintOutcome.Retry ->
+                Log.w("lakko-auth", "identity key not recorded at auth yet: ${error?.javaClass?.simpleName}")
+        }
+    }
+
+    /**
+     * Whether auth is known to hold this account's identity key (the mint
+     * succeeded once for the key this device holds). Device removal needs
+     * it: without a recorded key the server answers `account-key-required`.
+     */
+    public fun identityKeyRecorded(): Boolean {
+        val secrets = mutableIdentitySecrets.value ?: return false
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val recorded = genesisRecorded.recordedPubkeyB64(accountIdB64) ?: return false
+        return try {
+            Identity.fromSeed(secrets.accountIdentitySeed).use { base64Encode(it.signaturePublicKey()) } == recorded
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /** Run the identity-key mint now (the Devices screen, before a removal
+     *  on an account whose key is not recorded yet). */
+    public suspend fun ensureIdentityKeyRecorded(): Boolean {
+        val secrets = mutableIdentitySecrets.value ?: return false
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val seed = secrets.accountIdentitySeed.copyOf()
+        try {
+            sessionDutyMutex.withLock { recordIdentityKey(accountIdB64, seed) }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            // Read back below.
+        } finally {
+            seed.fill(0)
+        }
+        return identityKeyRecorded()
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0066 section 2: logout tells the server
+    // -----------------------------------------------------------------
+
+    /**
+     * `POST /auth/session/logout` for the session that just ended on this
+     * device, best effort: the pair is put aside durably first (when
+     * [keepForRetry]), the call is made in the background, and a call that
+     * found no connection is made once more at the next launch
+     * ([retryOwedLogouts]). The local sign-out never waits for it.
+     */
+    private fun tellServerLoggedOut(accountIdB64: String, pair: SessionPair, keepForRetry: Boolean) {
+        val owed = LogoutOwed(
+            accessToken = pair.accessToken,
+            accessExpiresAtMs = pair.accessExpiresAtMs,
+            refreshToken = pair.refreshToken,
+            refreshExpiresAtMs = pair.refreshExpiresAtMs,
+        )
+        if (keepForRetry) logoutOwedStore.save(accountIdB64, owed)
+        pushScope.launch { attemptServerLogout(accountIdB64, owed, isRetry = !keepForRetry) }
+    }
+
+    private suspend fun attemptServerLogout(accountIdB64: String, owed: LogoutOwed, isRetry: Boolean) {
+        try {
+            authClientFactory().use { client ->
+                when (logoutRetryStep(owed, System.currentTimeMillis())) {
+                    LogoutRetryStep.Drop -> Unit
+                    LogoutRetryStep.Logout -> client.sessionLogout(owed.accessToken)
+                    LogoutRetryStep.RefreshThenLogout ->
+                        client.sessionLogout(client.sessionRefresh(owed.refreshToken).accessToken)
+                }
+            }
+            logoutOwedStore.clear(accountIdB64)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "server logout not confirmed: ${cause.javaClass.simpleName}")
+            if (!keepLogoutOwed(cause, isRetry)) logoutOwedStore.clear(accountIdB64)
+        }
+    }
+
+    /** The one retry of a logout made offline, at launch. Never for an
+     *  account that is signed in again: the floor a late logout writes
+     *  would refuse the session that is live now. */
+    private suspend fun retryOwedLogouts() {
+        for (accountIdB64 in logoutOwedStore.accounts()) {
+            val owed = logoutOwedStore.load(accountIdB64)
+            if (owed == null || signedInAccountIdB64() == accountIdB64 ||
+                pendingRecovery.get()?.accountIdB64 == accountIdB64
+            ) {
+                logoutOwedStore.clear(accountIdB64)
+                continue
+            }
+            attemptServerLogout(accountIdB64, owed, isRetry = true)
+        }
     }
 
     /**
@@ -725,6 +1086,7 @@ public class AuthRepository(
                     accountIdB64 = accountIdB64,
                     accountIdentitySeed = accountIdentitySeed,
                     attestationB64 = owed.attestationB64,
+                    keyGeneration = owed.keyGeneration,
                 )
                 KeyResetStep.Done -> KeyResetStepOutcome.Landed
             }
@@ -757,7 +1119,9 @@ public class AuthRepository(
      */
     public fun publishOwed(): Boolean {
         val accountIdB64 = signedInAccountIdB64() ?: return false
-        return owedStore.isPublishOwed(accountIdB64)
+        // ADR-0066 part 3: and while a rotation this device ran has not
+        // published the new keys yet (the same rule, UX 18.1).
+        return owedStore.isPublishOwed(accountIdB64) || rotationPublishOwed(accountIdB64)
     }
 
     /**
@@ -826,7 +1190,15 @@ public class AuthRepository(
             throw AuthClientArgError("username must be non-empty")
         }
         return authClientFactory().use { client ->
-            val result = client.signup(password, enrolRecovery = true, onProofSolved = onProofSolved)
+            val result = client.signup(
+                password,
+                enrolRecovery = true,
+                onProofSolved = onProofSolved,
+                // ADR-0066 - the session names this device from its first
+                // credential (the device seed for the new account is minted
+                // here; the ensure further down finds it).
+                deviceIdFor = { accountId -> landingDeviceId(base64Encode(accountId)) },
+            )
             try {
                 val accountIdB64 = base64Encode(result.accountId)
                 // UX section 17 - the sign-up is a fresh-auth proof (so the
@@ -1046,7 +1418,12 @@ public class AuthRepository(
         val randomPassword = ByteArray(32).also { SecureRandom().nextBytes(it) }
         return authClientFactory().use { client ->
             // Same PoW-gated OPAQUE registration signup uses — no bypass.
-            val result = client.signup(randomPassword, enrolRecovery = true, onProofSolved = onProofSolved)
+            val result = client.signup(
+                randomPassword,
+                enrolRecovery = true,
+                onProofSolved = onProofSolved,
+                deviceIdFor = { accountId -> landingDeviceId(base64Encode(accountId)) },
+            )
             try {
                 val accountIdB64 = base64Encode(result.accountId)
                 freshAuth.put(
@@ -1198,7 +1575,10 @@ public class AuthRepository(
                 cached = null,
                 typed = trimmed,
                 source = loginHandleSource,
-                call = { client.login(it.handle, password) },
+                // ADR-0066 - name this device at the landing when the device
+                // already knows the account behind the typed name; else bind
+                // right after the answer.
+                call = { client.login(it.handle, password, landingDeviceId(candidateAccount(trimmed))).bound() },
                 sessionTokenOf = { it.sessionToken },
                 rebind = ::rebindLoginHandleInBackground,
             )
@@ -1449,7 +1829,10 @@ public class AuthRepository(
             authClientFactory().use { client ->
                 val result = signInByName(
                     named = named,
-                    call = { client.recover(it.handle, seed, newPassword) },
+                    call = {
+                        client.recover(it.handle, seed, newPassword, landingDeviceId(candidateAccount(named.username)))
+                            .bound()
+                    },
                     sessionTokenOf = { it.sessionToken },
                     rebind = ::rebindLoginHandleInBackground,
                 )
@@ -1765,7 +2148,7 @@ public class AuthRepository(
                 cached = null,
                 typed = trimmed,
                 source = loginHandleSource,
-                call = { client.totpRecover(it.handle, code) },
+                call = { client.totpRecover(it.handle, code, landingDeviceId(candidateAccount(trimmed))).bound() },
                 sessionTokenOf = { it.sessionToken },
                 rebind = ::rebindLoginHandleInBackground,
             )
@@ -1904,7 +2287,9 @@ public class AuthRepository(
                     source = loginHandleSource,
                     call = { named ->
                         try {
-                            client.recoveryLogin(named.handle, seed)
+                            // This device holds the account (its phrase): the
+                            // id is known before the request.
+                            client.recoveryLogin(named.handle, seed, landingDeviceId(found.accountIdB64)).bound()
                         } catch (cause: Throwable) {
                             if (cause is kotlinx.coroutines.CancellationException) throw cause
                             throw afterRefusedRecoveryLogin(found.accountIdB64, cause)
@@ -1999,7 +2384,10 @@ public class AuthRepository(
         val named = resolveNamedSignIn(null, session.account.username, loginHandleSource)
         return try {
             // Nothing is re-bound and the session this yields is installed nowhere.
-            val result = authClientFactory().use { it.login(named.handle, password) }
+            // It still names this device, so it stays revocable with it.
+            val result = authClientFactory().use {
+                it.login(named.handle, password, landingDeviceId(session.account.accountIdB64))
+            }
             try {
                 base64Encode(result.accountId) == session.account.accountIdB64
             } finally {
@@ -2071,7 +2459,9 @@ public class AuthRepository(
             val result = authClientFactory().use { client ->
                 signInByName(
                     named = named,
-                    call = { client.recover(it.handle, seed, newPassword) },
+                    call = {
+                        client.recover(it.handle, seed, newPassword, landingDeviceId(session.account.accountIdB64))
+                    },
                     sessionTokenOf = { it.sessionToken },
                     rebind = ::rebindLoginHandleInBackground,
                 )
@@ -2541,9 +2931,46 @@ public class AuthRepository(
         // A key reset spends every proof of the old generation, and the pair
         // it returns carries none.
         freshAuth.clear()
+        landKeyReset(
+            accountIdB64 = pending.accountIdB64,
+            accountIdBytes = pending.accountIdBytes,
+            username = pending.username,
+            seed = seed,
+            phrase = phrase,
+            newSignaturePubkey = newSignaturePubkey,
+            reset = reset,
+            context = "mintFreshIdentity",
+        )
+        return phrase
+    }
 
+    /**
+     * Everything a key reset does on this device AFTER its server step
+     * answered (ADR-0065 section 2.3 steps 3 to 6): the point of no return.
+     * Shared by [mintFreshIdentity] (`reset/finish`) and by the recall
+     * ([recallSubmit], `recall/finish`, ADR-0066 section 1.2: "from the
+     * reset's client order onward the recall IS a reset"), so there is one
+     * such path.
+     *
+     * Persists the new pair, seed, phrase, attestation and the publish-owed
+     * marker before any further network call; drops the DeviceGroup and the
+     * device binding of the old key; runs the attested publish (each step
+     * recorded, retried from the owed record with the SAME attestation);
+     * parks the phrase and flips to [AuthState.SaveFreshPhrase]. The words
+     * are shown only once the publish landed. [seed] is owned by the parked
+     * phrase from here on.
+     */
+    private suspend fun landKeyReset(
+        accountIdB64: String,
+        accountIdBytes: ByteArray,
+        username: String,
+        seed: ByteArray,
+        phrase: String,
+        newSignaturePubkey: ByteArray,
+        reset: KeyResetResult,
+        context: String,
+    ) {
         // ---- the point of no return: persist before any further network call
-        val accountIdB64 = pending.accountIdB64
         // The caller's old pair is superseded with everyone else's; install
         // the new one before the next request goes out.
         persistSessionPairBestEffort(accountIdB64, reset.session)
@@ -2551,7 +2978,7 @@ public class AuthRepository(
         bootstrapDeviceKeyFromSeedBestEffort(
             accountIdB64 = accountIdB64,
             accountIdentitySeed = seed,
-            context = "mintFreshIdentity",
+            context = context,
         )
         try {
             AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, seed)
@@ -2597,7 +3024,7 @@ public class AuthRepository(
         // ---- the publish, with the attestation; each step recorded.
         var publishOwed = true
         try {
-            runOwedPublish(accountIdB64, pending.accountIdBytes, seed)
+            runOwedPublish(accountIdB64, accountIdBytes, seed)
             publishOwed = owedStore.isPublishOwed(accountIdB64)
         } catch (cause: Throwable) {
             if (cause is kotlinx.coroutines.CancellationException) throw cause
@@ -2614,10 +3041,10 @@ public class AuthRepository(
         pendingFreshPhrase.set(
             PendingFreshPhrase(
                 seed = seed,
-                accountIdBytes = pending.accountIdBytes,
+                accountIdBytes = accountIdBytes,
                 accountIdB64 = accountIdB64,
                 session = reset.session,
-                username = pending.username,
+                username = username,
                 phrase = phrase,
                 publishOwed = publishOwed,
             ),
@@ -2627,10 +3054,9 @@ public class AuthRepository(
         mutableState.value = AuthState.SaveFreshPhrase(
             account = SessionAccount(
                 accountIdB64 = accountIdB64,
-                username = pending.username,
+                username = username,
             ),
         )
-        return phrase
     }
 
     // -----------------------------------------------------------------
@@ -2727,7 +3153,9 @@ public class AuthRepository(
         val parked = pendingRecovery.get()
         val named = resolveNamedSignIn(null, proofSignInName(target.username, typedUsername), loginHandleSource)
         val result = try {
-            authClientFactory().use { it.login(named.handle, password) }
+            // The proof's sign-in replaces the session pair, so it must name
+            // this device like the pair it replaces.
+            authClientFactory().use { it.login(named.handle, password, landingDeviceId(target.accountIdB64)) }
         } catch (cause: FfiException) {
             // The OPAQUE finish refused the server's answer on this device:
             // the password does not open the envelope.
@@ -2974,6 +3402,7 @@ public class AuthRepository(
         accountIdB64: String,
         accountIdentitySeed: ByteArray,
         attestationB64: String,
+        keyGeneration: Long,
     ): KeyResetStepOutcome =
         try {
             me.lakko.app.ds.DsClient().use { ds ->
@@ -2983,6 +3412,7 @@ public class AuthRepository(
                     accountIdB64 = accountIdB64,
                     accountIdentitySeed = accountIdentitySeed,
                     attestationB64 = attestationB64,
+                    keyGeneration = keyGeneration,
                     ds = ds,
                 )
             }
@@ -3084,6 +3514,9 @@ public class AuthRepository(
         accountIdentitySeed: ByteArray,
     ) {
         if (owedStore.isPublishOwed(accountIdB64)) return
+        // A rotation this device runs publishes the identity itself, with
+        // the proof and the attestation.
+        if (rotationOwedStore.load(accountIdB64)?.let { it.commitSent || it.committed } == true) return
         val accountId = accountIdBytes.copyOf()
         val seed = accountIdentitySeed.copyOf()
         pushScope.launch {
@@ -3125,6 +3558,9 @@ public class AuthRepository(
                 if (mutableKeyResetSignOut.value != null) return@launch
                 if (mutableIdentitySecrets.value?.accountId?.contentEquals(accountId) != true) return@launch
                 if (owedStore.isPublishOwed(accountIdB64)) return@launch
+                if (rotationOwedStore.load(accountIdB64)?.let { it.commitSent || it.committed } == true) {
+                    return@launch
+                }
                 publishIdentityFor(
                     landing = IdentityLanding.SESSION_RESTORE,
                     accountIdB64 = accountIdB64,
@@ -3174,6 +3610,7 @@ public class AuthRepository(
                     override val signaturePubkey: ByteArray = identity.signaturePublicKey()
                     override val x25519Pubkey: ByteArray = identity.x25519PublicKey()
                     override val ownKeyGeneration: Long = pair.keyGeneration
+                    override val ownPredecessors: List<ByteArray> = ownPredecessorKeys(accountIdB64)
 
                     override suspend fun fetchPublished(): PublishedIdentityKeys? =
                         discovery.identityFetch(accountId)?.let {
@@ -3196,7 +3633,11 @@ public class AuthRepository(
                             null
                         }
                         val genesisAttest = if (withGenesisAuth) {
-                            mintGenesisAttestBestEffort(sessionToken, signaturePubkey)
+                            mintGenesisAttestBestEffort(sessionToken, signaturePubkey)?.also {
+                                // ADR-0066 - auth signed this key, so it is
+                                // the recorded one.
+                                genesisRecorded.markRecorded(accountIdB64, base64Encode(signaturePubkey))
+                            }
                         } else {
                             null
                         }
@@ -3217,7 +3658,7 @@ public class AuthRepository(
                         when (verdict) {
                             LandingVerdict.StaleKeys -> onKeysSuperseded(accountIdB64)
                             LandingVerdict.KeyMismatch -> onPublishedKeyMismatch(accountIdB64)
-                            is LandingVerdict.Proceed -> Unit
+                            is LandingVerdict.Proceed, LandingVerdict.OwnPredecessorPublished -> Unit
                         }
                     }
                 }
@@ -3393,6 +3834,10 @@ public class AuthRepository(
             phraseEntropy.fill(0)
             throw AuthClientArgError("no pending identity recovery — sign in first")
         }
+        // ADR-0066 - the grant redeem named no device (it learned its account
+        // from the answer): bind before the pair is used.
+        @Suppress("NAME_SHADOWING")
+        val session = session?.let { boundSession(pending.accountIdB64, it) }
         // Nothing is written before the check below.
         val keys = keysFromTransferredEntropy(phraseEntropy)
         val phraseSeed = keys.seed
@@ -3508,6 +3953,9 @@ public class AuthRepository(
         persistJoin: suspend () -> Unit = {},
         forgotPassword: Boolean = false,
     ) {
+        // ADR-0066 - the grant redeem named no device: bind before use.
+        @Suppress("NAME_SHADOWING")
+        val session = boundSession(accountIdB64, session)
         // Nothing is written before the gates of [runCheckedDeviceRestore].
         val keys = keysFromTransferredEntropy(phraseEntropy)
         val phraseSeed = keys.seed
@@ -3833,7 +4281,17 @@ public class AuthRepository(
         accountIdB64Url: String?,
     ): PasskeyLoginResult {
         val assertion = try {
-            WebauthnClient().use { it.loginWithPasskey(activityContext, accountIdB64 = accountIdB64Url) }
+            WebauthnClient().use {
+                it.loginWithPasskey(
+                    activityContext,
+                    accountIdB64 = accountIdB64Url,
+                    // ADR-0066 - the account is known only when the ceremony
+                    // was limited to it; a discoverable sign-in binds after.
+                    deviceIdB64Url = accountIdB64Url
+                        ?.let { url -> landingDeviceId(base64Encode(base64UrlDecodeNoPad(url))) }
+                        ?.let(::base64UrlEncodeNoPad),
+                )
+            }
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (_: WebauthnUserCancelledError) {
@@ -3841,7 +4299,16 @@ public class AuthRepository(
         } catch (cause: Throwable) {
             throw AuthClientArgError("passkey sign-in failed: ${cause.javaClass.simpleName}", passkeyFailureText(cause))
         }
-        return assertion ?: throw PasskeyCancelled()
+        val landed = assertion ?: throw PasskeyCancelled()
+        // ADR-0066 - a discoverable sign-in learns its account here: bind
+        // the session to this device before anything uses it.
+        val accountIdB64 = try {
+            base64Encode(accountIdOfAssertion(landed))
+        } catch (_: Throwable) {
+            // The callers refuse a malformed account id themselves.
+            return landed
+        }
+        return landed.withSession(boundSession(accountIdB64, landed.session))
     }
 
     private fun accountIdOfAssertion(assertion: PasskeyLoginResult): ByteArray {
@@ -3945,8 +4412,16 @@ public class AuthRepository(
         // ADR-0054 - the push unregister below spends one push-register
         // token, drawn with THIS session after the live one is gone.
         val departingSession = currentAnonSession()
+        // ADR-0066 section 2 - the session is ended at the server too, so a
+        // copy of what this device held cannot keep using the account. Best
+        // effort; offline, the server is told at the next launch.
+        val departingPair = sessionTokenProvider.peek()
+        val departingAccount = signedInAccountIdB64() ?: pendingRecovery.get()?.accountIdB64
         clearIdentitySecrets()
         sessionTokenProvider.clear()
+        if (departingPair != null && departingAccount != null) {
+            tellServerLoggedOut(departingAccount, departingPair, keepForRetry = true)
+        }
         // The account's tokens stay on disk for its next sign-in; only the
         // memory goes (the unregister draws its token from disk).
         me.lakko.app.anon.AnonTokens.releaseSession()
@@ -3980,6 +4455,10 @@ public class AuthRepository(
         me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
         val accountIdB64 = identitySecrets.value?.let { base64Encode(it.accountId) }
             ?: sessionStore.load()?.accountIdB64
+        // ADR-0066 - read before the wipe: the session is ended at the
+        // server as well (one attempt; nothing of it is kept on a device
+        // that is forgetting the account).
+        val departingPair = sessionTokenProvider.peek()
         if (accountIdB64 != null) {
             me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
         }
@@ -3991,6 +4470,9 @@ public class AuthRepository(
         val departingSession = currentAnonSession()
         clearIdentitySecrets()
         sessionTokenProvider.clear()
+        if (departingPair != null && accountIdB64 != null) {
+            tellServerLoggedOut(accountIdB64, departingPair, keepForRetry = false)
+        }
         // The wipe above removed this account's tokens; this drops only what
         // memory still holds (nothing on disk, no other account's tokens).
         me.lakko.app.anon.AnonTokens.releaseSession()
@@ -4021,7 +4503,29 @@ public class AuthRepository(
      * this device's.
      */
     public fun onKeysSuperseded(accountIdB64: String) {
-        signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
+        // ADR-0066 section 3.3 - a device that holds the account's keys does
+        // not yet know whether this is a reset or a rotation that kept it:
+        // the server does not say. It looks for the rotation first.
+        if (ownRotationInFlight(accountIdB64)) {
+            // This device's own rotation superseded its old pair; the
+            // rotation's run installs the new one.
+            Log.i("lakko-auth", "superseded by this device's own key rotation; nothing to do")
+            return
+        }
+        val holdsKeys = mutableIdentitySecrets.value?.let { base64Encode(it.accountId) == accountIdB64 } == true
+        if (!holdsKeys || mutableKeyResetSignOut.value != null) {
+            signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
+            return
+        }
+        pushScope.launch {
+            try {
+                resolveSupersession(accountIdB64)
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                // Never a wipe on a failure of the looking itself.
+                Log.w("lakko-auth", "superseded session not resolved: ${cause.javaClass.simpleName}")
+            }
+        }
     }
 
     /**
@@ -4032,6 +4536,26 @@ public class AuthRepository(
      */
     public fun onPublishedKeyMismatch(accountIdB64: String) {
         signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Mismatch)
+    }
+
+    /**
+     * ADR-0066 section 2.3 — another device of the account removed this
+     * one: auth answered `401 device-revoked` (to the refresh, a bearer
+     * route or the bind), or this device applied its own removal from the
+     * account's DeviceGroup ([onRemovedFromDeviceGroup]). The removed screen
+     * replaces the app and the full wipe runs BY ITSELF; no recall record
+     * is kept (a removal changes no keys). Never called on a failed request
+     * alone, and never on discovery's `403 device-revoked`.
+     */
+    public fun onDeviceRevoked(accountIdB64: String) {
+        signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Removed)
+    }
+
+    /** This device's own DeviceGroup turned inactive: proof of removal by a
+     *  device of the account. Same consequence as [onDeviceRevoked]. */
+    public fun onRemovedFromDeviceGroup() {
+        val accountIdB64 = signedInAccountIdB64() ?: return
+        signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Removed)
     }
 
     private fun signOutForKeyReset(accountIdB64: String, kind: KeyResetSignOut.Kind) {
@@ -4050,16 +4574,736 @@ public class AuthRepository(
         val username = sessionStore.load()?.takeIf { it.accountIdB64 == accountIdB64 }?.username
             ?: (mutableState.value as? AuthState.Session)?.account?.username
             ?: ""
-        Log.w("lakko-auth", "this device's keys are no longer the account's ($kind): signing out and wiping")
+        // ADR-0066 section 1.1 - a device that holds the account's keys
+        // keeps a recall record through the wipe; one that never held them,
+        // and a REMOVED device, keep nothing.
+        val holdsKeys = mutableIdentitySecrets.value?.let { base64Encode(it.accountId) == accountIdB64 } == true ||
+            pendingFreshPhrase.get()?.accountIdB64 == accountIdB64
+        val wipe = supersededWipeFor(kind, holdsKeys)
+        Log.w("lakko-auth", "this device's keys are no longer the account's ($kind, $wipe): signing out and wiping")
         mutableKeyResetSignOut.value = KeyResetSignOut(
             accountIdB64 = accountIdB64,
             username = username,
             kind = kind,
-            phase = when (kind) {
-                KeyResetSignOut.Kind.Reset -> KeyResetSignOut.Phase.Removing
-                KeyResetSignOut.Kind.Mismatch -> KeyResetSignOut.Phase.AwaitingTap
-            },
+            phase = signOutPhaseFor(kind),
+            keepsRecall = wipe == SupersededWipe.StagedKeepingRecall,
         )
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0066 part 3 (Stage A): changing the account keys, devices kept
+    // -----------------------------------------------------------------
+
+    private val pendingRotationStore: PendingRotationStore by lazy { PendingRotationStore.onDevice(applicationContext) }
+    private val ownPredecessorStore: OwnPredecessorStore by lazy { OwnPredecessorStore.onDevice(applicationContext) }
+    private val preparedRotationStore: PreparedRotationStore by lazy {
+        PreparedRotationStore.onDevice(applicationContext)
+    }
+    private val rotationOwedStore: me.lakko.app.devices.KeyRotationOwedStore by lazy {
+        me.lakko.app.devices.KeyRotationOwedStore.onDevice(applicationContext)
+    }
+    private val rotationNoticeStorage: MarkerStorage by lazy {
+        SharedPrefsMarkerStorage(applicationContext, ROTATION_NOTICE_PREFS)
+    }
+
+    /** UX 18.3 - this device was told its session is out of date and has
+     *  not yet read (or been granted) the new keys: `Updating keys...` where
+     *  "Synchronizing..." would be; sends wait. Never a full-screen state. */
+    private val mutableKeysUpdating: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    public val keysUpdating: StateFlow<Boolean> = mutableKeysUpdating.asStateFlow()
+
+    /** UX 18.3 - "Your account keys were changed on another device. This
+     *  device has the new ones." until dismissed (kept across restarts). */
+    private val mutableKeysRotatedNotice: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    public val keysRotatedNotice: StateFlow<Boolean> = mutableKeysRotatedNotice.asStateFlow()
+
+    /** Bumped each time this device adopted rotated account keys: the app
+     *  root re-publishes this device's KeyPackage (every directory row of
+     *  the account was deleted by the rotation; the device id stays). */
+    private val mutableKeysAdoptedRevision: MutableStateFlow<Long> = MutableStateFlow(0L)
+    public val keysAdoptedRevision: StateFlow<Long> = mutableKeysAdoptedRevision.asStateFlow()
+
+    private val supersessionInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Read the kept-device notice for the signed-in account (at landing). */
+    private fun restoreKeysRotatedNotice(accountIdB64: String) {
+        mutableKeysRotatedNotice.value = try {
+            rotationNoticeStorage.get(ROTATION_NOTICE_PREFIX + accountIdB64) != null
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    public fun dismissKeysRotatedNotice() {
+        signedInAccountIdB64()?.let { accountIdB64 ->
+            try {
+                rotationNoticeStorage.remove(ROTATION_NOTICE_PREFIX + accountIdB64)
+            } catch (_: Throwable) {
+                // Shown again at the next launch.
+            }
+        }
+        mutableKeysRotatedNotice.value = false
+    }
+
+    /** The keys of this account's own previous identities on this device. */
+    private fun ownPredecessorKeys(accountIdB64: String): List<ByteArray> =
+        try {
+            val rows = ownPredecessorStore.load(accountIdB64)
+            rows.map { it.signaturePubkey.copyOf() }.also { rows.forEach { row -> row.zero() } }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+
+    /**
+     * The 64-byte seed of the account identity the conversation leaves that
+     * exist are bound to: the EARLIEST own predecessor after a rotation
+     * (Stage A moves no leaf), else the current seed. The caller zeroes it.
+     */
+    public fun conversationAccountSeed(): ByteArray? {
+        val secrets = mutableIdentitySecrets.value ?: return null
+        val accountIdB64 = base64Encode(secrets.accountId)
+        return try {
+            ownPredecessorStore.conversationSeed(accountIdB64)
+        } catch (_: Throwable) {
+            null
+        } ?: secrets.accountIdentitySeed.copyOf()
+    }
+
+    /** This account's own previous identities (seeds included), earliest
+     *  first; the caller zeroes each. Empty when it never rotated. */
+    public fun ownPredecessors(): List<OwnPredecessor> {
+        val accountIdB64 = signedInAccountIdB64() ?: return emptyList()
+        return try {
+            ownPredecessorStore.load(accountIdB64)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /** Move the read cursor of a previous identity's mailbox forward. */
+    public fun advancePredecessorMailboxCursor(signaturePubkey: ByteArray, cursor: Long) {
+        val accountIdB64 = signedInAccountIdB64() ?: return
+        try {
+            ownPredecessorStore.advanceMailboxCursor(accountIdB64, signaturePubkey, cursor)
+        } catch (_: Throwable) {
+            // Read again from the old cursor next time.
+        }
+    }
+
+    /** Whether a rotation this device runs is between its commit and its
+     *  local adoption: a `key-generation-superseded` seen then is this
+     *  device's own doing and must never be read as a reset elsewhere. */
+    private fun ownRotationInFlight(accountIdB64: String): Boolean {
+        val owed = try {
+            rotationOwedStore.load(accountIdB64)
+        } catch (_: Throwable) {
+            null
+        } ?: return false
+        return (owed.commitSent || owed.committed) && !owed.adopted
+    }
+
+    /** Whether the new words of a rotation this device ran are withheld
+     *  (the publish is still owed, UX 18.1). */
+    private fun rotationPublishOwed(accountIdB64: String): Boolean =
+        try {
+            rotationOwedStore.load(accountIdB64)?.let { me.lakko.app.devices.rotationWithholdsPhrase(it) } == true
+        } catch (_: Throwable) {
+            false
+        }
+
+    // ---- the rotating device (the ports of [KeyRotationRunner]) ----------
+
+    private fun rotationSecrets(): IdentitySecrets =
+        mutableIdentitySecrets.value ?: throw AuthClientArgError("not signed in")
+
+    /**
+     * ADR section 3.2 step 3: generate the new phrase and seed and sign the
+     * supersession proof with the OLD account key (14 days), sealed on this
+     * device. Idempotent while usable prepared material exists.
+     */
+    public fun rotationPrepare(nowMs: Long) {
+        val secrets = rotationSecrets()
+        val accountIdB64 = base64Encode(secrets.accountId)
+        preparedRotationStore.load(accountIdB64)?.let { held ->
+            val usable = preparedRotationUsable(held.preparedAtMs, nowMs)
+            held.zero()
+            if (usable) return
+        }
+        val (entropy, newSeed) = RecoveryMnemonic.generate().use { it.toEntropy() to it.toSeed() }
+        try {
+            val newEd = Identity.fromSeed(newSeed).use { it.ed25519Seed() }
+            val oldEd = Identity.fromSeed(secrets.accountIdentitySeed).use { it.ed25519Seed() }
+            val proof = try {
+                val nowSecs = nowMs / 1000L
+                uniffi.lakko_ffi_uniffi.signSupersessionProof(
+                    oldEd,
+                    newEd,
+                    nowSecs,
+                    nowSecs + ROTATION_PROOF_VALIDITY_SECS,
+                )
+            } finally {
+                newEd.fill(0)
+                oldEd.fill(0)
+            }
+            if (!preparedRotationStore.save(accountIdB64, PreparedRotation(entropy, proof, nowMs))) {
+                throw IllegalStateException("the new keys could not be stored on this device")
+            }
+        } finally {
+            entropy.fill(0)
+            newSeed.fill(0)
+        }
+    }
+
+    private fun preparedOrThrow(accountIdB64: String): PreparedRotation =
+        preparedRotationStore.load(accountIdB64) ?: throw IllegalStateException("no prepared key rotation")
+
+    /** The `key-rotation` envelope of the prepared material (192 bytes). */
+    public fun rotationEnvelope(): ByteArray {
+        val accountIdB64 = base64Encode(rotationSecrets().accountId)
+        val prepared = preparedOrThrow(accountIdB64)
+        try {
+            return uniffi.lakko_ffi_uniffi.composeKeyRotationEnvelope(
+                prepared.preparedAtMs.toULong(),
+                prepared.newEntropy,
+                prepared.supersessionProof,
+            )
+        } finally {
+            prepared.zero()
+        }
+    }
+
+    /**
+     * ADR section 3.2 step 5: `rotate/start` and `rotate/finish`. On success
+     * the new pair is persisted and served before this returns (the old one
+     * is superseded). Throws what the client threw.
+     */
+    public suspend fun rotationCommit(
+        freshGrant: String,
+        revokeDeviceId: ByteArray,
+    ): me.lakko.app.devices.CommitAnswer.Committed {
+        val secrets = rotationSecrets()
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val prepared = preparedOrThrow(accountIdB64)
+        val newSeed = RecoveryMnemonic.fromEntropy(prepared.newEntropy).use { it.toSeed() }
+        try {
+            val newPubkey = Identity.fromSeed(newSeed).use { it.signaturePublicKey() }
+            val token = sessionTokenProvider.current() ?: secrets.sessionToken
+            val result = authClientFactory().use {
+                it.rotateAccountKeys(
+                    sessionToken = token,
+                    freshGrant = freshGrant,
+                    seed = newSeed,
+                    newSignaturePubkey = newPubkey,
+                    supersessionProof = prepared.supersessionProof,
+                    revokeDeviceIds = listOf(revokeDeviceId),
+                )
+            }
+            // The grant the rotation used is of the previous generation and
+            // is spent; the answer carries none.
+            freshAuth.clear()
+            persistSessionPairBestEffort(accountIdB64, result.session)
+            sessionTokenProvider.update(result.session)
+            return me.lakko.app.devices.CommitAnswer.Committed(
+                attestationB64 = base64Encode(result.attestation),
+                keyGeneration = result.keyGeneration,
+            )
+        } finally {
+            newSeed.fill(0)
+            prepared.zero()
+        }
+    }
+
+    /**
+     * A `rotate/finish` had no answer: ask auth whether the account is at
+     * the prepared key, with the session upgrade only that key can sign.
+     */
+    public suspend fun rotationResolveLostCommit(): me.lakko.app.devices.LostCommit {
+        val secrets = rotationSecrets()
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val prepared = preparedRotationStore.load(accountIdB64) ?: return me.lakko.app.devices.LostCommit.NotCommitted
+        val held = sessionTokenProvider.peek() ?: secrets.session
+        val newEd = try {
+            RecoveryMnemonic.fromEntropy(prepared.newEntropy).use { mnemonic ->
+                val seed = mnemonic.toSeed()
+                try {
+                    Identity.fromSeed(seed).use { it.ed25519Seed() }
+                } finally {
+                    seed.fill(0)
+                }
+            }
+        } finally {
+            prepared.zero()
+        }
+        val outcome: UpgradeOutcome = try {
+            UpgradeOutcome.Upgraded(
+                authClientFactory().use { it.sessionUpgrade(held.refreshToken, secrets.accountId, newEd) },
+            )
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            upgradeOutcomeOf(cause)
+        } finally {
+            newEd.fill(0)
+        }
+        return when (outcome) {
+            is UpgradeOutcome.Upgraded -> {
+                // A usable pair either way.
+                persistSessionPairBestEffort(accountIdB64, outcome.pair)
+                sessionTokenProvider.update(outcome.pair)
+                if (upgradeProvesKey(held.keyGeneration, outcome.pair)) {
+                    me.lakko.app.devices.LostCommit.Committed(outcome.pair.keyGeneration)
+                } else {
+                    me.lakko.app.devices.LostCommit.NotCommitted
+                }
+            }
+            // The statement by the prepared key was not accepted: the
+            // account is not at it.
+            UpgradeOutcome.NotAccepted -> me.lakko.app.devices.LostCommit.NotCommitted
+            UpgradeOutcome.DeviceRevoked, UpgradeOutcome.RefreshInvalid, is UpgradeOutcome.Unanswered ->
+                me.lakko.app.devices.LostCommit.Unknown
+        }
+    }
+
+    /** ADR section 3.2 step 6 on the rotating device. */
+    public fun rotationAdopt() {
+        val secrets = rotationSecrets()
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val prepared = preparedOrThrow(accountIdB64)
+        try {
+            adoptRotatedKeys(
+                accountIdB64 = accountIdB64,
+                newEntropy = prepared.newEntropy,
+                pair = null,
+                asKeptDevice = false,
+            )
+        } finally {
+            prepared.zero()
+        }
+    }
+
+    /**
+     * ADR section 3.5 "Discovery": the directory upload with the proof AND
+     * the attestation (the proven-rotation arm). Without the proof it is the
+     * attested reset arm (the fallback when the row no longer holds the key
+     * the proof was signed by); without the attestation (a commit learned
+     * from the session upgrade) the proof alone.
+     */
+    public suspend fun rotationPublishIdentity(
+        attestationB64: String?,
+        withProof: Boolean,
+    ): me.lakko.app.devices.IdentityPublish {
+        val secrets = rotationSecrets()
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val prepared = preparedRotationStore.load(accountIdB64)
+        val proofB64 = prepared?.let { base64Encode(it.supersessionProof) }
+        prepared?.zero()
+        if (withProof && proofB64 == null) {
+            return me.lakko.app.devices.IdentityPublish.Retry(IllegalStateException("no supersession proof"))
+        }
+        val attestation = attestationB64?.let { base64Decode(it) }
+        if (!withProof && attestation == null) {
+            return me.lakko.app.devices.IdentityPublish.Retry(IllegalStateException("nothing to publish with"))
+        }
+        val sessionToken = sessionTokenProvider.current() ?: secrets.sessionToken
+        val error: Throwable? = try {
+            val discovery = discoveryClientFactory()
+            try {
+                discovery.setSessionToken(sessionToken)
+                Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
+                    val signaturePubkey = identity.signaturePublicKey()
+                    if (attestation != null) {
+                        val verdict = verifyResetAttestationLocally(attestation, secrets.accountId, signaturePubkey)
+                        if (verdict is ResetAttestationVerdict.Unusable) {
+                            return me.lakko.app.devices.IdentityPublish.Retry(
+                                IllegalStateException("the attestation could not be verified on this device"),
+                            )
+                        }
+                    }
+                    discovery.uploadIdentityBundle(
+                        accountId = secrets.accountId,
+                        signaturePubkey = signaturePubkey,
+                        x25519Pubkey = identity.x25519PublicKey(),
+                        supersessionProofB64 = if (withProof) proofB64 else null,
+                        // With the proof, discovery forwards it as the log
+                        // leaf's authorisation; the attested-reset fallback
+                        // is a first entry for this key and self-signs.
+                        leafAuth = if (withProof) {
+                            null
+                        } else {
+                            signLeafGenesis(identity.ed25519Seed(), transparencyAccountKey(secrets.accountId))
+                        },
+                        genesisAttest = null,
+                        keyResetAttest = attestation,
+                    )
+                }
+            } finally {
+                discovery.close()
+            }
+            null
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            cause
+        }
+        return me.lakko.app.devices.rotationIdentityPublishOf(error)
+    }
+
+    /**
+     * ADR section 3.5 "DS": move the DeviceGroup journal's root from the one
+     * the OLD seed derives to the one the NEW seed derives, with the
+     * attestation and the new account key's endorsement when an attestation
+     * is in hand. Run by the rotating device and, without the attestation,
+     * by a kept device when it adopts (whoever is first moves it; the other
+     * finds it moved). `true` once the new root IS the journal's root.
+     */
+    public suspend fun rotationMoveDeviceGroupRoot(attestationB64: String?, keyGeneration: Long?): Boolean {
+        val secrets = rotationSecrets()
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val newSeed = secrets.accountIdentitySeed.copyOf()
+        val oldSeed = ownPredecessorStore.load(accountIdB64).let { rows ->
+            val last = rows.lastOrNull()?.phraseSeed?.copyOf()
+            rows.forEach { it.zero() }
+            last
+        }
+        try {
+            if (oldSeed == null) return true
+            val journalId = uniffi.lakko_ffi_uniffi.deviceGroupJournalId(secrets.accountId)
+            val access = me.lakko.app.devices.DeviceGroupJournalAccess
+            val oldRoot = access.rootOfSeed(oldSeed, journalId) ?: return false
+            val newRoot = access.rootOfSeed(newSeed, journalId) ?: return false
+            val evidence = if (attestationB64 != null && keyGeneration != null) {
+                access.rootEvidence(newSeed, attestationB64, keyGeneration, journalId, newRoot.publicKey)
+            } else {
+                null
+            }
+            val moved = me.lakko.app.ds.DsClient().use { ds ->
+                me.lakko.app.ds.transferRootOrConfirm(
+                    journalId = journalId,
+                    oldRoot = oldRoot,
+                    newRoot = newRoot,
+                    evidence = evidence,
+                    put = { make -> ds.putStatement(make) },
+                )
+            }
+            if (moved) me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.rebindRoot(newSeed)
+            return moved
+        } finally {
+            newSeed.fill(0)
+            oldSeed?.fill(0)
+        }
+    }
+
+    /** The publish landed far enough: the new words may be shown. */
+    public fun rotationPhraseReleased() {
+        mutablePublishOwedRevision.value = mutablePublishOwedRevision.value + 1
+    }
+
+    public fun rotationDiscardPrepared() {
+        val accountIdB64 = signedInAccountIdB64() ?: return
+        try {
+            preparedRotationStore.clear(accountIdB64)
+        } catch (_: Throwable) {
+            // Dropped by the wipe at the latest.
+        }
+    }
+
+    // ---- a kept device ----------------------------------------------------
+
+    /**
+     * A `key-rotation` envelope dispatched from the account's OWN
+     * DeviceGroup (the only place it means anything; the sync runtime is the
+     * only caller). Verified with the account key this device holds and
+     * stored as PENDING; nothing changes until the server side shows its
+     * key as the account's.
+     */
+    public fun onKeyRotationEnvelope(plaintext: ByteArray) {
+        val secrets = mutableIdentitySecrets.value ?: return
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val nowMs = System.currentTimeMillis()
+        val verified = try {
+            val held = Identity.fromSeed(secrets.accountIdentitySeed).use { it.signaturePublicKey() }
+            uniffi.lakko_ffi_uniffi.verifyKeyRotationEnvelope(plaintext, held, nowMs / 1000L)
+        } catch (cause: Throwable) {
+            // The code only; never a payload byte.
+            Log.w("lakko-auth", "a key-rotation envelope was dropped: ${cause.javaClass.simpleName}")
+            return
+        }
+        val incoming = PendingRotation(
+            newSignaturePubkey = verified.newSignaturePubkey,
+            newEntropy = verified.newEntropy,
+            supersessionProof = verified.supersessionProof,
+            preparedAtMs = verified.preparedAtMs.toLong(),
+            proofExpiresAtUnixSecs = verified.proofExpiresAtUnixSecs,
+        )
+        try {
+            val held = agedPendingRotations(accountIdB64, nowMs)
+            val stored = pendingRotationStore.save(accountIdB64, withPendingRotation(held, incoming))
+            held.forEach { it.zero() }
+            if (!stored) Log.w("lakko-auth", "a key-rotation envelope could not be stored")
+        } finally {
+            incoming.zero()
+        }
+        // The commit may already be visible in the directory.
+        pushScope.launch {
+            try {
+                checkPendingRotations()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                Log.w("lakko-auth", "pending key rotation not checked: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /** The pending envelopes, with the expired ones dropped (14 days). */
+    private fun agedPendingRotations(accountIdB64: String, nowMs: Long): List<PendingRotation> {
+        val held = pendingRotationStore.load(accountIdB64)
+        if (held.isEmpty()) return held
+        val kept = withoutExpiredRotations(held, nowMs) { preparedAtMs, now ->
+            uniffi.lakko_ffi_uniffi.keyRotationPendingExpired(
+                preparedAtMs.coerceAtLeast(0).toULong(),
+                now.coerceAtLeast(0).toULong(),
+            )
+        }
+        if (kept.size != held.size) {
+            pendingRotationStore.save(accountIdB64, kept)
+            held.filterNot { it in kept }.forEach { it.zero() }
+        }
+        return kept
+    }
+
+    /**
+     * At a landing and after an envelope arrived: when the published
+     * identity bundle carries a pending envelope's key, adopt it. Reads the
+     * directory; changes nothing on a read failure.
+     */
+    public suspend fun checkPendingRotations() {
+        val secrets = mutableIdentitySecrets.value ?: return
+        val accountIdB64 = base64Encode(secrets.accountId)
+        if (mutableKeyResetSignOut.value != null) return
+        val pending = agedPendingRotations(accountIdB64, System.currentTimeMillis())
+        if (pending.isEmpty()) return
+        try {
+            val published = try {
+                val discovery = discoveryClientFactory()
+                try {
+                    sessionTokenProvider.peek()?.let { discovery.setSessionToken(it.accessToken) }
+                    discovery.identityFetch(secrets.accountId)?.let { base64Decode(it.signature_pubkey) }
+                } finally {
+                    discovery.close()
+                }
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: Throwable) {
+                return
+            }
+            val verdict = keptDeviceVerdict(pending, published, superseded = false, journalRead = true)
+            if (verdict is KeptDeviceVerdict.Adopt) {
+                resolveSupersession(accountIdB64, candidates = listOf(verdict.pending))
+            }
+        } finally {
+            pending.forEach { it.zero() }
+        }
+    }
+
+    /**
+     * This device's session was answered `key-generation-superseded` (or the
+     * directory serves another key at a higher generation), and it holds the
+     * account's keys. Before it is treated as a reset: adopt a pending
+     * rotation the server accepts, reading the DeviceGroup journal to its
+     * head once when none is held. Never wipes on a failed request.
+     */
+    private suspend fun resolveSupersession(accountIdB64: String, candidates: List<PendingRotation>? = null) {
+        if (!supersessionInFlight.compareAndSet(false, true)) return
+        mutableKeysUpdating.value = true
+        try {
+            var journalRead = false
+            var waitMs = SUPERSESSION_RETRY_FIRST_MS
+            while (true) {
+                val secrets = mutableIdentitySecrets.value ?: return
+                if (base64Encode(secrets.accountId) != accountIdB64) return
+                if (mutableKeyResetSignOut.value != null) return
+                val pending = candidates ?: agedPendingRotations(accountIdB64, System.currentTimeMillis())
+                val verdict = if (candidates != null) {
+                    KeptDeviceVerdict.TryUpgrade(candidates)
+                } else {
+                    keptDeviceVerdict(pending, publishedKey = null, superseded = true, journalRead = journalRead)
+                }
+                when (verdict) {
+                    is KeptDeviceVerdict.TryUpgrade, is KeptDeviceVerdict.Adopt -> {
+                        val tries = (verdict as? KeptDeviceVerdict.TryUpgrade)?.candidates
+                            ?: listOf((verdict as KeptDeviceVerdict.Adopt).pending)
+                        when (val resolution = keptResolutionOf(tries.map { it to tryUpgrade(secrets, it) })) {
+                            is KeptResolution.Adopted -> {
+                                adoptRotatedKeys(
+                                    accountIdB64 = accountIdB64,
+                                    newEntropy = resolution.pending.newEntropy,
+                                    pair = resolution.pair,
+                                    asKeptDevice = true,
+                                )
+                                return
+                            }
+                            KeptResolution.Removed -> {
+                                signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Removed)
+                                return
+                            }
+                            KeptResolution.SignInAgain -> {
+                                onRefreshInvalid(accountIdB64)
+                                return
+                            }
+                            KeptResolution.Reset -> {
+                                // A directory match that auth does not back
+                                // decides nothing.
+                                if (candidates != null) return
+                                if (journalRead) {
+                                    signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
+                                    return
+                                }
+                                journalRead = readDeviceGroupJournalOnce()
+                            }
+                            KeptResolution.Later -> {
+                                if (candidates != null) return
+                                kotlinx.coroutines.delay(waitMs)
+                                waitMs = (waitMs * 2).coerceAtMost(SUPERSESSION_RETRY_MAX_MS)
+                            }
+                        }
+                    }
+                    KeptDeviceVerdict.ReadJournalOnce -> journalRead = readDeviceGroupJournalOnce()
+                    KeptDeviceVerdict.TreatAsReset -> {
+                        signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
+                        return
+                    }
+                    KeptDeviceVerdict.Nothing -> return
+                }
+            }
+        } finally {
+            mutableKeysUpdating.value = false
+            supersessionInFlight.set(false)
+        }
+    }
+
+    /** One upgrade trial: the refresh with a statement by [pending]'s key. */
+    private suspend fun tryUpgrade(secrets: IdentitySecrets, pending: PendingRotation): UpgradeOutcome {
+        val held = sessionTokenProvider.peek() ?: secrets.session
+        val newEd = RecoveryMnemonic.fromEntropy(pending.newEntropy).use { mnemonic ->
+            val seed = mnemonic.toSeed()
+            try {
+                Identity.fromSeed(seed).use { it.ed25519Seed() }
+            } finally {
+                seed.fill(0)
+            }
+        }
+        return try {
+            val pair = authClientFactory().use { it.sessionUpgrade(held.refreshToken, secrets.accountId, newEd) }
+            // A credential that was not of a lower generation is refreshed
+            // without the statement being read: that proves nothing.
+            if (upgradeProvesKey(held.keyGeneration, pair)) {
+                UpgradeOutcome.Upgraded(pair)
+            } else {
+                persistSessionPairBestEffort(base64Encode(secrets.accountId), pair)
+                sessionTokenProvider.update(pair)
+                UpgradeOutcome.NotAccepted
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            upgradeOutcomeOf(cause)
+        } finally {
+            newEd.fill(0)
+        }
+    }
+
+    /** ADR section 3.3 "Order on a superseded device": read the DeviceGroup
+     *  journal to its head, once (the DS does not use session tokens). An
+     *  unreadable journal counts as read: the device then decides without
+     *  it, as the ADR says. */
+    private suspend fun readDeviceGroupJournalOnce(): Boolean {
+        try {
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.awaitHeadOnce(JOURNAL_HEAD_WAIT_MS)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "the device list's journal could not be read: ${cause.javaClass.simpleName}")
+        }
+        return true
+    }
+
+    /**
+     * Adopt rotated account keys (ADR section 3.3 "Adopting", and step 6 of
+     * 3.2 on the rotating device): the new seed and phrase replace the old
+     * ones, the old identity is kept as this account's predecessor, and
+     * NOTHING else local changes - every chat, contact and message stays,
+     * the DeviceGroup stays, the device binding stays (Stage A re-binds no
+     * leaf). The predecessor is stored BEFORE the seed is overwritten, so no
+     * crash loses the key the existing conversations are bound to.
+     */
+    private fun adoptRotatedKeys(
+        accountIdB64: String,
+        newEntropy: ByteArray,
+        pair: SessionPair?,
+        asKeptDevice: Boolean,
+    ) {
+        val live = mutableIdentitySecrets.value?.takeIf { base64Encode(it.accountId) == accountIdB64 }
+            ?: throw AuthClientArgError("no session to adopt the new keys into")
+        val (phrase, newSeed) = RecoveryMnemonic.fromEntropy(newEntropy).use { it.phrase() to it.toSeed() }
+        val oldSeed = live.accountIdentitySeed
+        if (!oldSeed.contentEquals(newSeed)) {
+            val oldPubkey = Identity.fromSeed(oldSeed).use { it.signaturePublicKey() }
+            val newPubkey = Identity.fromSeed(newSeed).use { it.signaturePublicKey() }
+            val kept = ownPredecessorStore.add(
+                accountIdB64,
+                OwnPredecessor(oldPubkey, oldSeed.copyOf(), System.currentTimeMillis()),
+            )
+            if (!kept) {
+                newSeed.fill(0)
+                throw IllegalStateException("the previous account key could not be kept; nothing was changed")
+            }
+            AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, newSeed)
+            DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.KeyRotation)
+            // The same proven-predecessor rule this device applies to its
+            // contacts, for its own account.
+            me.lakko.app.contacts.ProvenPredecessors.recordProven(
+                store = me.lakko.app.contacts.SharedPrefsProvenLinkStore(applicationContext),
+                ownerAccountIdB64 = accountIdB64,
+                accountIdB64 = accountIdB64,
+                oldKeyB64 = base64Encode(oldPubkey),
+                newKeyB64 = base64Encode(newPubkey),
+            )
+            // Auth moved its recorded identity key with the rotation: no
+            // genesis mint for the new key.
+            genesisRecorded.markRecorded(accountIdB64, base64Encode(newPubkey))
+        }
+        if (pair != null) {
+            persistSessionPairBestEffort(accountIdB64, pair)
+            sessionTokenProvider.update(pair)
+        }
+        val session = pair ?: sessionTokenProvider.peek() ?: live.session
+        mutableIdentitySecrets.value = live.copy(accountIdentitySeed = newSeed, session = session)
+        // The envelopes did their work (the adopted one, and any that named
+        // a key that never became the account's).
+        try {
+            pendingRotationStore.clear(accountIdB64)
+        } catch (_: Throwable) {
+            // Aged out later.
+        }
+        if (asKeptDevice) {
+            try {
+                rotationNoticeStorage.set(ROTATION_NOTICE_PREFIX + accountIdB64, "1")
+            } catch (_: Throwable) {
+                // Shown for this process only.
+            }
+            mutableKeysRotatedNotice.value = true
+            Log.i("lakko-auth", "the account keys were changed on another device; this device has the new ones")
+            // The DeviceGroup journal's root follows the seed; whichever
+            // device gets there first moves it.
+            pushScope.launch {
+                try {
+                    rotationMoveDeviceGroupRoot(attestationB64 = null, keyGeneration = null)
+                } catch (cause: Throwable) {
+                    if (cause is kotlinx.coroutines.CancellationException) throw cause
+                    Log.w("lakko-auth", "device list root not confirmed after adopting: ${cause.javaClass.simpleName}")
+                }
+            }
+        }
+        mutableKeysAdoptedRevision.value = mutableKeysAdoptedRevision.value + 1
     }
 
     /** The refresh credential is gone (`refresh-invalid`): the sign-in
@@ -4092,15 +5336,343 @@ public class AuthRepository(
             ?: pendingRecovery.get()?.let {
                 me.lakko.app.anon.AnonSession(accountKey = it.accountIdB64, bearer = it.sessionToken)
             }
-        me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
+        // ADR-0066 section 1.1 - the recall record is written BEFORE
+        // anything is deleted (the seed it holds is about to go). A record
+        // that could not be written means the full wipe: nothing half-kept.
+        val recallRecord = if (signOut.keepsRecall) writeRecallRecord(accountIdB64, signOut.username) else null
+        if (recallRecord != null) {
+            me.lakko.app.account.AccountLocalWipe.wipeKeepingRecallRecord(applicationContext, accountIdB64)
+        } else {
+            me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
+        }
         if (sessionStore.load()?.accountIdB64 == accountIdB64) sessionStore.clear()
         clearIdentitySecrets()
         sessionTokenProvider.clear()
         me.lakko.app.anon.AnonTokens.releaseSession()
         clearPendingRecovery()
+        pendingFreshPhrase.getAndSet(null)?.seed?.fill(0)
         mutableState.value = AuthState.Anon()
         unsubscribePushBestEffort("key-reset", departingSession)
-        mutableKeyResetSignOut.value = signOut.copy(phase = KeyResetSignOut.Phase.Removed)
+        if (recallRecord != null) {
+            // "Was it you?" replaces the signed-out screen.
+            mutableRecall.value = RecallUi(
+                accountIdB64 = accountIdB64,
+                username = recallRecord.username,
+                learnedAtMs = recallRecord.learnedAtMs,
+            )
+            recallRecord.zero()
+            mutableKeyResetSignOut.value = null
+        } else {
+            mutableKeyResetSignOut.value = signOut.copy(phase = KeyResetSignOut.Phase.Removed)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0066 part 1: "Was it you?" and taking the account back
+    // -----------------------------------------------------------------
+
+    /**
+     * Build and store the recall record of [accountIdB64] from the seed this
+     * device still holds: the 32-byte Ed25519 seed of the account identity,
+     * NOT the 64-byte phrase seed. `null` when no seed is held or the record
+     * could not be stored (the caller then runs the full wipe).
+     */
+    private fun writeRecallRecord(accountIdB64: String, username: String): RecallRecord? {
+        val phraseSeed = mutableIdentitySecrets.value
+            ?.takeIf { base64Encode(it.accountId) == accountIdB64 }?.accountIdentitySeed?.copyOf()
+            ?: pendingFreshPhrase.get()?.takeIf { it.accountIdB64 == accountIdB64 }?.seed?.copyOf()
+            ?: try {
+                AccountIdentitySeedStore.getAccountIdentitySeed(applicationContext, accountIdB64)
+            } catch (_: Throwable) {
+                null
+            }
+            ?: return null
+        return try {
+            val signingSeed = Identity.fromSeed(phraseSeed).use { it.ed25519Seed() }
+            val record = RecallRecord(
+                accountId = base64Decode(accountIdB64),
+                oldAccountSeed = signingSeed,
+                username = username,
+                learnedAtMs = System.currentTimeMillis(),
+            )
+            if (recallStore.save(record)) {
+                record
+            } else {
+                record.zero()
+                Log.w("lakko-auth", "the recall record could not be stored; running the full wipe")
+                null
+            }
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "the recall record could not be built: ${cause.javaClass.simpleName}")
+            null
+        } finally {
+            phraseSeed.fill(0)
+        }
+    }
+
+    /**
+     * The launch half: a recall record on disk brings "Was it you?" back
+     * (or, past the window by this device's clock, finishes the wipe).
+     * `true` when a record was found.
+     */
+    private fun restoreRecallAtLaunch(): Boolean {
+        val record = try {
+            recallStore.loadAny()
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "reading the recall record failed: ${cause.javaClass.simpleName}")
+            null
+        } ?: return false
+        val ui = RecallUi(
+            accountIdB64 = record.accountIdB64,
+            username = record.username,
+            learnedAtMs = record.learnedAtMs,
+        )
+        record.zero()
+        if (recallExpired(ui.learnedAtMs, null, System.currentTimeMillis())) {
+            endRecall(ui, RecallEnd.NotPossible)
+        } else {
+            mutableRecall.value = ui
+        }
+        return true
+    }
+
+    /**
+     * End the recall without the account being taken back: destroy the
+     * record and hand over to the signed-out screen, whose wipe (the FULL
+     * one, run by the app root as for any reset) finishes the deletion and
+     * then offers `Sign in`.
+     */
+    private fun endRecall(ui: RecallUi, reason: RecallEnd) {
+        Log.w("lakko-auth", "the recall ended without taking the account back ($reason)")
+        recallStore.delete(ui.accountIdB64)
+        mutableKeyResetSignOut.value = KeyResetSignOut(
+            accountIdB64 = ui.accountIdB64,
+            username = ui.username,
+            kind = KeyResetSignOut.Kind.Reset,
+            phase = KeyResetSignOut.Phase.Removing,
+            keepsRecall = false,
+            notice = recallEndLine(reason),
+        )
+        mutableRecall.value = null
+    }
+
+    private fun applyRecallStep(step: RecallStep, basedOn: RecallUi) {
+        when (step) {
+            is RecallStep.Stay -> mutableRecall.compareAndSet(basedOn, step.ui)
+            is RecallStep.End -> endRecall(basedOn, step.reason)
+        }
+    }
+
+    private suspend fun readRecallStatus(accountIdB64: String): RecallStatusOutcome {
+        val record = recallStore.load(accountIdB64) ?: return RecallStatusOutcome.Refused
+        return try {
+            RecallStatusOutcome.Open(
+                authClientFactory().use { it.recallStatus(record.accountId, record.oldAccountSeed) },
+            )
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            recallStatusOutcomeOf(cause)
+        } finally {
+            record.zero()
+        }
+    }
+
+    /**
+     * Ask the server whether the account can be taken back from this device
+     * and apply the answer ([recallAfterStatus]). Returns how long to wait
+     * before asking again; `null` when the recall is over.
+     */
+    public suspend fun recallCheck(): Long? {
+        val ui = mutableRecall.value ?: return null
+        if (ui.working) return RECALL_BUSY_RECHECK_MS
+        // A `finish` that was sent and not answered may have landed: a
+        // status asked now could read "no anchor" and destroy the record
+        // while the answer can still be asked again. Wait for that first.
+        pendingRecallFinish.get()?.let { parked ->
+            if (parked.accountIdB64 == ui.accountIdB64 &&
+                recallFinishReplayable(parked.firstSentAtMs, System.currentTimeMillis())
+            ) {
+                return RECALL_BUSY_RECHECK_MS
+            }
+        }
+        val outcome = readRecallStatus(ui.accountIdB64)
+        // The person may have moved on (the form, a submit) meanwhile.
+        val current = mutableRecall.value ?: return null
+        if (current.working) return RECALL_BUSY_RECHECK_MS
+        applyRecallStep(recallAfterStatus(current, outcome, System.currentTimeMillis()), current)
+        return if (mutableRecall.value == null) null else recallRecheckDelayMs(outcome)
+    }
+
+    /** "Yes, it was me" / "Go back" / "No, take the account back" / "Back". */
+    public fun recallShow(stage: RecallStage) {
+        val ui = mutableRecall.value ?: return
+        if (ui.working) return
+        if (stage == RecallStage.Form && !recallNoEnabled(ui)) return
+        mutableRecall.compareAndSet(ui, ui.copy(stage = stage, line = null))
+    }
+
+    /** "Delete and sign in": local only, nothing is sent (ADR 1.1). */
+    public fun recallConfirmOwn() {
+        val ui = mutableRecall.value ?: return
+        if (ui.working) return
+        endRecall(ui, RecallEnd.ConfirmedOwn)
+    }
+
+    /**
+     * "Take the account back": prove this device's old account key and the
+     * password the account had before the reset, set [newPassword], and
+     * from the server's answer onward run the key reset's client order
+     * ([landKeyReset]): a new identity, a new phrase shown last.
+     *
+     * A failure leaves its line on the form ([recallAfterFailure]) or ends
+     * the recall; nothing is thrown for the screen to map.
+     */
+    public suspend fun recallSubmit(oldPassword: ByteArray, newPassword: ByteArray) {
+        val ui = mutableRecall.value ?: return
+        val open = ui.availability as? RecallAvailability.Open ?: return
+        if (ui.working) return
+        val working = ui.copy(working = true, line = null)
+        if (!mutableRecall.compareAndSet(ui, working)) return
+        val record = recallStore.load(ui.accountIdB64)
+        if (record == null) {
+            endRecall(working, RecallEnd.Closed)
+            return
+        }
+        // ADR-0066 T5 item 25 - a `finish` of an earlier press that was sent
+        // and never answered is asked again FIRST, with the same bytes: if
+        // it landed, the account already has the phrase generated then.
+        var phrase: String? = null
+        var seed: ByteArray? = null
+        var result: Pair<ByteArray, RecallResult>? = null
+        val parked = pendingRecallFinish.get()?.takeIf { it.accountIdB64 == ui.accountIdB64 }
+        if (parked != null) {
+            if (!recallFinishReplayable(parked.firstSentAtMs, System.currentTimeMillis())) {
+                pendingRecallFinish.compareAndSet(parked, null)
+                parked.seed.fill(0)
+            } else {
+                try {
+                    val again = authClientFactory().use { it.recallFinishResend(parked.request) }
+                    pendingRecallFinish.compareAndSet(parked, null)
+                    phrase = parked.phrase
+                    seed = parked.seed
+                    result = parked.newSignaturePubkey to again
+                } catch (cause: Throwable) {
+                    if (cause is kotlinx.coroutines.CancellationException) {
+                        record.zero()
+                        mutableRecall.compareAndSet(working, working.copy(working = false))
+                        throw cause
+                    }
+                    if (recallFinishAnswerLost(cause)) {
+                        // Still no answer: the request and its phrase stay.
+                        record.zero()
+                        applyRecallStep(
+                            recallAfterFailure(working, RecallFailure.Offline, null, System.currentTimeMillis()),
+                            working,
+                        )
+                        return
+                    }
+                    // A real answer: that finish did not land (or its ten
+                    // minutes are over). Its phrase names nothing; carry on
+                    // with a new attempt from what was typed now.
+                    Log.w("lakko-auth", "the unanswered recall finish did not land: ${cause.javaClass.simpleName}")
+                    pendingRecallFinish.compareAndSet(parked, null)
+                    parked.seed.fill(0)
+                }
+            }
+        }
+        if (result == null) {
+            // A new phrase and identity, as a reset makes them: the old key
+            // authorises the recall and does not return.
+            val (newPhrase, newSeed) = RecoveryMnemonic.generate().use { mnemonic ->
+                mnemonic.phrase() to mnemonic.toSeed()
+            }
+            var newPubkey: ByteArray? = null
+            result = try {
+                val newSignaturePubkey = Identity.fromSeed(newSeed).use { it.signaturePublicKey() }
+                newPubkey = newSignaturePubkey
+                val seedCopy = newSeed.copyOf()
+                try {
+                    newSignaturePubkey to authClientFactory().use {
+                        it.recallAccount(
+                            accountId = record.accountId,
+                            oldAccountSeed = record.oldAccountSeed,
+                            anchorSeq = open.status.anchorSeq,
+                            oldPassword = oldPassword,
+                            newPassword = newPassword,
+                            newSeed = seedCopy,
+                            newSignaturePubkey = newSignaturePubkey,
+                            deviceId = landingDeviceId(ui.accountIdB64),
+                        )
+                    }
+                } finally {
+                    seedCopy.fill(0)
+                }
+            } catch (cause: Throwable) {
+                record.zero()
+                val pubkey = newPubkey
+                if (cause is RecallFinishUnanswered && pubkey != null) {
+                    // Sent, and no answer was read: the account may already
+                    // be at the new keys. Keep the request and the phrase
+                    // until the answer is in hand (this process only).
+                    pendingRecallFinish.getAndSet(
+                        PendingRecallFinish(
+                            accountIdB64 = ui.accountIdB64,
+                            request = cause.request,
+                            firstSentAtMs = cause.firstSentAtMs,
+                            seed = newSeed,
+                            phrase = newPhrase,
+                            newSignaturePubkey = pubkey,
+                        ),
+                    )?.seed?.fill(0)
+                    Log.w("lakko-auth", "the recall finish was sent and not answered; it is asked again on the next try")
+                    applyRecallStep(
+                        recallAfterFailure(working, RecallFailure.Offline, null, System.currentTimeMillis()),
+                        working,
+                    )
+                    return
+                }
+                newSeed.fill(0)
+                if (cause is kotlinx.coroutines.CancellationException) {
+                    mutableRecall.compareAndSet(working, working.copy(working = false))
+                    throw cause
+                }
+                val failure = recallFailureOf(cause)
+                Log.w("lakko-auth", "taking the account back did not happen: ${failure.javaClass.simpleName}")
+                // A wrong password: how many tries are left comes from a
+                // fresh status.
+                val statusAfter =
+                    if (failure == RecallFailure.WrongPassword) readRecallStatus(ui.accountIdB64) else null
+                applyRecallStep(recallAfterFailure(working, failure, statusAfter, System.currentTimeMillis()), working)
+                return
+            }
+            phrase = newPhrase
+            seed = newSeed
+        }
+        val (newSignaturePubkey, recalled) = result
+        val landedSeed = seed ?: return
+        val landedPhrase = phrase ?: return
+        // `finish` answered: the account is this device's again and the
+        // record has done its work.
+        record.zero()
+        recallStore.delete(ui.accountIdB64)
+        val nowMs = System.currentTimeMillis()
+        freshAuth.put(ui.accountIdB64, recalled.freshGrant, recalled.freshGrantExpiresAtMs, nowMs)
+        sessionLandingKind = SessionLanding.Password
+        mutableRecallDone.value = true
+        try {
+            landKeyReset(
+                accountIdB64 = ui.accountIdB64,
+                accountIdBytes = base64Decode(ui.accountIdB64),
+                username = ui.username,
+                seed = landedSeed,
+                phrase = landedPhrase,
+                newSignaturePubkey = newSignaturePubkey,
+                reset = recalled.reset,
+                context = "recall",
+            )
+        } finally {
+            mutableRecall.value = null
+        }
     }
 
     /** The signed-out screen's one button: to the sign-in screen. */
@@ -4603,6 +6175,19 @@ internal fun passkeyFailureText(cause: Throwable): me.lakko.app.l10n.UiText = wh
 }
 
 private const val HTTP_UNAUTHORIZED: Int = 401
+
+/** The kept-device notice of UX 18.3, per account (a flag, no secret). */
+private const val ROTATION_NOTICE_PREFS: String = "lakko-key-rotation-notice"
+private const val ROTATION_NOTICE_PREFIX: String = "notice-v1:"
+
+/** The waits between tries of an upgrade that had no usable answer
+ *  (chosen, not measured). */
+private const val SUPERSESSION_RETRY_FIRST_MS: Long = 5_000L
+private const val SUPERSESSION_RETRY_MAX_MS: Long = 60_000L
+
+/** How long a superseded device waits for its DeviceGroup journal to be
+ *  read to the head (chosen: longer than one long poll). */
+private const val JOURNAL_HEAD_WAIT_MS: Long = 40_000L
 private const val HTTP_NOT_FOUND: Int = 404
 private const val HTTP_SERVICE_UNAVAILABLE: Int = 503
 private const val ACCOUNT_ID_LENGTH: Int = 16
@@ -4701,6 +6286,13 @@ public data class KeyResetSignOut(
     val username: String,
     val kind: Kind,
     val phase: Phase,
+    /** ADR-0066 section 1.1 - the wipe keeps the recall record and the
+     *  screen that follows is "Was it you?" ([supersededWipeFor]). Only ever
+     *  `true` for [Kind.Reset] on a device that holds the account's keys. */
+    val keepsRecall: Boolean = false,
+    /** A line the screen carries once the wipe is done: why the account can
+     *  no longer be taken back ([recallEndLine]). */
+    val notice: me.lakko.app.l10n.UiText? = null,
 ) {
     public enum class Kind {
         /** The account's keys were reset on another device (a known reset:
@@ -4710,6 +6302,11 @@ public data class KeyResetSignOut(
         /** The directory serves other keys at the same generation (an
          *  anomaly: the wipe runs on the tap). */
         Mismatch,
+
+        /** ADR-0066: another device of the account removed this one (the
+         *  wipe runs by itself; nothing is kept to take the account back
+         *  with, since a removal changes no keys). */
+        Removed,
     }
 
     public enum class Phase {
@@ -4723,6 +6320,28 @@ public data class KeyResetSignOut(
          *  wipe. */
         AwaitingTap,
     }
+}
+
+/**
+ * The phase a sign-out screen opens in: a known reset and a removal by
+ * another device (ADR-0066) delete everything BY THEMSELVES; only the
+ * same-generation mismatch waits for the person's tap.
+ */
+public fun signOutPhaseFor(kind: KeyResetSignOut.Kind): KeyResetSignOut.Phase = when (kind) {
+    KeyResetSignOut.Kind.Reset, KeyResetSignOut.Kind.Removed -> KeyResetSignOut.Phase.Removing
+    KeyResetSignOut.Kind.Mismatch -> KeyResetSignOut.Phase.AwaitingTap
+}
+
+/**
+ * The screen a refused session leads to (ADR-0066 section 2.3, UX 18.7):
+ * three answers, three screens, three deletions. `null` = no full-screen
+ * state: the sign-in screen with nothing wiped (a logout at the server, an
+ * expired refresh credential), or one refresh and one retry.
+ */
+public fun signOutKindFor(refusal: SessionRefusal): KeyResetSignOut.Kind? = when (refusal) {
+    SessionRefusal.KeysReset -> KeyResetSignOut.Kind.Reset
+    SessionRefusal.DeviceRevoked -> KeyResetSignOut.Kind.Removed
+    SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized -> null
 }
 
 /** Result handed back to the signup ViewModel so it can show

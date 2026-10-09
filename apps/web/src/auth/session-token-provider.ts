@@ -20,7 +20,10 @@
  *   3. `401 key-generation-superseded`, from the refresh route or from any
  *      bearer route, raises `superseded` once: the device signs out and
  *      wipes (the listener in `AuthContext` runs it); `refresh-invalid`
- *      raises `refresh-invalid`: the sign-in screen, nothing wiped.
+ *      raises `refresh-invalid`: the sign-in screen, nothing wiped;
+ *   4. `401 device-revoked` (ADR-0066), from the refresh route or from any
+ *      bearer route, raises `device-revoked` once: this device was removed
+ *      from the account, signs out and wipes everything.
  *
  * A caller may pass a token the provider has since replaced (a component
  * that captured `identitySecrets().sessionToken` before a refresh): the
@@ -60,6 +63,9 @@ export type RefreshOutcome =
   /** The account's keys were reset elsewhere: the pair is dropped and
    *  `superseded` was raised. */
   | "superseded"
+  /** This device was removed from the account (ADR-0066): the pair is
+   *  dropped and `device-revoked` was raised. */
+  | "device-revoked"
   /** The credential is bad or expired: the pair is dropped and
    *  `refresh-invalid` was raised. */
   | "invalid"
@@ -72,6 +78,7 @@ export type RefreshOutcome =
 export type SessionEvent =
   | { readonly kind: "pair"; readonly accountIdB64: string; readonly pair: SessionPair }
   | { readonly kind: "superseded"; readonly accountIdB64: string }
+  | { readonly kind: "device-revoked"; readonly accountIdB64: string }
   | { readonly kind: "refresh-invalid"; readonly accountIdB64: string };
 
 type Listener = (event: SessionEvent) => void;
@@ -85,6 +92,11 @@ export class SessionTokenProvider {
    *  page lifetime (one per 15 minutes by design). */
   private readonly replaced = new Set<string>();
   private inflight: Promise<RefreshOutcome> | null = null;
+  /** ADR-0066 section 3.3: the pair that was held when the server answered
+   *  `key-generation-superseded`. A kept device exchanges its refresh
+   *  credential for a pair at the new generation with a statement by the new
+   *  account key; a device that cannot is signed out as before. */
+  private supersededHeld: { readonly accountIdB64: string; readonly pair: SessionPair } | null = null;
   private readonly listeners = new Set<Listener>();
 
   /** Install (or replace) the ports. Called once by `AuthContext`. */
@@ -96,6 +108,7 @@ export class SessionTokenProvider {
    *  `accountIdB64`. Replaces whatever was held; tokens of a previous pair
    *  of the same account keep resolving to the live one. */
   install(accountIdB64: string, pair: SessionPair): void {
+    this.supersededHeld = null;
     if (this.account !== accountIdB64) this.replaced.clear();
     if (this.held !== null && this.held.sessionToken !== pair.sessionToken) {
       this.replaced.add(this.held.sessionToken);
@@ -130,6 +143,14 @@ export class SessionTokenProvider {
   /** The generation the held pair was issued under, or `null`. */
   keyGeneration(): bigint | null {
     return this.held?.keyGeneration ?? null;
+  }
+
+  /** The pair that was superseded, for `accountIdB64` (ADR-0066 section
+   *  3.3); `null` when none is kept. Dropped by the next `install`. */
+  supersededPair(accountIdB64: string): SessionPair | null {
+    return this.supersededHeld !== null && this.supersededHeld.accountIdB64 === accountIdB64
+      ? this.supersededHeld.pair
+      : null;
   }
 
   /** `true` for the live access token and for any access token of this
@@ -201,12 +222,15 @@ export class SessionTokenProvider {
       if (result.status !== 401) return "network";
       const verdict = refreshRefusal(result.errorCode);
       this.clear();
+      if (verdict === "superseded") this.supersededHeld = { accountIdB64: account, pair: held };
       this.emit(
         verdict === "superseded"
           ? { kind: "superseded", accountIdB64: account }
-          : { kind: "refresh-invalid", accountIdB64: account },
+          : verdict === "device-revoked"
+            ? { kind: "device-revoked", accountIdB64: account }
+            : { kind: "refresh-invalid", accountIdB64: account },
       );
-      return verdict === "superseded" ? "superseded" : "invalid";
+      return verdict;
     }
     this.install(account, result.pair);
     void ports.persist(account, result.pair).catch(() => {
@@ -224,8 +248,22 @@ export class SessionTokenProvider {
   reportSuperseded(): void {
     const account = this.account;
     if (account === null) return;
+    const held = this.held;
     this.clear();
+    if (held !== null) this.supersededHeld = { accountIdB64: account, pair: held };
     this.emit({ kind: "superseded", accountIdB64: account });
+  }
+
+  /**
+   * A bearer route of auth answered `401 device-revoked` to the held token
+   * (ADR-0066 section 0.4): this device was removed from the account. Drop
+   * the pair and raise `device-revoked` once.
+   */
+  reportDeviceRevoked(): void {
+    const account = this.account;
+    if (account === null) return;
+    this.clear();
+    this.emit({ kind: "device-revoked", accountIdB64: account });
   }
 
   subscribe(listener: Listener): () => void {
@@ -285,6 +323,10 @@ export class SessionTokenProvider {
       this.reportSuperseded();
       return first;
     }
+    if (verdict === "device-revoked") {
+      this.reportDeviceRevoked();
+      return first;
+    }
     const outcome = await this.refreshOnce();
     const next = this.peek();
     if (outcome !== "refreshed" || next === null) return first;
@@ -297,6 +339,7 @@ export class SessionTokenProvider {
         refreshAvailable: false,
       });
       if (again === "superseded") this.reportSuperseded();
+      if (again === "device-revoked") this.reportDeviceRevoked();
     }
     return second;
   }

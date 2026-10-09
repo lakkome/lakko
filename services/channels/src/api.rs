@@ -7,7 +7,8 @@
 //!
 //! | Method | Path | Gate | Purpose |
 //! |---|---|---|---|
-//! | `POST` | `/v1/channels` | none | Register a channel: `{channel_id, owner_pubkey_hex}`. The owner key is fixed at creation. |
+//! | `POST` | `/v1/channels` | none | Register a channel: `{channel_id, owner_pubkey_hex}`. Re-creating a channel never changes its owner key. |
+//! | `PUT`  | `/v1/channels/:id/owner` | owner proof (by the CURRENT owner key) | Hand the channel to a new owner key (ADR-0066 section 3.5). Body: the new key, 32 raw bytes, `application/octet-stream`. |
 //! | `POST` | `/v1/channels/:id/posts` | publisher proof | Publish an opaque ChannelPost. |
 //! | `GET`  | `/v1/channels/:id/posts?after=&limit=` | none | Cursor-paginated fetch. |
 //! | `POST` | `/v1/channels/:id/subscribers` | one `channel-subscribe` token | Register a subscriber key. |
@@ -1738,6 +1739,107 @@ fn parse_pubkey_hex(hex_str: &str) -> Option<[u8; 32]> {
     Some(key)
 }
 
+/// `PUT /v1/channels/:channel_id/owner` — hand the channel to a new owner
+/// key ([ADR-0066] section 3.5). Signed by the CURRENT owner key; the body is
+/// the new key, 32 raw bytes (`lakko_channels::owner_handover_body`).
+///
+/// When it is used: the account that owns the channel changed its account
+/// keys, and the owner key is derived from the account seed. The device that
+/// holds both seeds signs with the key the old seed derives and names the key
+/// the new seed derives. After the `204` the old key is nobody to this
+/// channel: its proofs are the uniform `401`, re-creating the channel under
+/// it is `409 channel-exists`.
+///
+/// Order: the owner proof over the exact body (the uniform `401
+/// owner-proof-required`; an unknown channel is refused the same way), then
+/// the body (`400 bad-owner-pubkey`), then the swap. The swap is a
+/// compare-and-swap against the key the proof was verified under, so of two
+/// handovers signed by one key exactly one lands and the other is `409
+/// owner-changed`.
+///
+/// A handover that names the key that already owns the channel is a `204`
+/// that changes nothing: the new owner's way to ask "did my handover land?"
+/// after a lost answer, since the old key can no longer ask anything.
+///
+/// The co-publisher appointments and the listing stay as they are: neither
+/// carries a signature by the owner key (an appointment is a row the owner
+/// asked for, a listing is checked at upload).
+///
+/// [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+async fn replace_owner(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    // The key the proof is about to be verified under: the swap below is
+    // conditional on it still being the owner's.
+    let current = match state.store.owner_pubkey(channel).await {
+        Ok(key) => key,
+        Err(e) => {
+            tracing::error!(error = %e, "owner key lookup failed");
+            return internal_error();
+        },
+    };
+    if let Err(refused) = require_owner(&state, channel, &method, &uri, &headers, &body).await {
+        return refused;
+    }
+    let Some(current) = current else {
+        // `require_owner` refuses an unknown channel; reaching here means the
+        // channel appeared between the two reads.
+        return (
+            StatusCode::CONFLICT,
+            Json(err(
+                "owner-changed",
+                "the channel's owner changed; ask again",
+            )),
+        )
+            .into_response();
+    };
+    let Ok(new_owner) = lakko_channels::parse_owner_handover_body(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-owner-pubkey",
+                "the body must be the 32 bytes of the new owner's Ed25519 public key",
+            )),
+        )
+            .into_response();
+    };
+    let new_owner = new_owner.to_bytes();
+    if new_owner == current {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    match state.store.replace_owner(channel, current, new_owner).await {
+        Ok(true) => {
+            tracing::info!("channel owner key replaced");
+            StatusCode::NO_CONTENT.into_response()
+        },
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "owner-changed",
+                "the channel's owner key changed while this request was in flight",
+            )),
+        )
+            .into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "replace owner failed");
+            internal_error()
+        },
+    }
+}
+
 /// `PUT /v1/channels/:channel_id/copublishers/:pubkey_hex` — appoint a
 /// co-publisher key (owner-signed, empty body). Idempotent; the owner learns
 /// the key end-to-end from the co-publisher's binding (ADR-0059 section 1),
@@ -1973,6 +2075,7 @@ pub(crate) fn unix_ms() -> u64 {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/channels", post(create_channel))
+        .route("/v1/channels/{channel_id}/owner", put(replace_owner))
         .route(
             "/v1/channels/{channel_id}/posts",
             post(publish_post).get(fetch_posts),

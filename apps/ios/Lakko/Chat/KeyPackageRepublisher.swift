@@ -129,3 +129,30 @@ final class KeyPackageRepublisher {
         }
     }
 }
+
+/// What discovery refused a KeyPackage publish with (ADR-0066 section 2.2).
+enum KeyPackagePublishRefusal: Equatable {
+    /// `403 device-mismatch`: the body's device id is not the session's (a
+    /// session that names no device yet, or another one).
+    case deviceMismatch
+    /// `403 device-revoked`: the id is tombstoned. NOT proof of removal:
+    /// the caller refreshes at auth and acts on auth's answer.
+    case deviceRevoked
+    /// Anything else.
+    case other
+
+    static func classify(status: Int, body: String) -> KeyPackagePublishRefusal {
+        let code = ((try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any])?["error"]
+            as? String
+        switch (status, code) {
+        case (403, "device-mismatch"): return .deviceMismatch
+        case (403, "device-revoked"): return .deviceRevoked
+        default: return .other
+        }
+    }
+
+    static func of(_ error: Error) -> KeyPackagePublishRefusal {
+        guard case .http(let status, _, let body) = error as? DiscoveryClientError else { return .other }
+        return classify(status: status, body: body)
+    }
+}

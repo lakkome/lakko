@@ -30,7 +30,8 @@ import {
 import { DiscoveryClient } from "../discovery/client";
 import { paths } from "../routes/paths";
 import { Icon } from "../ui/icons";
-import { t, type L10nArgs } from "../l10n";
+import { currentLanguage, t, type L10nArgs } from "../l10n";
+import { deleteBlockedUntilMs } from "./recall";
 
 /** A catalog key, rendered at display time so it follows a language switch. */
 type Message = { readonly kind: "ok" | "error"; readonly key: string; readonly args?: L10nArgs } | null;
@@ -287,6 +288,21 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
       // Wipes this device and lands on the sign-in screen.
       await auth.forgetDevice();
     } catch (err) {
+      // ADR-0066 section 1.3: while the account can still be taken back
+      // after a key reset, the server refuses the deletion and names the
+      // date. Nothing was deleted and the proof is not at fault.
+      const blockedUntilMs =
+        err instanceof WebauthnHttpError ? deleteBlockedUntilMs(err.status, err.body) : null;
+      if (blockedUntilMs !== null) {
+        setError(
+          t("settings.account.delete.blocked", {
+            date: new Date(blockedUntilMs).toLocaleDateString(currentLanguage(), {
+              dateStyle: "medium",
+            }),
+          }),
+        );
+        return;
+      }
       const failure = gate.failed(err, grant);
       if (err instanceof WebauthnUserCancelledError || failure.kind === "cancelled") {
         setError(t("settings.account.delete.error.cancelled"));

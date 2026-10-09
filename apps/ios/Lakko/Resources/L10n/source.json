@@ -4520,9 +4520,155 @@
       "text": "Pairing QR code",
       "comment": "Accessible name of the QR code a device shows so another device can link to it."
     },
+    "devices.recall.body": {
+      "text": "The keys of {name} were reset on another device on {date}. This device was signed out, and the chats and contacts it kept were deleted.",
+      "comment": "The screen an old device shows after the account keys were reset on another device: Was it you? (UX identity-recovery 18.4). {name} is the username, {date} a formatted date.",
+      "security_critical": true
+    },
+    "devices.recall.checking": {
+      "text": "Checking whether the account can be taken back...",
+      "comment": "The screen an old device shows after the account keys were reset on another device: Was it you? (UX identity-recovery 18.4). {name} is the username, {date} a formatted date."
+    },
+    "devices.recall.done": {
+      "text": "You took your account back. Add your passkeys and your other devices again.",
+      "comment": "The screen an old device shows after the account keys were reset on another device: Was it you? (UX identity-recovery 18.4). {name} is the username, {date} a formatted date.",
+      "security_critical": true
+    },
+    "devices.recall.error.closed": {
+      "text": "The account can no longer be taken back from this device.",
+      "comment": "Error on the take-the-account-back form (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.error.exhausted": {
+      "text": "Too many wrong passwords. The account can no longer be taken back from this device.",
+      "comment": "Error on the take-the-account-back form (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.error.tries_left": {
+      "text": "{count, plural, one {# try left} other {# tries left}}",
+      "comment": "Error on the take-the-account-back form (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.error.wrong_password": {
+      "text": "That is not the password this account had before the reset. If you changed your password in the last month, enter the one you had before that.",
+      "comment": "Error on the take-the-account-back form (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.form.effect_factors": {
+      "text": "Passkeys and the authenticator code are removed. Add them again afterwards.",
+      "comment": "The form that takes an account back from an old device after its keys were reset elsewhere (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.form.effect_keys": {
+      "text": "The account gets new keys and a new recovery phrase.",
+      "comment": "The form that takes an account back from an old device after its keys were reset elsewhere (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.form.effect_messages": {
+      "text": "Messages sent to the account since the reset were not sent to you and cannot be recovered.",
+      "comment": "The form that takes an account back from an old device after its keys were reset elsewhere (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.form.lede": {
+      "text": "Enter the password this account had before the reset, and choose a new one. Whoever reset the keys will be signed out.",
+      "comment": "The form that takes an account back from an old device after its keys were reset elsewhere (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.form.new_password": {
+      "text": "New password",
+      "comment": "The form that takes an account back from an old device after its keys were reset elsewhere (UX identity-recovery 18.4)."
+    },
+    "devices.recall.form.old_password": {
+      "text": "Password before the reset",
+      "comment": "The form that takes an account back from an old device after its keys were reset elsewhere (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.form.repeat_password": {
+      "text": "Repeat new password",
+      "comment": "The form that takes an account back from an old device after its keys were reset elsewhere (UX identity-recovery 18.4)."
+    },
+    "devices.recall.form.submit": {
+      "text": "Take the account back",
+      "comment": "The form that takes an account back from an old device after its keys were reset elsewhere (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.form.title": {
+      "text": "Take the account back",
+      "comment": "The form that takes an account back from an old device after its keys were reset elsewhere (UX identity-recovery 18.4).",
+      "security_critical": true
+    },
+    "devices.recall.form.working": {
+      "text": "Taking the account back...",
+      "comment": "The form that takes an account back from an old device after its keys were reset elsewhere (UX identity-recovery 18.4)."
+    },
+    "devices.recall.no": {
+      "text": "No, take the account back",
+      "comment": "The screen an old device shows after the account keys were reset on another device: Was it you? (UX identity-recovery 18.4). {name} is the username, {date} a formatted date.",
+      "security_critical": true
+    },
+    "devices.recall.question": {
+      "text": "Was it you?",
+      "comment": "The screen an old device shows after the account keys were reset on another device: Was it you? (UX identity-recovery 18.4). {name} is the username, {date} a formatted date.",
+      "security_critical": true
+    },
+    "devices.recall.until": {
+      "text": "You can take the account back from this device until {date}.",
+      "comment": "The screen an old device shows after the account keys were reset on another device: Was it you? (UX identity-recovery 18.4). {name} is the username, {date} a formatted date.",
+      "security_critical": true
+    },
+    "devices.recall.yes": {
+      "text": "Yes, it was me",
+      "comment": "The screen an old device shows after the account keys were reset on another device: Was it you? (UX identity-recovery 18.4). {name} is the username, {date} a formatted date.",
+      "security_critical": true
+    },
+    "devices.recall.yes.back": {
+      "text": "Go back",
+      "comment": "The screen an old device shows after the account keys were reset on another device: Was it you? (UX identity-recovery 18.4). {name} is the username, {date} a formatted date."
+    },
+    "devices.recall.yes.confirm": {
+      "text": "The rest of what this account kept on this device will be deleted. To use the account here again, sign in and get the keys from the device that reset them.",
+      "comment": "The screen an old device shows after the account keys were reset on another device: Was it you? (UX identity-recovery 18.4). {name} is the username, {date} a formatted date.",
+      "security_critical": true
+    },
+    "devices.recall.yes.delete": {
+      "text": "Delete and sign in",
+      "comment": "The screen an old device shows after the account keys were reset on another device: Was it you? (UX identity-recovery 18.4). {name} is the username, {date} a formatted date."
+    },
+    "devices.remove.done": {
+      "text": "Device removed and signed out.",
+      "comment": "Shown after a device was removed from the account.",
+      "security_critical": true
+    },
+    "devices.remove.error.not_revoked": {
+      "text": "The device could not be signed out, so nothing was removed. Try again.",
+      "comment": "Shown when the server refused or did not answer the removal; nothing changed.",
+      "security_critical": true
+    },
+    "devices.remove.error.try_later": {
+      "text": "This device is still setting up the account. Try again in a minute.",
+      "comment": "Shown when a removal cannot run yet because this device has not finished registering the account's key."
+    },
+    "devices.remove.finish": {
+      "text": "Finish removing",
+      "comment": "Button on a device row whose removal needs the person's passkey again to finish."
+    },
+    "devices.remove.pending": {
+      "text": "Removing...",
+      "comment": "Line on a device row whose removal was accepted by the server and is still finishing."
+    },
     "devices.removed.body": {
       "text": "It was removed from your account on another device. New messages no longer reach it. Sign out, then sign in again if you want to use it.",
       "comment": "Body of the This device was removed screen.",
+      "security_critical": true
+    },
+    "devices.removed.body_done": {
+      "text": "It was removed from the account {name} on another device and signed out. Everything the account kept here was deleted.",
+      "comment": "Body of the This device was removed screen once the local data is gone. {name} is the account's username.",
+      "security_critical": true
+    },
+    "devices.removed.body_removing": {
+      "text": "It was removed from the account {name} on another device and signed out. Everything this account kept on this device is being deleted: its chats, contacts, keys and recovery phrase.",
+      "comment": "Body of the This device was removed screen while the local data is being deleted. {name} is the account's username.",
       "security_critical": true
     },
     "devices.removed.sign_out": {
@@ -4534,6 +4680,83 @@
       "text": "This device was removed",
       "comment": "Title of the full-screen state shown once another device of the account removed this one.",
       "security_critical": true
+    },
+    "devices.rotate.confirm": {
+      "text": "Remove and change keys",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1)."
+    },
+    "devices.rotate.done": {
+      "text": "Your account keys were changed. Your other devices get the new ones when they next connect.",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
+      "security_critical": true
+    },
+    "devices.rotate.effect_contacts": {
+      "text": "The people you talk to do not have to do anything.",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
+      "security_critical": true
+    },
+    "devices.rotate.effect_devices": {
+      "text": "Your other devices keep their chats and get the new keys by themselves.",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
+      "security_critical": true
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Your passkeys still sign you in. \"Restore keys with this passkey\" is turned off until you turn it on again.",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
+      "security_critical": true
+    },
+    "devices.rotate.effect_phrase": {
+      "text": "You get a new recovery phrase. The old one stops working.",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
+      "security_critical": true
+    },
+    "devices.rotate.error.not_started": {
+      "text": "The device was removed, but your account keys were not changed.",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
+      "security_critical": true
+    },
+    "devices.rotate.lede": {
+      "text": "A lost device still holds your account keys. Changing them makes what it holds useless.",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
+      "security_critical": true
+    },
+    "devices.rotate.not_now": {
+      "text": "Not now",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1)."
+    },
+    "devices.rotate.retry": {
+      "text": "Try again",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1)."
+    },
+    "devices.rotate.step_devices": {
+      "text": "Updating your other devices",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1)."
+    },
+    "devices.rotate.step_keys": {
+      "text": "Changing your account keys",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1)."
+    },
+    "devices.rotate.step_remove": {
+      "text": "Removing the device",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1)."
+    },
+    "devices.rotate.title": {
+      "text": "Remove this device and change your account keys",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
+      "security_critical": true
+    },
+    "devices.rotated.notice": {
+      "text": "Your account keys were changed on another device. This device has the new ones.",
+      "comment": "Shown on the account's other devices after the account keys were changed (UX identity-recovery 18.3).",
+      "security_critical": true
+    },
+    "devices.rotated.show_phrase": {
+      "text": "Show new phrase",
+      "comment": "Shown on the account's other devices after the account keys were changed (UX identity-recovery 18.3)."
+    },
+    "devices.rotated.updating": {
+      "text": "Updating keys...",
+      "comment": "Shown on the account's other devices after the account keys were changed (UX identity-recovery 18.3)."
     },
     "devices.scan.confirm.body": {
       "text": "This gives the scanned device full access to your account: your messages, your contacts and your identity. Continue only if the code is on your own new device.",
@@ -6433,6 +6656,21 @@
       "text": "Use your password instead",
       "comment": "Button shown where a sensitive account action would be confirmed with a passkey. Reveals a password field instead."
     },
+    "proof.remove_device.cancelled": {
+      "text": "Cancelled. The device was not removed.",
+      "comment": "Shown when the passkey prompt on the remove-device sheet was dismissed.",
+      "security_critical": true
+    },
+    "proof.remove_device.help": {
+      "text": "Enter your password to remove this device.",
+      "comment": "Helper under the password field shown before removing a device.",
+      "security_critical": true
+    },
+    "proof.remove_device.wrong_password": {
+      "text": "Wrong password. The device was not removed.",
+      "comment": "Under the password field on the remove-device sheet.",
+      "security_critical": true
+    },
     "proof.reset.cancelled": {
       "text": "Cancelled. Nothing was reset.",
       "comment": "Shown on the reset-account-keys screen after the person closed the passkey sheet without finishing.",
@@ -7099,6 +7337,11 @@
       "comment": "Note under the Log out / Forget this device / Delete account rows in Settings. The three action names are the row labels, keep them recognisable.",
       "security_critical": true
     },
+    "settings.account.delete.blocked": {
+      "text": "The account keys were reset recently. The account cannot be deleted until {date}.",
+      "comment": "Shown instead of deleting the account while the account can still be taken back after a key reset. {date} is a formatted date.",
+      "security_critical": true
+    },
     "settings.account.delete.body": {
       "text": "This erases your server-side identity — username, keys, recovery factors and backup — and signs you out everywhere. Your local messages are wiped from this device too. This cannot be undone.",
       "comment": "Confirmation dialog body; lists exactly what is erased.",
@@ -7334,19 +7577,35 @@
       "comment": "Small label on a row of Settings > Devices for a device that joined the account recently and that the person has not yet acknowledged. Refers to a device."
     },
     "settings.devices.remove.body": {
-      "text": "This device will lose access to your messages from that moment on. You may be asked for your passkey.",
+      "text": "It is signed out now. The next time it connects, everything this account kept on it is deleted: chats, contacts, keys and the recovery phrase.",
       "comment": "Body of the confirmation before removing one of the account's devices.",
       "security_critical": true
+    },
+    "settings.devices.remove.confirm": {
+      "text": "Remove device",
+      "comment": "The remove-device sheet in Settings > Devices (UX identity-recovery 18.1)."
     },
     "settings.devices.remove.confirm_named": {
       "text": "Remove {device}",
       "comment": "Destructive button of the device removal confirmation; {device} is the row label (This device / Device 2).",
       "security_critical": true
     },
+    "settings.devices.remove.reason_stolen": {
+      "text": "It was lost or stolen",
+      "comment": "The remove-device sheet in Settings > Devices (UX identity-recovery 18.1)."
+    },
+    "settings.devices.remove.reason_unused": {
+      "text": "I do not use it any more",
+      "comment": "The remove-device sheet in Settings > Devices (UX identity-recovery 18.1)."
+    },
     "settings.devices.remove.title": {
       "text": "Remove {device}?",
       "comment": "Title of the confirmation before removing one of the account's devices; {device} is the row label, e.g. Device 2.",
       "security_critical": true
+    },
+    "settings.devices.remove.working": {
+      "text": "Removing...",
+      "comment": "The remove-device sheet in Settings > Devices (UX identity-recovery 18.1)."
     },
     "settings.devices.removed_change_password": {
       "text": "Device removed. If you did not add it, change your password now.",

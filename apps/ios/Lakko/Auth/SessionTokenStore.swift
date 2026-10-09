@@ -50,7 +50,7 @@ import Security
 ///   * `kSecAttrService = "me.lakko.session-token.v2"`
 ///   * `kSecAttrAccount = accountIdB64`
 ///   * `kSecValueData = JSON { "token", "expires_at_ms", "refresh_token",
-///     "refresh_expires_at_ms", "key_generation" }`
+///     "refresh_expires_at_ms", "key_generation", "device_id"? }`
 ///
 /// v2 is a flag day (ADR-0065: no users, no v1 token to keep valid): a v1
 /// row under the old service tag is never read and is deleted beside the
@@ -151,19 +151,24 @@ public struct PersistedSessionToken: Equatable, Codable {
     public let refreshToken: String
     public let refreshExpiresAtMs: Int64
     public let keyGeneration: UInt64
+    /// ADR-0066 — the device the pair was issued for, as this client
+    /// asserted it (``SessionPair/deviceIdB64``); absent for an unbound pair.
+    public let deviceIdB64: String?
 
     public init(
         sessionToken: String,
         sessionExpiresAtMs: Int64,
         refreshToken: String,
         refreshExpiresAtMs: Int64,
-        keyGeneration: UInt64
+        keyGeneration: UInt64,
+        deviceIdB64: String? = nil
     ) {
         self.sessionToken = sessionToken
         self.sessionExpiresAtMs = sessionExpiresAtMs
         self.refreshToken = refreshToken
         self.refreshExpiresAtMs = refreshExpiresAtMs
         self.keyGeneration = keyGeneration
+        self.deviceIdB64 = deviceIdB64
     }
 
     public init(pair: SessionPair) {
@@ -172,7 +177,8 @@ public struct PersistedSessionToken: Equatable, Codable {
             sessionExpiresAtMs: pair.sessionExpiresAtMs,
             refreshToken: pair.refreshToken,
             refreshExpiresAtMs: pair.refreshExpiresAtMs,
-            keyGeneration: pair.keyGeneration
+            keyGeneration: pair.keyGeneration,
+            deviceIdB64: pair.deviceIdB64
         )
     }
 
@@ -184,7 +190,7 @@ public struct PersistedSessionToken: Equatable, Codable {
             refreshToken: refreshToken,
             refreshExpiresAtMs: refreshExpiresAtMs,
             keyGeneration: keyGeneration
-        )
+        ).naming(deviceIdB64: deviceIdB64)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -193,6 +199,7 @@ public struct PersistedSessionToken: Equatable, Codable {
         case refreshToken = "refresh_token"
         case refreshExpiresAtMs = "refresh_expires_at_ms"
         case keyGeneration = "key_generation"
+        case deviceIdB64 = "device_id"
     }
 }
 

@@ -94,7 +94,7 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
       setError(CHANNEL_NEEDS_NAME);
       return;
     }
-    const id = chats.accountIdentity();
+    const id = chats.conversationAccountIdentity();
     if (id === null) {
       setError(() => t("channels.meta.error.sign_in"));
       return;
@@ -212,7 +212,7 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
     // The SESSION-LONG account identity, not a throwaway `Identity.fromSeed`:
     // the PublisherGroup lives in this identity's provider, which the channel
     // log snapshots. This panel borrows the handle and never frees it.
-    const id = chats.accountIdentity();
+    const id = chats.conversationAccountIdentity();
     if (auth.identitySecrets() === null || id === null) {
       setOpenError(() => t("channels.manage.error.sign_in"));
       return;

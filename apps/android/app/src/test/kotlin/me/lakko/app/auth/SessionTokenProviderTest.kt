@@ -21,10 +21,13 @@ class SessionTokenProviderTest {
 
     private val acct = "AAAAAAAAAAAAAAAAAAAAAA"
 
+    /** The device segment (base64url of 32 bytes). */
+    private val dev = "D".repeat(43)
+
     private fun pair(n: Int, expiresAtMs: Long, generation: Long = 1L) = SessionPair(
-        accessToken = "v2.$acct.$generation.$expiresAtMs.access$n",
+        accessToken = "v3.$acct.$generation.$dev.1.$expiresAtMs.access$n",
         accessExpiresAtMs = expiresAtMs,
-        refreshToken = "r1.$acct.$generation.9.refresh$n",
+        refreshToken = "r2.$acct.$generation.$dev.1.9.refresh$n",
         refreshExpiresAtMs = expiresAtMs + 1_000_000L,
         keyGeneration = generation,
     )
@@ -59,7 +62,7 @@ class SessionTokenProviderTest {
         val p = provider(refresher)
         install(p, pair(1, now + 300_000L))
 
-        assertEquals("v2.$acct.1.${now + 300_000L}.access1", p.current())
+        assertEquals("v3.$acct.1.$dev.1.${now + 300_000L}.access1", p.current())
         assertTrue(refresher.calls.isEmpty())
     }
 
@@ -72,7 +75,7 @@ class SessionTokenProviderTest {
         val installed = install(p, pair(1, now + 120_000L))
 
         assertEquals(fresh.accessToken, p.current())
-        assertEquals(listOf("r1.$acct.1.9.refresh1"), refresher.calls)
+        assertEquals(listOf("r2.$acct.1.$dev.1.9.refresh1"), refresher.calls)
         assertEquals(listOf(fresh), installed.persisted)
         assertEquals(fresh, p.peek())
         // The next call uses the new token without another refresh.
@@ -90,7 +93,7 @@ class SessionTokenProviderTest {
 
         val a = async { p.current() }
         val b = async { p.current() }
-        val c = async { p.afterUnauthorized("v2.$acct.1.$now.access1") }
+        val c = async { p.afterUnauthorized("v3.$acct.1.$dev.1.$now.access1") }
         repeat(5) { yield() }
         assertEquals(1, refresher.calls.size)
         val fresh = pair(2, now + 900_000L)
@@ -170,7 +173,7 @@ class SessionTokenProviderTest {
         assertNull(p.current())
         assertEquals(listOf(SessionRefusal.RefreshInvalid), installed.refusals)
         assertNull(p.peek())
-        assertFalse(p.manages("v2.$acct.1.$now.access1"))
+        assertFalse(p.manages("v3.$acct.1.$dev.1.$now.access1"))
     }
 
     @Test
@@ -196,12 +199,12 @@ class SessionTokenProviderTest {
         val p = provider(FakeRefresher())
         install(p, pair(1, now + 900_000L))
 
-        assertTrue(p.manages("v2.$acct.1.5.someOlderToken"))
-        assertFalse(p.manages("v2.BBBBBBBBBBBBBBBBBBBBBB.1.5.other"))
-        assertFalse(p.manages("r1.$acct.1.5.refresh"))
+        assertTrue(p.manages("v3.$acct.1.$dev.1.5.someOlderToken"))
+        assertFalse(p.manages("v3.BBBBBBBBBBBBBBBBBBBBBB.1.$dev.1.5.other"))
+        assertFalse(p.manages("r2.$acct.1.$dev.1.5.refresh"))
         assertFalse(p.manages("v1.x.y.z"))
         p.clear()
-        assertFalse(p.manages("v2.$acct.1.5.someOlderToken"))
+        assertFalse(p.manages("v3.$acct.1.$dev.1.5.someOlderToken"))
         assertNull(p.peek())
     }
 
@@ -214,7 +217,7 @@ class SessionTokenProviderTest {
         p.update(newer)
         assertEquals(newer, p.peek())
         // Another account's pair is ignored.
-        p.update(SessionPair("v2.BBBBBBBBBBBBBBBBBBBBBB.1.1.x", 1L, "r1.B.1.1.y", 2L, 1L))
+        p.update(SessionPair("v3.BBBBBBBBBBBBBBBBBBBBBB.1.$dev.1.1.x", 1L, "r2.B.1.$dev.1.1.y", 2L, 1L))
         assertEquals(newer, p.peek())
         assertTrue(installed.persisted.isEmpty())
     }
@@ -230,5 +233,57 @@ class SessionTokenProviderTest {
         assertEquals(fresh, p.refreshNow())
         assertEquals(1, refresher.calls.size)
         assertNull(provider(FakeRefresher()).refreshNow())
+    }
+
+    // ---- ADR-0066: this device was removed ---------------------------------
+
+    @Test
+    fun `a refresh refused as device-revoked reports it once and keeps the pair`() = runTest {
+        val refresher = FakeRefresher()
+        val p = provider(refresher)
+        val installed = install(p, pair(1, now + 10_000L))
+        refresher.answer = { throw AuthHttpError(401, "/auth/session/refresh", "{}", code = DEVICE_REVOKED) }
+        // The stale token is still handed back (requests in flight fail as they like).
+        assertEquals(pair(1, now + 10_000L).accessToken, p.current())
+        assertEquals(listOf(SessionRefusal.DeviceRevoked), installed.refusals)
+        // Reported once; the pair is kept for the wipe that follows.
+        p.current()
+        p.reportDeviceRevokedFromBearerRoute()
+        assertEquals(listOf(SessionRefusal.DeviceRevoked), installed.refusals)
+        assertEquals(1, refresher.calls.size)
+        assertEquals(pair(1, now + 10_000L), p.peek())
+    }
+
+    @Test
+    fun `a bearer route's device-revoked is reported once`() = runTest {
+        val p = provider(FakeRefresher())
+        val installed = install(p, pair(1, now + 900_000L))
+        p.reportDeviceRevokedFromBearerRoute()
+        p.reportDeviceRevokedFromBearerRoute()
+        assertEquals(listOf(SessionRefusal.DeviceRevoked), installed.refusals)
+    }
+
+    @Test
+    fun `a logout at the server reads as refresh-invalid, never as a removal`() = runTest {
+        val refresher = FakeRefresher()
+        val p = provider(refresher)
+        val installed = install(p, pair(1, now + 10_000L))
+        refresher.answer = { throw AuthHttpError(401, "/auth/session/refresh", "{}", code = REFRESH_INVALID) }
+        p.current()
+        assertEquals(listOf(SessionRefusal.RefreshInvalid), installed.refusals)
+        assertNull(p.peek())
+    }
+
+    @Test
+    fun `adopt serves and persists the pair the bind returned, for the same account only`() = runTest {
+        val p = provider(FakeRefresher())
+        val installed = install(p, pair(1, now + 900_000L))
+        val bound = pair(2, now + 900_000L)
+        p.adopt(bound)
+        assertEquals(bound.accessToken, p.current())
+        assertEquals(listOf(bound), installed.persisted)
+        p.adopt(SessionPair("v3.BBBBBBBBBBBBBBBBBBBBBB.1.$dev.1.1.x", 1L, "r2.B.1.$dev.1.1.y", 2L, 1L))
+        assertEquals(bound.accessToken, p.current())
+        assertEquals(1, installed.persisted.size)
     }
 }

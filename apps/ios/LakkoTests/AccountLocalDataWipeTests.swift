@@ -3,6 +3,7 @@
 
 import XCTest
 import LakkoCore
+import Security
 @testable import Lakko
 
 /// Forget device and Delete account leave nothing of the account behind
@@ -111,6 +112,75 @@ final class AccountLocalDataWipeTests: XCTestCase {
         XCTAssertEqual(Set(AccountDataInventory.remaining(accountIdB64: b)), Set(beforeB))
         XCTAssertFalse(beforeB.isEmpty)
         NSLog("[account-wipe-test] other account kept: %d item(s)", beforeB.count)
+    }
+
+    /// ADR-0066 section 1.1 — the STAGED wipe is the full list minus ONE
+    /// item: after it, the only thing on the device that still names the
+    /// account is the recall record, and the full wipe then removes that too.
+    func testTheStagedWipeDeletesEverythingExceptTheRecallRecord() throws {
+        try seed(accountId: accountIdA, channelId: channelA)
+        try seed(accountId: accountIdB, channelId: channelB)
+        SessionStore().save(PersistedSession(accountIdB64: a, username: "alice"))
+        let beforeA = AccountDataInventory.remaining(accountIdB64: a)
+        let beforeB = AccountDataInventory.remaining(accountIdB64: b)
+        let recallItems = beforeA.filter(AccountDataInventory.isRecallRecord)
+        XCTAssertEqual(recallItems.count, 1, "the seed planted one recall record for the account")
+
+        let staged = AccountLocalDataWipe.wipe(
+            accountIdB64: a, keeping: [.recallRecord], removeDeliveredNotifications: {})
+
+        XCTAssertEqual(staged.failedSteps, [])
+        XCTAssertEqual(staged.leftovers, [], "the kept record is not a leftover of the staged wipe")
+        XCTAssertEqual(
+            AccountDataInventory.remaining(accountIdB64: a), recallItems,
+            "the full wipe's list minus the record: nothing else of the account is left")
+        // The other account is untouched, its own recall record included.
+        XCTAssertEqual(Set(AccountDataInventory.remaining(accountIdB64: b)), Set(beforeB))
+        KeychainRecallRecordStore().clear(accountIdB64: b)
+        // What it keeps is exactly the record, readable, with its four fields.
+        let kept = KeychainRecallRecordStore().load()
+        XCTAssertEqual(kept?.accountIdB64, a)
+        XCTAssertEqual(kept?.oldSeed, Data(repeating: 9, count: RecallRecord.seedLength))
+        XCTAssertEqual(kept?.username, "alice")
+        // The account identity seed, the phrase, the device key and the
+        // session are gone.
+        XCTAssertNil(try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: a))
+        XCTAssertNil(try DeviceKeyStore.getDeviceKey(accountIdB64: a))
+        XCTAssertNil(SessionStore().load())
+
+        // The end of the recall (Yes, closed, expired): the full wipe.
+        let full = AccountLocalDataWipe.wipe(accountIdB64: a, removeDeliveredNotifications: {})
+        XCTAssertEqual(full.failedSteps, [])
+        XCTAssertEqual(AccountDataInventory.remaining(accountIdB64: a), [])
+    }
+
+    /// The recall record is stored in the app's own Keychain group, never in
+    /// the shared group the notification extension can read.
+    func testTheRecallRecordIsNotInTheSharedKeychainGroup() throws {
+        try KeychainRecallRecordStore().put(RecallRecord(
+            accountIdB64: a, oldSeed: Data(repeating: 9, count: RecallRecord.seedLength),
+            username: "alice", learnedAtMs: 1))
+        defer { KeychainRecallRecordStore().clear(accountIdB64: a) }
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: KeychainRecallRecordStore.serviceTag,
+            kSecAttrAccount: a,
+            kSecReturnAttributes: true,
+            kSecMatchLimit: kSecMatchLimitAll,
+        ]
+        var result: CFTypeRef?
+        XCTAssertEqual(SecItemCopyMatching(query as CFDictionary, &result), errSecSuccess)
+        let rows = try XCTUnwrap(result as? [[String: Any]])
+        XCTAssertEqual(rows.count, 1)
+        let group = rows[0][kSecAttrAccessGroup as String] as? String ?? ""
+        XCTAssertFalse(group.isEmpty)
+        XCTAssertFalse(
+            group.hasSuffix(SharedStorage.keychainAccessGroup),
+            "the record must not be readable by the notification extension")
+        XCTAssertEqual(
+            rows[0][kSecAttrAccessible as String] as? String,
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
+            "this device only, no iCloud Keychain")
     }
 
     /// The walk is what makes the list checkable: a store the wipe does not
@@ -238,6 +308,10 @@ final class AccountLocalDataWipeTests: XCTestCase {
             accountIdB64: x, exportKey: Data(repeating: 3, count: ExportKeyStore.exportKeyLength))
         try AccountIdentitySeedStore.putAccountIdentitySeed(
             accountIdB64: x, seed: Data(repeating: 4, count: AccountIdentitySeedStore.seedLength))
+        // ADR-0066 section 1.1 — the recall record of a reset elsewhere.
+        try KeychainRecallRecordStore().put(RecallRecord(
+            accountIdB64: x, oldSeed: Data(repeating: 9, count: RecallRecord.seedLength),
+            username: "alice", learnedAtMs: 1))
         try DeviceIdentityStore.putDeviceIdentitySeed(
             accountIdB64: x, seed: Data(repeating: 5, count: DeviceIdentityStore.seedLength))
         try DeviceIdentityStore.putDeviceBinding(accountIdB64: x, binding: Data([6, 6]))

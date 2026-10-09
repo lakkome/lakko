@@ -216,7 +216,68 @@ async function ownerSigner(
   channelIdHex: string,
 ): Promise<ChannelOwnerSigner> {
   const wasm = await loadWasm();
-  return wasm.channelOwnerSigner(accountIdentity, hexToBytesStrict(channelIdHex));
+  // ADR-0066 section 3.5: once a channel's owner key was handed over to the
+  // key of the account's NEW identity, owner requests are signed by it. The
+  // identity passed in is the one whose MLS provider holds the
+  // PublisherGroup (the conversation identity), which after a rotation is
+  // the predecessor.
+  const moved = movedOwnerIdentity?.(channelIdHex.toLowerCase()) ?? null;
+  return wasm.channelOwnerSigner(moved ?? accountIdentity, hexToBytesStrict(channelIdHex));
+}
+
+/** The identity whose owner key a channel was handed over to, or `null`
+ *  when it was not (installed by the session; see {@link handOverChannelOwner}). */
+let movedOwnerIdentity: ((channelIdHexLower: string) => Identity | null) | null = null;
+
+export function installMovedOwnerIdentity(
+  source: ((channelIdHexLower: string) => Identity | null) | null,
+): void {
+  movedOwnerIdentity = source;
+}
+
+/**
+ * ADR-0066 section 3.5 / "T5 as built" item 26 - `PUT /v1/channels/{id}/owner`:
+ * the body is the NEW owner key (32 raw bytes, the new identity's
+ * `ChannelOwnerSigner.verifyingKey()`), the owner proof is by the OLD
+ * identity's signer. Returns the HTTP status (`204` done; `409 owner-changed`
+ * / `401 owner-proof-required` when the old key is no longer the owner), or
+ * `null` when no answer arrived. Never throws for a refusal.
+ */
+export async function putChannelOwner(
+  channelIdHex: string,
+  signingIdentity: Identity,
+  newOwnerIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<number | null> {
+  const path = `/v1/channels/${channelIdHex}/owner`;
+  const wasm = await loadWasm();
+  const id = hexToBytesStrict(channelIdHex);
+  const next = wasm.channelOwnerSigner(newOwnerIdentity, id);
+  const current = wasm.channelOwnerSigner(signingIdentity, id);
+  let body: Uint8Array;
+  let proof: string;
+  try {
+    body = next.verifyingKey();
+    proof = current.sign("PUT", path, "", body);
+  } finally {
+    next.free();
+    current.free();
+  }
+  try {
+    await fetchJson<void>(`${base}${path}`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/octet-stream",
+        [wasm.channelOwnerProofHeaderName()]: proof,
+      },
+      body: new Blob([body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer], {
+        type: "application/octet-stream",
+      }),
+    });
+    return 204;
+  } catch (err) {
+    return isChannelApiError(err) ? err.status : null;
+  }
 }
 
 function hexToBytesStrict(hex: string): Uint8Array {

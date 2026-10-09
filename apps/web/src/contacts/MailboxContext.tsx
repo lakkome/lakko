@@ -96,6 +96,25 @@ export interface MailboxApi {
   removePending(messageId: number): void;
 }
 
+function predecessorCursorKey(accountIdB64: string): string {
+  return `lakko.contacts.predecessor-mailbox.v1.${accountIdB64}`;
+}
+
+function readPredecessorMailboxCursor(accountIdB64: string): number {
+  try {
+    const raw = globalThis.localStorage?.getItem(predecessorCursorKey(accountIdB64)) ?? null;
+    const n = raw === null ? 0 : Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writePredecessorMailboxCursor(accountIdB64: string, cursor: number): void {
+  // A failed write throws, which holds the cursor: the rows come back.
+  globalThis.localStorage?.setItem(predecessorCursorKey(accountIdB64), String(cursor));
+}
+
 const MailboxContext = createContext<MailboxApi>();
 
 export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
@@ -248,6 +267,36 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     dispatch,
   });
 
+  // ADR-0066 section 3.5 (Stage A) — after a proven key rotation the
+  // conversation leaves stay bound to the account key of before it, and a
+  // Welcome is addressed to the mailbox the leaf's binding names: the
+  // PREDECESSOR's. So that mailbox is read too, under the predecessor
+  // identity, for as long as the device holds one. Requests that reach it
+  // (a peer that has not seen the rotation yet) are opened with its key. Its
+  // cursor is its own row; the rows go through the same dispatch, one poll
+  // after the other, never concurrently.
+  const predecessorClient = new ContactsClient(undefined, undefined, {
+    identityProvider: () => chats.identity(),
+    accountIdentityProvider: () => chats.predecessorAccountIdentity(),
+    onPersist: async () => {
+      const s = auth.state();
+      if (s.kind !== "session") return;
+      await chats.persistSnapshot(s.account.accountId);
+    },
+    ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
+    onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
+  });
+  const predecessorPoller: MailboxPoller = createMailboxPoller<IncomingMailboxEvent>({
+    readCursor: () => (activeAccount === null ? 0 : readPredecessorMailboxCursor(activeAccount)),
+    writeCursor: (next) => {
+      if (activeAccount === null) throw new Error("predecessor mailbox cursor write without an account");
+      writePredecessorMailboxCursor(activeAccount, next);
+    },
+    fetch: async (after, waitSecs, signal) =>
+      predecessorClient.pollMailbox(auth.identitySecrets(), after, waitSecs, signal),
+    dispatch,
+  });
+
   // ADR-0060 section 6 — one inbound mailbox per person: every Welcome is
   // addressed to the ACCOUNT mailbox (the device mailbox is claimed and
   // closed, and no longer polled; its cursor key `lakko.contacts.device-
@@ -285,6 +334,17 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       waitUntilResumed: (signal) => resume.wait(signal),
       tick: async (signal) => {
         // Long-poll the account mailbox (ADR-0060: the one inbound mailbox).
+        // The predecessor's mailbox first, without holding the read open
+        // (ADR-0066 section 3.5); then the long poll of the account's.
+        if (chats.predecessorAccountIdentity() !== null) {
+          try {
+            await predecessorPoller.poll(0, signal);
+          } catch (err) {
+            // Never costs the account mailbox its poll.
+            // eslint-disable-next-line no-console
+            console.warn("predecessor mailbox poll failed", err);
+          }
+        }
         await poller.poll(LONG_POLL_WAIT_SECS, signal);
         return 0;
       },

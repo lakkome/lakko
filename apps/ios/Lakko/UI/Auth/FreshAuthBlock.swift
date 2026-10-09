@@ -28,10 +28,13 @@ enum FreshAuthSurface: Equatable {
     case addDeviceScan
     case addPasskey
     case changePassword
+    /// Settings > Devices > Remove (ADR-0066 section 2.3, UX 18.1).
+    case removeDevice
 
     /// The helper under the field, naming the action.
     var helpKey: String {
         switch self {
+        case .removeDevice: return "proof.remove_device.help"
         case .reset: return "restore_identity.reset.password_help"
         case .deleteAccount: return "proof.delete.help"
         case .addDeviceRequest, .addDeviceScan: return "proof.add_device.help"
@@ -44,7 +47,9 @@ enum FreshAuthSurface: Equatable {
     /// NOT happen.
     var wrongPasswordKey: String {
         switch self {
-        case .reset, .addPasskey, .changePassword: return "restore_identity.reset.error.wrong_password"
+        case .reset, .addPasskey, .changePassword:
+            return "restore_identity.reset.error.wrong_password"
+        case .removeDevice: return "proof.remove_device.wrong_password"
         case .deleteAccount: return "proof.delete.wrong_password"
         case .addDeviceRequest: return "proof.add_device.request.wrong_password"
         case .addDeviceScan: return "proof.add_device.scan.wrong_password"
@@ -61,6 +66,7 @@ enum FreshAuthSurface: Equatable {
         case .addDeviceScan: return "proof.add_device.scan.cancelled"
         case .addPasskey: return "proof.add_passkey.cancelled"
         case .changePassword: return "proof.change_password.cancelled"
+        case .removeDevice: return "proof.remove_device.cancelled"
         }
     }
 

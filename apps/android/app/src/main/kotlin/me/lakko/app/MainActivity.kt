@@ -576,7 +576,9 @@ private fun AppRoot(
             authRepository.wipeAfterKeyReset()
         }
         LaunchedEffect(keysReset.kind, keysReset.phase) {
-            if (keysReset.kind == me.lakko.app.auth.KeyResetSignOut.Kind.Reset &&
+            // A known reset, and a removal by another device (ADR-0066):
+            // the wipe runs by itself. Only the mismatch waits for the tap.
+            if (keysReset.kind != me.lakko.app.auth.KeyResetSignOut.Kind.Mismatch &&
                 keysReset.phase == me.lakko.app.auth.KeyResetSignOut.Phase.Removing
             ) {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { wipe() }
@@ -593,6 +595,20 @@ private fun AppRoot(
                     }
                 },
             )
+        }
+        return
+    }
+
+    // ADR-0066 part 1 (docs/ux/identity-recovery.md 18.4) - this device holds
+    // a recall record: the account's keys were reset elsewhere and what the
+    // account kept here is already deleted. "Was it you?" replaces the whole
+    // app, in every auth state and at launch (the state is rebuilt from the
+    // record), until it is answered.
+    val recall by authRepository.recall.collectAsStateWithLifecycle()
+    val recallUi = recall
+    if (recallUi != null) {
+        InsetRoot {
+            me.lakko.app.ui.devices.RecallRoot(repository = authRepository, ui = recallUi)
         }
         return
     }
@@ -836,7 +852,9 @@ private fun AppRoot(
             identity = {
                 authRepository.identitySecrets.value?.let { secrets ->
                     me.lakko.app.calls.CallInviteIdentity(
-                        accountIdentitySeed = secrets.accountIdentitySeed,
+                        // ADR-0066 Stage A: a call founded for a link is an MLS
+                        // group; its owner key is the conversation identity's.
+                        accountIdentitySeed = me.lakko.app.auth.conversationAccountSeedOf(appContext, me.lakko.app.auth.base64Encode(secrets.accountId), secrets.accountIdentitySeed),
                         accountId = secrets.accountId,
                         sessionToken = secrets.sessionToken,
                     )
@@ -999,6 +1017,60 @@ private fun SessionRoot(
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             deviceGroupSync.bootstrap(secrets)
         }
+        // ADR-0066 section 2.3 — a device removal that still owes steps (the
+        // directory row, the device list, a chat that had not answered) is
+        // retried at every landing until each step has an answer.
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                me.lakko.app.devices.DeviceRemovalRunner
+                    .onDevice(chatRepository.context, authRepository, chatRepository)
+                    ?.resume()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                android.util.Log.w("lakko-auth", "owed device removal not resumed: ${cause.javaClass.simpleName}")
+            }
+        }
+        // ADR-0066 part 3 - a key rotation that passed its commit finishes
+        // its publishing steps by itself at every landing.
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                me.lakko.app.devices.KeyRotationDevice
+                    .runner(chatRepository.context, authRepository, chatRepository)
+                    ?.resume()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                android.util.Log.w("lakko-auth", "owed key rotation not resumed: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+
+    // ADR-0066 section 0.4 — a session that was bound to this device after
+    // it was installed could not publish this device's KeyPackage before the
+    // bind (`403 device-mismatch`): publish it now.
+    // ADR-0066 part 3 - a `key-rotation` envelope read from the account's
+    // own DeviceGroup goes to the auth side (verified, stored as pending).
+    DisposableEffect(authRepository) {
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.keyRotationSink = { envelope ->
+            authRepository.onKeyRotationEnvelope(envelope)
+        }
+        onDispose { me.lakko.app.devices.sync.DeviceGroupSyncRepository.keyRotationSink = null }
+    }
+    // This device adopted rotated account keys (as the device that changed
+    // them, or as a kept device): every directory row of the account was
+    // deleted by the rotation, so this device's KeyPackage is published
+    // again under the same device id, and the DeviceGroup journal's root
+    // signer follows the new seed.
+    val keysAdoptedRevision by authRepository.keysAdoptedRevision.collectAsStateWithLifecycle()
+    LaunchedEffect(keysAdoptedRevision) {
+        if (keysAdoptedRevision > 0) {
+            authRepository.identitySecrets.value?.let { deviceGroupSync.rebindRoot(it.accountIdentitySeed) }
+            chatRepository.requestKeyPackageRepublish()
+        }
+    }
+
+    val deviceBoundRevision by authRepository.deviceBoundRevision.collectAsStateWithLifecycle()
+    LaunchedEffect(deviceBoundRevision) {
+        if (deviceBoundRevision > 0) chatRepository.requestKeyPackageRepublish()
     }
 
     // docs/ux/calls.md section 2.1 — the phone must ring with the app closed,
@@ -1083,7 +1155,10 @@ private fun SessionRoot(
         try {
             channelsState.bind(
                 accountIdB64 = me.lakko.app.auth.base64Encode(secrets.accountId),
-                accountIdentitySeed = secrets.accountIdentitySeed,
+                // ADR-0066 Stage A: a channel's PublisherGroup is an MLS
+                // group founded under the account identity; after a rotation
+                // it stays under the predecessor (no leaf is moved).
+                accountIdentitySeed = me.lakko.app.auth.conversationAccountSeedOf(chatRepository.context, me.lakko.app.auth.base64Encode(secrets.accountId), secrets.accountIdentitySeed),
             )
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
@@ -1451,16 +1526,17 @@ private fun SessionRoot(
         authRepository.forgetDevice()
     }
 
-    // docs/ux/second-device.md section 3.1 — another device removed this one.
-    // The removed screen replaces the whole app, tab bar, call bar and notices
-    // included; its one button is "Forget this device" above.
+    // ADR-0066 section 2.3 / docs/ux/identity-recovery.md 18.2 — another
+    // device removed this one, and this device read its own removal from the
+    // account's DeviceGroup (the group turned inactive): proof of removal by
+    // a device of the account. The app root replaces the whole app with the
+    // removed screen and wipes everything by itself, exactly as it does for
+    // auth's `401 device-revoked`; nothing is drawn here in between.
     val deviceRemoved by deviceGroupSync.deviceRemoved.collectAsStateWithLifecycle()
-    if (deviceRemoved) {
-        InsetRoot {
-            me.lakko.app.ui.devices.RemovedDeviceScreen(onSignOut = forgetDevice)
-        }
-        return
+    LaunchedEffect(deviceRemoved) {
+        if (deviceRemoved) authRepository.onRemovedFromDeviceGroup()
     }
+    if (deviceRemoved) return
 
     Scaffold(
         // Each screen pads by its own Scaffold; the shell contributes only the
@@ -1524,6 +1600,15 @@ private fun SessionRoot(
                     // every device but the added one and the one that let it
                     // in. Not a modal; it stays until dismissed.
                     androidx.compose.foundation.layout.Column(modifier = Modifier.fillMaxSize()) {
+                    // UX 18.4 - the session that took the account back.
+                    me.lakko.app.ui.devices.RecallDoneLine(repository = authRepository)
+                    // UX 18.3 - a kept device after the account keys were
+                    // changed on another one: `Updating keys...`, then the
+                    // dismissible notice. Never a full-screen state.
+                    me.lakko.app.ui.devices.KeysRotatedNotice(
+                        repository = authRepository,
+                        onShowPhrase = { navController.navigate(Routes.RECOVERY) { launchSingleTop = true } },
+                    )
                     me.lakko.app.ui.devices.NewDeviceNoticeBanner(
                         onOpenDevices = { navController.navigate(Routes.DEVICES) { launchSingleTop = true } },
                     )

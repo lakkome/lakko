@@ -23,6 +23,7 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
         { personKeyB64: "bob", devices: [kp("bob-1"), kp("bob-2")] },
       ],
       removed: new Set(),
+      ownDeviceGroup: new Set(["me-1", "me-2"]),
     });
     expect(plan.admit.map((d) => d.deviceKeyB64)).toEqual(["me-2", "bob-2"]);
     expect(plan.retire).toEqual([]);
@@ -34,6 +35,7 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
       ownPersonKeyB64: "me",
       accounts: [{ personKeyB64: "bob", devices: [kp("bob-1"), kp("bob-old")] }],
       removed: new Set(["bob-old"]),
+      ownDeviceGroup: new Set(["me-1", "me-2"]),
     });
     expect(plan.admit).toEqual([]);
   });
@@ -51,6 +53,7 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
         { personKeyB64: "bob", devices: [] },
       ],
       removed: new Set(),
+      ownDeviceGroup: new Set(["me-1", "me-2"]),
     });
     expect(plan.retire).toEqual(["me-forgotten"]);
     expect(plan.admit).toEqual([]);
@@ -65,6 +68,7 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
       ownPersonKeyB64: "me",
       accounts: [{ personKeyB64: "me", devices: null }],
       removed: new Set(),
+      ownDeviceGroup: new Set(["me-1", "me-2"]),
     });
     expect(plan).toEqual({ admit: [], retire: [] });
   });
@@ -78,7 +82,69 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
         { personKeyB64: "b", devices: [kp("x")] },
       ],
       removed: new Set(),
+      ownDeviceGroup: new Set(["me-1", "me-2"]),
     });
     expect(plan.admit).toHaveLength(1);
+  });
+
+  // ADR-0066 section 2.3 - the DeviceGroup filter.
+  describe("own-account devices are admitted only from the DeviceGroup roster", () => {
+    const base = {
+      roster: [
+        { leafKeyB64: "me-1", personKeyB64: "me" },
+        { leafKeyB64: "bob-1", personKeyB64: "bob" },
+      ],
+      ownPersonKeyB64: "me",
+      accounts: [
+        { personKeyB64: "me", devices: [kp("me-1"), kp("me-2"), kp("me-removed")] },
+        { personKeyB64: "bob", devices: [kp("bob-1"), kp("bob-2")] },
+      ],
+      removed: new Set<string>(),
+    };
+
+    it("does not re-admit an own device that published itself but is not in the DeviceGroup", () => {
+      const plan = planReadmission({ ...base, ownDeviceGroup: new Set(["me-1", "me-2"]) });
+      expect(plan.admit.map((d) => d.deviceKeyB64)).toEqual(["me-2", "bob-2"]);
+    });
+
+    it("admits no own device while the DeviceGroup roster is unknown", () => {
+      const plan = planReadmission({ ...base, ownDeviceGroup: null });
+      expect(plan.admit.map((d) => d.deviceKeyB64)).toEqual(["bob-2"]);
+    });
+
+    it("leaves a contact's devices to the directory and the removed memory", () => {
+      const plan = planReadmission({
+        ...base,
+        ownDeviceGroup: new Set(),
+        removed: new Set(["bob-2"]),
+      });
+      expect(plan.admit).toEqual([]);
+    });
+
+    it("keeps the per-chat removed memory as a second test for an own device", () => {
+      const plan = planReadmission({
+        ...base,
+        ownDeviceGroup: new Set(["me-1", "me-2", "me-removed"]),
+        removed: new Set(["me-removed"]),
+      });
+      expect(plan.admit.map((d) => d.deviceKeyB64)).toEqual(["me-2", "bob-2"]);
+    });
+
+    it("does not retire an own leaf merely because the DeviceGroup lacks it", () => {
+      // A device restored from the phrase with no other device online founds
+      // its own DeviceGroup: two devices that are each absent from the
+      // other's roster must not evict each other.
+      const plan = planReadmission({
+        roster: [
+          { leafKeyB64: "me-1", personKeyB64: "me" },
+          { leafKeyB64: "me-restored", personKeyB64: "me" },
+        ],
+        ownPersonKeyB64: "me",
+        accounts: [{ personKeyB64: "me", devices: [kp("me-1"), kp("me-restored")] }],
+        removed: new Set(),
+        ownDeviceGroup: new Set(["me-1"]),
+      });
+      expect(plan).toEqual({ admit: [], retire: [] });
+    });
   });
 });

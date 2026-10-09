@@ -4543,9 +4543,11 @@ DeviceGroup. What remains: an attacker holding the password (the reset is
 then a legitimate sign-in, and with the new phrase they change the password
 and lock the owner out; a recall from a surviving old device, or a delay,
 was discussed and is undecided); a grant read out of a device's memory
-together with the session inside its ten minutes; a stolen recovery phrase
-or a passkey that carries keys, which need no reset at all; and the second
-part below, unchanged. The paragraphs that follow describe the state before
+together with the session inside its ten minutes (a recall from a surviving old device with the previous password was built on 2026-10-08, ADR-0066 T3-T4, unit-tested only, so "undecided" above is history); a stolen recovery phrase
+or a passkey that carries keys, which need no reset at all. The second
+part below was closed in code on 2026-10-08 (ADR-0066 T1: the directory
+delete is under the generation floor, needs an account statement for
+another device's row, and tombstones the id). The paragraphs that follow describe the state before
 this amendment.
 
 **What the code does.** `POST /account/keys/reset/{start,finish}` is

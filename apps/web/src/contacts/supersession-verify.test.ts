@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { ContactsClient, SupersessionRefused } from "./client";
-import { bindContactsAccount, readPin } from "./local-store";
+import { bindContactsAccount, loadFlaggedContacts, readKeyState, readPin } from "./local-store";
 import type { IdentityFetchResponse } from "../discovery/wire";
 
 /** In-memory `localStorage` shim (vitest `node` environment has
@@ -171,6 +171,54 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     expect(pin?.pinnedSignaturePubkeyB64).toBe(newPeer.signaturePubkeyB64);
     // The marker advanced to the proof's expires_at.
     expect(pin?.rotationMarker).toBe(Number(expires));
+  });
+
+  it("ADR-0066: a PROVEN rotation at a higher generation is followed silently, and the old key is the proven predecessor", async () => {
+    const oldPeer = identityFromSeed(41);
+    const newPeer = identityFromSeed(42);
+    const accountIdB64 = b64(ACCOUNT_ID);
+    await gate({
+      signature_pubkey: oldPeer.signaturePubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64, key_generation: 1
+    });
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const proof = wasm.signSupersessionProof(oldPeer.ed25519Seed, newPeer.ed25519Seed, now, now + WINDOW_SECS);
+    // What the proven-rotation arm serves: the new key, the proof, and the
+    // generation the attestation moved the account to. No throw, no prompt.
+    await expect(
+      gate({
+        signature_pubkey: newPeer.signaturePubkeyB64,
+        x25519_pubkey: newPeer.x25519PubkeyB64, key_generation: 2,
+        supersession_proof: b64(proof),
+      }),
+    ).resolves.toBeUndefined();
+    const pin = readPin(accountIdB64);
+    expect(pin?.pinnedSignaturePubkeyB64).toBe(newPeer.signaturePubkeyB64);
+    expect(pin?.provenPredecessorsB64).toEqual([oldPeer.signaturePubkeyB64]);
+    // Nothing of the ADR-0065 phase-2 "keys reset" state: a proven rotation
+    // is not a reset.
+    expect(pin?.keyReset).toBeUndefined();
+    expect(readKeyState(accountIdB64)).toBe("normal");
+    expect(loadFlaggedContacts()).toEqual([]);
+  });
+
+  it("ADR-0066: a changed key WITHOUT a proof is refused and leaves NO predecessor", async () => {
+    const oldPeer = identityFromSeed(43);
+    const newPeer = identityFromSeed(44);
+    const accountIdB64 = b64(ACCOUNT_ID);
+    await gate({
+      signature_pubkey: oldPeer.signaturePubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64, key_generation: 1
+    });
+    await expect(
+      gate({
+        signature_pubkey: newPeer.signaturePubkeyB64,
+        x25519_pubkey: newPeer.x25519PubkeyB64, key_generation: 2,
+      }),
+    ).rejects.toBeInstanceOf(SupersessionRefused);
+    const pin = readPin(accountIdB64);
+    expect(pin?.pinnedSignaturePubkeyB64).toBe(oldPeer.signaturePubkeyB64);
+    expect(pin?.provenPredecessorsB64).toBeUndefined();
   });
 
   it("a changed key WITHOUT a proof fails closed (no blind TOFU)", async () => {

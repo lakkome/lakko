@@ -282,4 +282,23 @@ enum DeviceRowPresentation {
             ? Localization.text("settings.devices.this_device")
             : Localization.text("settings.devices.device_n", texts: ["number": String(position)])
     }
+
+    /// The trailing control of a device row (UX 18.1).
+    enum Control: Equatable {
+        /// This device: no control (Forget this device is in Settings).
+        case none
+        /// Signed out at the server, the rest of the removal still
+        /// finishing: a "Removing..." label and no Remove control.
+        case pending
+        /// Signed out at the server, and the owed step waits for the
+        /// person's passkey: the label AND `Finish removing`.
+        case pendingFinish
+        case remove
+    }
+
+    static func control(isSelf: Bool, removalPending: Bool, waitingOnPerson: Bool = false) -> Control {
+        if isSelf { return .none }
+        guard removalPending else { return .remove }
+        return waitingOnPerson ? .pendingFinish : .pending
+    }
 }

@@ -104,6 +104,21 @@ public class ContactsRepository(
             lastSeenRoot = appContext?.let {
                 me.lakko.app.transparency.LastSeenRoot(it)
             } ?: me.lakko.app.transparency.InMemoryLastSeenRoot(),
+            // ADR-0066 section 3.5 - a contact's proven rotation makes the
+            // key pinned until now a proven predecessor of the new one.
+            onProvenRotation = { peer, oldKey, newKey ->
+                val ctx = appContext
+                val owner = authRepo.identitySecrets.value?.let { base64Encode(it.accountId) }
+                if (ctx != null && owner != null) {
+                    ProvenPredecessors.recordProven(
+                        store = SharedPrefsProvenLinkStore(ctx),
+                        ownerAccountIdB64 = owner,
+                        accountIdB64 = AcceptedContactsStore.canonicalAccountB64(peer),
+                        oldKeyB64 = oldKey,
+                        newKeyB64 = newKey,
+                    )
+                }
+            },
         )
     },
     /** Factory for the [me.lakko.app.discovery.DiscoveryClient] the invite-
@@ -133,6 +148,16 @@ public class ContactsRepository(
      *  without a [Context]). */
     private val keyStateStore: ContactKeyStateStore =
         appContext?.let { SharedPrefsContactKeyStateStore(it) } ?: InMemoryContactKeyStateStore(),
+    /** ADR-0066 part 3 - which key's mailbox the kept inbox cursor reads,
+     *  and the cursor of each later mailbox of the account. */
+    private val inboxMailboxStore: InboxMailboxStore? =
+        appContext?.let {
+            InboxMailboxStore(me.lakko.app.auth.SharedPrefsMarkerStorage(it, InboxMailboxStore.PREFS_NAME))
+        },
+    /** ADR-0066 section 3.5 - the proven steps of contacts' key histories
+     *  (public keys only). */
+    private val provenLinkStore: ProvenLinkStore =
+        appContext?.let { SharedPrefsProvenLinkStore(it) } ?: InMemoryProvenLinkStore(),
     /** ADR-0065 phase 2 / UX 16.2 — the pin store the confirmation re-pins
      *  through: the SAME persistent per-account store the fetch-path gate
      *  reads, so a confirmed key is what the next identity fetch compares
@@ -207,6 +232,9 @@ public class ContactsRepository(
         if (merged == existing) return
         keyStateStore.save(owner, merged)
         mutableResetRecords.update { it + (peer to merged) }
+        // ADR-0066 section 3.5 - a RESET ends every proven predecessor the
+        // account had: none of its earlier keys is the person any more.
+        ProvenPredecessors.dropAccount(provenLinkStore, owner, peer)
         pushAliasesToDirectory()
         Log.i(TAG, "ADR-0065: contact flagged reset-unverified")
         chatRepo?.onContactKeysReset(merged)
@@ -307,6 +335,12 @@ public class ContactsRepository(
         } catch (_: IllegalArgumentException) {
             return null
         }
+        // ADR-0066 section 3.5 - a key of the same person through proven
+        // rotations names the row the person already has.
+        val links = provenLinks()
+        if (links.isNotEmpty()) {
+            accepted.firstOrNull { samePerson(base64Encode(it.request.fromPubkey), keyB64, links) }?.let { return it }
+        }
         val record = resetRecordOfKey(keyB64) ?: return null
         return accepted.firstOrNull { c -> c.request.fromAccountId?.let(::base64Encode) == record.accountIdB64 }
     }
@@ -348,10 +382,30 @@ public class ContactsRepository(
      *  to the person: the directory aliases the new key to the old one. */
     private fun pushAliasesToDirectory() {
         val directory = profileDirectory ?: return
+        // ADR-0066 section 3.5 - and from a proven successor key to the key
+        // the person was first known by: a proven rotation is the same
+        // person, with nothing shown.
         directory.setAliases(
-            mutableResetRecords.value.values.associate { it.pendingKeyB64 to it.previousKeyB64 },
+            provenAliases(provenLinks()) +
+                mutableResetRecords.value.values.associate { it.pendingKeyB64 to it.previousKeyB64 },
         )
     }
+
+    /** The proven steps recorded for the bound account. */
+    private fun provenLinks(): List<ProvenLink> =
+        boundAccountB64?.let { provenLinkStore.load(it) }.orEmpty()
+
+    /**
+     * ADR-0066 section 3.5 - whether two account keys are the same person
+     * across PROVEN rotations (never across a reset or an unproven change).
+     * Standard base64 keys.
+     */
+    public fun sameProvenPerson(aKeyB64: String, bKeyB64: String): Boolean =
+        samePerson(aKeyB64, bKeyB64, provenLinks())
+
+    /** The key conversation leaves and the contact row of the person behind
+     *  [keyB64] are under: the earliest key of its proven chain. */
+    public fun conversationKeyOf(keyB64: String): String = earliestKeyOf(keyB64, provenLinks())
     /**
      * Build a [DiscoveryClient] pre-stamped with the current
      * session's bearer token (Phase 1.5b). Every protected
@@ -412,6 +466,9 @@ public class ContactsRepository(
      */
     public fun bindAccount(accountId: ByteArray) {
         val accountB64 = base64Encode(accountId)
+        // ADR-0066 section 3.5 - a proven rotation recorded by the gate
+        // reaches name resolution at once.
+        ProvenPredecessors.onChanged = { pushAliasesToDirectory() }
         var acceptedGrew = false
         synchronized(bindLock) {
             if (boundAccountB64 == accountB64) return
@@ -919,12 +976,42 @@ public class ContactsRepository(
         // thread: the state is a `MutableStateFlow` and the stores below it
         // are their own.
         withContext(Dispatchers.IO) {
+            // ADR-0066 part 3, Stage A - after a rotation of the account
+            // keys the device bindings that exist still name the previous
+            // key, so a Welcome for one of them arrives in the PREVIOUS
+            // identity's mailbox. Read it first (no long poll).
             try {
                 useClientWith(secrets) { client, sender ->
+                    // A mailbox's ids are its own: after a rotation the kept
+                    // cursor belongs to the previous key's mailbox.
+                    val currentKeyB64 = base64Encode(sender.signaturePubkey)
+                    val mailboxes = inboxMailboxStore
+                    val read = if (mailboxes == null) {
+                        InboxRead(mutableState.value.cursor, usesKeptCursor = true, keptCursorOwnerB64 = null)
+                    } else {
+                        val owner = mailboxes.ownerKey(accountB64)
+                        if (owner == null) mailboxes.setOwnerKey(accountB64, currentKeyB64)
+                        inboxReadFor(
+                            ownerKeyB64 = owner,
+                            currentKeyB64 = currentKeyB64,
+                            keptCursor = mutableState.value.cursor,
+                            laterCursor = mailboxes.cursor(accountB64, currentKeyB64),
+                        )
+                    }
+                    read.keptCursorOwnerB64?.let { owner ->
+                        // The previous identity's mailbox continues from the
+                        // kept cursor (forward-only, so repeating is harmless).
+                        try {
+                            authRepo.advancePredecessorMailboxCursor(me.lakko.app.auth.base64Decode(owner), mutableState.value.cursor)
+                        } catch (_: IllegalArgumentException) {
+                            // A damaged row: the old mailbox is read from 0.
+                        }
+                    }
+                    pollPredecessorWelcomes()
                     val result = client.pollStrangerInbox(
                         mySignaturePubkey = sender.signaturePubkey,
                         myX25519Secret = sender.x25519Secret,
-                        after = mutableState.value.cursor,
+                        after = read.after,
                         waitSecs = waitSecs,
                         mailboxSigner = sender.mailboxSigner,
                     )
@@ -1013,6 +1100,9 @@ public class ContactsRepository(
                     // belongs to the previous account's inbox. `clear()` already
                     // reset the state; do not land the rows or the cursor in it.
                     if (boundAccountB64 != accountB64) return@useClientWith
+                    if (!read.usesKeptCursor) {
+                        inboxMailboxStore?.advance(accountB64, currentKeyB64, result.cursor)
+                    }
 
                     var dropped: List<IncomingContactRequest> = emptyList()
                     var acceptedChanged = false
@@ -1035,7 +1125,12 @@ public class ContactsRepository(
                             pending = withoutAcceptedSenders(merged.pending, applied.accepted),
                             // Never backwards: a stale batch cannot re-arm a
                             // re-fetch of rows this device already handled.
-                            cursor = advanceInboxCursor(state.cursor, result.cursor),
+                            // A later mailbox's cursor is kept apart.
+                            cursor = if (read.usesKeptCursor) {
+                                advanceInboxCursor(state.cursor, result.cursor)
+                            } else {
+                                state.cursor
+                            },
                             // Always clear the refreshing flag —
                             // even if this was a long-poll that
                             // didn't raise it, clearing is a no-op.
@@ -1762,6 +1857,67 @@ public class ContactsRepository(
         // names it learned stop resolving.
         pushRenamesToDirectory()
         profileDirectory?.onAccountChanged()
+    }
+
+    /**
+     * ADR-0066 part 3, Stage A - read the mailbox of each of this account's
+     * own previous identities and join the groups its Welcomes invite this
+     * device to. Only Welcomes are acted on: a contact request sealed to a
+     * previous key is left where it is (the sender's client re-fetches the
+     * identity bundle and follows the proof). Best-effort; the cursor of
+     * each mailbox only moves forward.
+     */
+    private suspend fun pollPredecessorWelcomes() {
+        val chat = chatRepo ?: return
+        val predecessors = try {
+            authRepo.ownPredecessors()
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        if (predecessors.isEmpty()) return
+        try {
+            for (previous in predecessors) {
+                try {
+                    clientFactory().use { client ->
+                        Identity.fromSeed(previous.phraseSeed).use { identity ->
+                            val secret = identity.x25519SecretKey()
+                            try {
+                                val result = client.pollStrangerInbox(
+                                    mySignaturePubkey = identity.signaturePublicKey(),
+                                    myX25519Secret = secret,
+                                    after = previous.mailboxCursor,
+                                    waitSecs = 0,
+                                    mailboxSigner = me.lakko.app.ds.FfiDsJournalSigner(
+                                        uniffi.lakko_ffi_uniffi.dsMailboxSigner(identity),
+                                    ),
+                                )
+                                for (event in result.events) {
+                                    val welcome = event as? IncomingMailboxEvent.Welcome ?: continue
+                                    try {
+                                        chat.joinGroupFromWelcome(welcome.welcomeBytes)
+                                    } catch (cancel: kotlinx.coroutines.CancellationException) {
+                                        throw cancel
+                                    } catch (cause: Throwable) {
+                                        if (!me.lakko.app.chat.isWelcomeForAnotherDevice(cause)) {
+                                            Log.w(TAG, "a Welcome in a previous mailbox was not joined: ${cause.javaClass.simpleName}")
+                                        }
+                                    }
+                                }
+                                authRepo.advancePredecessorMailboxCursor(previous.signaturePubkey, result.cursor)
+                            } finally {
+                                secret.fill(0)
+                            }
+                        }
+                    }
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (cause: Throwable) {
+                    Log.w(TAG, "a previous identity's mailbox was not read: ${cause.javaClass.simpleName}")
+                }
+            }
+        } finally {
+            predecessors.forEach { it.zero() }
+        }
     }
 
     /**

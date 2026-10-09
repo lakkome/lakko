@@ -29,7 +29,8 @@ import kotlinx.coroutines.sync.withLock
  *   * A refresh answered `key-generation-superseded` reports
  *     [SessionRefusal.KeysReset] ONCE and keeps the stale pair: the device is
  *     about to wipe, and requests that are still in flight may fail as they
- *     like.
+ *     like. A refresh answered `device-revoked` (ADR-0066) reports
+ *     [SessionRefusal.DeviceRevoked] the same way.
  *   * A refresh answered `refresh-invalid` reports
  *     [SessionRefusal.RefreshInvalid] and drops the pair: the device goes to
  *     the sign-in screen, nothing is wiped.
@@ -97,6 +98,23 @@ public class SessionTokenProvider(
         inst.refused = false
     }
 
+    /**
+     * ADR-0066 - `bind-device` replaced the installed session's pair with
+     * one that names this device: serve it and persist it like a refreshed
+     * pair. A no-op when nothing is installed or the pair names another
+     * account.
+     */
+    public fun adopt(pair: SessionPair) {
+        val inst = installed ?: return
+        if (accountSegmentOfAccessToken(pair.accessToken) != inst.accountSegment) return
+        inst.pair = pair
+        try {
+            inst.persist(pair)
+        } catch (cause: Throwable) {
+            log("session pair persist after bind failed: ${cause.javaClass.simpleName}")
+        }
+    }
+
     /** Forget the session (logout, wipe). */
     public fun clear() {
         installed = null
@@ -116,6 +134,18 @@ public class SessionTokenProvider(
         if (inst.refused) return
         inst.refused = true
         inst.onRefusal(SessionRefusal.KeysReset)
+    }
+
+    /**
+     * ADR-0066 - a bearer route of auth answered `401 device-revoked`:
+     * another device of the account removed this one. Reported once per
+     * installed session, like the refresh refusal.
+     */
+    public fun reportDeviceRevokedFromBearerRoute() {
+        val inst = installed ?: return
+        if (inst.refused) return
+        inst.refused = true
+        inst.onRefusal(SessionRefusal.DeviceRevoked)
     }
 
     /** Whether [bearer] is an access token of the account this provider
@@ -181,6 +211,19 @@ public class SessionTokenProvider(
                         inst.refused = true
                         inst.onRefusal(SessionRefusal.KeysReset)
                     }
+                    SessionRefusal.DeviceRevoked -> {
+                        // ADR-0066 "T3 as built" item 1: auth reads the
+                        // generation BEFORE the device floor, so this answer
+                        // only ever reaches a credential of the CURRENT
+                        // generation. A removed device whose account was
+                        // also reset is told `key-generation-superseded`
+                        // (the staged wipe and a recall record), never this.
+                        // Nothing here depends on that order: each code is
+                        // acted on as it arrives.
+                        log("session refresh refused: this device was removed from the account")
+                        inst.refused = true
+                        inst.onRefusal(SessionRefusal.DeviceRevoked)
+                    }
                     SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized -> {
                         log("session refresh refused: the refresh credential is not accepted")
                         inst.refused = true
@@ -218,5 +261,10 @@ public object SessionTokens {
      *  refresh refusal, reported once. */
     public fun reportSuperseded() {
         provider?.reportSupersededFromBearerRoute()
+    }
+
+    /** Report a `401 device-revoked` seen on a bearer route of auth. */
+    public fun reportDeviceRevoked() {
+        provider?.reportDeviceRevokedFromBearerRoute()
     }
 }

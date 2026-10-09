@@ -4402,8 +4402,132 @@
       "text": "رمز QR للربط",
       "status": "machine"
     },
+    "devices.recall.body": {
+      "text": "أُعيد تعيين مفاتيح {name} من جهاز آخر بتاريخ {date}. سُجّل خروج هذا الجهاز، وحُذفت الدردشات وجهات الاتصال التي كان يحتفظ بها.",
+      "status": "machine"
+    },
+    "devices.recall.checking": {
+      "text": "جارٍ التحقق مما إذا كان يمكن استرجاع الحساب...",
+      "status": "machine"
+    },
+    "devices.recall.done": {
+      "text": "لقد استرجعت حسابك. أضِف مفاتيح المرور وأجهزتك الأخرى مجددًا.",
+      "status": "machine"
+    },
+    "devices.recall.error.closed": {
+      "text": "لم يعد ممكنًا استرجاع الحساب من هذا الجهاز.",
+      "status": "machine"
+    },
+    "devices.recall.error.exhausted": {
+      "text": "كلمات مرور خاطئة كثيرة جدًا. لم يعد ممكنًا استرجاع الحساب من هذا الجهاز.",
+      "status": "machine"
+    },
+    "devices.recall.error.tries_left": {
+      "text": "{count, plural, zero {لم تبقَ أي محاولة} one {بقيت محاولة واحدة} two {بقيت محاولتان} few {بقيت # محاولات} many {بقيت # محاولة} other {بقيت # محاولة}}",
+      "status": "machine"
+    },
+    "devices.recall.error.wrong_password": {
+      "text": "هذه ليست كلمة المرور التي كانت لهذا الحساب قبل إعادة التعيين. إذا غيّرت كلمة مرورك خلال الشهر الماضي، فأدخل الكلمة التي كانت لديك قبل ذلك.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_factors": {
+      "text": "تُزال مفاتيح المرور ورمز تطبيق المصادقة. أضِفها مجددًا بعد ذلك.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_keys": {
+      "text": "يحصل الحساب على مفاتيح جديدة وعبارة استرداد جديدة.",
+      "status": "machine"
+    },
+    "devices.recall.form.effect_messages": {
+      "text": "الرسائل المرسلة إلى الحساب منذ إعادة التعيين لم تُرسَل إليك ولا يمكن استرجاعها.",
+      "status": "machine"
+    },
+    "devices.recall.form.lede": {
+      "text": "أدخل كلمة المرور التي كانت لهذا الحساب قبل إعادة التعيين، واختر كلمة جديدة. سيُسجَّل خروج من أعاد تعيين المفاتيح.",
+      "status": "machine"
+    },
+    "devices.recall.form.new_password": {
+      "text": "كلمة المرور الجديدة",
+      "status": "machine"
+    },
+    "devices.recall.form.old_password": {
+      "text": "كلمة المرور قبل إعادة التعيين",
+      "status": "machine"
+    },
+    "devices.recall.form.repeat_password": {
+      "text": "تكرار كلمة المرور الجديدة",
+      "status": "machine"
+    },
+    "devices.recall.form.submit": {
+      "text": "استرجاع الحساب",
+      "status": "machine"
+    },
+    "devices.recall.form.title": {
+      "text": "استرجاع الحساب",
+      "status": "machine"
+    },
+    "devices.recall.form.working": {
+      "text": "جارٍ استرجاع الحساب...",
+      "status": "machine"
+    },
+    "devices.recall.no": {
+      "text": "لا، استرجاع الحساب",
+      "status": "machine"
+    },
+    "devices.recall.question": {
+      "text": "هل كنت أنت؟",
+      "status": "machine"
+    },
+    "devices.recall.until": {
+      "text": "يمكنك استرجاع الحساب من هذا الجهاز حتى {date}.",
+      "status": "machine"
+    },
+    "devices.recall.yes": {
+      "text": "نعم، كنت أنا",
+      "status": "machine"
+    },
+    "devices.recall.yes.back": {
+      "text": "رجوع",
+      "status": "machine"
+    },
+    "devices.recall.yes.confirm": {
+      "text": "سيُحذف باقي ما احتفظ به هذا الحساب على هذا الجهاز. لاستخدام الحساب هنا مجددًا، سجّل الدخول واحصل على المفاتيح من الجهاز الذي أعاد تعيينها.",
+      "status": "machine"
+    },
+    "devices.recall.yes.delete": {
+      "text": "حذف وتسجيل الدخول",
+      "status": "machine"
+    },
+    "devices.remove.done": {
+      "text": "أُزيل الجهاز وسُجّل خروجه.",
+      "status": "machine"
+    },
+    "devices.remove.error.not_revoked": {
+      "text": "تعذّر تسجيل خروج الجهاز، لذا لم يُزَل شيء. حاول مجددًا.",
+      "status": "machine"
+    },
+    "devices.remove.error.try_later": {
+      "text": "هذا الجهاز ما زال يُعِدّ الحساب. حاول بعد دقيقة.",
+      "status": "machine"
+    },
+    "devices.remove.finish": {
+      "text": "إكمال الإزالة",
+      "status": "machine"
+    },
+    "devices.remove.pending": {
+      "text": "جارٍ الإزالة...",
+      "status": "machine"
+    },
     "devices.removed.body": {
       "text": "أُزيل من حسابك من جهاز آخر. لم تعد الرسائل الجديدة تصل إليه. سجّل الخروج، ثم سجّل الدخول مجددًا إذا أردت استخدامه.",
+      "status": "machine"
+    },
+    "devices.removed.body_done": {
+      "text": "أُزيل من الحساب {name} على جهاز آخر وسُجّل خروجه. حُذف كل ما احتفظ به الحساب هنا.",
+      "status": "machine"
+    },
+    "devices.removed.body_removing": {
+      "text": "أُزيل من الحساب {name} على جهاز آخر وسُجّل خروجه. يُحذف الآن كل ما احتفظ به هذا الحساب على هذا الجهاز: الدردشات وجهات الاتصال والمفاتيح وعبارة الاسترداد.",
       "status": "machine"
     },
     "devices.removed.sign_out": {
@@ -4412,6 +4536,74 @@
     },
     "devices.removed.title": {
       "text": "أُزيل هذا الجهاز",
+      "status": "machine"
+    },
+    "devices.rotate.confirm": {
+      "text": "إزالة وتغيير المفاتيح",
+      "status": "machine"
+    },
+    "devices.rotate.done": {
+      "text": "تغيّرت مفاتيح حسابك. ستحصل أجهزتك الأخرى على المفاتيح الجديدة عند اتصالها في المرة القادمة.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_contacts": {
+      "text": "لا يحتاج من تتحدث معهم إلى فعل أي شيء.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_devices": {
+      "text": "تحتفظ أجهزتك الأخرى بدردشاتها وتحصل على المفاتيح الجديدة تلقائيًا.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "ما زالت مفاتيح المرور تسجّل دخولك. خيار «استعادة المفاتيح بمفتاح المرور هذا» متوقف إلى أن تشغّله مجددًا.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_phrase": {
+      "text": "تحصل على عبارة استرداد جديدة. العبارة القديمة تتوقف عن العمل.",
+      "status": "machine"
+    },
+    "devices.rotate.error.not_started": {
+      "text": "أُزيل الجهاز، لكن مفاتيح حسابك لم تتغيّر.",
+      "status": "machine"
+    },
+    "devices.rotate.lede": {
+      "text": "الجهاز المفقود ما زال يحتفظ بمفاتيح حسابك. تغييرها يجعل ما يحتفظ به بلا فائدة.",
+      "status": "machine"
+    },
+    "devices.rotate.not_now": {
+      "text": "ليس الآن",
+      "status": "machine"
+    },
+    "devices.rotate.retry": {
+      "text": "حاول مجددًا",
+      "status": "machine"
+    },
+    "devices.rotate.step_devices": {
+      "text": "جارٍ تحديث أجهزتك الأخرى",
+      "status": "machine"
+    },
+    "devices.rotate.step_keys": {
+      "text": "جارٍ تغيير مفاتيح حسابك",
+      "status": "machine"
+    },
+    "devices.rotate.step_remove": {
+      "text": "جارٍ إزالة الجهاز",
+      "status": "machine"
+    },
+    "devices.rotate.title": {
+      "text": "إزالة هذا الجهاز وتغيير مفاتيح حسابك",
+      "status": "machine"
+    },
+    "devices.rotated.notice": {
+      "text": "تغيّرت مفاتيح حسابك من جهاز آخر. هذا الجهاز لديه المفاتيح الجديدة.",
+      "status": "machine"
+    },
+    "devices.rotated.show_phrase": {
+      "text": "عرض العبارة الجديدة",
+      "status": "machine"
+    },
+    "devices.rotated.updating": {
+      "text": "جارٍ تحديث المفاتيح...",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -6266,6 +6458,18 @@
       "text": "استخدام كلمة المرور بدلًا من ذلك",
       "status": "machine"
     },
+    "proof.remove_device.cancelled": {
+      "text": "أُلغي. لم يُزَل الجهاز.",
+      "status": "machine"
+    },
+    "proof.remove_device.help": {
+      "text": "أدخل كلمة المرور لإزالة هذا الجهاز.",
+      "status": "machine"
+    },
+    "proof.remove_device.wrong_password": {
+      "text": "كلمة المرور غير صحيحة. لم يُزَل الجهاز.",
+      "status": "machine"
+    },
     "proof.reset.cancelled": {
       "text": "أُلغي. لم يُعَد تعيين أي شيء.",
       "status": "machine"
@@ -6862,6 +7066,10 @@
       "text": "«تسجيل الخروج» يُبقي بياناتك على هذا الجهاز. «نسيان هذا الجهاز» يزيلها؛ ولا يمكنك العودة إلا بجهاز آخر مسجّل الدخول، أو بمفتاح مرور يستعيد مفاتيح الحساب، أو بعبارة الاسترداد. «حذف الحساب» يمحو الحساب على الخادم ويمسح هذا الجهاز؛ ولا يمكن التراجع عن ذلك.",
       "status": "machine"
     },
+    "settings.account.delete.blocked": {
+      "text": "أُعيد تعيين مفاتيح الحساب مؤخرًا. لا يمكن حذف الحساب قبل {date}.",
+      "status": "machine"
+    },
     "settings.account.delete.body": {
       "text": "يؤدي هذا إلى محو هويتك على الخادم — اسم المستخدم والمفاتيح وعوامل الاسترداد والنسخة الاحتياطية — وتسجيل خروجك من كل مكان. تُمحى رسائلك المحلية من هذا الجهاز أيضًا. لا يمكن التراجع عن ذلك.",
       "status": "machine"
@@ -7079,15 +7287,31 @@
       "status": "machine"
     },
     "settings.devices.remove.body": {
-      "text": "سيفقد هذا الجهاز الوصول إلى رسائلك من تلك اللحظة. قد يُطلب منك مفتاح المرور.",
+      "text": "سُجّل خروجه الآن. عند اتصاله في المرة القادمة، سيُحذف كل ما احتفظ به هذا الحساب عليه: الدردشات وجهات الاتصال والمفاتيح وعبارة الاسترداد.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm": {
+      "text": "إزالة الجهاز",
       "status": "machine"
     },
     "settings.devices.remove.confirm_named": {
       "text": "إزالة {device}",
       "status": "machine"
     },
+    "settings.devices.remove.reason_stolen": {
+      "text": "فُقد أو سُرق",
+      "status": "machine"
+    },
+    "settings.devices.remove.reason_unused": {
+      "text": "لم أعد أستخدمه",
+      "status": "machine"
+    },
     "settings.devices.remove.title": {
       "text": "هل تريد إزالة {device}؟",
+      "status": "machine"
+    },
+    "settings.devices.remove.working": {
+      "text": "جارٍ الإزالة...",
       "status": "machine"
     },
     "settings.devices.removed_change_password": {

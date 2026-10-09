@@ -69,15 +69,4 @@ class RemovedDeviceTest {
             // expected
         }
     }
-
-    @Test
-    fun uses_the_spec_copy_exactly() {
-        assertEquals("This device was removed", RemovedDevice.TITLE.en)
-        assertEquals(
-            "It was removed from your account on another device. New messages no longer reach it. " +
-                "Sign out, then sign in again if you want to use it.",
-            RemovedDevice.BODY.en,
-        )
-        assertEquals("Sign out", RemovedDevice.SIGN_OUT.en)
-    }
 }

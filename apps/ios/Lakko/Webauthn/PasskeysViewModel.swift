@@ -406,6 +406,12 @@ public final class PasskeysViewModel: ObservableObject {
                 // error styling. Nothing was deleted.
                 authRepository.dropFreshAuth()
                 proof.proofExpired()
+            } else if let untilMs = RecallWindowOpen.untilMs(of: error) {
+                // ADR-0066 section 1.3 — the account's keys were reset (or
+                // its password changed with the phrase) recently: it cannot
+                // be deleted while it can still be taken back. Nothing was
+                // deleted; the dialog says until when.
+                message = .error(Self.deleteBlocked(untilMs: untilMs))
             } else if case .network = error {
                 message = .error(.key("common.error.offline"))
             } else {
@@ -417,6 +423,15 @@ public final class PasskeysViewModel: ObservableObject {
             message = .error(.key("settings.account.delete.error.generic"))
         }
         return false
+    }
+
+    /// `settings.account.delete.blocked` with the date the server named.
+    static func deleteBlocked(untilMs: Int64) -> UiText {
+        UiText {
+            Localization.text(
+                RecallCopy.deleteBlocked,
+                texts: ["date": RecallCopy.date(ms: untilMs, locale: Localization.currentLocale)])
+        }
     }
 
     /// A proof block's model for one of this screen's surfaces.

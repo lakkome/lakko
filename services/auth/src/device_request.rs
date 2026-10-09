@@ -828,7 +828,7 @@ mod device_request_e2e_tests {
         let bearer = format!(
             "Bearer {}",
             token_secret
-                .issue(account_id, 1, now_ms + 3_600_000)
+                .issue(account_id, 1, &[0u8; 32], 0, now_ms + 3_600_000)
                 .expect("token")
         );
         (state, bearer)

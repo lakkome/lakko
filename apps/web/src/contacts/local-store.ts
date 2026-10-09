@@ -60,6 +60,7 @@
  */
 import { base64Encode } from "../auth/account-id";
 import { adoptOneToOnePeer, type OneToOnePeer } from "./adopt-one-to-one";
+import { afterProvenRotation, afterReset, type AccountKeys } from "./predecessor";
 
 /** Prefix of the per-account row; the signed-in account id follows. */
 const KEY_PREFIX = "lakko.contacts.v3.";
@@ -202,6 +203,13 @@ export interface AccountPubkeyPin {
    *  eviction bookkeeping needs after the UI has forgotten `previousKey`
    *  (UX 16.2): the old leaves in a group still resolve to one of these. */
   previousKeysB64?: string[];
+  /** ADR-0066 section 3.5: every key this account had before a PROVEN
+   *  rotation (a re-pin authorised by a supersession proof), base64, oldest
+   *  first. The conversation leaves that exist stay bound to these, so they
+   *  name the same person (`predecessor.ts`); nothing is evicted and nothing
+   *  is shown. Emptied by a confirmed reset: a reset makes every
+   *  predecessor, proven or not, a superseded key. */
+  provenPredecessorsB64?: string[];
 }
 
 /** Mirror of `transparency/verify.ts::LogVerifyStatus` — duplicated
@@ -326,6 +334,12 @@ function isAccountPubkeyPin(p: unknown): p is AccountPubkeyPin {
   const pk = (p as AccountPubkeyPin).previousKeysB64;
   if (pk !== undefined && !isStringArray(pk)) {
     delete (p as { previousKeysB64?: unknown }).previousKeysB64;
+  }
+  // ADR-0066: a junk predecessor list is dropped, which reads as "no proven
+  // predecessor" (the fail-closed direction).
+  const pp = (p as AccountPubkeyPin).provenPredecessorsB64;
+  if (pp !== undefined && !isStringArray(pp)) {
+    delete (p as { provenPredecessorsB64?: unknown }).provenPredecessorsB64;
   }
   return true;
 }
@@ -597,6 +611,11 @@ export function setPin(
   pinnedSignaturePubkeyB64: string,
   rotationMarker: number,
   owner?: string,
+  /** ADR-0066 section 3.5: `proven` is passed ONLY by the fail-closed gate,
+   *  after a supersession proof by the pinned key verified for exactly this
+   *  new key. The replaced key then becomes a proven predecessor. Any other
+   *  re-pin records none. */
+  options: { readonly proven?: boolean } = {},
 ): SetPinResult {
   const account = ownerOf(owner);
   if (account === null) return "no-account";
@@ -633,6 +652,21 @@ export function setPin(
     previousKeys.push(existing.pinnedSignaturePubkeyB64);
   }
   const carriedReset = keyChanged ? undefined : existing?.keyReset;
+  // ADR-0066: the proven chain. A proven re-pin appends the replaced key; an
+  // unchanged key carries the chain; a change that is NOT proven ends it.
+  let provenPredecessors: string[] = [];
+  if (existing !== undefined) {
+    const held: AccountKeys = {
+      currentKeyB64: existing.pinnedSignaturePubkeyB64,
+      provenPredecessorsB64: existing.provenPredecessorsB64 ?? [],
+    };
+    const next = !keyChanged
+      ? held
+      : options.proven === true
+        ? afterProvenRotation(held, pinnedSignaturePubkeyB64)
+        : afterReset(held, pinnedSignaturePubkeyB64);
+    provenPredecessors = [...next.provenPredecessorsB64];
+  }
   const nextPins: Record<string, AccountPubkeyPin> = {
     ...current.pins,
     [accountIdB64]: {
@@ -646,9 +680,13 @@ export function setPin(
       ...(carriedGeneration !== undefined ? { confirmedKeyGeneration: carriedGeneration } : {}),
       ...(carriedReset !== undefined ? { keyReset: carriedReset } : {}),
       ...(previousKeys.length > 0 ? { previousKeysB64: previousKeys } : {}),
+      ...(provenPredecessors.length > 0 ? { provenPredecessorsB64: provenPredecessors } : {}),
     },
   };
   save(account, { ...current, pins: nextPins });
+  // A proven re-pin changes which keys name the contact: the views that
+  // resolve names read the aliases again.
+  if (keyChanged) notifyAcceptedChanged("edited");
   return "set";
 }
 
@@ -781,6 +819,9 @@ export function confirmKeyReset(
     previousKeysB64: previousKeys,
   };
   delete pin.keyReset;
+  // ADR-0066 section 3.5: a reset makes every predecessor, proven or not, a
+  // superseded key.
+  delete pin.provenPredecessorsB64;
   const rowIndex = current.accepted.findIndex(
     (c) => accountIdB64OfHex(c.accountIdHex) === accountIdB64,
   );
@@ -830,8 +871,40 @@ export function loadKeyAliases(owner?: string): Map<string, string> {
     for (const old of pin.previousKeysB64 ?? []) {
       if (old !== c.signaturePubkeyB64 && !out.has(old)) out.set(old, c.signaturePubkeyB64);
     }
+    // ADR-0066 section 3.5: after a PROVEN rotation the row keeps the key the
+    // person's leaves are bound to, and the newly pinned key names the same
+    // row. Only for a proven chain: a pin that differs from the row for any
+    // other reason is not an alias.
+    if (
+      pin.keyReset === undefined &&
+      pin.pinnedSignaturePubkeyB64 !== c.signaturePubkeyB64 &&
+      (pin.provenPredecessorsB64 ?? []).includes(c.signaturePubkeyB64) &&
+      !out.has(pin.pinnedSignaturePubkeyB64)
+    ) {
+      out.set(pin.pinnedSignaturePubkeyB64, c.signaturePubkeyB64);
+    }
   }
   return out;
+}
+
+/** ADR-0066 section 3.5: the keys of a pinned account as `predecessor.ts`
+ *  reads them, or `undefined` when the account is not pinned. */
+export function accountKeysOf(accountIdB64: string, owner?: string): AccountKeys | undefined {
+  const pin = readPin(accountIdB64, owner);
+  if (pin === undefined) return undefined;
+  return {
+    currentKeyB64: pin.pinnedSignaturePubkeyB64,
+    provenPredecessorsB64: pin.provenPredecessorsB64 ?? [],
+  };
+}
+
+/** Every pinned account's keys (the predecessor table's input). */
+export function loadAccountKeys(owner?: string): AccountKeys[] {
+  const record = load(ownerOf(owner));
+  return Object.values(record.pins).map((pin) => ({
+    currentKeyB64: pin.pinnedSignaturePubkeyB64,
+    provenPredecessorsB64: pin.provenPredecessorsB64 ?? [],
+  }));
 }
 
 /** The contact ROW a key names, through its own key or an alias

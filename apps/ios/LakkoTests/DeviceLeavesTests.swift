@@ -29,7 +29,8 @@ final class DeviceLeavesTests: XCTestCase {
                 .init(personKeyB64: "me", devices: [kp("me-1"), kp("me-2")]),
                 .init(personKeyB64: "bob", devices: [kp("bob-1"), kp("bob-2")]),
             ],
-            removed: [])
+            removed: [],
+            ownDeviceGroupRoster: ["me-1", "me-2"])
         XCTAssertEqual(plan.admit.map { $0.deviceKeyB64 }, ["me-2", "bob-2"])
         XCTAssertEqual(plan.retire, [])
     }
@@ -39,7 +40,8 @@ final class DeviceLeavesTests: XCTestCase {
             roster: [leaf("bob-1", "bob")],
             ownPersonKeyB64: "me",
             accounts: [.init(personKeyB64: "bob", devices: [kp("bob-1"), kp("bob-old")])],
-            removed: ["bob-old"])
+            removed: ["bob-old"],
+            ownDeviceGroupRoster: nil)
         XCTAssertEqual(plan.admit, [])
     }
 
@@ -51,7 +53,8 @@ final class DeviceLeavesTests: XCTestCase {
                 .init(personKeyB64: "me", devices: [kp("me-1")]),
                 .init(personKeyB64: "bob", devices: []),
             ],
-            removed: [])
+            removed: [],
+            ownDeviceGroupRoster: nil)
         XCTAssertEqual(plan.retire, ["me-forgotten"])
         XCTAssertEqual(plan.admit, [])
     }
@@ -61,7 +64,8 @@ final class DeviceLeavesTests: XCTestCase {
             roster: [leaf("me-1", "me"), leaf("me-2", "me")],
             ownPersonKeyB64: "me",
             accounts: [.init(personKeyB64: "me", devices: nil)],
-            removed: [])
+            removed: [],
+            ownDeviceGroupRoster: nil)
         XCTAssertEqual(plan, DeviceReadmission.Plan(admit: [], retire: []))
     }
 
@@ -73,7 +77,8 @@ final class DeviceLeavesTests: XCTestCase {
                 .init(personKeyB64: "a", devices: [kp("x")]),
                 .init(personKeyB64: "b", devices: [kp("x")]),
             ],
-            removed: [])
+            removed: [],
+            ownDeviceGroupRoster: nil)
         XCTAssertEqual(plan.admit.count, 1)
     }
 

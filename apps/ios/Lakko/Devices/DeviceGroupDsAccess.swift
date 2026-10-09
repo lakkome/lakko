@@ -146,6 +146,9 @@ public enum DeviceGroupDsAccess {
     /// Push: the DeviceGroup journal binds no push routing id on iOS (only
     /// conversation groups do), so there is nothing to re-bind here.
     ///
+    /// `keyGeneration` is the generation the attestation carries: the root
+    /// endorsement the DS requires beside it (ADR-0066 section 4.6) binds it.
+    ///
     /// Throws ``DsStatementError`` (`.keyResetDisabled` when the DS has no
     /// pinned key, `.conflict` when another root holds the journal) or the
     /// founding error.
@@ -153,6 +156,7 @@ public enum DeviceGroupDsAccess {
         accountIdBytes: Data,
         accountIdB64: String,
         attestation: Data,
+        keyGeneration: UInt64,
         ds: DsStatementSending,
         snapshotStore: DeviceGroupSnapshotStore = DeviceGroupSnapshotStore(),
         marks: JournalFoundingMarks = .shared
@@ -185,9 +189,74 @@ public enum DeviceGroupDsAccess {
             epoch: signer.epoch(),
             epochKey: signer.verifyingKey(),
             attestation: attestation,
+            // ADR-0066 section 4.6 — the endorsement by the NEW account key
+            // (the seed this device stored before the publish started).
+            endorse: { rootKey in
+                let accountSeed = try AccountIdentitySeedStore.getAccountIdentitySeed(
+                    accountIdB64: accountIdB64)
+                guard let accountSeed else { throw DsStatementError.unauthorized }
+                return try RootEndorsement.sign(
+                    accountIdentitySeed: accountSeed, journalId: journalId,
+                    keyGeneration: keyGeneration, rootKey: rootKey)
+            },
             ds: ds
         )
         marks.clear(journalIdHex: hex)
+    }
+
+    /// ADR-0066 section 3.5, "DS" / "T5 as built" item 22 — after a ROTATION
+    /// of the account keys, hand the DeviceGroup journal's root from the old
+    /// seed's root to the new seed's: `PUT /ds/group/{hex}/root`, a
+    /// `RootTransfer` signed by the OLD root naming the new root, carrying
+    /// the key-reset attestation and the root endorsement by the new account
+    /// key. The DS keeps the chain, the registrars and the push binding (a
+    /// kept device that lags an epoch is not cut off) and records the
+    /// generation, so the attestation re-roots nothing afterwards.
+    ///
+    /// Unlike a reset, the DeviceGroup is NOT re-founded: its members, its
+    /// epoch and this device's leaf stay.
+    ///
+    /// `attestation` is `nil` only when the rotation's answer was lost: the
+    /// transfer then goes plain (the old root may always transfer).
+    ///
+    /// Idempotent on a retry: once the transfer landed the old root is a
+    /// stranger (`401`) or the generation is not newer (`409`); the root
+    /// probe by the NEW root then confirms it (`204`), and anything else is
+    /// thrown.
+    public static func transferRootAfterKeyRotation(
+        accountIdBytes: Data,
+        predecessorSeed: Data,
+        newAccountSeed: Data,
+        attestation: Data?,
+        keyGeneration: UInt64?,
+        ds: DsStatementSending
+    ) async throws {
+        let journalId = try deviceGroupJournalId(accountId: accountIdBytes)
+        let oldRoot = try dsJournalRootSigner(
+            accountIdentity: try Identity.fromSeed(seed: predecessorSeed), journalId: journalId)
+        let newRoot = try dsJournalRootSigner(
+            accountIdentity: try Identity.fromSeed(seed: newAccountSeed), journalId: journalId)
+        let request = try RootRotationRequest.build(
+            oldRoot: oldRoot,
+            newRootKey: newRoot.publicKey(),
+            journalId: journalId,
+            attestation: attestation,
+            keyGeneration: keyGeneration,
+            endorse: { rootKey, generation in
+                try RootEndorsement.sign(
+                    accountIdentitySeed: newAccountSeed, journalId: journalId,
+                    keyGeneration: generation, rootKey: rootKey)
+            })
+        do {
+            try await ds.putStatement(request)
+        } catch let refusal as DsStatementError where refusal == .conflict || refusal == .unauthorized {
+            switch try await JournalOwnership.probeRoot(root: newRoot, journalId: journalId, ds: ds) {
+            case .root:
+                NSLog("ADR-0066: the DeviceGroup journal root transfer had already landed")
+            case .notRoot:
+                throw refusal
+            }
+        }
     }
 
     /// Register-before-publish (obligation 5) for one direct DeviceGroup
@@ -224,5 +293,29 @@ public enum DeviceGroupDsAccess {
                 try await publish(prepared, DsAuth(signer: signerN))
             }
         ).run()
+    }
+}
+
+/// The body of the DeviceGroup journal's root transfer after a rotation
+/// (ADR-0066 "T5 as built" items 21 and 22), built purely: the `RootTransfer`
+/// statement by the OLD root, with the attestation and the endorsement of the
+/// NEW root key added when an attestation is in hand, and neither otherwise.
+enum RootRotationRequest {
+    static func build(
+        oldRoot: DsStatementSignerProtocol,
+        newRootKey: Data,
+        journalId: Data,
+        attestation: Data?,
+        keyGeneration: UInt64?,
+        endorse: (_ rootKey: Data, _ keyGeneration: UInt64) throws -> Data
+    ) throws -> DsStatementRequest {
+        let plain = try oldRoot.rootTransfer(journalId: journalId, newRoot: newRootKey)
+        guard let attestation, let keyGeneration else { return plain }
+        // The endorsement names the key that BECOMES the root: the transfer's
+        // `new_root`, not its signer.
+        return try AttestedResetBody.attach(
+            attestation: attestation,
+            endorsement: try endorse(newRootKey, keyGeneration),
+            to: plain)
     }
 }

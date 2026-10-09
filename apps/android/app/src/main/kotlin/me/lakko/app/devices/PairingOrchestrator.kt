@@ -260,7 +260,12 @@ public object PairingOrchestrator {
                         override fun joinedGroupId(): ByteArray = plain.groupId()
 
                         override suspend fun redeem(grantTokenB64: String) =
-                            AuthClient().use { client -> client.deviceAuthorizeRedeem(grantTokenB64) }
+                            // ADR-0066 - the session names this device from
+                            // its first credential: the id is the leaf key of
+                            // the identity that just joined the DeviceGroup.
+                            AuthClient().use { client ->
+                                client.deviceAuthorizeRedeem(grantTokenB64, deviceId = identity.signaturePublicKey())
+                            }
 
                         override fun groupIdFor(accountId: ByteArray): ByteArray =
                             deviceGroupIdFor(accountId)
@@ -497,7 +502,10 @@ public object PairingOrchestrator {
                     joinedGroupId = joined.groupId(),
                     grantToken = parsed.grantToken,
                     redeem = { grantB64 ->
-                        AuthClient().use { client -> client.deviceAuthorizeRedeem(grantB64) }
+                        // ADR-0066 - name this device at the landing.
+                        AuthClient().use { client ->
+                            client.deviceAuthorizeRedeem(grantB64, deviceId = identity.signaturePublicKey())
+                        }
                     },
                     groupIdFor = { accountId -> deviceGroupIdFor(accountId) },
                 ) as? JoinByNameResult.Joined

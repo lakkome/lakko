@@ -25,10 +25,14 @@ import { loadWasm } from "../wasm";
 import { dsAccess } from "./access";
 import { DsClient } from "./client";
 
-type Slot = "account" | "device";
+/** `predecessor` (ADR-0066 section 3.5): the mailbox of the account key the
+ *  conversation leaves are still bound to after a proven key rotation. It is
+ *  read for as long as leaves name it. */
+type Slot = "account" | "device" | "predecessor";
 
-const installed: Record<Slot, string | null> = { account: null, device: null };
-const generation: Record<Slot, number> = { account: 0, device: 0 };
+const SLOTS: readonly Slot[] = ["account", "device", "predecessor"];
+const installed: Record<Slot, string | null> = { account: null, device: null, predecessor: null };
+const generation: Record<Slot, number> = { account: 0, device: 0, predecessor: 0 };
 
 function dropSlot(slot: Slot): void {
   const hex = installed[slot];
@@ -37,8 +41,7 @@ function dropSlot(slot: Slot): void {
   // The device identity falls back to a second instance of the account seed
   // when no device key exists, so both slots can name one mailbox: keep the
   // signer while the other slot still uses it.
-  const other: Slot = slot === "account" ? "device" : "account";
-  if (installed[other] === hex) return;
+  if (SLOTS.some((other) => other !== slot && installed[other] === hex)) return;
   dsAccess.dropMailbox(hex);
 }
 
@@ -73,9 +76,9 @@ export function installMailboxAccess(slot: Slot, identity: WasmIdentity | null):
 
 /** Sign-out: forget every mailbox and group signer. */
 export function clearDsAccess(): void {
-  generation.account += 1;
-  generation.device += 1;
-  installed.account = null;
-  installed.device = null;
+  for (const slot of SLOTS) {
+    generation[slot] += 1;
+    installed[slot] = null;
+  }
   dsAccess.clear();
 }

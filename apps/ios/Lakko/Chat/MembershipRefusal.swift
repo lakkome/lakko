@@ -451,7 +451,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 // The local three-word check and the passkey vault.
                 .PhraseCheck, .PasskeyVaultNotOpened, .PasskeyVault,
                 // ADR-0065 key-reset attestation (verify only).
-                .KeyResetAttestation, .KeyResetAttestationStale:
+                .KeyResetAttestation, .KeyResetAttestationStale, .AccountStatement,
+                // ADR-0066 key-rotation envelope and root endorsement.
+                .KeyRotation:
                 return nil
             }
         }

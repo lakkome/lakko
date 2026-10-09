@@ -66,16 +66,24 @@ public final class ContactsClient {
     /// `nil` (a test, a tool) drops the observation.
     public static var keyResetSink: ((_ accountId: Data, _ previousKeyB64: String, _ pendingKeyB64: String) -> Void)?
 
+    /// ADR-0066 section 3.5 — the proven-predecessor map. A key change the
+    /// gate accepted BY PROOF records the old key as the proven predecessor
+    /// of the new one (the same person; nothing is shown); a change reported
+    /// as a reset drops the person's predecessors.
+    private let predecessors: ProvenPredecessorStore
+
     public init(
         discovery: DiscoveryClient = DiscoveryClient(),
         ds: DsClient = DsClient(),
         pinStore: PeerPinStore = PeerPinStore(),
-        transparencyVerify: TransparencyVerify = TransparencyVerify()
+        transparencyVerify: TransparencyVerify = TransparencyVerify(),
+        predecessors: ProvenPredecessorStore = ProvenPredecessorStore()
     ) {
         self.discovery = discovery
         self.ds = ds
         self.pinStore = pinStore
         self.transparencyVerify = transparencyVerify
+        self.predecessors = predecessors
     }
 
     // MARK: - G-4 (ADR-0016) supersession verify + KT-log S3d on fetch
@@ -146,9 +154,27 @@ public final class ContactsClient {
             // person verifies the new safety number).
             if KeyResetDetection.isReset(reason: refused.reason, loggedReset: refused.loggedReset),
                let pin = oldPin {
+                // ADR-0066 section 3.5 — a later reset of the same account
+                // makes every predecessor, proven or not, a superseded key.
+                predecessors.forgetPerson(currentKeyB64: pin.pinnedSignaturePubkeyB64)
                 Self.keyResetSink?(accountId, pin.pinnedSignaturePubkeyB64, bundle.signaturePubkey)
             }
             throw refused
+        }
+
+        // ADR-0066 section 3.5 — gate 1 passed. When the published key
+        // differs from the pin taken BEFORE it ran, the gate accepted the
+        // change by a verified supersession proof (its only accepting branch
+        // for a changed key) and re-pinned: a PROVEN ROTATION, with or
+        // without a key-reset attestation beside it. The old key becomes the
+        // account's proven predecessor: the leaves bound to it stay the same
+        // person. No flag, no banner, no closed chat, no eviction; the
+        // ADR-0065 phase-2 sink above is never reached on this path.
+        if let pin = oldPin, pin.pinnedSignaturePubkeyB64 != bundle.signaturePubkey {
+            predecessors.record(
+                oldKeyB64: pin.pinnedSignaturePubkeyB64,
+                newKeyB64: bundle.signaturePubkey,
+                evidence: .verifiedProof)
         }
 
         // Gate 2 (additive, best-effort). Hard-fails only on rollback.

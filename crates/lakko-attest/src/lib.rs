@@ -101,15 +101,33 @@
 //! the shared auth attest key; its 177-byte length is shared with none.
 //!
 //! [ADR-0065]: ../../../docs/adr/0065-account-key-reset.md
+//!
+//! # Account statement
+//!
+//! The seventh format, [`AccountStatement`] (see the [`account_statement`]
+//! module, [ADR-0066] section 0.3), is the first a **client** signs and a
+//! service verifies: a 138-byte request signed by the account's identity key
+//! (remove a device, and the recall and session-upgrade kinds of the same
+//! ADR). Its own domain separator and a length shared with no other kind keep
+//! it apart from the six above.
+//!
+//! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
 
 #![forbid(unsafe_code)]
 
+pub mod account_statement;
 pub mod backup_head;
 pub mod genesis;
 pub mod key_reset;
 pub mod release_manifest;
 pub mod username_cert;
 
+pub use account_statement::{
+    account_statement_is_stale, device_revoke_body, recall_body, recall_start_body,
+    session_upgrade_body, verify_account_statement, AccountStatement, AccountStatementError,
+    AccountStatementKind, ACCOUNT_STATEMENT_HEADER, ACCOUNT_STATEMENT_LEN,
+    ACCOUNT_STATEMENT_NONCE_LEN, ACCOUNT_STATEMENT_WINDOW_MS,
+};
 pub use backup_head::{
     verify_backup_head, verify_backup_head_binding, BackupHead, BackupHeadError, BACKUP_HEAD_LEN,
 };
@@ -118,8 +136,10 @@ pub use genesis::{
     GENESIS_ATTESTATION_LEN,
 };
 pub use key_reset::{
-    device_group_journal_id, key_reset_account_ref, verify_key_reset_binding,
-    verify_key_reset_fresh, KeyResetAttestError, KeyResetAttestation, KEY_RESET_ATTESTATION_LEN,
+    device_group_journal_id, key_reset_account_ref, sign_root_endorsement,
+    verify_key_reset_binding, verify_key_reset_fresh, verify_root_endorsement, KeyResetAttestError,
+    KeyResetAttestation, RootEndorsementError, KEY_RESET_ATTESTATION_LEN, ROOT_ENDORSEMENT_DOMAIN,
+    ROOT_ENDORSEMENT_LEN,
 };
 pub use release_manifest::{
     release_status, release_status_for, verify_release_manifest, ReleaseManifest,
@@ -326,9 +346,50 @@ pub fn verify_bound(
 #[doc(hidden)]
 pub mod fuzz_api {
     use super::{
-        ActionAttestation, BackupHead, GenesisAttestation, KeyResetAttestation, ReleaseManifest,
-        SigningKey, UsernameCertificate,
+        verify_account_statement, AccountStatement, AccountStatementKind, ActionAttestation,
+        BackupHead, GenesisAttestation, KeyResetAttestation, ReleaseManifest, SigningKey,
+        UsernameCertificate,
     };
+
+    /// Drive the account-statement parser and verifier on attacker-controlled
+    /// bytes against a FIXED verifying key, account and clock. A statement is
+    /// a request body field (auth) or a request header (discovery) anyone can
+    /// send, so the bytes reach [`AccountStatement::decode_unverified`] and
+    /// [`verify_account_statement`] before any state is consulted
+    /// (ADR-0066). The fuzzer cannot forge a signature under the fixed key,
+    /// so it exercises the length, version and kind gates, the field slicing,
+    /// the account and window comparisons at their extremes (the clock is the
+    /// statement's own `unix_ms`, so the window never hides the signature
+    /// path), the signature parse and the verify failure. Asserts that
+    /// whatever decodes is exactly the wire length and that decode and open
+    /// agree on the layout verdict. Returns `true` on a (vanishingly rare)
+    /// acceptance.
+    #[must_use]
+    pub fn open_account_statement(bytes: &[u8]) -> bool {
+        let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
+        let decoded = AccountStatement::decode_unverified(bytes);
+        let opened = AccountStatement::open(bytes, &vk);
+        let Ok(claims) = decoded else {
+            assert!(opened.is_err(), "open accepted what decode refused");
+            return false;
+        };
+        assert_eq!(bytes.len(), super::ACCOUNT_STATEMENT_LEN);
+        let mut accepted = opened.is_ok();
+        for kind in [
+            AccountStatementKind::RecallStatus,
+            AccountStatementKind::Recall,
+            AccountStatementKind::DeviceRevoke,
+            AccountStatementKind::SessionUpgrade,
+            AccountStatementKind::RecallStart,
+        ] {
+            for now in [claims.unix_ms, 0, i64::MAX, i64::MIN] {
+                accepted |=
+                    verify_account_statement(bytes, &vk, kind, &claims.account_id, &[], now)
+                        .is_ok();
+            }
+        }
+        accepted
+    }
 
     /// Try to [`ActionAttestation::open`] the bytes against a FIXED verifying
     /// key. The bytes are attacker-controlled — an attestation rides alongside a

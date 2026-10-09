@@ -34,11 +34,12 @@ class SessionBearerEngineTest {
 
     private val acct = "AAAAAAAAAAAAAAAAAAAAAA"
     private val now = 1_000_000L
+    private val dev = "D".repeat(43)
 
     private fun pair(n: Int, expiresAtMs: Long = now + 900_000L) = SessionPair(
-        accessToken = "v2.$acct.1.$expiresAtMs.access$n",
+        accessToken = "v3.$acct.1.$dev.1.$expiresAtMs.access$n",
         accessExpiresAtMs = expiresAtMs,
-        refreshToken = "r1.$acct.1.9.refresh$n",
+        refreshToken = "r2.$acct.1.$dev.1.9.refresh$n",
         refreshExpiresAtMs = expiresAtMs + 1_000_000L,
         keyGeneration = 1L,
     )
@@ -87,7 +88,7 @@ class SessionBearerEngineTest {
         install(pair(2))
         client(HttpStatusCode.OK to "{}").use { http ->
             val response = http.get("https://api.test/discovery/identity") {
-                header(HttpHeaders.Authorization, "Bearer v2.$acct.1.5.access1")
+                header(HttpHeaders.Authorization, "Bearer v3.$acct.1.$dev.1.5.access1")
             }
             assertEquals(HttpStatusCode.OK, response.status)
         }
@@ -112,12 +113,12 @@ class SessionBearerEngineTest {
         client(HttpStatusCode.OK to "{}").use { http ->
             http.get("https://api.test/discovery/lookup")
             http.post("https://api.test/auth/session/refresh") {
-                header(HttpHeaders.Authorization, "Bearer r1.$acct.1.9.refresh1")
+                header(HttpHeaders.Authorization, "Bearer r2.$acct.1.$dev.1.9.refresh1")
             }
-            http.get("https://api.test/x") { header(HttpHeaders.Authorization, "Bearer v2.BBBBBBBBBBBBBBBBBBBBBB.1.5.t") }
+            http.get("https://api.test/x") { header(HttpHeaders.Authorization, "Bearer v3.BBBBBBBBBBBBBBBBBBBBBB.1.$dev.1.5.t") }
         }
         assertEquals(
-            listOf(null, "Bearer r1.$acct.1.9.refresh1", "Bearer v2.BBBBBBBBBBBBBBBBBBBBBB.1.5.t"),
+            listOf(null, "Bearer r2.$acct.1.$dev.1.9.refresh1", "Bearer v3.BBBBBBBBBBBBBBBBBBBBBB.1.$dev.1.5.t"),
             seenBearers,
         )
         assertEquals(0, refresher.calls)
@@ -206,8 +207,91 @@ class SessionBearerEngineTest {
     fun `with no provider installed every request goes through as it is`() = runTest {
         SessionTokens.provider = null
         client(HttpStatusCode.Unauthorized to "{}").use { http ->
-            http.get("https://api.test/x") { header(HttpHeaders.Authorization, "Bearer v2.$acct.1.5.old") }
+            http.get("https://api.test/x") { header(HttpHeaders.Authorization, "Bearer v3.$acct.1.$dev.1.5.old") }
         }
-        assertEquals(listOf("Bearer v2.$acct.1.5.old"), seenBearers)
+        assertEquals(listOf("Bearer v3.$acct.1.$dev.1.5.old"), seenBearers)
+    }
+
+    // ---- ADR-0066: this device was removed ---------------------------------
+
+    @Test
+    fun `auth's 401 device-revoked is reported as a removal and never retried`() = runTest {
+        install(pair(1))
+        client(HttpStatusCode.Unauthorized to """{"error":"device-revoked"}""").use { http ->
+            val response = http.get("https://api.test/auth/x") {
+                header(HttpHeaders.Authorization, "Bearer ${pair(1).accessToken}")
+            }
+            assertEquals(HttpStatusCode.Unauthorized, response.status)
+            assertEquals("""{"error":"device-revoked"}""", response.bodyAsText())
+        }
+        assertEquals(0, refresher.calls)
+        assertEquals(1, seenBearers.size)
+        assertEquals(listOf(SessionRefusal.DeviceRevoked), refusals)
+    }
+
+    @Test
+    fun `a device-revoked answer to the retry is reported too`() = runTest {
+        install(pair(1))
+        refresher.answer = { pair(2) }
+        client(
+            HttpStatusCode.Unauthorized to """{"error":"expired"}""",
+            HttpStatusCode.Unauthorized to """{"error":"device-revoked"}""",
+        ).use { http ->
+            http.get("https://api.test/auth/x") { header(HttpHeaders.Authorization, "Bearer ${pair(1).accessToken}") }
+        }
+        assertEquals(listOf(SessionRefusal.DeviceRevoked), refusals)
+    }
+
+    @Test
+    fun `discovery's 403 device-revoked proves nothing - auth is asked, and its yes keeps the device`() = runTest {
+        install(pair(1))
+        refresher.answer = { pair(2) }
+        client(HttpStatusCode.Forbidden to """{"error":"device-revoked"}""").use { http ->
+            val response = http.post("https://api.test/discovery/keypackage") {
+                header(HttpHeaders.Authorization, "Bearer ${pair(1).accessToken}")
+                setBody("{}")
+            }
+            // The response goes back as it came, body included.
+            assertEquals(HttpStatusCode.Forbidden, response.status)
+            assertEquals("""{"error":"device-revoked"}""", response.bodyAsText())
+        }
+        // Auth was asked once (the refresh) and answered with a pair: no
+        // removal, nothing wiped, and the request is not retried.
+        assertEquals(1, refresher.calls)
+        assertEquals(1, seenBearers.size)
+        assertEquals(emptyList<SessionRefusal>(), refusals)
+        assertEquals(pair(2), provider.peek())
+    }
+
+    @Test
+    fun `discovery's 403 device-revoked followed by auth's device-revoked is the removal`() = runTest {
+        install(pair(1))
+        refresher.answer = {
+            throw me.lakko.app.auth.AuthHttpError(401, "/auth/session/refresh", "{}", code = "device-revoked")
+        }
+        client(HttpStatusCode.Forbidden to """{"error":"device-revoked"}""").use { http ->
+            http.post("https://api.test/discovery/keypackage") {
+                header(HttpHeaders.Authorization, "Bearer ${pair(1).accessToken}")
+                setBody("{}")
+            }
+        }
+        assertEquals(1, refresher.calls)
+        assertEquals(listOf(SessionRefusal.DeviceRevoked), refusals)
+    }
+
+    @Test
+    fun `any other 403 is handed back untouched, with no refresh`() = runTest {
+        install(pair(1))
+        for (body in listOf("""{"error":"device-mismatch"}""", """{"error":"account-key-required"}""", "", "not json")) {
+            client(HttpStatusCode.Forbidden to body).use { http ->
+                val response = http.get("https://api.test/discovery/x") {
+                    header(HttpHeaders.Authorization, "Bearer ${pair(1).accessToken}")
+                }
+                assertEquals(HttpStatusCode.Forbidden, response.status)
+                assertEquals(body, response.bodyAsText())
+            }
+        }
+        assertEquals(0, refresher.calls)
+        assertEquals(emptyList<SessionRefusal>(), refusals)
     }
 }

@@ -171,6 +171,15 @@ class JoinCallViewModel(
     private val endCurrentCallAction: () -> Unit,
 ) : ViewModel() {
 
+    /** ADR-0066 Stage A - the seed of the account identity MLS groups know
+     *  this account by (the predecessor after a key rotation). */
+    private fun conversationSeed(secrets: me.lakko.app.auth.IdentitySecrets): ByteArray =
+        me.lakko.app.auth.conversationAccountSeedOf(
+            applicationContext,
+            me.lakko.app.auth.base64Encode(secrets.accountId),
+            secrets.accountIdentitySeed,
+        )
+
     /** This screen's own state before (or instead of) the host's call. */
     private val local = MutableStateFlow(JoinCallUiState())
 
@@ -273,7 +282,7 @@ class JoinCallViewModel(
             }.use { cap ->
                 val secrets = authRepository.identitySecrets.value
                 val isOwner = secrets != null &&
-                    Identity.fromSeed(secrets.accountIdentitySeed).use {
+                    Identity.fromSeed(conversationSeed(secrets)).use {
                         hexKey(it.signaturePublicKey()) == hexKey(cap.ownerSignaturePubkey())
                     }
                 DecodedCall(
@@ -447,7 +456,7 @@ class JoinCallViewModel(
                 mediaVideo = d.mediaVideo,
                 isOwner = d.isOwner,
                 slug = slug,
-                accountIdentitySeed = secrets.accountIdentitySeed,
+                accountIdentitySeed = conversationSeed(secrets),
                 sessionToken = secrets.sessionToken,
                 accountId = secrets.accountId,
             ),
