@@ -774,6 +774,7 @@ After Phase 5 it is normal product evolution. Technical directions worth trackin
 - **Post-quantum** — MLS extensions for ML-KEM are being worked on at IETF; migrate when stable and available in OpenMLS
 - **libcrux replacement** — switch to a formally verified crypto provider
 - **OpenMLS upstream contributions** — reserve capacity for upstream
+- **Lakko's own media stack in the browser** (backlog, 2026-10-07; recorded as the fallback in ADR-0068) — encode and decode through WebCodecs, carry media over WebTransport, and do packetization, jitter buffer, loss recovery, bitrate control and frame encryption in Lakko's own code, the same on every engine; the browser keeps only camera, microphone and the codec. Reason to revisit: twice in the call-media work a browser's built-in WebRTC behaviour decided the outcome (built-in simulcast; key-frame detection without the generic frame descriptor, which left Firefox with no video). Before deciding, check the actual WebCodecs and WebTransport support in Firefox and Safari; it also changes the SFU's transport
 - **SDK split** — separate `lakko-mls` / `lakko-crypto` / `lakko-proto` under Apache 2.0 into a sub-repo if the industry asks for an embedded MLS implementation; thanks to the CLA this is possible
 
 ---

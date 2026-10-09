@@ -43,3 +43,16 @@ path = "fuzz_targets/signaling_payload_decode.rs"
 test = false
 doc = false
 bench = false
+
+# The sealed media frame of ADR-0071 ends in a 3-byte trailer that tells a
+# receiver where the clear codec-header prefix stops and where the SFrame
+# header starts. It is read on bytes from an untrusted SFU / peer before the
+# AEAD authenticates anything, so the two length bytes and the header they
+# point at are attacker-chosen.
+
+[[bin]]
+name = "media_frame_open"
+path = "fuzz_targets/media_frame_open.rs"
+test = false
+doc = false
+bench = false

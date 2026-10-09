@@ -20,14 +20,18 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod burst_keyframe;
 pub mod call_lifetime;
 pub mod config;
+pub mod downlink_allocation;
+pub mod downlink_probe;
 pub mod fec_receive;
 pub mod fec_send;
 pub mod frame_descriptor;
 pub mod jwks;
 pub mod media;
 pub mod peer;
+pub mod playout_delay;
 pub mod prom;
 pub mod protocol;
 pub mod router;

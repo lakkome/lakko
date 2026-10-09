@@ -25,6 +25,19 @@
 //!   needs a flat C ABI — passing `Mutex<ParticipantKey>` through
 //!   Java first just to come back to a C++ pointer is gratuitous.
 //!
+//! ## Two frame layouts (ADR-0071)
+//!
+//! The header-first functions (`_seal_framed`, `_open_framed`,
+//! `_call_key_ring_open_framed_with_overlap`) are what the iOS and
+//! Android bridges call today and are unchanged. Beside them sit the
+//! entry points for the ADR-0071 layout, which leaves the codec's frame
+//! header in the clear and puts the SFrame header at the end:
+//! [`lakko_sframe_media_clear_prefix_len`],
+//! [`lakko_sframe_seal_media_frame`] and
+//! [`lakko_sframe_call_key_ring_open_media_frame_with_overlap`]. The web
+//! client uses only that layout, the two do not open as each other, and
+//! a bridge moves to the new entry points in ADR-0071 phase 2.
+//!
 //! ## Memory ownership
 //!
 //! Every function that returns a pointer (`*mut CallKey`,
@@ -86,7 +99,9 @@
 use std::sync::Mutex;
 
 use lakko_calls::sframe as core;
-use lakko_calls::{CallKeyRing as CoreRing, Error as CallsError, SframeHeader};
+use lakko_calls::{
+    CallKeyRing as CoreRing, Error as CallsError, MediaCodec, MediaFrameParts, SframeHeader,
+};
 
 // ---------------------------------------------------------------------
 // Status codes
@@ -130,6 +145,10 @@ pub enum LakkoSframeStatus {
     /// value the header can carry is accepted. The variant keeps its
     /// number so the status codes do not shift.
     CtrOverflow = 8,
+    /// [`lakko_sframe_seal_media_frame`] was asked to leave more than
+    /// [`LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN`] bytes in the clear
+    /// (ADR-0071). Nothing was sealed.
+    BadClearPrefix = 9,
 }
 
 // ---------------------------------------------------------------------
@@ -801,6 +820,165 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_framed_with_overlap(
     unsafe {
         *out_plaintext_ptr = ptr;
         *out_plaintext_len = len;
+    }
+    LakkoSframeStatus::Ok
+}
+
+// ---------------------------------------------------------------------
+// Sealed media frame — codec header in the clear, SFrame header at
+// the end (ADR-0071)
+// ---------------------------------------------------------------------
+//
+// These entry points sit BESIDE the header-first `_seal_framed` /
+// `_open_framed` / `_ring_open_framed_with_overlap`, whose behaviour is
+// unchanged. The two layouts do not open as each other. The web client
+// sends and accepts only the layout below; a native bridge still on the
+// header-first functions does not interoperate with it on media until it
+// moves to these (ADR-0071, phase 2).
+
+/// [`lakko_sframe_media_clear_prefix_len`] codec value: any codec without
+/// a rule, or one the sender could not determine. Nothing is left clear.
+pub const LAKKO_SFRAME_MEDIA_CODEC_OTHER: u8 = MediaCodec::Other as u8;
+/// [`lakko_sframe_media_clear_prefix_len`] codec value: VP8 video.
+pub const LAKKO_SFRAME_MEDIA_CODEC_VP8: u8 = MediaCodec::Vp8 as u8;
+/// [`lakko_sframe_media_clear_prefix_len`] codec value: Opus audio.
+pub const LAKKO_SFRAME_MEDIA_CODEC_OPUS: u8 = MediaCodec::Opus as u8;
+/// The most bytes [`lakko_sframe_seal_media_frame`] leaves in the clear.
+pub const LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN: usize = lakko_calls::MAX_CLEAR_PREFIX_LEN;
+
+/// How many leading bytes of an encoded frame a sender leaves in the
+/// clear for `codec` (one of the `LAKKO_SFRAME_MEDIA_CODEC_*` values;
+/// an unknown value is treated as `OTHER`): 10 for a VP8 key frame, 3
+/// for any other VP8 frame, 0 for Opus and for `OTHER`. For VP8 the
+/// frame's own tag bit decides whether it is a key frame. Never more
+/// than `frame_len`. A null `frame_ptr` yields 0.
+///
+/// # Safety
+///
+/// `frame_ptr` may be null only when `frame_len == 0`; otherwise
+/// `frame_len` valid bytes must be readable.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_media_clear_prefix_len(
+    codec: u8,
+    frame_ptr: *const u8,
+    frame_len: usize,
+) -> usize {
+    if frame_ptr.is_null() || frame_len == 0 {
+        return 0;
+    }
+    // SAFETY: pointer + length guarded above.
+    let frame = unsafe { std::slice::from_raw_parts(frame_ptr, frame_len) };
+    lakko_calls::clear_prefix_len(MediaCodec::from_u8(codec), frame)
+}
+
+/// Seal an encoded media frame into the ADR-0071 layout —
+/// `clear_prefix || ciphertext_and_tag || sframe_header || trailer` —
+/// leaving the first `clear_prefix_len` bytes of the frame in the clear
+/// (cut to `frame_len` when the frame is shorter). The key, nonce and
+/// counter are those of [`lakko_sframe_seal_framed`]; the AEAD
+/// additional data is `sframe_header || clear_prefix || trailer`. Wraps
+/// [`core::ParticipantKey::seal_media_frame`]. The caller takes
+/// `clear_prefix_len` from [`lakko_sframe_media_clear_prefix_len`].
+///
+/// Writes the sealed frame into a freshly-allocated buffer the caller
+/// MUST free via [`lakko_sframe_buffer_free`].
+///
+/// # Safety
+///
+/// - `participant_key` must be a live pointer from
+///   [`lakko_sframe_participant_key_new`].
+/// - `frame_ptr` may be null only when `frame_len == 0`.
+/// - `out_wire_ptr` / `out_wire_len` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_seal_media_frame(
+    participant_key: *mut ParticipantKey,
+    frame_ptr: *const u8,
+    frame_len: usize,
+    clear_prefix_len: usize,
+    out_wire_ptr: *mut *mut u8,
+    out_wire_len: *mut usize,
+) -> LakkoSframeStatus {
+    if participant_key.is_null() || out_wire_ptr.is_null() || out_wire_len.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if frame_ptr.is_null() && frame_len != 0 {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if clear_prefix_len > LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN {
+        return LakkoSframeStatus::BadClearPrefix;
+    }
+    // SAFETY: pointer + length guarded above.
+    let frame = if frame_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(frame_ptr, frame_len) }
+    };
+    // SAFETY: caller upheld the live-pointer contract.
+    let pk = unsafe { &mut *participant_key };
+    let wire = match pk.inner.seal_media_frame(frame, clear_prefix_len) {
+        Ok(w) => w,
+        Err(CallsError::CounterExhausted) => return LakkoSframeStatus::CounterExhausted,
+        Err(_) => return LakkoSframeStatus::AeadFailed,
+    };
+    let (ptr, len) = vec_into_raw(wire);
+    // SAFETY: out-pointers non-null per the guard above.
+    unsafe {
+        *out_wire_ptr = ptr;
+        *out_wire_len = len;
+    }
+    LakkoSframeStatus::Ok
+}
+
+/// Open a sealed media frame in the ADR-0071 layout with the overlap
+/// fall-back (ADR-0029) and write the encoded frame
+/// `clear_prefix || plaintext` into a freshly-allocated buffer the
+/// caller MUST free via [`lakko_sframe_buffer_free`]. The KID is read
+/// from the frame's own SFrame header (which sits before the 3-byte
+/// trailer at the end), so the decryptor needs no leaf, stream or
+/// codec argument. A malformed frame — including one in the
+/// header-first layout — returns [`LakkoSframeStatus::WireParse`]; an
+/// authentication failure under both keys returns
+/// [`LakkoSframeStatus::AeadFailed`]. The shim drops the frame on
+/// either.
+///
+/// # Safety
+///
+/// - `ring` must be a live pointer from [`lakko_sframe_call_key_ring_new`].
+/// - `wire_ptr` may be null only when `wire_len == 0`.
+/// - `out_frame_ptr` / `out_frame_len` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_media_frame_with_overlap(
+    ring: *const CallKeyRing,
+    wire_ptr: *const u8,
+    wire_len: usize,
+    out_frame_ptr: *mut *mut u8,
+    out_frame_len: *mut usize,
+) -> LakkoSframeStatus {
+    if ring.is_null() || out_frame_ptr.is_null() || out_frame_len.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if wire_ptr.is_null() && wire_len != 0 {
+        return LakkoSframeStatus::NullPointer;
+    }
+    // SAFETY: pointer + length guarded above.
+    let wire = if wire_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) }
+    };
+    if MediaFrameParts::split(wire).is_err() {
+        return LakkoSframeStatus::WireParse;
+    }
+    // SAFETY: caller upheld the live-pointer contract.
+    let ring = unsafe { &*ring };
+    let Ok(frame) = lock_ring(ring).try_open_media_frame_with_overlap(wire) else {
+        return LakkoSframeStatus::AeadFailed;
+    };
+    let (ptr, len) = vec_into_raw(frame);
+    // SAFETY: out-pointers non-null per the guard above.
+    unsafe {
+        *out_frame_ptr = ptr;
+        *out_frame_len = len;
     }
     LakkoSframeStatus::Ok
 }

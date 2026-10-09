@@ -67,6 +67,10 @@ use lakko_mls::Group;
 
 use crate::error::{Error, Result};
 use crate::header::SframeHeader;
+use crate::media_frame::{
+    clear_prefix_len, media_frame_aad, media_frame_trailer, MediaCodec, MediaFrameError,
+    MediaFrameParts, MAX_CLEAR_PREFIX_LEN, MAX_MEDIA_FRAME_OVERHEAD,
+};
 
 /// MLS exporter label for SFrame call keying. Pinned ASCII;
 /// any change is a breaking protocol change to every
@@ -483,6 +487,112 @@ impl ParticipantKey {
         self.open(aad, ciphertext, header.ctr)
     }
 
+    /// Seal an encoded media frame into the ADR-0071 layout,
+    /// `clear_prefix || ciphertext_and_tag || sframe_header || trailer`,
+    /// leaving the first `clear_prefix_len` bytes of `frame` in the clear.
+    ///
+    /// The key, the nonce and the counter are exactly those of
+    /// [`Self::seal`] (ADR-0035, ADR-0069): one counter value is consumed.
+    /// The AEAD additional data is `sframe_header || clear_prefix || trailer`,
+    /// so the clear bytes, the header and the trailer are all authenticated;
+    /// the plaintext is the frame after the clear prefix. See
+    /// [`crate::media_frame`] for the layout.
+    ///
+    /// A `clear_prefix_len` beyond the frame's length is cut to the frame's
+    /// length: such a frame is left clear whole and its ciphertext is the tag
+    /// over an empty plaintext. Callers normally do not choose the length
+    /// themselves; see [`Self::seal_media_frame_for_codec`].
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Crypto`] when `clear_prefix_len` exceeds
+    ///   [`MAX_CLEAR_PREFIX_LEN`]. Nothing is sealed and the counter does not
+    ///   move.
+    /// - [`Error::CounterExhausted`] when the 64-bit counter stands at its
+    ///   last value. Nothing is sealed.
+    /// - [`Error::Crypto`] on AEAD failure (practically unreachable).
+    pub fn seal_media_frame(&mut self, frame: &[u8], clear_prefix_len: usize) -> Result<Vec<u8>> {
+        if clear_prefix_len > MAX_CLEAR_PREFIX_LEN {
+            return Err(media_frame_refusal(&MediaFrameError::ClearPrefixTooLong {
+                len: clear_prefix_len,
+                max: MAX_CLEAR_PREFIX_LEN,
+            }));
+        }
+        if self.counter == MAX_FRAME_COUNTER {
+            return Err(Error::CounterExhausted);
+        }
+        let (clear, body) = frame.split_at(clear_prefix_len.min(frame.len()));
+        let header = SframeHeader {
+            kid: self.kid,
+            ctr: self.counter + 1,
+        }
+        .encode();
+        let trailer =
+            media_frame_trailer(clear.len(), header.len()).map_err(|e| media_frame_refusal(&e))?;
+        let aad = media_frame_aad(&header, clear, &trailer);
+        let (_, ciphertext) = self.seal(&aad, body)?;
+        let mut wire = Vec::with_capacity(frame.len() + MAX_MEDIA_FRAME_OVERHEAD);
+        wire.extend_from_slice(clear);
+        wire.extend_from_slice(&ciphertext);
+        wire.extend_from_slice(&header);
+        wire.extend_from_slice(&trailer);
+        Ok(wire)
+    }
+
+    /// [`Self::seal_media_frame`] with the clear prefix the sender's rule
+    /// gives `codec` for this frame ([`clear_prefix_len`]): 10 bytes of a VP8
+    /// key frame, 3 of any other VP8 frame, none for Opus or an unknown
+    /// codec.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::seal_media_frame`]; the rule never asks for more than
+    /// [`MAX_CLEAR_PREFIX_LEN`].
+    pub fn seal_media_frame_for_codec(
+        &mut self,
+        frame: &[u8],
+        codec: MediaCodec,
+    ) -> Result<Vec<u8>> {
+        self.seal_media_frame(frame, clear_prefix_len(codec, frame))
+    }
+
+    /// Open a frame sealed by [`Self::seal_media_frame`] and return the
+    /// encoded frame as the sender's encoder produced it:
+    /// `clear_prefix || plaintext`.
+    ///
+    /// The trailer is read and every length checked against the input before
+    /// any slice is taken; the wire bytes of the header, the clear prefix and
+    /// the trailer are bound as additional data. This key must be the one
+    /// derived for the frame's KID. A frame in the ADR-0013 header-first
+    /// layout is refused. Opening keeps no state and accepts any 64-bit
+    /// counter (ADR-0069).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Crypto`] on a malformed frame, a KID that is not this key's,
+    /// or an AEAD authentication failure. Nothing of the input is returned on
+    /// any of them (security invariant #4).
+    pub fn open_media_frame(&self, wire: &[u8]) -> Result<Vec<u8>> {
+        let parts = MediaFrameParts::split(wire).map_err(|e| media_frame_refusal(&e))?;
+        self.open_media_parts(&parts)
+    }
+
+    /// Open an already-split media frame. The key ring splits once and tries
+    /// its current and previous keys over the same parts.
+    pub(crate) fn open_media_parts(&self, parts: &MediaFrameParts<'_>) -> Result<Vec<u8>> {
+        if parts.header.kid != self.kid {
+            return Err(Error::Crypto(format!(
+                "media frame kid {} does not match participant kid {}",
+                parts.header.kid, self.kid
+            )));
+        }
+        let plaintext = self.open(&parts.aad(), parts.ciphertext, parts.header.ctr)?;
+        let mut frame = Vec::with_capacity(parts.clear_prefix.len() + plaintext.len());
+        frame.extend_from_slice(parts.clear_prefix);
+        frame.extend_from_slice(&plaintext);
+        Ok(frame)
+    }
+
     /// Test-only — force the internal counter to a given value: the only
     /// deterministic start there is (ADR-0069). The exhaustion-edge tests use
     /// it to land near `u64::MAX`, and the tests that pin exact wire bytes use
@@ -511,6 +621,11 @@ impl ParticipantKey {
         }
         nonce
     }
+}
+
+/// A malformed sealed media frame, as this crate's error.
+pub(crate) fn media_frame_refusal(err: &MediaFrameError) -> Error {
+    Error::Crypto(format!("media frame: {err}"))
 }
 
 // =============================================================================

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { oneToOneEndReason } from "./call-session";
 import { endOpensMenu, endedForEveryoneLine, endsTheCallForMe, ENDED_FOR_ALL } from "./end-for-everyone";
+import { reduceGroupCalls, type GroupCallRecords } from "./group-call-record";
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -94,5 +95,104 @@ describe("a one-to-one call", () => {
     expect(oneToOneEndReason(ENDED_FOR_ALL)).toBe("hungUp");
     expect(oneToOneEndReason("declined")).toBe("declined");
     expect(oneToOneEndReason("something else")).toBe("hungUp");
+  });
+});
+
+// The receiving side of a chat-group call reads the starter out of the chat's
+// own record of the call (`group-call-record.ts`), which is written from the
+// `GroupCallStart` row and from nothing else. These pin that a device which
+// came to the call late still knows who may end it.
+describe("who may end the call, for a device that joined late", () => {
+  const starter = "c3RhcnRlcg==";
+  const callIdHex = "2a".repeat(16);
+  const start = (records: GroupCallRecords, observedAtMs: number): GroupCallRecords =>
+    reduceGroupCalls(records, {
+      kind: "start",
+      callIdHex,
+      initiatorLeaf: 0,
+      initiatorPersonKey: starter,
+      createdAtMs: 1_000,
+      mediaAudio: true,
+      mediaVideo: true,
+      observedAtMs,
+    });
+  const starterOf = (records: GroupCallRecords): string | null =>
+    records.get(callIdHex)?.initiatorPersonKey ?? null;
+
+  it("knows the starter from the start row it read long after the call began", () => {
+    let records: GroupCallRecords = new Map();
+    // The start row is read on a later poll, after other people's joins.
+    records = start(records, 600_000);
+    records = reduceGroupCalls(records, {
+      kind: "join",
+      callIdHex,
+      memberKey: "bGF0ZQ==",
+      personKey: "bGF0ZQ==",
+      observedAtMs: 601_000,
+    });
+    expect(
+      endsTheCallForMe({
+        endReason: ENDED_FOR_ALL,
+        senderPersonKey: starter,
+        starterPersonKey: starterOf(records),
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the starter when the start row is seen again", () => {
+    let records: GroupCallRecords = new Map();
+    records = start(records, 2_000);
+    const again = reduceGroupCalls(records, {
+      kind: "start",
+      callIdHex,
+      initiatorLeaf: 7,
+      initiatorPersonKey: "c29tZW9uZSBlbHNl",
+      createdAtMs: 1_000,
+      mediaAudio: true,
+      mediaVideo: true,
+      observedAtMs: 3_000,
+    });
+    // A second start for the same call names nobody new.
+    expect(starterOf(again)).toBe(starter);
+  });
+
+  it("still knows the starter after the starter left and came back", () => {
+    let records: GroupCallRecords = new Map();
+    records = start(records, 2_000);
+    records = reduceGroupCalls(records, { kind: "leave", callIdHex, memberKey: starter, observedAtMs: 3_000 });
+    records = reduceGroupCalls(records, {
+      kind: "join",
+      callIdHex,
+      memberKey: starter,
+      personKey: starter,
+      observedAtMs: 4_000,
+    });
+    expect(
+      endsTheCallForMe({
+        endReason: ENDED_FOR_ALL,
+        senderPersonKey: starter,
+        starterPersonKey: starterOf(records),
+      }),
+    ).toBe(true);
+  });
+
+  it("is not taken out by a call it never saw start", () => {
+    // No start row was ever read: a join alone opens no record (C-12), so
+    // there is no starter to compare with and the end is a plain end.
+    const records = reduceGroupCalls(new Map(), {
+      kind: "join",
+      callIdHex,
+      memberKey: "bGF0ZQ==",
+      personKey: "bGF0ZQ==",
+      observedAtMs: 601_000,
+    });
+    expect(starterOf(records)).toBeNull();
+    expect(
+      endsTheCallForMe({
+        endReason: ENDED_FOR_ALL,
+        senderPersonKey: starter,
+        starterPersonKey: starterOf(records),
+      }),
+    ).toBe(false);
   });
 });

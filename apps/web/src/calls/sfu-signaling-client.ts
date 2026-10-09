@@ -32,6 +32,12 @@
  */
 
 import { loadWasm } from "../wasm";
+import {
+  claimsVideoGiven,
+  readVideoGivenFrame,
+  VIDEO_GIVEN_MALFORMED_WARNING,
+  type VideoGivenEntry,
+} from "./video-given";
 
 // ---- Typed server frames ------------------------------------------
 
@@ -123,6 +129,13 @@ export interface SfuSignalingCallbacks {
   onSignalRelay?(frame: SfuSignalRelay): void;
   onSdpAnswer?(frame: SfuSdpAnswer): void;
   onSdpOffer?(frame: SfuSdpOffer): void;
+  /**
+   * What the SFU gives this device of each person's video (ADR-0070 step 6,
+   * `video-given.ts`): the whole set, in the frame's order. Sent only by an
+   * SFU with downlink control on, when the set changes and after a
+   * `video-wants`. A malformed frame never reaches this.
+   */
+  onVideoGiven?(given: readonly VideoGivenEntry[]): void;
   onPong?(frame: SfuPong): void;
   onServerError?(frame: SfuErrorFrame): void;
   /** A malformed / unknown-kind frame the shared validator rejected.
@@ -248,9 +261,28 @@ export class SfuSignalingClient {
 
   // ---- Send (client → SFU) ----------------------------------------
 
-  /** Send a client → SFU SDP offer (publish path). */
-  sendSdpOffer(sdp: string): void {
-    this.sendRaw(this.requireWasm().composeSfuSdpOffer(sdp));
+  /**
+   * Send a client → SFU SDP offer (publish path). `lightMids` names the
+   * `mid` of every video m-line of this offer that carries the light sender
+   * of this client's camera (ADR-0070 step 1), so the SFU forwards it as the
+   * camera's light companion; `middleMids` those that carry its middle sender
+   * (step 5), which the SFU forwards only to a viewer that asks for it. Each
+   * is empty when there is none.
+   */
+  sendSdpOffer(sdp: string, lightMids: readonly string[], middleMids: readonly string[] = []): void {
+    this.sendRaw(
+      this.requireWasm().composeSfuSdpOfferWithMiddle(sdp, [...lightMids], [...middleMids]),
+    );
+  }
+
+  /**
+   * Tell the SFU which picture of each publisher this client shows (ADR-0070
+   * step 5): `qualities[i]` is `main`, `middle` or `light` for `peers[i]`.
+   * The frame replaces the whole set; a publisher it leaves out is `main`.
+   * Throws when the lists are outside the protocol's bounds.
+   */
+  sendVideoWants(peers: readonly string[], qualities: readonly string[]): void {
+    this.sendRaw(this.requireWasm().composeSfuVideoWants([...peers], [...qualities]));
   }
 
   /** Send a client → SFU SDP answer (responds to a SFU-initiated
@@ -308,7 +340,29 @@ export class SfuSignalingClient {
       // Shared validator: size cap + fail-fast on unknown kind.
       kind = wasm.validateSfuServerFrame(raw);
     } catch (err) {
+      // A `video-given` frame outside the protocol's bounds (an unknown
+      // quality, an empty peer) is refused here: ignored, with one warning.
+      if (claimsVideoGiven(raw)) {
+        // eslint-disable-next-line no-console
+        console.warn(VIDEO_GIVEN_MALFORMED_WARNING);
+      }
       this.callbacks.onParseError?.(raw, err);
+      return;
+    }
+    if (kind === "video-given") {
+      // Read through the shared helper (bounds and quality names are the
+      // protocol crate's), not from the untrusted `JSON.parse`.
+      const given = readVideoGivenFrame(wasm, raw);
+      if (given === null) {
+        // eslint-disable-next-line no-console
+        console.warn(VIDEO_GIVEN_MALFORMED_WARNING);
+        return;
+      }
+      try {
+        this.callbacks.onVideoGiven?.(given);
+      } catch {
+        // A handler's failure never reaches the socket's message handler.
+      }
       return;
     }
     let frame: SfuServerFrame;

@@ -24,7 +24,10 @@ use lakko_ui_rules::call_bar::{
 };
 use lakko_ui_rules::call_group::{
     call_grid as rust_call_grid, call_stage as rust_call_stage,
-    ringback_plays as rust_ringback_plays, StageCandidate as RustStageCandidate,
+    middle_sender_wanted as rust_middle_sender_wanted, ringback_plays as rust_ringback_plays,
+    tile_video_quality as rust_tile_video_quality, StageCandidate as RustStageCandidate,
+    TileVideoQuality as RustTileVideoQuality, LIGHT_MAX_WIDTH_PX, MAIN_MIN_WIDTH_PX,
+    MIDDLE_SENDER_MIN_PEOPLE,
 };
 use lakko_ui_rules::capture::call_holds_capture as rust_call_holds_capture;
 use lakko_ui_rules::conversation::{
@@ -761,6 +764,80 @@ pub fn call_stage(people: Vec<StageCandidate>, pinned: Option<u32>) -> Option<u3
     rust_call_stage(&people, pinned).and_then(|index| u32::try_from(index).ok())
 }
 
+/// Which of a person's video tracks a call tile asks the call server for
+/// (`docs/ux/group-call-grid.md` section 7.6, ADR-0070 step 5). The light
+/// track always arrives beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum TileVideoQuality {
+    /// The main track: the full picture.
+    Main,
+    /// The middle track: the camera at half size.
+    Middle,
+    /// The light track alone.
+    Light,
+}
+
+impl From<RustTileVideoQuality> for TileVideoQuality {
+    fn from(quality: RustTileVideoQuality) -> Self {
+        match quality {
+            RustTileVideoQuality::Main => Self::Main,
+            RustTileVideoQuality::Middle => Self::Middle,
+            RustTileVideoQuality::Light => Self::Light,
+        }
+    }
+}
+
+/// Which track a tile asks for. `people` is everyone in the call, this
+/// device's own person included; `tile_width_px` is the width the tile is
+/// drawn at in **physical** pixels (points times the display scale);
+/// `pinned_or_stage` says the tile is the pinned person or the stage.
+///
+/// A call of two: `Main`. A pinned or stage tile at least
+/// [`tile_main_min_width_px`] wide: `Main`. Otherwise a tile narrower than
+/// [`tile_light_max_width_px`]: `Light`. Otherwise: `Middle`.
+#[uniffi::export]
+#[must_use]
+pub fn tile_video_quality(
+    people: u32,
+    tile_width_px: u32,
+    pinned_or_stage: bool,
+) -> TileVideoQuality {
+    rust_tile_video_quality(people, tile_width_px, pinned_or_stage).into()
+}
+
+/// Whether this device sends the middle copy of its camera: only from
+/// [`middle_sender_min_people`] people in the call on (its own person
+/// included).
+#[uniffi::export]
+#[must_use]
+pub fn middle_sender_wanted(people: u32) -> bool {
+    rust_middle_sender_wanted(people)
+}
+
+/// A pinned or stage tile at least this wide, in physical pixels, asks for
+/// the main track. Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn tile_main_min_width_px() -> u32 {
+    MAIN_MIN_WIDTH_PX
+}
+
+/// A tile narrower than this, in physical pixels, asks for the light track
+/// alone. Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn tile_light_max_width_px() -> u32 {
+    LIGHT_MAX_WIDTH_PX
+}
+
+/// A person sends the middle copy of their camera from this many people in
+/// the call on. Chosen.
+#[uniffi::export]
+#[must_use]
+pub fn middle_sender_min_people() -> u32 {
+    MIDDLE_SENDER_MIN_PEOPLE
+}
+
 /// Which of a remote person's two video tracks a call tile shows
 /// (`docs/ux/group-call-grid.md` section 7.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -951,6 +1028,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_tile_video_rule_crosses_the_boundary_intact() {
+        assert_eq!(
+            (
+                tile_main_min_width_px(),
+                tile_light_max_width_px(),
+                middle_sender_min_people()
+            ),
+            (960, 240, 3)
+        );
+        assert_eq!(tile_video_quality(2, 100, false), TileVideoQuality::Main);
+        assert_eq!(tile_video_quality(3, 960, true), TileVideoQuality::Main);
+        assert_eq!(tile_video_quality(3, 959, true), TileVideoQuality::Middle);
+        assert_eq!(tile_video_quality(3, 2000, false), TileVideoQuality::Middle);
+        assert_eq!(tile_video_quality(3, 240, false), TileVideoQuality::Middle);
+        assert_eq!(tile_video_quality(3, 239, false), TileVideoQuality::Light);
+        assert_eq!(tile_video_quality(3, 239, true), TileVideoQuality::Light);
+        assert!(!middle_sender_wanted(2));
+        assert!(middle_sender_wanted(3));
+    }
+
+    #[test]
     fn the_layer_display_crosses_the_boundary_intact() {
         assert_eq!(
             (
@@ -967,11 +1065,12 @@ mod tests {
             assert_eq!(d.full_frame(t), ShownLayer::Full);
             assert_eq!(d.light_frame(t), ShownLayer::Full);
         }
-        for t in (1020..=1140).step_by(20) {
+        for t in (1020..=1280).step_by(20) {
             d.light_frame(t);
         }
-        assert_eq!(d.tick(1149), ShownLayer::Full);
-        assert_eq!(d.tick(1180), ShownLayer::Light);
+        // 300 ms without a full frame is where the tile hands over.
+        assert_eq!(d.tick(1299), ShownLayer::Full);
+        assert_eq!(d.tick(1330), ShownLayer::Light);
         assert_eq!(d.shown(), ShownLayer::Light);
         let total = d.counters();
         assert_eq!(
@@ -980,14 +1079,14 @@ mod tests {
                 total.stall_max_ms,
                 total.stall_total_ms
             ),
-            (1, 180, 180)
+            (1, 330, 330)
         );
         assert_eq!(d.drain(), total);
         assert_eq!(d.drain().stall_total_ms, 0);
-        assert_eq!(d.set_light_available(false, 1200), ShownLayer::Full);
+        assert_eq!(d.set_light_available(false, 1350), ShownLayer::Full);
         assert_eq!(d.resync(5000), ShownLayer::Full);
         assert_eq!(add_layer_display_counters(total, total).light_switches, 2);
-        assert_eq!(add_layer_display_counters(total, total).stall_max_ms, 180);
+        assert_eq!(add_layer_display_counters(total, total).stall_max_ms, 330);
     }
 
     #[test]

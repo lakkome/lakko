@@ -13,6 +13,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   [ADR-0013](0013-sframe-cross-platform-aad.md) (the header is the AAD) and
   [ADR-0029](0029-mid-call-key-rotation.md) (the overlap key ring) as they
   are. Security invariants #2 and #3; C-5.
+- **Amended by:** [ADR-0071](0071-codec-header-in-the-clear.md) (Proposed, 2026-10-07) moves the SFrame header that carries this counter to the end of the frame; the counter, the nonce and the key are unchanged.
 
 ## Context
 

@@ -52,9 +52,11 @@ import {
   createMemo,
   createSignal,
   For,
+  on,
   onCleanup,
   onMount,
   Show,
+  untrack,
   type Component,
   type JSX,
 } from "solid-js";
@@ -91,8 +93,31 @@ import {
   type CallSurfaceKind,
 } from "../calls/call-screen-model";
 import { endOpensMenu } from "../calls/end-for-everyone";
-import { LayerDisplay, shownLayerLedger, type LayerShown } from "../calls/layer-display";
+import { lastDefined } from "../calls/held";
+import {
+  FIRST_FRAME_GRACE_MS,
+  LayerDisplay,
+  shownLayerLedger,
+  TileFrameTally,
+  type LayerShown,
+} from "../calls/layer-display";
 import { canWatchVideoFrames, watchVideoFrames } from "../calls/video-frame-watch";
+import {
+  askedQuality,
+  coversHeavySwap,
+  physicalTileWidth,
+  SettledWidth,
+  sharedTileQualityRules,
+  tileQualityOf,
+  type VideoQuality,
+} from "../calls/video-wants";
+import { heavyStreamForGiven } from "../calls/video-given";
+import {
+  describeLocalPreview,
+  LocalPreviewBinder,
+  PREVIEW_CHECK_MS,
+  PREVIEW_DIAG_AFTER_MS,
+} from "../calls/local-preview";
 import { callBarPhase } from "../calls/call-bar-model";
 import { callSettingsSections, type SettingsSectionKind } from "../calls/call-settings";
 import {
@@ -807,18 +832,12 @@ const SelfView: Component<{
           </div>
         }
       >
-        {(stream) => (
-          <video
-            class="lk-call-self-video"
-            autoplay
-            playsinline
-            muted
-            aria-label={t("call.self.camera_a11y")}
-            ref={(el) => {
-              el.srcObject = stream();
-            }}
-          />
-        )}
+        <LocalVideo
+          stream={props.stream}
+          where="self"
+          class="lk-call-self-video"
+          ariaLabel={t("call.self.camera_a11y")}
+        />
       </Show>
 
       <Show when={props.starting}>
@@ -875,9 +894,25 @@ function peerIdOfParticipant(participantId: string): string {
 interface RemoteVideoProps {
   /** The person's main stream. */
   stream: MediaStream;
+  /** Their middle stream (`calls/light-stream.ts`), when the publisher sends
+   *  one. */
+  middle?: MediaStream | undefined;
   /** Their light companion (`calls/light-stream.ts`), when the publisher
    *  sends one. */
   light: MediaStream | undefined;
+  /**
+   * Which picture this tile shows (`calls/video-wants.ts`): the main one, the
+   * middle one, or the light one alone. Left out (a one-to-one call, which
+   * has one picture per person), the main one.
+   */
+  quality?: VideoQuality | undefined;
+  /**
+   * The picture the SFU says it gives of this person (`calls/video-given.ts`,
+   * ADR-0070 step 6); `undefined` when it has not said. The tile shows the
+   * lower of this and {@link quality}; what the tile asks for is not changed
+   * by it.
+   */
+  given?: VideoQuality | undefined;
   /** The SFU peer id, for the `shown` line of the media counters. */
   peerId: string;
   /** The class the single `<video>` has always had here; with a companion
@@ -889,50 +924,136 @@ interface RemoteVideoProps {
 /**
  * A remote person's picture.
  *
- * Without a light companion: one `<video>`, as before. With one: two, stacked
- * in the same box with the same `object-fit`, both in layout and both playing
- * all the time so both keep decoding, and the one the layer display
- * (`calls/layer-display.ts`) names is the one that is opaque and on top. The
- * switch is `opacity` and stacking order with no transition; neither element
- * is ever `display: none` or `visibility: hidden`, because a browser stops
- * presenting frames for those.
+ * Up to two `<video>` elements, stacked in the same box with the same
+ * `object-fit`:
  *
- * Presented frames are read with `requestVideoFrameCallback` on each element.
- * Where a browser lacks it nothing is observed, the full track stays shown,
- * and nothing is reported to the media counters. A hidden page presents no
- * frames, so the clock stops while it is hidden and the display starts again
- * on the full track when it returns.
+ *   * the **heavy** one plays the lower of the picture the tile asked for and
+ *     the one the SFU says it gives (`calls/video-given.ts`): the main stream
+ *     at `main`, the middle stream at `middle` (the main one while the person
+ *     has no middle track), and at `light` it does not exist at all;
+ *   * the **light** one plays the light companion for as long as the person
+ *     has one.
+ *
+ * Both are in layout and playing all the time so both keep decoding, and the
+ * one the layer display (`calls/layer-display.ts`) names is the one that is
+ * opaque and on top. The switch is `opacity` and stacking order with no
+ * transition; neither element is ever `display: none` or
+ * `visibility: hidden`, because a browser stops presenting frames for those.
+ *
+ * When the heavy picture is replaced (the tile changed size, the person's
+ * middle track arrived) the heavy element keeps its place and takes the new
+ * stream; the tile and the light element are not rebuilt. The layer display
+ * starts again as for a new tile, and the light copy is shown until the new
+ * picture's first frame, so the swap is never a blank box.
+ *
+ * The frames each element shows are read through `calls/video-frame-watch.ts`:
+ * `requestVideoFrameCallback` where the browser has it, the statistics of the
+ * track's receiver where it does not. Where neither can be had nothing is
+ * observed, the heavy picture stays shown, and nothing is reported to the
+ * media counters. A hidden page presents no frames, so the clock stops while
+ * it is hidden and the display starts again on the heavy picture when it
+ * returns.
  *
  * Muted: audio plays through the dedicated hidden `<audio>` sinks.
  */
 const RemoteVideo: Component<RemoteVideoProps> = (props) => {
   const clock = (): number => performance.now();
   const display = new LayerDisplay(clock());
+  /** The frames each element shows, for the `shown` line of the media
+   *  counters; decides nothing. */
+  const tally = new TileFrameTally();
   const [shown, setShown] = createSignal<LayerShown>("full");
   const sync = (): void => {
     setShown(display.shown());
   };
-  let fullEl: HTMLVideoElement | undefined;
-  let observing = false;
-  const report = (): void => {
-    if (observing) shownLayerLedger.add(props.peerId, display.drain());
+  let heavyEl: HTMLVideoElement | undefined;
+  let lightEl: HTMLVideoElement | undefined;
+  const [lightMounted, setLightMounted] = createSignal(false);
+
+  /**
+   * The stream the heavy element plays: the one for the lower of what the
+   * tile asked for and what the SFU gives (`calls/video-given.ts`). None when
+   * the light one is shown alone, which it is only while there is a light
+   * stream. A track the SFU paused on purpose is therefore not the one this
+   * element waits on: when the SFU says it gives less, the memo changes and
+   * the effect below starts the layer rule again on the picture that is
+   * actually sent.
+   */
+  const heavy = createMemo(() =>
+    heavyStreamForGiven(
+      props.quality ?? "main",
+      props.given,
+      props.stream,
+      props.middle,
+      props.light !== undefined,
+    ),
+  );
+  const lightOnly = (): boolean => heavy() === undefined;
+  tally.setHeavy(!lightOnly());
+  const heavyTrack = (): MediaStreamTrack | undefined => heavy()?.getVideoTracks()[0];
+  const lightTrack = (): MediaStreamTrack | undefined => props.light?.getVideoTracks()[0];
+  /** The stream the light element plays; kept while that element is taken
+   *  down after the companion went away (`calls/held.ts`). */
+  const shownLight = lastDefined(() => props.light);
+
+  /** When the heavy picture was last replaced and has not shown a frame
+   *  since; `null` otherwise. */
+  const [heavySwappedAt, setHeavySwappedAt] = createSignal<number | null>(null);
+
+  /** The rule is told of a light track only while it is the companion of a
+   *  heavy one. Shown alone, the light stream is the tile's one picture and
+   *  its frames are reported as that picture's. */
+  const tellLightAvailable = (): void => {
+    display.setLightAvailable(lightMounted() && !lightOnly(), clock());
   };
 
-  createEffect(() => {
-    const stream = props.stream;
-    if (fullEl !== undefined) fullEl.srcObject = stream;
-  });
+  // The heavy picture was replaced (the tile asked for another, the SFU
+  // gives another, the person's middle track arrived): start the rule again,
+  // as for a new tile. `resync` forgets the last frame of the old picture,
+  // and the rule counts a displayed stall only from a frame it has seen, so
+  // neither the picture the SFU paused nor the wait for the new one's first
+  // key frame is counted as a stall.
+  createEffect(
+    on(
+      heavy,
+      (now) => {
+        display.resync(clock());
+        tally.setHeavy(now !== undefined, true);
+        tellLightAvailable();
+        setHeavySwappedAt(now === undefined ? null : clock());
+        sync();
+      },
+      { defer: true },
+    ),
+  );
+
+  /** Whether the frames of the picture this tile shows can be observed. */
+  const observable = (): boolean =>
+    lightOnly()
+      ? lightEl !== undefined && canWatchVideoFrames(lightEl, lightTrack)
+      : heavyEl !== undefined && canWatchVideoFrames(heavyEl, heavyTrack);
+  const report = (): void => {
+    if (!observable()) return;
+    shownLayerLedger.add(
+      props.peerId,
+      display.drain(),
+      tally.drain(clock(), lightShown() ? "light" : "full"),
+    );
+  };
 
   onMount(() => {
-    if (fullEl === undefined) return;
-    observing = canWatchVideoFrames(fullEl);
-    const stopFrames = watchVideoFrames(fullEl, (now) => {
-      display.fullFrame(now);
-      sync();
-    });
     const pageVisible = (): boolean => document.visibilityState === "visible";
     const timer = setInterval(() => {
       if (!pageVisible()) return;
+      const swappedAt = heavySwappedAt();
+      if (
+        swappedAt !== null &&
+        (!observable() || clock() - swappedAt >= FIRST_FRAME_GRACE_MS)
+      ) {
+        // No first frame can be seen, or none came in the time the rule
+        // itself waits for one: the rule decides from here.
+        setHeavySwappedAt(null);
+      }
       display.tick(clock());
       sync();
       report();
@@ -940,11 +1061,11 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
     const onVisibility = (): void => {
       if (!pageVisible()) return;
       display.resync(clock());
+      tally.unobserved();
       sync();
     };
     document.addEventListener("visibilitychange", onVisibility);
     onCleanup(() => {
-      stopFrames();
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);
       if (pageVisible()) display.tick(clock());
@@ -953,68 +1074,157 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
     });
   });
 
-  const layered = (): boolean => props.light !== undefined;
+  /** Whether the light element is the one on top. */
+  const lightShown = (): boolean =>
+    lightOnly() ||
+    coversHeavySwap(heavySwappedAt() !== null, lightMounted()) ||
+    shown() === "light";
 
   return (
     <>
-      <video
-        class={layered() ? `${props.class} lk-call-layer` : props.class}
-        data-shown={layered() ? String(shown() === "full") : undefined}
-        aria-label={props.ariaLabel}
-        autoplay
-        playsinline
-        muted
-        ref={fullEl}
-      />
-      <Show when={props.light}>
-        {(light) => (
-          <LightLayerVideo
-            stream={light()}
-            class={props.class}
-            shown={shown() === "light"}
-            onFrame={(now): void => {
-              display.lightFrame(now);
+      <Show when={heavy() !== undefined}>
+        <LayerVideo
+          stream={heavy() ?? props.stream}
+          class={props.light !== undefined ? `${props.class} lk-call-layer` : props.class}
+          shown={props.light !== undefined ? !lightShown() : undefined}
+          ariaLabel={props.ariaLabel}
+          elRef={(el): void => {
+            heavyEl = el;
+          }}
+          onFrame={(now): void => {
+            if (heavySwappedAt() !== null) setHeavySwappedAt(null);
+            tally.heavyFrame(now);
+            display.fullFrame(now);
+            sync();
+          }}
+        />
+      </Show>
+      <Show when={props.light !== undefined}>
+        {
+          <LayerVideo
+            stream={shownLight() as MediaStream}
+            class={`${props.class} lk-call-layer`}
+            shown={lightShown()}
+            ariaLabel={lightOnly() ? props.ariaLabel : undefined}
+            ariaHidden={!lightOnly()}
+            elRef={(el): void => {
+              lightEl = el;
+              setLightMounted(el !== undefined);
+              tellLightAvailable();
               sync();
             }}
-            onAvailable={(available): void => {
-              display.setLightAvailable(available, clock());
+            onFrame={(now): void => {
+              tally.lightFrame();
+              if (lightOnly()) display.fullFrame(now);
+              else display.lightFrame(now);
               sync();
             }}
           />
-        )}
+        }
       </Show>
     </>
   );
 };
 
-/** The light companion's `<video>`, stacked over the main one. It exists for
- *  as long as the person has a companion stream. */
-const LightLayerVideo: Component<{
+/**
+ * The person's own camera on their own screen (`calls/local-preview.ts`).
+ *
+ * Bound once the element is in the document, to a stream of its own made
+ * from the camera track, with `play()` called on every engine; looked at
+ * again when the stream changes and on a slow timer, because the call swaps
+ * the camera track inside one stream object and nothing announces that.
+ * Muted: a person never hears their own microphone from this element, and it
+ * plays no audio track at all. A little after each new camera the element's
+ * and the track's state are written to the console once.
+ */
+const LocalVideo: Component<{
+  stream: MediaStream | undefined;
+  /** Which own-camera element this is, for the console line. */
+  where: string;
+  class: string;
+  ariaLabel?: string | undefined;
+}> = (props) => {
+  let el: HTMLVideoElement | undefined;
+  const binder = new LocalPreviewBinder<MediaStreamTrack, MediaProvider>(
+    (track) => new MediaStream([track]),
+  );
+  let diagTimer: ReturnType<typeof setTimeout> | undefined;
+  const look = (): void => {
+    if (el === undefined) return;
+    // The attribute alone is not relied on for the muted state either.
+    if (!el.muted) el.muted = true;
+    if (!binder.sync(el, props.stream)) return;
+    if (diagTimer !== undefined) clearTimeout(diagTimer);
+    if (binder.track() === null) return;
+    diagTimer = setTimeout(() => {
+      diagTimer = undefined;
+      if (el === undefined) return;
+      // eslint-disable-next-line no-console
+      console.info(describeLocalPreview(props.where, el, binder.track(), binder.counts()));
+    }, PREVIEW_DIAG_AFTER_MS);
+  };
+  onMount(() => {
+    // The stream signal changed: look at once. Created here, so the first
+    // look is with the element in the document.
+    createEffect(() => {
+      void props.stream;
+      look();
+    });
+    const timer = setInterval(look, PREVIEW_CHECK_MS);
+    onCleanup(() => {
+      clearInterval(timer);
+      if (diagTimer !== undefined) clearTimeout(diagTimer);
+      if (el !== undefined) el.srcObject = null;
+      binder.reset();
+    });
+  });
+  return (
+    <video class={props.class} aria-label={props.ariaLabel} autoplay playsinline muted ref={el} />
+  );
+};
+
+/**
+ * One `<video>` of a remote picture: the heavy one or the light companion.
+ * It keeps its element while its stream is replaced (`srcObject` is swapped),
+ * and reports each frame it shows.
+ */
+const LayerVideo: Component<{
   stream: MediaStream;
   class: string;
-  shown: boolean;
+  /** Whether this is the element on top; `undefined` where there is only
+   *  one and nothing is stacked. */
+  shown: boolean | undefined;
+  ariaLabel?: string | undefined;
+  ariaHidden?: boolean | undefined;
+  /** The element, and `undefined` when it is gone. */
+  elRef: (el: HTMLVideoElement | undefined) => void;
   onFrame: (now: number) => void;
-  onAvailable: (available: boolean) => void;
 }> = (props) => {
   let el: HTMLVideoElement | undefined;
   createEffect(() => {
     const stream = props.stream;
-    if (el !== undefined) el.srcObject = stream;
+    if (el !== undefined && el.srcObject !== stream) el.srcObject = stream;
   });
   onMount(() => {
     if (el === undefined) return;
-    props.onAvailable(true);
-    const stopFrames = watchVideoFrames(el, (now) => props.onFrame(now));
+    props.elRef(el);
+    const stopFrames = watchVideoFrames(
+      el,
+      (now) => props.onFrame(now),
+      // Read each time: the stream this element plays can be replaced.
+      () => props.stream.getVideoTracks()[0],
+    );
     onCleanup(() => {
       stopFrames();
-      props.onAvailable(false);
+      props.elRef(undefined);
     });
   });
   return (
     <video
-      class={`${props.class} lk-call-layer`}
-      data-shown={String(props.shown)}
-      aria-hidden="true"
+      class={props.class}
+      data-shown={props.shown === undefined ? undefined : String(props.shown)}
+      aria-label={props.ariaLabel}
+      aria-hidden={props.ariaHidden === true ? "true" : undefined}
       autoplay
       playsinline
       muted
@@ -1023,36 +1233,129 @@ const LightLayerVideo: Component<{
   );
 };
 
+/** What a call screen passes down so a tile can say which picture of a person
+ *  it shows (`calls/video-wants.ts`). `tile` is the same object for the
+ *  tile's lifetime; `null` when it stops showing one. */
+type ReportTileVideoQuality = (
+  tile: object,
+  participantId: string,
+  quality: VideoQuality | null,
+) => void;
+
 interface TileProps {
   participant: Participant;
   large: boolean;
   onPin?: (id: string) => void;
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
   remoteLightStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteMiddleStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteVideoGivenFor?: ((participantId: string) => VideoQuality | undefined) | undefined;
+  reportTileVideoQuality?: ReportTileVideoQuality | undefined;
   localStream?: (() => MediaStream | undefined) | undefined;
 }
 
 const ParticipantTile: Component<TileProps> = (props) => {
-  const isPinned = (): boolean => callState.pinnedId() === props.participant.id;
+  // A tile is one person for as long as it is mounted (tiles are keyed by
+  // participant id), so who it shows is read once. Its teardown must not ask
+  // the roster again: the person may be the very one who just left
+  // (`calls/held.ts`).
+  const participantId = untrack(() => props.participant.id);
+  const local = untrack(() => props.participant.isLocal);
+  const isPinned = (): boolean => callState.pinnedId() === participantId;
   const tileStream = (): MediaStream | undefined =>
-    props.participant.isLocal
-      ? props.localStream?.()
-      : props.remoteStreamFor?.(props.participant.id);
+    local ? props.localStream?.() : props.remoteStreamFor?.(participantId);
+  /** The stream the picture below plays; kept while the picture is taken
+   *  down after the stream went away. */
+  const shownStream = lastDefined(tileStream);
+
+  // Which picture of the person this tile shows
+  // (`docs/ux/group-call-grid.md` section 7.6): asked of the shared rule from
+  // the people in the call, this tile's own drawn width in physical pixels,
+  // and whether it is the pinned person or the stage. Only where the call can
+  // act on it (a call through the SFU); elsewhere a person has one picture.
+  let tileEl: HTMLDivElement | undefined;
+  const tileKey = {};
+  const asksQuality = (): boolean => !local && props.reportTileVideoQuality !== undefined;
+  /** The tile's width in physical pixels, once measured and settled. */
+  const [widthPx, setWidthPx] = createSignal<number | null>(null);
+  onMount(() => {
+    const el = tileEl;
+    if (el === undefined || !asksQuality()) return;
+    const settled = new SettledWidth((width) => {
+      setWidthPx(width);
+    });
+    const measured = (cssWidth: number): void => {
+      // A tile not laid out yet has no width to ask about.
+      if (cssWidth > 0) settled.observe(physicalTileWidth(cssWidth, window.devicePixelRatio));
+    };
+    const measure = (): void => measured(el.getBoundingClientRect().width);
+    measure();
+    // A resize of the window also covers a change of the pixel ratio (zoom,
+    // another display).
+    window.addEventListener("resize", measure);
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(measure);
+      observer.observe(el);
+    }
+    onCleanup(() => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+      settled.dispose();
+    });
+  });
+  const tileQuality = createMemo((): VideoQuality | null => {
+    if (!asksQuality()) return null;
+    const width = widthPx();
+    if (width === null) return null;
+    // Read so the answer is asked again once the shared rules have loaded.
+    uiRules();
+    return askedQuality(
+      tileQualityOf(
+        sharedTileQualityRules,
+        callState.participants().length,
+        width,
+        props.large || isPinned(),
+      ),
+      props.remoteLightStreamFor?.(participantId) !== undefined,
+    );
+  });
+  // Tell the call what this tile shows; a tile that draws no picture of the
+  // person (camera off, no stream yet, not measured yet) shows none.
+  createEffect(() => {
+    const report = props.reportTileVideoQuality;
+    if (report === undefined || local) return;
+    const drawsPicture = props.participant.camOn && tileStream() !== undefined;
+    report(tileKey, participantId, drawsPicture ? tileQuality() : null);
+  });
+  onCleanup(() => {
+    if (local) return;
+    // The tile is gone: it shows no picture of the person. Nothing here may
+    // stop the rest of the screen from being taken down.
+    try {
+      untrack(() => props.reportTileVideoQuality)?.(tileKey, participantId, null);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("call ui: a tile could not withdraw what it asked for", err);
+    }
+  });
+
   const name = (): string =>
     props.participant.displayName ||
     (props.participant.isLocal ? t("call.participant.you") : t("call.participant.unnamed"));
   return (
     <div
       class="lk-call-tile"
+      ref={tileEl}
       classList={{
         large: props.large,
         speaking: props.participant.speaking,
         pinnable: !props.participant.isLocal && props.onPin !== undefined,
       }}
-      data-tone={toneOf(props.participant.id)}
+      data-tone={toneOf(participantId)}
       onClick={(): void => {
-        if (props.onPin !== undefined && !props.participant.isLocal) {
-          props.onPin(isPinned() ? "" : props.participant.id);
+        if (props.onPin !== undefined && !local) {
+          props.onPin(isPinned() ? "" : participantId);
         }
       }}
     >
@@ -1068,38 +1371,34 @@ const ParticipantTile: Component<TileProps> = (props) => {
             dedicated hidden <audio> sinks, so this element never doubles the
             audio. The mock path passes no stream and falls through. */}
         <Show
-          when={tileStream()}
+          when={tileStream() !== undefined}
           fallback={
             <div class="lk-call-tile-blank" aria-hidden="true">
               <Icon name="video" size={props.large ? 36 : 24} strokeWidth={1.4} />
             </div>
           }
         >
-          {(stream) => (
-            <Show
-              when={!props.participant.isLocal}
-              fallback={
-                <video
-                  class="lk-call-tile-video mirrored"
-                  autoplay
-                  playsinline
-                  muted
-                  ref={(el) => {
-                    el.srcObject = stream();
-                  }}
-                />
-              }
-            >
-              {/* The other person: their full picture, and their light one
-                  shown the moment the full one stands still. */}
-              <RemoteVideo
-                stream={stream()}
-                light={props.remoteLightStreamFor?.(props.participant.id)}
-                peerId={peerIdOfParticipant(props.participant.id)}
-                class="lk-call-tile-video"
-              />
-            </Show>
-          )}
+          {/* `shownStream`, not the accessor `<Show>` would hand over: the
+              picture reads its stream while it is being taken down
+              (`calls/held.ts`). */}
+          <Show
+            when={!local}
+            fallback={
+              <LocalVideo stream={tileStream()} where="tile" class="lk-call-tile-video mirrored" />
+            }
+          >
+            {/* The other person: the picture this tile asked for, and their
+                light one shown the moment that one stands still. */}
+            <RemoteVideo
+              stream={shownStream() as MediaStream}
+              middle={props.remoteMiddleStreamFor?.(participantId)}
+              light={props.remoteLightStreamFor?.(participantId)}
+              quality={tileQuality() ?? undefined}
+              given={props.remoteVideoGivenFor?.(participantId)}
+              peerId={peerIdOfParticipant(participantId)}
+              class="lk-call-tile-video"
+            />
+          </Show>
         </Show>
       </Show>
 
@@ -1155,6 +1454,9 @@ const ParticipantTile: Component<TileProps> = (props) => {
 const GroupArea: Component<{
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
   remoteLightStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteMiddleStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteVideoGivenFor?: ((participantId: string) => VideoQuality | undefined) | undefined;
+  reportTileVideoQuality?: ReportTileVideoQuality | undefined;
   localStream?: (() => MediaStream | undefined) | undefined;
 }> = (props) => {
   let area: HTMLDivElement | undefined;
@@ -1233,20 +1535,30 @@ const GroupArea: Component<{
     }
     callActions.pin(callState.pinnedId() === id ? null : id);
   };
-  const tile = (id: string, large: boolean): JSX.Element => (
-    <Show when={personById(id)}>
-      {(p) => (
+  // A tile is drawn for a person in the roster, and reads them through
+  // `lastDefined`, never through the accessor a `<Show>` hands its child: a
+  // tile of someone who just left is taken down while the roster no longer
+  // holds them, and that accessor throws when read then, which stopped the
+  // whole roster update half way (`calls/held.ts`). Which tiles exist is
+  // decided by the lists of ids above, which follow the roster.
+  const tile = (id: string, large: boolean): JSX.Element => {
+    const person = lastDefined(() => personById(id));
+    return (
+      <Show when={person() !== undefined}>
         <ParticipantTile
-          participant={p()}
+          participant={person() as Participant}
           large={large}
           onPin={togglePin}
           remoteStreamFor={props.remoteStreamFor}
           remoteLightStreamFor={props.remoteLightStreamFor}
+          remoteMiddleStreamFor={props.remoteMiddleStreamFor}
+          remoteVideoGivenFor={props.remoteVideoGivenFor}
+          reportTileVideoQuality={props.reportTileVideoQuality}
           localStream={props.localStream}
         />
-      )}
-    </Show>
-  );
+      </Show>
+    );
+  };
 
   return (
     <main
@@ -1535,6 +1847,19 @@ const Call: Component<{
    *  light companion stream (`calls/light-stream.ts`), when their device
    *  sends one. Their picture then shows it while the main one stands still. */
   remoteLightStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  /** SFU group-call only: resolve a roster participant id to that person's
+   *  middle stream (`calls/light-stream.ts`, ADR-0070 step 5), when their
+   *  device sends one. A grid tile watches it in place of the main one. */
+  remoteMiddleStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  /** SFU group-call only: the picture the SFU says it gives this device of a
+   *  person (`calls/video-given.ts`, ADR-0070 step 6); `undefined` when it
+   *  has not said. A tile shows the lower of that and what it asked for. */
+  remoteVideoGivenFor?: ((participantId: string) => VideoQuality | undefined) | undefined;
+  /** SFU group-call only: a tile says which picture of a person it shows
+   *  (`calls/video-wants.ts`), so the call asks the SFU for that one and the
+   *  SFU stops sending the others. Without it every tile shows the main
+   *  picture, as a one-to-one call does. */
+  reportTileVideoQuality?: ReportTileVideoQuality | undefined;
   /** The local capture `MediaStream`, for the self-view. */
   localStream?: (() => MediaStream | undefined) | undefined;
   /** Copy the link to this call (`docs/ux/call-links.md` section 3). The
@@ -1714,6 +2039,11 @@ const Call: Component<{
    *  camera on gets the video layout even when the other side has not, and the
    *  only picture that exists then is their own. */
   const fill = createMemo(() => callFillSource(surface(), remoteCameraOn(), localCameraOn()));
+  /** The other person's stream on the video surface, and the one its picture
+   *  keeps reading while it is taken down (`calls/held.ts`). */
+  const fillStream = (): MediaStream | undefined =>
+    props.remoteStreamFor?.(remotes()[0]?.id ?? "");
+  const shownFillStream = lastDefined(fillStream);
 
   /** Who is on the call, by the shared rule — lifted out of this view when the
    *  collapsed bar was built, so the bar can show "the same label the call
@@ -1911,32 +2241,24 @@ const Call: Component<{
           bars that read as an empty box. Own camera mirrored, the other
           person's never. */}
       <Show when={fill() === "remote"}>
-        <Show when={props.remoteStreamFor?.(remotes()[0]?.id ?? "")}>
-          {(stream) => (
-            <RemoteVideo
-              stream={stream()}
-              light={props.remoteLightStreamFor?.(remotes()[0]?.id ?? "")}
-              peerId={peerIdOfParticipant(remotes()[0]?.id ?? "")}
-              class="lk-call-fill"
-              ariaLabel={t("call.fill.remote_camera_a11y", { name: peerLabel() })}
-            />
-          )}
+        <Show when={fillStream() !== undefined}>
+          <RemoteVideo
+            stream={shownFillStream() as MediaStream}
+            light={props.remoteLightStreamFor?.(remotes()[0]?.id ?? "")}
+            peerId={peerIdOfParticipant(remotes()[0]?.id ?? "")}
+            class="lk-call-fill"
+            ariaLabel={t("call.fill.remote_camera_a11y", { name: peerLabel() })}
+          />
         </Show>
       </Show>
       <Show when={fill() === "local"}>
-        <Show when={props.localStream?.()}>
-          {(stream) => (
-            <video
-              class="lk-call-fill mirrored"
-              autoplay
-              playsinline
-              muted
-              aria-label={t("call.self.camera_a11y")}
-              ref={(el) => {
-                el.srcObject = stream();
-              }}
-            />
-          )}
+        <Show when={props.localStream?.() !== undefined}>
+          <LocalVideo
+            stream={props.localStream?.()}
+            where="fill"
+            class="lk-call-fill mirrored"
+            ariaLabel={t("call.self.camera_a11y")}
+          />
         </Show>
       </Show>
 
@@ -1955,6 +2277,9 @@ const Call: Component<{
         <GroupArea
           remoteStreamFor={props.remoteStreamFor}
           remoteLightStreamFor={props.remoteLightStreamFor}
+          remoteMiddleStreamFor={props.remoteMiddleStreamFor}
+          remoteVideoGivenFor={props.remoteVideoGivenFor}
+          reportTileVideoQuality={props.reportTileVideoQuality}
           localStream={props.localStream}
         />
         <Show when={remotes().length > 0}>

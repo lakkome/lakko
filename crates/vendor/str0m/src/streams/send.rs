@@ -145,6 +145,18 @@ pub struct StreamTx {
     // LAKKO FORK: whether each packet of this stream is kept, at its first
     // transmission, as it was serialized (see `StreamTx::keep_sent_rtp`).
     keep_sent_rtp: bool,
+
+    // LAKKO FORK: sequence numbers the receiver asked for by NACK and that
+    // were still in the cache, counted once per request
+    // (`StreamTx::nacked_packets`). Resends queued by `StreamTx::resend` are
+    // not counted.
+    nacked_packets: u64,
+
+    // LAKKO FORK: receiver reports taken for the main SSRC, and the loss
+    // fraction of the latest (`StreamTx::receiver_reports`,
+    // `StreamTx::last_fraction_lost`).
+    receiver_reports: u64,
+    last_fraction_lost: u8,
 }
 
 impl StreamTx {
@@ -180,6 +192,9 @@ impl StreamTx {
             remote_acked_rtx_ssrc: false,
             // LAKKO FORK: off unless asked for.
             keep_sent_rtp: false,
+            nacked_packets: 0,
+            receiver_reports: 0,
+            last_fraction_lost: 0,
         }
     }
 
@@ -371,6 +386,51 @@ impl StreamTx {
         self.rtx.is_some() && self.pt_for_padding.is_some()
     }
 
+    // LAKKO FORK: lets a caller send a packet of this stream a second time
+    // without waiting to be asked (the SFU, for a low-rate stream it wants
+    // to arrive through a burst of loss).
+
+    /// Queue a retransmission of the packet sent under `seq_no`, exactly as
+    /// one asked for by NACK: on the RTX stream, from the retransmission
+    /// cache, ahead of new packets. Returns `false`, and queues nothing,
+    /// when the packet is not in the cache: it was never sent, was not
+    /// nackable (which includes every packet of a stream without an RTX
+    /// payload type), or has aged out. A receiver that already has the
+    /// packet discards the copy by its sequence number.
+    pub fn resend(&mut self, seq_no: SeqNo, now: Instant) -> bool {
+        let Some(packet) = self.rtx_cache.get_cached_packet_by_seq_no(seq_no) else {
+            return false;
+        };
+        let resend = Resend {
+            seq_no,
+            queued_at: now,
+            payload_size: packet.payload.len(),
+        };
+        self.resends.push_back(resend);
+        true
+    }
+
+    // LAKKO FORK: what the receiver of this stream reported, readable
+    // without the statistics events (the SFU, to see a burst of loss on a
+    // subscriber's downlink).
+
+    /// How many packets of this stream the receiver has asked for by NACK
+    /// that were still in the retransmission cache, each request counted.
+    pub fn nacked_packets(&self) -> u64 {
+        self.nacked_packets
+    }
+
+    /// How many RTCP receiver reports have arrived for this stream's main
+    /// SSRC.
+    pub fn receiver_reports(&self) -> u64 {
+        self.receiver_reports
+    }
+
+    /// The loss fraction of the latest of those reports, in 1/256.
+    pub fn last_fraction_lost(&self) -> u8 {
+        self.last_fraction_lost
+    }
+
     pub(crate) fn poll_packet(
         &mut self,
         now: Instant,
@@ -537,13 +597,20 @@ impl StreamTx {
                 let body_len = pkt.payload.len();
                 body_out[..body_len].copy_from_slice(&pkt.payload);
 
-                // pad for SRTP
-                let pad_len = RtpHeader::pad_packet(
-                    &mut buf[..],
-                    header_len,
-                    body_len + original_seq_len,
-                    SRTP_BLOCK_SIZE,
-                );
+                // LAKKO FORK: a retransmission carries no padding. Upstream
+                // pads every packet to the SRTP block size; SRTP needs none
+                // (its ciphers are stream ciphers), and a libwebrtc receiver
+                // restores the original packet behind a copy of the RTX
+                // packet's header, padding bit included, without the
+                // padding: the restored packet then loses as many bytes
+                // from its tail as its last byte says. A first transmission
+                // is padded as upstream does it.
+                let pad_len = if original_seq_len > 0 {
+                    0
+                } else {
+                    // pad for SRTP
+                    RtpHeader::pad_packet(&mut buf[..], header_len, body_len, SRTP_BLOCK_SIZE)
+                };
 
                 body_len + original_seq_len + pad_len
             }
@@ -817,6 +884,12 @@ impl StreamTx {
                     self.remote_acked_ssrc = true;
                 }
 
+                // LAKKO FORK: see `StreamTx::receiver_reports`.
+                if r.ssrc == self.ssrc {
+                    self.receiver_reports += 1;
+                    self.last_fraction_lost = r.fraction_lost;
+                }
+
                 self.stats.update_with_rr(now, self.last_sent_seq_no, r)
             }
             Nack(_, list) => {
@@ -863,6 +936,8 @@ impl StreamTx {
                 payload_size: packet.payload.len(),
             };
             self.resends.push_back(resend);
+            // LAKKO FORK: see `StreamTx::nacked_packets`.
+            self.nacked_packets += 1;
         }
 
         Some(())
@@ -1155,4 +1230,215 @@ struct Resend {
     seq_no: SeqNo,
     queued_at: Instant,
     payload_size: usize,
+}
+
+// LAKKO FORK: tests of the fork's additions to this file.
+#[cfg(test)]
+mod lakko_test {
+    use super::*;
+
+    fn stream() -> StreamTx {
+        let midrid = MidRid(Mid::from("v"), None);
+        StreamTx::new(1.into(), Some(2.into()), midrid, false)
+    }
+
+    fn cached(seq_no: u64, now: Instant) -> RtpPacket {
+        RtpPacket {
+            header: RtpHeader::default(),
+            seq_no: seq_no.into(),
+            time: MediaTime::from_90khz(0),
+            payload: vec![7; 100],
+            timestamp: now,
+            last_sender_info: None,
+            nackable: true,
+        }
+    }
+
+    #[test]
+    fn resend_queues_a_cached_packet_and_nothing_else() {
+        let now = Instant::now();
+        let mut s = stream();
+        assert!(!s.resend(10.into(), now), "nothing was sent");
+        s.rtx_cache.cache_sent_packet(cached(10, now), now);
+        assert!(s.resend(10.into(), now));
+        assert!(!s.resend(11.into(), now), "not in the cache");
+        assert_eq!(s.resends.len(), 1);
+        assert_eq!(s.resends[0].seq_no, 10.into());
+        assert_eq!(s.nacked_packets(), 0, "a resend is not a NACK");
+
+        let next = s.poll_packet_resend(now).expect("a resend to send");
+        assert_eq!(next.kind, NextPacketKind::Resend(10.into()));
+        assert!(s.poll_packet_resend(now).is_none(), "sent once");
+    }
+
+    #[test]
+    fn a_nack_is_counted_per_cached_packet_and_answered_every_time() {
+        let now = Instant::now();
+        let mut s = stream();
+        s.rtx_cache.cache_sent_packet(cached(10, now), now);
+        s.rtx_cache.cache_sent_packet(cached(11, now), now);
+        // 10 and 11 asked for, and 9, which is not in the cache.
+        let entry = || NackEntry { pid: 9, blp: 0b11 };
+        s.handle_nack(std::iter::once(entry()), now);
+        assert_eq!(s.nacked_packets(), 2);
+        assert_eq!(s.resends.len(), 2);
+        // Asked again at once: answered again, no hold-off.
+        s.handle_nack(std::iter::once(entry()), now);
+        assert_eq!(s.nacked_packets(), 4);
+        assert_eq!(s.resends.len(), 4);
+    }
+
+    #[test]
+    fn the_latest_receiver_report_of_the_main_ssrc_is_readable() {
+        let now = Instant::now();
+        let mut s = stream();
+        assert_eq!((s.receiver_reports(), s.last_fraction_lost()), (0, 0));
+        let report = |ssrc: u32, fraction_lost: u8| {
+            RtcpFb::ReceptionReport(crate::rtp_::ReceptionReport {
+                ssrc: ssrc.into(),
+                fraction_lost,
+                packets_lost: 0,
+                max_seq: 0,
+                jitter: 0,
+                last_sr_time: 0,
+                last_sr_delay: 0,
+            })
+        };
+        s.handle_rtcp(now, report(1, 64));
+        assert_eq!((s.receiver_reports(), s.last_fraction_lost()), (1, 64));
+        // A report for the RTX SSRC is not one for the stream's media.
+        s.handle_rtcp(now, report(2, 200));
+        assert_eq!((s.receiver_reports(), s.last_fraction_lost()), (1, 64));
+        s.handle_rtcp(now, report(1, 0));
+        assert_eq!((s.receiver_reports(), s.last_fraction_lost()), (2, 0));
+    }
+
+    // ---- what a retransmission looks like on the wire ----
+
+    use crate::format::{Codec, CodecSpec, FormatParams};
+
+    const PT: u8 = 96;
+    const PT_RTX: u8 = 97;
+
+    fn params() -> Vec<PayloadParams> {
+        let spec = CodecSpec {
+            codec: Codec::Vp8,
+            clock_rate: Frequency::NINETY_KHZ,
+            channels: None,
+            format: FormatParams::default(),
+        };
+        vec![PayloadParams::new(PT.into(), Some(PT_RTX.into()), spec)]
+    }
+
+    /// The bytes of the next packet the stream puts on the wire (before
+    /// SRTP, which changes no length and no header byte): header length
+    /// and the whole packet.
+    fn next_wire(s: &mut StreamTx, now: Instant) -> (usize, Vec<u8>) {
+        let mut buf = Vec::new();
+        // A written packet is released by the next timeout.
+        s.send_queue.handle_timeout(now);
+        let receipt = s
+            .poll_packet(now, &ExtensionMap::empty(), None, &params(), &mut buf)
+            .expect("a packet to send");
+        let header_len = receipt.header.header_len;
+        (header_len, buf[..header_len + receipt.payload_size].to_vec())
+    }
+
+    /// RFC 3550 section 5.1: the payload of a packet, its padding
+    /// removed when the padding bit is set. `None` for a packet whose
+    /// padding count is zero or larger than what it has: malformed, and a
+    /// receiver drops it.
+    fn rfc3550_payload(header_len: usize, packet: &[u8]) -> Option<Vec<u8>> {
+        let body = &packet[header_len..];
+        if packet[0] & 0b0010_0000 == 0 {
+            return Some(body.to_vec());
+        }
+        let pad = usize::from(*body.last()?);
+        (pad > 0 && pad <= body.len()).then(|| body[..body.len() - pad].to_vec())
+    }
+
+    /// What a libwebrtc receiver hands its depacketizer for an RTX packet
+    /// (`RtxReceiveStream::OnRtpPacket`, as this fork's authors recall it,
+    /// not read for this test): the RTX packet's padding removed, the two
+    /// bytes of the original sequence number removed, and the rest put
+    /// behind a COPY OF THE RTX PACKET'S HEADER, padding bit included,
+    /// with no padding added back. A later stage that honours the bit
+    /// reads the last payload byte as a padding count.
+    fn restored_as_a_browser_does(header_len: usize, rtx: &[u8]) -> Option<Vec<u8>> {
+        let rtx_payload = rfc3550_payload(header_len, rtx)?;
+        let mut restored = rtx[..header_len].to_vec();
+        restored.extend_from_slice(rtx_payload.get(2..)?);
+        rfc3550_payload(header_len, &restored)
+    }
+
+    fn payload_of(len: usize, last: u8) -> Vec<u8> {
+        let mut payload: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(7) | 0x80).collect();
+        payload[len - 1] = last;
+        payload
+    }
+
+    /// A retransmission restores to exactly the payload that was sent,
+    /// by the RFCs (4588: original sequence number, then the original
+    /// payload; 3550: padding) and by a receiver that copies the RTX
+    /// header onto the restored packet. Both ways of asking for one: the
+    /// caller's own `resend` and a NACK.
+    ///
+    /// The second failed before the fork's fourteenth change for every
+    /// payload whose length plus two is not a multiple of sixteen: the
+    /// RTX packet was padded to the SRTP block size with the padding bit
+    /// set, and the restored packet lost as many bytes from its tail as
+    /// its last byte says (one, for a frame ending in 0x01).
+    #[test]
+    fn a_retransmission_restores_to_the_payload_that_was_sent() {
+        let now = Instant::now();
+        for len in 1..=64usize {
+            for last in [0x00u8, 0x01, 0x04, 0xff] {
+                for by_nack in [false, true] {
+                    let what = format!("len {len} last {last:#04x} nack {by_nack}");
+                    let payload = payload_of(len, last);
+                    let mut s = stream();
+                    let seq: u64 = 1000;
+                    s.write_rtp(
+                        PT.into(),
+                        seq.into(),
+                        90_000,
+                        now,
+                        true,
+                        ExtensionValues::default(),
+                        true,
+                        payload.clone(),
+                    )
+                    .expect("written");
+                    let (header_len, first) = next_wire(&mut s, now);
+                    assert_eq!(
+                        rfc3550_payload(header_len, &first).as_deref(),
+                        Some(&payload[..]),
+                        "first transmission, {what}"
+                    );
+
+                    if by_nack {
+                        let entry = NackEntry { pid: seq as u16, blp: 0 };
+                        s.handle_nack(std::iter::once(entry), now);
+                    } else {
+                        assert!(s.resend(seq.into(), now));
+                    }
+                    let (header_len, rtx) = next_wire(&mut s, now);
+                    assert_eq!(rtx[1] & 0x7f, PT_RTX, "on the RTX payload type, {what}");
+
+                    // By the RFCs.
+                    let body = rfc3550_payload(header_len, &rtx).expect("well formed");
+                    assert_eq!(body[..2], (seq as u16).to_be_bytes(), "OSN, {what}");
+                    assert_eq!(body[2..], payload[..], "RFC 4588, {what}");
+
+                    // And by a receiver that keeps the RTX header.
+                    assert_eq!(
+                        restored_as_a_browser_does(header_len, &rtx).as_deref(),
+                        Some(&payload[..]),
+                        "restored behind a copy of the RTX header, {what}"
+                    );
+                    assert_eq!(rtx[0] & 0b0010_0000, 0, "no padding bit, {what}");
+                }
+            }
+        }
+    }
 }

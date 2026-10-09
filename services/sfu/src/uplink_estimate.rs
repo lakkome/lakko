@@ -48,6 +48,25 @@
 //!   past the window lowers the estimate in steps.
 //! - **bounds.** A configured start value and maximum, and the video
 //!   encoder's own minimum as the only floor.
+//!
+//! ## The same rules for a subscriber's downlink
+//!
+//! The estimator is of a *path*, and the SFU has two kinds
+//! ([ADR-0070](../../../docs/adr/0070-call-media-through-a-loss-burst.md)
+//! step 6). For the path from the SFU to a subscriber it is the sender:
+//! it knows when it sent each packet, and the subscriber's transport-wide
+//! feedback says when each arrived or that it did not. Those are the same
+//! three figures per packet, so the type is the same one
+//! ([`PathEstimator`]; [`UplinkEstimator`] is its name on a publisher's
+//! path), fed through [`PathEstimator::on_packet_sent_at`] with the send
+//! time as an `Instant` instead of the 24-bit header value. Three small
+//! additions serve the downlink, where the SFU cannot send "as much as
+//! the estimate allows" and proves a rate by sending padding
+//! (`crate::downlink_probe`): the estimate can be told a rate the path
+//! was seen to carry ([`PathEstimator::note_carried`]), its ceiling can
+//! follow what the SFU would like to send
+//! ([`PathEstimator::set_ceiling`]), and it counts its cuts
+//! ([`PathEstimator::cuts`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -371,6 +390,9 @@ pub enum ChangeReason {
     Overuse,
     /// Stepped down because loss lasted past [`LOSS_WINDOW`].
     Loss,
+    /// Raised to a rate the path was seen to carry
+    /// ([`PathEstimator::note_carried`]).
+    Carried,
 }
 
 impl ChangeReason {
@@ -382,6 +404,7 @@ impl ChangeReason {
             Self::Increase => "increase",
             Self::Overuse => "overuse",
             Self::Loss => "loss",
+            Self::Carried => "carried",
         }
     }
 }
@@ -421,6 +444,165 @@ pub struct Snapshot {
     pub last_change: ChangeReason,
     /// Retransmitted packets seen since the estimator was created.
     pub retransmitted: u64,
+    /// The queue standing above the path's smallest delay, milliseconds;
+    /// `None` when it cannot be told or is not watched.
+    pub queue_ms: Option<u64>,
+    /// How many times the delay detector asked for a cut with no queue
+    /// standing, since the estimator was created: cuts not made.
+    pub doubted: u64,
+}
+
+// ------------------------------------------------------------
+// The queue standing on a path
+// ------------------------------------------------------------
+
+/// A queue is standing on a path when the smallest delay of the packets
+/// of the last [`QUEUE_RECENT`] is this much above the smallest of the
+/// last [`QUEUE_BASELINE`] to twice that. Chosen: well above the jitter
+/// of a loopback path (a few ms) and of a home network (about 10 ms),
+/// and a quarter of the 100 ms or more a full bottleneck queue adds. The
+/// smallest of a window, not its mean: jitter raises some packets, a
+/// queue raises all of them.
+pub(crate) const STANDING_QUEUE: Duration = Duration::from_millis(25);
+/// And it has to stand this long before a cut is made on it. Chosen.
+pub(crate) const QUEUE_STANDS_FOR: Duration = Duration::from_millis(300);
+/// A queue this deep that has stood [`QUEUE_STANDS_FOR`] is cut on
+/// without the delay detector having spoken: a path that carries a
+/// fraction of what is sent fills its queue within the detector's first
+/// window and shows no growth after. Chosen: three times
+/// [`STANDING_QUEUE`].
+pub(crate) const DEEP_QUEUE: Duration = Duration::from_millis(75);
+/// The window the standing queue is read from.
+pub(crate) const QUEUE_RECENT: Duration = Duration::from_millis(200);
+/// The window the delay of the empty path is read from (this one and the
+/// one before it).
+pub(crate) const QUEUE_BASELINE: Duration = Duration::from_secs(15);
+/// Fewer packets than this in [`QUEUE_RECENT`] say nothing.
+pub(crate) const QUEUE_MIN_PACKETS: usize = 5;
+
+/// The delay of the packets a path delivered, watched for a queue: how
+/// far the smallest recent delay stands above the smallest the path has
+/// shown. Delay is arrival time less send time on two clocks whose
+/// offset is unknown and constant; only its changes matter. Shared by a
+/// publisher's uplink (send time from the abs-send-time extension) and a
+/// subscriber's downlink (send time the SFU's own, arrival time from the
+/// subscriber's feedback).
+#[derive(Debug)]
+pub(crate) struct QueueWatch {
+    /// (arrival, delay µs, delay less what the sender's own sending
+    /// explains µs) of the packets of the last [`QUEUE_RECENT`].
+    recent: VecDeque<(Instant, i64, i64)>,
+    /// The smallest delay in the current and in the previous
+    /// [`QUEUE_BASELINE`], and when the current one began.
+    baseline_now: Option<i64>,
+    baseline_before: Option<i64>,
+    baseline_since: Instant,
+}
+
+impl QueueWatch {
+    pub(crate) const fn new(now: Instant) -> Self {
+        Self {
+            recent: VecDeque::new(),
+            baseline_now: None,
+            baseline_before: None,
+            baseline_since: now,
+        }
+    }
+
+    /// One delivered packet: when it arrived, its delay in microseconds
+    /// (zero point arbitrary), and how much of a queue the sender's own
+    /// sending explains for it (zero when that is not modelled).
+    pub(crate) fn note(&mut self, arrival: Instant, delay_us: i64, explained: Duration) {
+        let explained = i64::try_from(explained.as_micros()).unwrap_or(i64::MAX);
+        if arrival.saturating_duration_since(self.baseline_since) >= QUEUE_BASELINE {
+            self.baseline_before = self.baseline_now.take();
+            self.baseline_since = arrival;
+        }
+        self.baseline_now = Some(self.baseline_now.map_or(delay_us, |min| min.min(delay_us)));
+        self.recent
+            .push_back((arrival, delay_us, delay_us.saturating_sub(explained)));
+        while self
+            .recent
+            .front()
+            .is_some_and(|(at, _, _)| arrival.saturating_duration_since(*at) > QUEUE_RECENT)
+        {
+            self.recent.pop_front();
+        }
+    }
+
+    /// Take the delay of the packets delivered lately as the delay of
+    /// the empty path. Returns whether there were enough to do so.
+    pub(crate) fn rebase(&mut self) -> bool {
+        if self.recent.len() < QUEUE_MIN_PACKETS {
+            return false;
+        }
+        let Some(recent) = self.recent.iter().map(|(_, delay, _)| *delay).min() else {
+            return false;
+        };
+        self.baseline_now = Some(recent);
+        self.baseline_before = None;
+        true
+    }
+
+    /// Forget everything (the clocks were reset).
+    pub(crate) fn reset(&mut self, now: Instant) {
+        *self = Self::new(now);
+    }
+
+    /// The queue standing on the path; `None` when too few packets were
+    /// delivered lately to tell.
+    pub(crate) fn standing(&self) -> Option<Duration> {
+        if self.recent.len() < QUEUE_MIN_PACKETS {
+            return None;
+        }
+        let recent = self.recent.iter().map(|(_, delay, _)| *delay).min()?;
+        self.above_baseline(recent)
+    }
+
+    /// The queue standing beyond what the sender's own sending explains.
+    pub(crate) fn excess(&self) -> Option<Duration> {
+        if self.recent.len() < QUEUE_MIN_PACKETS {
+            return None;
+        }
+        let recent = self.recent.iter().map(|(_, _, left)| *left).min()?;
+        self.above_baseline(recent)
+    }
+
+    fn above_baseline(&self, delay: i64) -> Option<Duration> {
+        let baseline = match (self.baseline_now, self.baseline_before) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => return None,
+        };
+        let above = u64::try_from(delay.saturating_sub(baseline)).unwrap_or(0);
+        Some(Duration::from_micros(above))
+    }
+}
+
+/// One lowering of the estimate for over-use, for the log.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OveruseCut {
+    /// What asked for it: `"detector"` (the delay trend) or
+    /// `"standing-queue"` (a deep queue, or a cut the detector asked for
+    /// earlier that the queue has since borne out).
+    pub rule: &'static str,
+    /// The estimate before, bits per second.
+    pub from_bps: u64,
+    /// The estimate after, bits per second.
+    pub to_bps: u64,
+    /// The rate arriving when it was made, bits per second.
+    pub arriving_bps: u64,
+    /// The queue standing above the path's smallest delay, milliseconds;
+    /// `None` when it could not be told or is not watched.
+    pub queue_ms: Option<u64>,
+    /// The detector's trend value (its slope times its gain, in the
+    /// units its threshold is in).
+    pub trend: f64,
+    /// The detector's threshold when the cut was made.
+    pub threshold: f64,
+    /// Whether a standing queue confirmed it. Always `false` for an
+    /// estimator that does not ask for confirmation.
+    pub confirmed: bool,
 }
 
 // ------------------------------------------------------------
@@ -629,6 +811,8 @@ struct Trendline {
     smoothed_delay_ms: f64,
     threshold_ms: f64,
     previous_trend: f64,
+    /// The last trend value compared with the threshold.
+    last_modified: f64,
     time_over_using_ms: Option<f64>,
     overuse_count: u32,
     last_threshold_update_ms: Option<f64>,
@@ -645,6 +829,7 @@ impl Trendline {
             smoothed_delay_ms: 0.0,
             threshold_ms: THRESHOLD_INITIAL_MS,
             previous_trend: 0.0,
+            last_modified: 0.0,
             time_over_using_ms: None,
             overuse_count: 0,
             last_threshold_update_ms: None,
@@ -691,6 +876,7 @@ impl Trendline {
 
     fn detect(&mut self, trend: f64, send_delta_ms: f64, now_ms: f64) {
         let modified = self.samples_seen.min(TRENDLINE_MAX_DELTAS) * trend * TRENDLINE_GAIN;
+        self.last_modified = modified;
         if modified > self.threshold_ms {
             let over = match self.time_over_using_ms {
                 // Assume over-use for half the time since the last sample.
@@ -750,10 +936,17 @@ enum RateState {
     Decrease,
 }
 
-/// The estimate of the bitrate one publisher's path carries. One per
-/// publisher, fed with the packets of all its streams.
+/// The estimate of the bitrate one publisher's path carries: a
+/// [`PathEstimator`] fed with the packets of all the publisher's streams
+/// as they arrive at the SFU ([`PathEstimator::on_packet`]).
+pub type UplinkEstimator = PathEstimator;
+
+/// The estimate of the bitrate one path carries, from what is known of
+/// each packet that crossed it: when it was sent, when it arrived and how
+/// large it was, and what was lost. One per path: a publisher's uplink
+/// ([`UplinkEstimator`]) or a subscriber's downlink.
 #[derive(Debug)]
-pub struct UplinkEstimator {
+pub struct PathEstimator {
     config: EstimatorConfig,
     /// Zero point of the arrival clock.
     origin: Instant,
@@ -796,9 +989,30 @@ pub struct UplinkEstimator {
     lossy: bool,
 
     retransmitted: u64,
+    /// How many times the estimate has been lowered (over-use cuts and
+    /// loss steps).
+    cuts: u64,
+
+    /// Whether a cut for over-use needs a standing queue
+    /// ([`Self::confirming`]).
+    confirm: bool,
+    /// The delay of the packets taken, watched for a queue (only when
+    /// `confirm`).
+    queue: QueueWatch,
+    /// Since when a queue of [`STANDING_QUEUE`] has stood.
+    queue_since: Option<Instant>,
+    /// When a cut was last made on a standing queue.
+    last_queue_cut: Option<Instant>,
+    /// The detector asked for a cut and no queue had stood long enough:
+    /// the cut is made if one goes on standing.
+    cut_pending: bool,
+    /// How often that happened.
+    doubted: u64,
+    /// The cuts made for over-use since they were last taken.
+    cut_notes: Vec<OveruseCut>,
 }
 
-impl UplinkEstimator {
+impl PathEstimator {
     /// A fresh estimator at the configured start value. `now` is the zero
     /// point every later arrival time is measured from.
     #[must_use]
@@ -833,6 +1047,149 @@ impl UplinkEstimator {
             last_loss_step: None,
             lossy: false,
             retransmitted: 0,
+            cuts: 0,
+            confirm: false,
+            queue: QueueWatch::new(now),
+            queue_since: None,
+            last_queue_cut: None,
+            cut_pending: false,
+            doubted: 0,
+            cut_notes: Vec::new(),
+        }
+    }
+
+    /// The same estimator, cutting for over-use only when a queue is
+    /// standing on the path ([`STANDING_QUEUE`] above the path's smallest
+    /// delay for [`QUEUE_STANDS_FOR`]).
+    ///
+    /// The delay detector reads the trend of delay over some twenty
+    /// groups of packets. On a mobile uplink delay moves by tens of
+    /// milliseconds with the radio's scheduling, and the detector reads
+    /// that as over-use. The cut is to 0.85 of what is arriving; the
+    /// publisher obeys, less arrives, and the next false alarm cuts from
+    /// there (seen on a live call, 2026-10-07: 503, 191, 53 kbit/s in
+    /// fifteen seconds on a path that had carried 2.7 Mbit/s, with no
+    /// loss). A path that is really congested holds a queue: every
+    /// packet is late, not some. So the detector's word is doubted until
+    /// a queue has stood; if it goes on standing the cut is made, and a
+    /// deep one ([`DEEP_QUEUE`]) is cut on without the detector. After a
+    /// cut the queue has to stand as long again before the next, so a
+    /// cut is never made on the arriving rate the previous cut imposed
+    /// unless the path is still congested at it.
+    #[must_use]
+    pub const fn confirming(mut self) -> Self {
+        self.confirm = true;
+        self
+    }
+
+    /// The cuts made for over-use since this was last called, oldest
+    /// first (at most sixteen are kept).
+    pub fn take_cut_notes(&mut self) -> Vec<OveruseCut> {
+        std::mem::take(&mut self.cut_notes)
+    }
+
+    /// The queue standing on the path, when it is watched.
+    #[must_use]
+    pub fn standing_queue(&self) -> Option<Duration> {
+        self.confirm.then(|| self.queue.standing()).flatten()
+    }
+
+    /// Whether a queue has stood for [`QUEUE_STANDS_FOR`], and as long
+    /// since the last cut made on one. Asked only while one is standing.
+    fn queue_stood(&self, now: Instant) -> bool {
+        let long_enough = |since: Instant| now.saturating_duration_since(since) >= QUEUE_STANDS_FOR;
+        self.queue_since.is_some_and(long_enough) && self.last_queue_cut.map_or(true, long_enough)
+    }
+
+    /// How many times the estimate has been lowered since the estimator
+    /// was created: over-use cuts and loss steps. A caller that tries a
+    /// rate on the path reads it before and after.
+    #[must_use]
+    pub const fn cuts(&self) -> u64 {
+        self.cuts
+    }
+
+    /// Whether any packet has been taken yet. Before that the estimate is
+    /// the configured start value and says nothing of the path.
+    #[must_use]
+    pub const fn has_arrivals(&self) -> bool {
+        self.last_arrival.is_some()
+    }
+
+    /// The rate arriving over the last [`ARRIVING_WINDOW`] as of `now`, in
+    /// bits per second; `None` while too little has been observed.
+    pub fn arriving_bps(&mut self, now: Instant) -> Option<u64> {
+        self.arriving.rate_bps(now).map(as_bps)
+    }
+
+    /// The rate arriving over the last [`ARRIVING_WINDOW`] as of the
+    /// latest arrival taken: for a caller whose arrival times are on a
+    /// clock of their own, or lag its own by the time feedback takes.
+    pub fn arriving_latest_bps(&mut self) -> Option<u64> {
+        let at = self.last_arrival?;
+        self.arriving.rate_bps(at).map(as_bps)
+    }
+
+    /// Move the ceiling of the estimate, and with it the value the
+    /// estimate may always rise to (the start value): a sender that knows
+    /// what it would like to send has no use for an estimate far above
+    /// it, and the blackout rule ([`BLACKOUT_FRACTION`]) measures what
+    /// arrives against the estimate. An estimate above the new ceiling
+    /// comes down to it; that is not a cut. An estimate that has never
+    /// changed is the start value, and moves with it both ways: nothing
+    /// is known of the path yet, and a sender whose demand is still being
+    /// measured must not be left with the first, small figure.
+    pub fn set_ceiling(&mut self, bps: u64) {
+        let bps = bps.max(MIN_ESTIMATE_BPS);
+        self.config.max_bps = bps;
+        self.config.start_bps = bps;
+        if self.estimate_bps > as_f64(bps) || self.last_change == ChangeReason::Start {
+            self.estimate_bps = as_f64(bps);
+        }
+    }
+
+    /// Over-use the caller had reason to doubt has been borne out (a
+    /// queue has gone on standing on the path): cut to the fraction of
+    /// what is arriving now that over-use cuts to, if that is below the
+    /// estimate. Returns whether the estimate was lowered.
+    pub fn confirm_overuse(&mut self, now: Instant) -> bool {
+        // As of the latest arrival taken, not of `now`: the caller's
+        // arrival times lag its clock by the time feedback takes, and on
+        // a path that is overflowing by much more than that, so the rate
+        // "as of now" is next to nothing (seen: a cut to the floor).
+        let at = self.last_arrival.unwrap_or(now);
+        let Some(arriving) = self.arriving.rate_bps(at) else {
+            return false;
+        };
+        let target = BACKOFF_FACTOR * arriving;
+        if target >= self.estimate_bps {
+            return false;
+        }
+        self.last_decrease = Some(now);
+        self.restore_to = None;
+        self.cuts = self.cuts.saturating_add(1);
+        self.set_estimate(target, ChangeReason::Overuse);
+        true
+    }
+
+    /// Put the estimate at `bps` as if the path had brought it there
+    /// (tests only).
+    #[cfg(test)]
+    pub(crate) fn force_estimate(&mut self, bps: u64) {
+        self.set_estimate(as_f64(bps), ChangeReason::Overuse);
+    }
+
+    /// The path was seen to carry `bps` without over-use and without
+    /// lasting loss (the caller's finding, from a rate it tried): the
+    /// estimate is at least that. The fast way back and the hint that the
+    /// path is narrow are both settled by it.
+    pub fn note_carried(&mut self, bps: u64) {
+        let bps = as_f64(bps).min(as_f64(self.config.max_bps));
+        if bps > self.estimate_bps {
+            self.set_estimate(bps, ChangeReason::Carried);
+            if self.restore_to.is_some_and(|restore| bps >= restore) {
+                self.restore_to = None;
+            }
         }
     }
 
@@ -862,13 +1219,47 @@ impl UplinkEstimator {
             state: self.state(),
             last_change: self.last_change,
             retransmitted: self.retransmitted,
+            queue_ms: self
+                .standing_queue()
+                .map(|queue| u64::try_from(queue.as_millis()).unwrap_or(u64::MAX)),
+            doubted: self.doubted,
         }
     }
 
     /// Take one received packet.
     pub fn on_packet(&mut self, packet: PacketArrival) {
-        let now = packet.arrival;
-        if packet.retransmission {
+        let send_ms = packet
+            .send_time_24
+            .map(|raw| self.send_clock.unwrap_ms(raw));
+        self.on_arrival(send_ms, packet.arrival, packet.size, packet.retransmission);
+    }
+
+    /// Take one received packet whose send time is known exactly: the
+    /// sender's own clock reading, as the SFU has for a packet it sent a
+    /// subscriber. `sent` and `arrival` may be on different clocks; only
+    /// differences within each are used. A packet sent before the
+    /// estimator was created is counted toward the arriving rate only.
+    pub fn on_packet_sent_at(
+        &mut self,
+        sent: Instant,
+        arrival: Instant,
+        size: usize,
+        retransmission: bool,
+    ) {
+        let send_ms = (sent >= self.origin).then(|| ms_since(self.origin, sent));
+        self.on_arrival(send_ms, arrival, size, retransmission);
+    }
+
+    /// One received packet, with its send time in milliseconds on a clock
+    /// that does not wrap.
+    fn on_arrival(
+        &mut self,
+        send_ms: Option<f64>,
+        now: Instant,
+        size: usize,
+        retransmission: bool,
+    ) {
+        if retransmission {
             self.retransmitted = self.retransmitted.saturating_add(1);
         }
         if self
@@ -880,13 +1271,15 @@ impl UplinkEstimator {
         // Arrival times handed in out of order (they are not, from one
         // socket) must not move the clock backwards.
         self.last_arrival = Some(self.last_arrival.map_or(now, |last| last.max(now)));
-        self.arriving.record(now, packet.size);
-        self.peak_rate.record(now, packet.size);
+        self.arriving.record(now, size);
+        self.peak_rate.record(now, size);
 
         let mut overuse_now = false;
-        if let Some(raw) = packet.send_time_24 {
-            let send_ms = self.send_clock.unwrap_ms(raw);
+        if let Some(send_ms) = send_ms {
             let arrival_ms = ms_since(self.origin, now);
+            if self.confirm {
+                self.watch_queue(send_ms, arrival_ms, now);
+            }
             if let Some(sample) = self.inter_arrival.on_packet(send_ms, arrival_ms) {
                 if (sample.arrival_delta_ms - sample.send_delta_ms).abs() > ARRIVAL_OFFSET_RESET_MS
                     || sample.send_delta_ms < 0.0
@@ -901,6 +1294,28 @@ impl UplinkEstimator {
             }
         }
         self.update_rate(now, overuse_now);
+    }
+
+    /// One packet's delay into the queue watch.
+    fn watch_queue(&mut self, send_ms: f64, arrival_ms: f64, now: Instant) {
+        let delay_ms = arrival_ms - send_ms;
+        if !delay_ms.is_finite() {
+            return;
+        }
+        // Whole microseconds of a figure bounded by the clocks' ranges.
+        #[allow(clippy::cast_possible_truncation)]
+        let micros = (delay_ms * 1000.0).clamp(-9.0e15, 9.0e15) as i64;
+        self.queue.note(now, micros, Duration::ZERO);
+        match self.queue.standing() {
+            Some(queue) if queue >= STANDING_QUEUE => {
+                self.queue_since.get_or_insert(now);
+            },
+            Some(_) => {
+                self.queue_since = None;
+                self.cut_pending = false;
+            },
+            None => {},
+        }
     }
 
     /// Take the loss seen over the interval that ended at `now`: of
@@ -954,6 +1369,7 @@ impl UplinkEstimator {
         // Loss that outlasted the window is no hiccup: there is no old rate
         // to hurry back to.
         self.restore_to = None;
+        self.cuts = self.cuts.saturating_add(1);
         self.set_estimate(base * (1.0 - 0.5 * fraction), ChangeReason::Loss);
     }
 
@@ -961,6 +1377,12 @@ impl UplinkEstimator {
         self.send_clock = SendClock::default();
         self.inter_arrival = InterArrival::default();
         self.trendline = Trendline::new();
+        // The send clock starts again: delays before and after do not
+        // compare.
+        let at = self.last_arrival.unwrap_or(self.origin);
+        self.queue.reset(at);
+        self.queue_since = None;
+        self.cut_pending = false;
     }
 
     fn set_estimate(&mut self, bps: f64, reason: ChangeReason) {
@@ -988,6 +1410,10 @@ impl UplinkEstimator {
             self.peak.record(now, rate);
         }
 
+        if self.confirm {
+            self.update_rate_by_the_queue(now, since_last);
+            return;
+        }
         match self.trendline.state {
             DetectorState::Normal => {
                 if self.rate_state == RateState::Hold {
@@ -1004,8 +1430,72 @@ impl UplinkEstimator {
             RateState::Hold => {},
             RateState::Increase => self.increase(now, since_last),
             RateState::Decrease => {
-                self.decrease(now);
+                self.decrease(now, "detector");
                 self.rate_state = RateState::Hold;
+            },
+        }
+    }
+
+    /// The rate control of an estimator that asks the queue
+    /// ([`Self::confirming`]). The queue reading decides; the detector
+    /// only says when a cut is asked for.
+    ///
+    /// - **No queue** (the smallest recent delay is within
+    ///   [`STANDING_QUEUE`] of the path's smallest): the estimate rises,
+    ///   whatever the detector says. Its over-use is doubted and counted;
+    ///   its under-use holds nothing. (Seen on a live call, 2026-10-07: a
+    ///   mobile publisher at 300 kbit/s whose detector went from over-use
+    ///   to under-use and back about twice a second sat at 291 kbit/s for
+    ///   minutes with a queue reading of 8 ms, because either state stops
+    ///   the rise.)
+    /// - **A queue is standing**: nothing rises. Once it has stood
+    ///   [`QUEUE_STANDS_FOR`], and as long since the last cut, a cut is
+    ///   made if the detector asked for one while it stood or the queue
+    ///   is [`DEEP_QUEUE`] deep.
+    /// - **Too few packets to tell**: the detector is followed as far as
+    ///   holding and rising go, and nothing is cut.
+    fn update_rate_by_the_queue(&mut self, now: Instant, since_last: Option<Duration>) {
+        let overuse = self.trendline.state == DetectorState::Overuse;
+        match self.queue.standing() {
+            Some(queue) if queue >= STANDING_QUEUE => {
+                self.rate_state = RateState::Hold;
+                if overuse {
+                    self.cut_pending = true;
+                }
+                let deep = queue >= DEEP_QUEUE;
+                if (self.cut_pending || deep) && self.queue_stood(now) {
+                    let rule = if overuse {
+                        "detector"
+                    } else {
+                        "standing-queue"
+                    };
+                    self.decrease(now, rule);
+                    // Cut or not, it has to stand as long again.
+                    self.last_queue_cut = Some(now);
+                    self.cut_pending = false;
+                }
+            },
+            Some(_) => {
+                self.cut_pending = false;
+                if overuse {
+                    self.doubted = self.doubted.saturating_add(1);
+                }
+                self.rate_state = RateState::Increase;
+                self.increase(now, since_last);
+            },
+            None => {
+                if overuse {
+                    self.doubted = self.doubted.saturating_add(1);
+                }
+                match self.trendline.state {
+                    DetectorState::Normal if self.rate_state == RateState::Hold => {
+                        self.rate_state = RateState::Increase;
+                    },
+                    DetectorState::Normal => self.increase(now, since_last),
+                    DetectorState::Overuse | DetectorState::Underuse => {
+                        self.rate_state = RateState::Hold;
+                    },
+                }
             },
         }
     }
@@ -1069,7 +1559,7 @@ impl UplinkEstimator {
     /// two additions of Lakko's own (see the constants): it is not made
     /// while next to nothing is arriving unless that lasts, and the estimate
     /// held before it is remembered as the place to come back to fast.
-    fn decrease(&mut self, now: Instant) {
+    fn decrease(&mut self, now: Instant, rule: &'static str) {
         let Some(arriving) = self.arriving.rate_bps(now) else {
             return;
         };
@@ -1130,7 +1620,23 @@ impl UplinkEstimator {
         // narrower: `before_episode` is `None` and the fast way back goes.
         self.restore_to = before_episode;
         self.last_decrease = Some(now);
+        self.cuts = self.cuts.saturating_add(1);
+        let from_bps = self.estimate_bps();
         self.set_estimate(target, ChangeReason::Overuse);
+        if self.cut_notes.len() < 16 {
+            self.cut_notes.push(OveruseCut {
+                rule,
+                from_bps,
+                to_bps: self.estimate_bps(),
+                arriving_bps: as_bps(arriving),
+                queue_ms: self
+                    .standing_queue()
+                    .map(|queue| u64::try_from(queue.as_millis()).unwrap_or(u64::MAX)),
+                trend: self.trendline.last_modified,
+                threshold: self.trendline.threshold_ms,
+                confirmed: self.confirm,
+            });
+        }
     }
 }
 
@@ -1212,6 +1718,10 @@ mod tests {
     enum Fate {
         /// Arrives after the base delay.
         Deliver,
+        /// Arrives this many microseconds later than that (an unlimited
+        /// path only). The caller keeps arrivals in order: the extra
+        /// delay never falls faster than time passes.
+        Late(u64),
         /// Never arrives.
         Drop,
         /// Held until the given moment (microseconds), then released.
@@ -1332,6 +1842,7 @@ mod tests {
                         self.released_us = self.released_us.max(release_us) + 100;
                         self.released_us
                     },
+                    Fate::Late(extra_us) => send_us + BASE_DELAY_US + extra_us,
                     Fate::Deliver => match self.capacity_bps {
                         None => send_us + BASE_DELAY_US,
                         Some(capacity) => {
@@ -1711,6 +2222,252 @@ mod tests {
         }
     }
 
+    // ---- Cuts that need a standing queue (`PathEstimator::confirming`) ----
+
+    fn confirming_sim(config: EstimatorConfig) -> Sim {
+        let mut sim = Sim::new(config);
+        sim.est = UplinkEstimator::new(config, sim.t0).confirming();
+        sim
+    }
+
+    /// A mobile uplink's jitter: twice a second the delay climbs by 20
+    /// to 60 ms over a tenth of a second and falls back over the next
+    /// (the radio's scheduling). No limit on the rate, nothing lost, and
+    /// no queue: between the excursions the delay is the path's own.
+    fn cellular_jitter(send_us: u64, _seq: u64) -> Fate {
+        if send_us < 2_000_000 {
+            return Fate::Deliver;
+        }
+        let slot = send_us / 500_000;
+        let into = send_us % 500_000;
+        let peak = 20_000 + (slot * 17 % 41) * 1_000;
+        let extra = if into < 100_000 {
+            peak * into / 100_000
+        } else if into < 200_000 {
+            peak * (200_000 - into) / 100_000
+        } else {
+            0
+        };
+        Fate::Late(extra)
+    }
+
+    /// (a) A steady path with a mobile network's jitter and no limit, for
+    /// a minute: the estimate never falls below its start value, and no
+    /// cut is made. The same jitter does cut an estimator that takes the
+    /// delay detector at its word, which is what a publisher's uplink ran
+    /// on before (live call, 2026-10-07: 503, 191, 53 kbit/s in fifteen
+    /// seconds, no loss).
+    #[test]
+    fn jitter_without_a_queue_cuts_nothing() {
+        let start = 1_500_000;
+        let mut sim = confirming_sim(config(1500, 5000));
+        sim.run(60.0, cellular_jitter);
+        let lowest = sim.trace.iter().map(|(_, e)| *e).min().unwrap();
+        assert!(lowest >= start, "fell to {lowest}");
+        assert_eq!(sim.est.cuts(), 0, "no cut");
+        assert!(sim.est.take_cut_notes().is_empty());
+        let at_end = sim.between(59.0, 60.0)[0];
+        assert!(at_end >= NOMINAL_BPS, "what is being sent fits: {at_end}");
+        // The detector did speak, and was doubted.
+        let snap = sim.est.snapshot(sim.at(sim.now_us));
+        assert!(snap.doubted > 0, "the jitter set the detector off");
+
+        // The rule before: the same path, the detector taken at its word.
+        let mut raw = Sim::new(config(1500, 5000));
+        raw.run(60.0, cellular_jitter);
+        assert!(raw.est.cuts() > 0, "the detector alone cuts on this jitter");
+        let raw_lowest = raw.trace.iter().map(|(_, e)| *e).min().unwrap();
+        assert!(
+            raw_lowest < start / 2,
+            "and walks the estimate down: {} cuts, lowest {raw_lowest}",
+            raw.est.cuts()
+        );
+    }
+
+    /// (b) A path that really narrows to 800 kbit/s: a queue stands, and
+    /// the estimate is under what the path carries within three seconds.
+    /// (c) The narrowing lifted: the estimate carries what is sent again
+    /// within fifteen seconds.
+    #[test]
+    fn a_path_that_narrows_is_cut_and_comes_back_when_it_widens() {
+        let narrow = 800_000;
+        let mut sim = confirming_sim(config(1500, 5000));
+        sim.run(10.0, |_, _| Fate::Deliver);
+        assert!(sim.between(9.9, 10.0)[0] >= NOMINAL_BPS);
+        sim.capacity_bps = Some(narrow);
+        sim.queue_free_us = sim.now_us;
+        sim.run(30.0, |_, _| Fate::Deliver);
+        let after_3s = sim.between(13.0, 13.1)[0];
+        assert!(after_3s <= narrow, "three seconds in: {after_3s}");
+        // It stays near what the path carries: never above it by much,
+        // never a small fraction of it.
+        for e in sim.between(15.0, 30.0) {
+            assert!(e <= narrow * 5 / 4, "above the path: {e}");
+            assert!(e >= narrow / 2, "far below the path: {e}");
+        }
+        let notes = sim.est.take_cut_notes();
+        assert!(!notes.is_empty());
+        for note in &notes {
+            assert!(note.confirmed);
+            assert!(
+                note.queue_ms.is_some_and(|queue| queue >= 25),
+                "every cut had a standing queue: {note:?}"
+            );
+        }
+
+        sim.capacity_bps = None;
+        sim.run(45.0, |_, _| Fate::Deliver);
+        let back = sim.between(44.9, 45.0)[0];
+        assert!(back >= NOMINAL_BPS, "fifteen seconds after: {back}");
+    }
+
+    /// One stall of the radio (everything sent in half a second held and
+    /// delivered together) on a path with jitter: at most one cut, and it
+    /// is undone within two seconds; the estimate does not walk down.
+    #[test]
+    fn a_stall_on_a_jittery_path_does_not_start_a_walk_down() {
+        let stalled = |send_us: u64, seq: u64| {
+            if (20_000_000..20_500_000).contains(&send_us) {
+                Fate::HoldUntil(20_500_000)
+            } else {
+                cellular_jitter(send_us, seq)
+            }
+        };
+        let mut sim = confirming_sim(config(1500, 5000));
+        sim.run(40.0, stalled);
+        assert!(sim.est.cuts() <= 1, "{} cuts", sim.est.cuts());
+        for e in sim.between(23.0, 40.0) {
+            assert!(e >= 1_500_000, "still down after the stall: {e}");
+        }
+        for note in sim.est.take_cut_notes() {
+            assert!(
+                note.queue_ms.is_some_and(|queue| queue >= 25),
+                "a cut with no queue standing: {note:?}"
+            );
+        }
+    }
+
+    /// A publisher at a low rate on a path with jitter and no queue
+    /// climbs, although its detector keeps going from over-use to
+    /// under-use and back: with no queue standing neither state stops the
+    /// rise. (Live call, 2026-10-07: such a publisher sat at 291 kbit/s
+    /// for minutes with a queue reading of 8 ms.)
+    #[test]
+    fn a_low_estimate_climbs_while_no_queue_stands() {
+        let mut sim = confirming_sim(config(300, 5000));
+        sim.run(30.0, cellular_jitter);
+        let at_10s = sim.between(10.0, 10.1)[0];
+        assert!(at_10s >= 1_000_000, "ten seconds in: {at_10s}");
+        let at_end = sim.between(29.9, 30.0)[0];
+        assert!(at_end >= NOMINAL_BPS, "at the end: {at_end}");
+        assert_eq!(sim.est.cuts(), 0);
+        let snap = sim.est.snapshot(sim.at(sim.now_us));
+        assert!(snap.doubted > 0, "the detector did ask");
+    }
+
+    /// No cut is ever made without a queue standing at that moment, on a
+    /// path that narrows, widens, stalls and jitters by turns: every cut
+    /// names a queue of at least [`STANDING_QUEUE`]. (Live call,
+    /// 2026-10-07: 21 of 51 cuts were logged with no queue reading at
+    /// all; a cut used to re-arm the wait as if a queue had begun to
+    /// stand.)
+    #[test]
+    fn every_cut_names_the_queue_it_was_made_on() {
+        let mut sim = confirming_sim(config(1500, 5000));
+        sim.run(8.0, cellular_jitter);
+        sim.capacity_bps = Some(900_000);
+        sim.queue_free_us = sim.now_us;
+        sim.run(16.0, |_, _| Fate::Deliver);
+        sim.capacity_bps = None;
+        let stalls = |send_us: u64, seq: u64| {
+            if send_us % 5_000_000 < 400_000 {
+                Fate::HoldUntil(send_us - send_us % 5_000_000 + 400_000)
+            } else {
+                cellular_jitter(send_us, seq)
+            }
+        };
+        sim.run(60.0, stalls);
+        let notes = sim.est.take_cut_notes();
+        assert!(!notes.is_empty(), "the narrow stretch was cut on");
+        for note in &notes {
+            assert!(
+                note.queue_ms.is_some_and(|queue| queue >= 25),
+                "a cut with no queue standing: {note:?}"
+            );
+        }
+    }
+
+    /// (d) The loss rules are as they were: a burst of loss changes
+    /// nothing, loss that lasts steps the estimate down once a second.
+    #[test]
+    fn the_loss_rules_do_not_depend_on_a_queue() {
+        let mut sim = confirming_sim(config(1500, 2500));
+        let lossy = |send_us: u64, seq: u64| {
+            let burst = (5_000_000..7_000_000).contains(&send_us);
+            let lasting = (12_000_000..22_000_000).contains(&send_us);
+            if (burst && seq % 2 == 0) || (lasting && seq % 5 == 0) {
+                Fate::Drop
+            } else {
+                Fate::Deliver
+            }
+        };
+        sim.run(30.0, lossy);
+        for pair in sim
+            .trace
+            .iter()
+            .filter(|(t, _)| *t < 12.0)
+            .collect::<Vec<_>>()
+            .windows(2)
+        {
+            assert!(pair[1].1 >= pair[0].1, "the burst lowered it: {pair:?}");
+        }
+        let before = sim.between(11.9, 12.0)[0];
+        for e in sim.between(12.0, 15.0) {
+            assert_eq!(e, before, "nothing changes inside the loss window");
+        }
+        let steps: Vec<u64> = (15..=22)
+            .map(|s| sim.between(f64::from(s) + 0.5, f64::from(s) + 0.6)[0])
+            .collect();
+        for pair in steps.windows(2) {
+            assert!(pair[1] < pair[0], "each second lower: {steps:?}");
+        }
+        assert_eq!(sim.est.last_change(), ChangeReason::Increase);
+        assert!(sim.est.take_cut_notes().is_empty(), "no cut for over-use");
+    }
+
+    /// The queue watch: jitter raises some packets, a queue raises all of
+    /// them; only the second stands.
+    #[test]
+    fn the_queue_watch_reads_the_smallest_recent_delay() {
+        let t0 = Instant::now();
+        let mut watch = QueueWatch::new(t0);
+        let ms = Duration::from_millis;
+        // A second of 20 ms delay with every other packet 40 ms late.
+        for i in 0..200u64 {
+            let late = if i % 2 == 0 { 40_000 } else { 0 };
+            watch.note(t0 + ms(5 * i), 20_000 + late, Duration::ZERO);
+        }
+        assert_eq!(watch.standing(), Some(Duration::ZERO));
+        // Then every packet 60 ms late.
+        for i in 200..300u64 {
+            watch.note(t0 + ms(5 * i), 80_000, Duration::ZERO);
+        }
+        assert_eq!(watch.standing(), Some(ms(60)));
+        // Of which the sender's own sending explains 50 ms.
+        for i in 300..400u64 {
+            watch.note(t0 + ms(5 * i), 80_000, ms(50));
+        }
+        assert_eq!(watch.excess(), Some(ms(10)));
+        // Taken as the empty path's delay: nothing stands.
+        assert!(watch.rebase());
+        assert_eq!(watch.standing(), Some(Duration::ZERO));
+        // Too few packets say nothing.
+        let mut fresh = QueueWatch::new(t0);
+        fresh.note(t0, 20_000, Duration::ZERO);
+        assert_eq!(fresh.standing(), None);
+        assert!(!fresh.rebase());
+    }
+
     /// (f) The 24-bit send time wraps every 64 s: a stream running across
     /// several wraps behaves exactly like one that never meets a wrap.
     #[test]
@@ -1942,5 +2699,140 @@ mod tests {
         assert_eq!(ChangeReason::Increase.as_str(), "increase");
         assert_eq!(ChangeReason::Overuse.as_str(), "overuse");
         assert_eq!(ChangeReason::Loss.as_str(), "loss");
+        assert_eq!(ChangeReason::Carried.as_str(), "carried");
+    }
+
+    // ---- The same estimator on a path the SFU sends on ----
+
+    /// Feed `n` packets of 1200 bytes sent 5 ms apart from `from`, each
+    /// arriving `delay_ms(i)` after it was sent on an arrival clock that
+    /// is an hour ahead of the sender's.
+    fn feed_sent_at(est: &mut PathEstimator, from: Instant, n: u64, delay_ms: impl Fn(u64) -> u64) {
+        for i in 0..n {
+            let sent = from + Duration::from_millis(5 * i);
+            let arrival = sent + Duration::from_secs(3600) + Duration::from_millis(delay_ms(i));
+            est.on_packet_sent_at(sent, arrival, PACKET_BYTES, false);
+        }
+    }
+
+    #[test]
+    fn exact_send_times_on_another_clock_feed_the_same_detector() {
+        let t0 = Instant::now();
+        let mut est = PathEstimator::new(config(3000, 3000), t0);
+        assert!(!est.has_arrivals());
+        assert_eq!(est.arriving_latest_bps(), None);
+        // Three seconds at a constant delay: nothing is lowered, and the
+        // arriving rate is what was sent (1200 bytes every 5 ms).
+        feed_sent_at(&mut est, t0, 600, |_| 20);
+        assert!(est.has_arrivals());
+        assert_eq!(est.estimate_bps(), 3_000_000);
+        assert_eq!(est.cuts(), 0);
+        assert_eq!(est.state(), DetectorState::Normal);
+        let arriving = est.arriving_latest_bps().expect("observed");
+        assert!((1_850_000..=1_990_000).contains(&arriving), "{arriving}");
+        // Then each packet waits 3 ms longer than the one before: a queue
+        // is building. The estimate is cut to a fraction of what is being
+        // acknowledged (1200 bytes every 8 ms, 1.2 Mbit/s), and the cut is
+        // counted.
+        let later = t0 + Duration::from_secs(3);
+        feed_sent_at(&mut est, later, 200, |i| 20 + 3 * i);
+        assert!(est.cuts() >= 1);
+        assert_eq!(est.last_change(), ChangeReason::Overuse);
+        assert!(
+            est.estimate_bps() < 1_300_000,
+            "cut to a fraction of the acknowledged rate, got {}",
+            est.estimate_bps()
+        );
+    }
+
+    #[test]
+    fn a_packet_sent_before_the_estimator_existed_only_counts_toward_the_rate() {
+        let before = Instant::now();
+        let t0 = before + Duration::from_secs(1);
+        let mut est = PathEstimator::new(config(3000, 3000), t0);
+        est.on_packet_sent_at(before, t0 + Duration::from_secs(3600), PACKET_BYTES, false);
+        assert!(est.has_arrivals());
+        assert_eq!(est.cuts(), 0);
+        assert_eq!(est.estimate_bps(), 3_000_000);
+    }
+
+    #[test]
+    fn a_carried_rate_raises_the_estimate_and_never_lowers_it() {
+        let t0 = Instant::now();
+        let mut est = PathEstimator::new(config(3000, 8000), t0);
+        feed_sent_at(&mut est, t0, 400, |_| 20);
+        feed_sent_at(&mut est, t0 + Duration::from_secs(2), 200, |i| 20 + 3 * i);
+        let cut = est.estimate_bps();
+        assert!(cut < 1_300_000);
+        // The path was seen to carry 5 Mbit/s.
+        est.note_carried(5_000_000);
+        assert_eq!(est.estimate_bps(), 5_000_000);
+        assert_eq!(est.last_change(), ChangeReason::Carried);
+        // A smaller figure changes nothing; one above the ceiling is the
+        // ceiling.
+        est.note_carried(1_000_000);
+        assert_eq!(est.estimate_bps(), 5_000_000);
+        est.note_carried(50_000_000);
+        assert_eq!(est.estimate_bps(), 8_000_000);
+        // None of that is a cut.
+        let cuts = est.cuts();
+        est.note_carried(1);
+        assert_eq!(est.cuts(), cuts);
+    }
+
+    #[test]
+    fn the_ceiling_can_follow_what_the_sender_would_like_to_send() {
+        let t0 = Instant::now();
+        let mut est = PathEstimator::new(config(20_000, 20_000), t0);
+        assert_eq!(est.estimate_bps(), 20_000_000);
+        est.set_ceiling(6_000_000);
+        assert_eq!(
+            est.estimate_bps(),
+            6_000_000,
+            "above the ceiling: down to it"
+        );
+        assert_eq!(est.cuts(), 0, "that is not a cut");
+        // An estimate that has never changed is the start value and
+        // moves with the ceiling both ways.
+        est.set_ceiling(9_000_000);
+        assert_eq!(est.estimate_bps(), 9_000_000);
+        // Once it has changed, raising the ceiling raises nothing.
+        est.set_ceiling(5_000_000);
+        est.set_ceiling(4_000_000);
+        est.note_carried(4_000_000);
+        est.force_estimate(3_000_000);
+        est.set_ceiling(9_000_000);
+        assert_eq!(est.estimate_bps(), 3_000_000);
+        // Never below the floor.
+        est.set_ceiling(0);
+        assert_eq!(est.estimate_bps(), MIN_ESTIMATE_BPS);
+    }
+
+    #[test]
+    fn loss_reported_for_a_sent_path_follows_the_same_rule() {
+        let t0 = Instant::now();
+        let mut est = PathEstimator::new(config(3000, 3000), t0);
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        // The arrival clock of the feed and the clock of the loss feed
+        // are the same one here.
+        for second in 0..8u64 {
+            for i in 0..200u64 {
+                let sent = at(second) + Duration::from_millis(5 * i);
+                // From the third second on seven in ten are missing.
+                if second >= 2 && i % 10 >= 3 {
+                    continue;
+                }
+                est.on_packet_sent_at(sent, sent + Duration::from_millis(20), PACKET_BYTES, false);
+            }
+            let lost = if second >= 2 { 140 } else { 0 };
+            est.on_loss(at(second + 1), 200, lost);
+            if second == 2 {
+                assert_eq!(est.cuts(), 0, "one lossy second changes nothing");
+                assert_eq!(est.estimate_bps(), 3_000_000);
+            }
+        }
+        assert!(est.cuts() >= 1, "loss that lasts steps the estimate down");
+        assert_eq!(est.last_change(), ChangeReason::Loss);
+        assert!(est.estimate_bps() < 3_000_000);
     }
 }

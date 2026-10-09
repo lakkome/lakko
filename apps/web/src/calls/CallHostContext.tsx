@@ -220,6 +220,7 @@ import type { SfuCallState } from "./sfu-call-session";
 import { SFU_CALL_STATE_PROBE_MS, parseSfuCallState, sfuCallStateUrl } from "./sfu-call-state";
 import { callEndedAtMs } from "./sfu-keepalive";
 import { createSfuCallUi, type SfuCallUiHandle } from "./sfu-call-ui";
+import { groupCallTileSources } from "./group-call-tile-sources";
 import { sfuBaseUrl } from "./sfu-config";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { uiRules } from "../chat/ui-rules";
@@ -1818,8 +1819,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       // Clear the slot BEFORE `hangUp`: the adapter's `closed` transition moves
       // the store to `ended`, whose effect must find no handle left to tear down
       // a second time.
-      setGroupHandle(null);
-      h.hangUp();
+      // `finally`: clearing the slot takes the call screen down, and nothing
+      // the screen does on its way out may leave the session open (camera and
+      // microphone on, senders sending, the SFU socket up).
+      try {
+        setGroupHandle(null);
+      } finally {
+        h.hangUp();
+      }
     }
     if (!groupCallStarting) setGroupSlot(null);
     return { call: g, failed };
@@ -2135,16 +2142,21 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (slot === null) return;
     const phase = reduceLinkCallPhase(slot.phase, event);
     if (phase === slot.phase) return;
-    setLinkSlot({
-      ...slot,
-      phase,
-      errorMessage: phase === "error" ? (errorMessage ?? slot.errorMessage) : slot.errorMessage,
-    });
-    if (!linkCallOccupiesSlot(phase)) {
-      // Over on its own: drop the session (idempotent — it also resets the
-      // shared in-call store) and keep the outcome for the user to see.
-      const h = linkHandle();
-      setLinkHandle(null);
+    // Over on its own: drop the session (idempotent — it also resets the
+    // shared in-call store) and keep the outcome for the user to see.
+    // `finally`, as in `releaseGroupSlot`: both writes below take the call
+    // screen down, and the session is closed whatever the screen does on its
+    // way out.
+    const over = !linkCallOccupiesSlot(phase);
+    const h = over ? linkHandle() : null;
+    try {
+      setLinkSlot({
+        ...slot,
+        phase,
+        errorMessage: phase === "error" ? (errorMessage ?? slot.errorMessage) : slot.errorMessage,
+      });
+      if (over) setLinkHandle(null);
+    } finally {
       h?.hangUp();
     }
   }
@@ -2271,12 +2283,17 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   function leaveLinkCall(): void {
     linkAttempt = null;
     const h = linkHandle();
-    setLinkHandle(null);
-    setLinkSlot(null);
-    setLinkCallId(null);
-    setLinkInvite(INVITE_IDLE);
-    setInviteLineShown(false);
-    h?.hangUp();
+    // `finally`, as in `releaseGroupSlot`: the writes below take the call
+    // screen down, and the session is closed whatever it does on its way out.
+    try {
+      setLinkHandle(null);
+      setLinkSlot(null);
+      setLinkCallId(null);
+      setLinkInvite(INVITE_IDLE);
+      setInviteLineShown(false);
+    } finally {
+      h?.hangUp();
+    }
   }
 
   function dismissLinkCallOutcome(): void {
@@ -2748,6 +2765,8 @@ export function CallHostView(): JSX.Element {
   const internals = useContext(CallHostInternalsContext);
   if (internals === undefined) throw new Error("CallHostView outside <CallHostProvider>");
   const [audioEl, setAudioEl] = createSignal<HTMLAudioElement | null>(null);
+  /** What the group call's tiles ask of it, safe to ask after it is over. */
+  const groupTiles = groupCallTileSources(() => internals.groupHandle());
 
   /**
    * `docs/ux/calls.md` §2.1 — a ringing call is audible, not only visible.
@@ -2937,43 +2956,37 @@ export function CallHostView(): JSX.Element {
       {/* The group (SFU) call's in-call UI. The session is the host's, so this
           stays up on every screen and a return to the call's chat shows it
           rather than offering a second call. */}
-      <Show when={internals.groupHandle()}>
-        {(handle) => (
-          <>
-            {/* The overlay is what `collapsed` hides; the audio sinks below
-                are not, so they stay outside this branch and a collapsed call
-                keeps its sound. */}
-            <Show when={!host.callCollapsed()}>
-              <Call
-                embedded={true}
-                group={true}
-                onExit={() => void host.leaveGroupCall()}
-                onEndForEveryone={
-                  host.startedGroupCall() ? () => void host.endGroupCallForEveryone() : undefined
-                }
-                onCollapse={collapse()}
-                remoteStreamFor={(participantId): MediaStream | undefined =>
-                  // The roster id is `peer-<peerId>`; the SFU sets the downstream
-                  // MSID stream id to that same peer id.
-                  handle().remoteStreams().get(participantId.replace(/^peer-/, ""))
-                }
-                remoteLightStreamFor={(participantId): MediaStream | undefined =>
-                  // A simulcast publisher's light companion, keyed by the same
-                  // peer id (`calls/light-stream.ts`). Video only: it never
-                  // gets an audio sink below.
-                  handle().remoteLightStreams().get(participantId.replace(/^peer-/, ""))
-                }
-                localStream={(): MediaStream | undefined => handle().localStream() ?? undefined}
-              />
-            </Show>
-            {/* One hidden sink per remote stream, keyed by stream identity, so
-                audio does not cut on roster churn. Remote video renders per tile
-                through `remoteStreamFor`. */}
-            <For each={[...handle().remoteStreams().values()]}>
-              {(stream) => <RemoteAudio stream={stream} />}
-            </For>
-          </>
-        )}
+      <Show when={internals.groupHandle() !== null}>
+        {/* The tiles read the call through `groupTiles`, never through the
+            accessor this `<Show>` could hand over: they are read while the
+            screen is taken down, after the handle was cleared
+            (`calls/group-call-tile-sources.ts`). */}
+        {/* The overlay is what `collapsed` hides; the audio sinks below
+            are not, so they stay outside this branch and a collapsed call
+            keeps its sound. */}
+        <Show when={!host.callCollapsed()}>
+          <Call
+            embedded={true}
+            group={true}
+            onExit={() => void host.leaveGroupCall()}
+            onEndForEveryone={
+              host.startedGroupCall() ? () => void host.endGroupCallForEveryone() : undefined
+            }
+            onCollapse={collapse()}
+            remoteStreamFor={groupTiles.remoteStreamFor}
+            remoteLightStreamFor={groupTiles.remoteLightStreamFor}
+            remoteMiddleStreamFor={groupTiles.remoteMiddleStreamFor}
+            remoteVideoGivenFor={groupTiles.remoteVideoGivenFor}
+            reportTileVideoQuality={groupTiles.reportTileVideoQuality}
+            localStream={groupTiles.localStream}
+          />
+        </Show>
+        {/* One hidden sink per remote stream, keyed by stream identity, so
+            audio does not cut on roster churn. Remote video renders per tile
+            through `remoteStreamFor`. */}
+        <For each={groupTiles.remoteStreamList()}>
+          {(stream) => <RemoteAudio stream={stream} />}
+        </For>
       </Show>
 
       {/* The call-link call's in-call UI, once this device is in the call's
@@ -3019,18 +3032,25 @@ export function CallHostView(): JSX.Element {
           remoteLightStreamFor={(participantId): MediaStream | undefined =>
             internals.linkHandle()?.remoteLightStreamFor(participantId)
           }
+          remoteMiddleStreamFor={(participantId): MediaStream | undefined =>
+            internals.linkHandle()?.remoteMiddleStreamFor(participantId)
+          }
+          remoteVideoGivenFor={(participantId) =>
+            internals.linkHandle()?.remoteVideoGivenFor(participantId)
+          }
+          reportTileVideoQuality={(tile, participantId, quality): void => {
+            internals
+              .linkHandle()
+              ?.reportTileVideoQuality(tile, participantId.replace(/^peer-/, ""), quality);
+          }}
           localStream={(): MediaStream | undefined =>
             internals.linkHandle()?.localStream() ?? undefined
           }
         />
       </Show>
-      <Show when={internals.linkHandle()}>
-        {(handle) => (
-          <For each={[...handle().remoteStreams().values()]}>
-            {(stream) => <RemoteAudio stream={stream} />}
-          </For>
-        )}
-      </Show>
+      <For each={[...(internals.linkHandle()?.remoteStreams().values() ?? [])]}>
+        {(stream) => <RemoteAudio stream={stream} />}
+      </For>
 
       {/* `Invite a contact` (`docs/ux/call-links.md` section 3): the same list
           of conversations a forward offers, under its own title. */}

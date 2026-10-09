@@ -70,7 +70,9 @@ fn test_config() -> Config {
         media_diagnostics: None,
         video_fec: false,
         uplink_fallback: false,
+        protection: lakko_svc_sfu::media::LossProtection::default(),
         bitrate_control: lakko_svc_sfu::media::BitrateControl::Client,
+        downlink_control: false,
         signaling_ping_interval: std::time::Duration::from_secs(20),
         signaling_idle_timeout: std::time::Duration::from_secs(60),
     }

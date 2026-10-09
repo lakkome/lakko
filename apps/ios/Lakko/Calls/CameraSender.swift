@@ -41,7 +41,7 @@ enum CameraSender {
     /// The light layer's bitrate ceiling, bits a second.
     static let lowMaxBitrateBps = 150_000
     /// Whether the camera is sent as two layers at all.
-    static let simulcastEnabled = true
+    static let simulcastEnabled = false
 
     /// The two encodings, light layer first (the order the SFU and the web
     /// client use).

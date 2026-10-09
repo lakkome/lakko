@@ -7,8 +7,9 @@ import {
   deltaOf,
   describeDeltas,
   describeOutbound,
-  describeOutboundLayers,
+  describeOutboundSenders,
   describeSender,
+  describeGivenChanges,
   describeShown,
   describeShownPeers,
   readMedia,
@@ -125,54 +126,61 @@ describe("the log lines", () => {
   });
 });
 
-describe("a simulcast camera sender", () => {
-  const layers: Record<string, unknown>[] = [
+describe("the camera's two senders", () => {
+  // The report's order is the browser's: here the light sender comes first.
+  const senders: Record<string, unknown>[] = [
     {
-      id: "OQ", type: "outbound-rtp", kind: "video", rid: "q", codecId: "CV", scalabilityMode: "L1T3",
+      id: "OL", type: "outbound-rtp", kind: "video", codecId: "CL",
       frameWidth: 320, frameHeight: 180, framesPerSecond: 30, qualityLimitationReason: "none",
       framesEncoded: 300, packetsSent: 400, retransmittedPacketsSent: 3, nackCount: 2, pliCount: 1,
       targetBitrate: 150_000,
     },
     {
-      id: "OF", type: "outbound-rtp", kind: "video", rid: "f", codecId: "CV", scalabilityMode: "L1T3",
+      id: "OM", type: "outbound-rtp", kind: "video", codecId: "CV", scalabilityMode: "L1T3",
       frameWidth: 1280, frameHeight: 720, framesPerSecond: 24, qualityLimitationReason: "bandwidth",
       framesEncoded: 250, packetsSent: 2600, retransmittedPacketsSent: 40, nackCount: 9, pliCount: 2,
       targetBitrate: 1_100_000,
     },
     { id: "CV", type: "codec", mimeType: "video/VP8" },
-    { id: "RQ", type: "remote-inbound-rtp", kind: "video", fractionLost: 0.02, roundTripTime: 0.03 },
-    { id: "RF", type: "remote-inbound-rtp", kind: "video", fractionLost: 0.4, roundTripTime: 0.05 },
+    { id: "CL", type: "codec", mimeType: "video/H264" },
+    { id: "RL", type: "remote-inbound-rtp", kind: "video", fractionLost: 0.02, roundTripTime: 0.03 },
+    { id: "RM", type: "remote-inbound-rtp", kind: "video", fractionLost: 0.4, roundTripTime: 0.05 },
   ];
+  const lightIds = new Set(["OL"]);
 
-  it("reports each layer: rid, size, frame rate and what limits it", () => {
-    const reading = readMedia(layers);
-    expect(reading.outboundVideoLayers.map((l) => l.rid)).toEqual(["q", "f"]);
-    expect(reading.outboundVideo?.rid).toBe("q");
-    expect(describeOutboundLayers("call media interval", reading.outboundVideoLayers)).toEqual([
-      "call media interval send video mode=L1T3 size=320x180 fps=30 limited_by=none rid=q",
-      "call media interval send video mode=L1T3 size=1280x720 fps=24 limited_by=bandwidth rid=f",
+  it("get one line each, the main one first, named sender=main and sender=light", () => {
+    const reading = readMedia(senders, new Set(), lightIds);
+    expect(reading.outboundVideoSenders.map((s) => s.sender)).toEqual(["main", "light"]);
+    expect(reading.outboundVideo?.sender).toBe("main");
+    expect(reading.outboundVideo?.frameWidth).toBe(1280);
+    const lines = describeOutboundSenders("call media interval", reading.outboundVideoSenders);
+    expect(lines).toEqual([
+      "call media interval send video mode=L1T3 size=1280x720 fps=24 limited_by=bandwidth sender=main",
+      "call media interval send video mode=- size=320x180 fps=30 limited_by=none sender=light",
     ]);
+    for (const line of lines) expect(line).not.toContain("rid=");
   });
 
-  it("shows a layer the browser has stopped sending as having no size", () => {
-    const reading = readMedia([{ id: "OF", type: "outbound-rtp", kind: "video", rid: "f" }]);
-    expect(describeOutboundLayers("call media", reading.outboundVideoLayers)).toEqual([
-      "call media send video mode=- size=- fps=- limited_by=- rid=f",
+  it("shows a sender the browser sends nothing on as having no size", () => {
+    const reading = readMedia([{ id: "OL", type: "outbound-rtp", kind: "video" }], new Set(), lightIds);
+    expect(describeOutboundSenders("call media", reading.outboundVideoSenders)).toEqual([
+      "call media send video mode=- size=- fps=- limited_by=- sender=light",
     ]);
+    expect(reading.outboundVideo).toBeNull();
   });
 
-  it("keeps the line of a single encoding as it was, and says nothing without a camera", () => {
+  it("names the one sender main without a light one, and says nothing without a camera", () => {
     const single = readMedia([
       { id: "OT", type: "outbound-rtp", kind: "video", scalabilityMode: "L1T3", frameWidth: 640, frameHeight: 480, framesPerSecond: 30, qualityLimitationReason: "none" },
     ]);
-    expect(describeOutboundLayers("call media", single.outboundVideoLayers)).toEqual([
-      "call media send video mode=L1T3 size=640x480 fps=30 limited_by=none",
+    expect(describeOutboundSenders("call media", single.outboundVideoSenders)).toEqual([
+      "call media send video mode=L1T3 size=640x480 fps=30 limited_by=none sender=main",
     ]);
-    expect(describeOutboundLayers("call media", readMedia([audio()]).outboundVideoLayers)).toEqual([]);
+    expect(describeOutboundSenders("call media", readMedia([audio()]).outboundVideoSenders)).toEqual([]);
   });
 
-  it("sums the sender line across the layers", () => {
-    const now = readSender(layers);
+  it("are summed in the sender line, which names the main sender's codec", () => {
+    const now = readSender(senders, lightIds);
     expect(now).not.toBeNull();
     if (now === null) return;
     expect(now.framesEncoded).toBe(550);
@@ -262,15 +270,52 @@ describe("which layer a video receiver carries", () => {
 describe("what a remote tile showed", () => {
   it("is one exact line per peer", () => {
     expect(
-      describeShown("call media interval", "peerX", {
-        lightSwitches: 2,
-        lightMs: 2314.6,
-        stallMaxMs: 187.4,
-        stallTotalMs: 361.5,
+      describeShown(
+        "call media interval",
+        "peerX",
+        { lightSwitches: 2, lightMs: 2314.6, stallMaxMs: 187.4, stallTotalMs: 361.5 },
+        "middle",
+      ),
+    ).toBe(
+      "call media interval shown peer=peerX want=middle given=- light_switches=2 light_ms=2315 stall_max_ms=187 stall_total_ms=362",
+    );
+  });
+
+  it("adds what the tile observed on its two elements, when it is given", () => {
+    const shown = { lightSwitches: 0, lightMs: 2000, stallMaxMs: 190, stallTotalMs: 720 };
+    // The rule keeps the light copy while the heavy picture plays.
+    expect(
+      describeShown("call media interval", "peerX", shown, "middle", "middle", {
+        heavy: "yes",
+        heavyFrames: 57,
+        heavyGapMaxMs: 203.4,
+        lightFrames: 56,
+        shownNow: "light",
       }),
     ).toBe(
-      "call media interval shown peer=peerX light_switches=2 light_ms=2315 stall_max_ms=187 stall_total_ms=362",
+      "call media interval shown peer=peerX want=middle given=middle light_switches=0 light_ms=2000" +
+        " stall_max_ms=190 stall_total_ms=720 now=light heavy=yes heavy_frames=57 heavy_gap_max_ms=203 light_frames=56",
     );
+    // The heavy picture has never produced a frame.
+    expect(
+      describeShown("l", "p", shown, "main", "main", {
+        heavy: "never",
+        heavyFrames: 0,
+        heavyGapMaxMs: 0,
+        lightFrames: 60,
+        shownNow: "light",
+      }),
+    ).toContain(" now=light heavy=never heavy_frames=0 heavy_gap_max_ms=0 light_frames=60");
+    const byPeer = new Map([["a1", shown]]);
+    expect(
+      describeShownPeers(
+        "l",
+        byPeer,
+        () => "main",
+        () => null,
+        () => undefined,
+      )[0],
+    ).not.toContain("heavy=");
   });
 
   it("lists every peer, for the interval and for the total", () => {
@@ -278,10 +323,129 @@ describe("what a remote tile showed", () => {
       ["a1", { lightSwitches: 0, lightMs: 0, stallMaxMs: 0, stallTotalMs: 0 }],
       ["b2", { lightSwitches: 1, lightMs: 1200, stallMaxMs: 950, stallTotalMs: 1100 }],
     ]);
-    expect(describeShownPeers("call media total", byPeer)).toEqual([
-      "call media total shown peer=a1 light_switches=0 light_ms=0 stall_max_ms=0 stall_total_ms=0",
-      "call media total shown peer=b2 light_switches=1 light_ms=1200 stall_max_ms=950 stall_total_ms=1100",
+    const wantOf = (peerId: string): "main" | "light" => (peerId === "a1" ? "main" : "light");
+    expect(describeShownPeers("call media total", byPeer, wantOf)).toEqual([
+      "call media total shown peer=a1 want=main given=- light_switches=0 light_ms=0 stall_max_ms=0 stall_total_ms=0",
+      "call media total shown peer=b2 want=light given=- light_switches=1 light_ms=1200 stall_max_ms=950 stall_total_ms=1100",
     ]);
-    expect(describeShownPeers("call media total", new Map())).toEqual([]);
+    const givenOf = (peerId: string): "middle" | null => (peerId === "a1" ? "middle" : null);
+    expect(describeShownPeers("call media total", byPeer, wantOf, givenOf)).toEqual([
+      "call media total shown peer=a1 want=main given=middle light_switches=0 light_ms=0 stall_max_ms=0 stall_total_ms=0",
+      "call media total shown peer=b2 want=light given=- light_switches=1 light_ms=1200 stall_max_ms=950 stall_total_ms=1100",
+    ]);
+    expect(describeShownPeers("call media total", new Map(), wantOf)).toEqual([]);
+  });
+
+  it("says given= beside want=: each of the three names, and - when the SFU has not said", () => {
+    const none = { lightSwitches: 0, lightMs: 0, stallMaxMs: 0, stallTotalMs: 0 };
+    for (const given of ["main", "middle", "light"] as const) {
+      expect(describeShown("l", "p", none, "main", given)).toContain(` want=main given=${given} `);
+    }
+    expect(describeShown("l", "p", none, "main", null)).toContain(" want=main given=- ");
+    expect(describeShown("l", "p", none, "main")).toContain(" want=main given=- ");
+  });
+
+  it("says in one line whose shown picture a video-given frame changed, and nothing when nobody's", () => {
+    expect(describeGivenChanges("call video given", [])).toBeNull();
+    expect(
+      describeGivenChanges("call video given", [{ peer: "a", wanted: "main", given: "middle" }]),
+    ).toBe("call video given peer=a want=main given=middle");
+    expect(
+      describeGivenChanges("call video given", [
+        { peer: "a", wanted: "main", given: "light" },
+        { peer: "b", wanted: "middle", given: null },
+      ]),
+    ).toBe("call video given peer=a want=main given=light | peer=b want=middle given=-");
+  });
+
+  it("says want= and given= right before light_switches, and keeps every other field's name", () => {
+    const line = describeShown(
+      "call media interval",
+      "p",
+      { lightSwitches: 0, lightMs: 0, stallMaxMs: 0, stallTotalMs: 0 },
+      "light",
+    );
+    expect(line.split(" ").slice(3)).toEqual([
+      "shown",
+      "peer=p",
+      "want=light",
+      "given=-",
+      "light_switches=0",
+      "light_ms=0",
+      "stall_max_ms=0",
+      "stall_total_ms=0",
+    ]);
+  });
+});
+
+describe("the middle sender and the middle track in the counters", () => {
+  const out = (id: string, width: number): Record<string, unknown> => ({
+    id, type: "outbound-rtp", kind: "video", codecId: id === "OM" ? "CV" : "CX",
+    frameWidth: width, frameHeight: (width * 9) / 16, framesPerSecond: 30,
+    framesEncoded: 100, packetsSent: 200, targetBitrate: 100_000,
+  });
+  // The browser's order, not ours.
+  const entries = [
+    out("OL", 320),
+    out("OD", 640),
+    out("OM", 1280),
+    { id: "CV", type: "codec", mimeType: "video/VP8" },
+    { id: "CX", type: "codec", mimeType: "video/H264" },
+  ];
+
+  it("gives the middle sender its own send line, between main and light", () => {
+    const reading = readMedia(entries, new Set(), new Set(["OL"]), new Set(), new Set(["OD"]));
+    expect(reading.outboundVideoSenders.map((s) => s.sender)).toEqual(["main", "middle", "light"]);
+    expect(reading.outboundVideo?.frameWidth).toBe(1280);
+    expect(describeOutboundSenders("call media interval", reading.outboundVideoSenders)).toEqual([
+      "call media interval send video mode=- size=1280x720 fps=30 limited_by=- sender=main",
+      "call media interval send video mode=- size=640x360 fps=30 limited_by=- sender=middle",
+      "call media interval send video mode=- size=320x180 fps=30 limited_by=- sender=light",
+    ]);
+  });
+
+  it("shows a middle sender that is not sending as having no size", () => {
+    const reading = readMedia(
+      [{ id: "OD", type: "outbound-rtp", kind: "video" }],
+      new Set(),
+      new Set(),
+      new Set(),
+      new Set(["OD"]),
+    );
+    expect(describeOutboundSenders("call media", reading.outboundVideoSenders)).toEqual([
+      "call media send video mode=- size=- fps=- limited_by=- sender=middle",
+    ]);
+  });
+
+  it("sums all three in the sender line and still names the main sender's codec", () => {
+    const now = readSender(entries, new Set(["OL"]), new Set(["OD"]));
+    expect(now?.framesEncoded).toBe(300);
+    expect(now?.packetsSent).toBe(600);
+    expect(now?.targetBitrate).toBe(300_000);
+    expect(now?.videoCodec).toBe("video/VP8");
+  });
+
+  it("names a middle track's receiver layer=middle", () => {
+    const r = readMedia(
+      [
+        video({ id: "V1", trackIdentifier: "track-main" }),
+        video({ id: "V2", trackIdentifier: "track-mid" }),
+        video({ id: "V3", trackIdentifier: "track-light" }),
+      ],
+      new Set(["track-light"]),
+      new Set(),
+      new Set(["track-mid"]),
+    );
+    expect([...r.inbound.values()].map((i) => i.layer)).toEqual(["main", "middle", "light"]);
+    const lines = describeDeltas("call media interval", deltaOf(null, r));
+    expect(lines.map((l) => l.slice(l.lastIndexOf(" ") + 1))).toEqual([
+      "layer=main",
+      "layer=middle",
+      "layer=light",
+    ]);
+    // Every other field of a video line is where it was.
+    expect(lines[1]).toBe(
+      "call media interval video#2 pkts=1000 lost=10 nack=4 jb_ms=50 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=middle",
+    );
   });
 });

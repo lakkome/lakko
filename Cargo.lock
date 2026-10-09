@@ -2622,6 +2622,7 @@ dependencies = [
  "lakko-crypto",
  "lakko-mls",
  "lakko-proto",
+ "proptest",
  "prost",
  "thiserror 1.0.69",
  "zeroize",

@@ -381,3 +381,28 @@ encoder produces two layers is not known; the `send video ... rid=` log lines
 will say. `str0m` drops `~` from a stream id it writes,
 so the SFU restores it in the SDP it sends; no fork change.
 
+
+## Note, 2026-10-07: retransmissions to a browser were not usable
+
+A retransmission the SFU sent (a NACK's answer, the second copy of a
+light packet, a probe's padding copy: all RTX packets) carried RTP
+padding to a multiple of 16 bytes with the padding bit set, as upstream
+`str0m` writes every packet. That is correct by RFC 4588 and RFC 3550,
+and the synthetic `str0m` clients every measurement here was made with
+restore it correctly. A Chrome viewer did not: on a live call it
+restored 848 of 12 957 second copies of light frames intact, the one in
+sixteen whose RTX packet needed no padding, and 12 109 as the frame less
+its last byte (the padding bit kept on the restored packet, the padding
+gone, the last byte read as a count); on the middle track 20 intact
+against 341, which are NACK-driven retransmissions. Since the fork's
+fourteenth change (2026-10-07) a retransmission carries no padding.
+
+What that means for this ADR: every figure in it that rests on a
+subscriber repairing loss by retransmission was measured against
+`str0m` clients and holds for them. For a browser, until that date,
+about fifteen of sixteen retransmitted packets were unusable, so loss
+between the SFU and a browser was in effect repaired by forward error
+correction (not an RTX packet, unaffected) and by key frames alone. No
+figure here was measured against a browser, so none is withdrawn; the
+expectation that a browser's own retransmission requests were being
+answered usefully was wrong.

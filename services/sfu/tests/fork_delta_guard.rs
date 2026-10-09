@@ -243,6 +243,182 @@
 //! the two files of the sixth. It was not compared against the registry copy
 //! of pristine 0.19.0.
 //!
+//! ## Ninth change: a NACK schedule per receive stream (2026-10-05)
+//!
+//! [ADR-0070](../../../docs/adr/0070-call-media-through-a-loss-burst.md)
+//! step 3. The eighth change asks for a missing packet of every stream every
+//! 60 ms. A publisher's light video (tens of packets a second) is what a
+//! viewer falls back to in a burst of loss, and it was repaired no faster
+//! than the full stream. The fork lets one receive stream be asked on an
+//! interval of its own; a stream that is not given one, and a session in
+//! which no stream is, behave exactly as after the eighth change.
+//!
+//! - `src/streams/register_nack.rs` - `NackRegister::set_retry_interval`
+//!   and a `retry` field; `PacketStatus::needs_nack` takes it. With an
+//!   interval of its own a packet is asked for as many times as cover the
+//!   span of the default schedule (`max_nacks_for`: 25 x 60 ms = 1.5 s, so
+//!   75 times at 20 ms), at least once, at most 255 times, and the interval
+//!   is never below 10 ms (`MIN_RETRY_INTERVAL`). One test added.
+//! - `src/streams/register.rs` - `ReceiverRegister::set_nack_retry_interval`,
+//!   a pass-through.
+//! - `src/streams/receive.rs` - `StreamRx::set_nack_retry_interval` (public,
+//!   reached through `DirectApi::stream_rx`) and a field; the interval is
+//!   handed to the register each time a NACK is built, because the register
+//!   is created with the first packet and again after a reset.
+//! - `src/streams/mod.rs` - `Streams::min_nack_retry_interval`.
+//! - `src/session.rs` - `nack_at` uses the shortest per-stream interval when
+//!   it is below the 33 ms `NACK_MIN_INTERVAL`. Without this a 20 ms
+//!   interval would still be served on the 33 ms tick. It is a behaviour
+//!   change for the other streams of that session only in this: their
+//!   60 ms is then met on a 20 ms tick (every 60 ms) instead of a 33 ms one
+//!   (every 66 ms).
+//!
+//! ## Tenth change: resend a sent packet without being asked (2026-10-05)
+//!
+//! ADR-0070 step 3. The SFU sends each packet of a light companion track to
+//! a subscriber a second time some tens of milliseconds after the first.
+//! Upstream resends only what a NACK names (or, with bandwidth estimation
+//! on, what its padding picks). One method, nothing changed for a caller
+//! that does not use it:
+//!
+//! - `src/streams/send.rs` - `StreamTx::resend(seq_no, now)`: queues the
+//!   cached packet exactly as `handle_nack` does (RTX stream, ahead of new
+//!   packets) and returns whether it was in the cache. A stream without an
+//!   RTX payload type caches nothing, so it resends nothing.
+//!
+//! ## Eleventh change: read what a receiver reported (2026-10-05)
+//!
+//! ADR-0070 step 4. The SFU raises a subscriber's playout delay after a
+//! burst of loss on its downlink, which it knows from the subscriber's
+//! receiver reports and NACKs. Upstream exposes both only through the
+//! periodic statistics events, averaged, and only with statistics on. Three
+//! getters and their counters, read-only:
+//!
+//! - `src/streams/send.rs` - `StreamTx::nacked_packets` (sequence numbers
+//!   asked for by NACK that were in the cache, each request counted; a
+//!   `resend` of the tenth change is not counted),
+//!   `StreamTx::receiver_reports` and `StreamTx::last_fraction_lost` (for
+//!   the main SSRC). Three tests added for the tenth and eleventh changes,
+//!   in a `lakko_test` module at the end of the file. One of them pins what
+//!   was found while reading for ADR-0070: upstream has no hold-off on
+//!   answering a NACK, every request for a cached packet queues a resend.
+//!
+//! The playout-delay header extension itself needed no change: upstream
+//! parses, writes and negotiates `Extension::PlayoutDelay` once it is in the
+//! session's extension map.
+//!
+//! By `git status -- crates/vendor/str0m` on the tree that carried changes
+//! one to eight committed, the ninth to eleventh touch six files
+//! (`register_nack.rs`, `register.rs`, `receive.rs`, `streams/mod.rs`,
+//! `session.rs`, `send.rs`), all of them already pinned below. Not compared
+//! against the registry copy of pristine 0.19.0.
+//!
+//! ## Twelfth change: transport-wide congestion control per direction (2026-10-05)
+//!
+//! [ADR-0070](../../../docs/adr/0070-call-media-through-a-loss-burst.md)
+//! step 6. The SFU estimates each subscriber's downlink with str0m's
+//! send-side estimator, which needs the transport-wide sequence number on
+//! the packets the SFU sends and `transport-cc` feedback for them. Under
+//! server-side bitrate control (ADR-0068) the same peer must NOT be given
+//! either on the media lines it publishes on, or its own send-side
+//! congestion controller would take over its publishing bitrate again.
+//! Upstream negotiates both from one session extension map and one codec
+//! configuration, on every media line alike. One switch, off by default;
+//! with it off nothing changes:
+//!
+//! - `src/session.rs` - `Session::twcc_on_local_media_only`, a field.
+//! - `src/change/direct.rs` - `DirectApi::set_twcc_on_local_media_only`.
+//! - `src/change/sdp.rs` - with the switch on, a media line the REMOTE side
+//!   offered (`Media::remote_created`) is given no transport-wide sequence
+//!   number in `update_media` (so the extension is neither echoed in the
+//!   answer nor expected on the line) and no `transport-cc` feedback line
+//!   in `as_sdp`; a media line this side offers is written as before. The
+//!   `AsSdpMediaLine` trait gains `remote_created`, `false` by default.
+//!
+//! What is not changed: transport-wide feedback is still enabled per
+//! session when any media line negotiated it, and a peer that sends the
+//! extension on a line that did not negotiate it is still reported on.
+//!
+//! ## Thirteenth change: hand out the transport-wide feedback records (2026-10-05)
+//!
+//! ADR-0070 step 6. The SFU runs its own estimate of each subscriber's
+//! downlink (`services/sfu/src/uplink_estimate.rs`, the rules of a
+//! publisher's uplink), because str0m's own send-side estimator does not
+//! serve an SFU that pauses tracks: measured through the SFU it took a
+//! second of loss on a 7.5 Mbit/s path to 178 kbit/s, could not rise
+//! above 1.5 times what was being sent while the heavy tracks were
+//! paused, and lowered the estimate of an unlimited path on the word of
+//! its first probe. An estimator of the SFU's own needs, per packet it
+//! sent, the send time, the size and the arrival time the receiver's
+//! transport-wide feedback reports (or that it reports none). str0m
+//! computes exactly those records for its own estimator and exposes none
+//! of them. One hook, off by default, read-only:
+//!
+//! - `src/session.rs` - `Session::keep_twcc_feedback` and
+//!   `Session::twcc_feedback`, two fields; in `handle_rtcp` the records of
+//!   a report are copied into the second when the first is set (bounded:
+//!   `MAX_TWCC_FEEDBACK_KEPT`, 8192, the oldest dropped) and then go to
+//!   str0m's own estimator as before; a unit test in the file.
+//! - `src/change/direct.rs` - `DirectApi::keep_twcc_feedback` and
+//!   `DirectApi::take_twcc_feedback`.
+//!
+//! It does not need `RtcConfig::enable_bwe`, and the SFU does not enable
+//! it under downlink control: str0m's estimator and its pacer stay off.
+//!
+//! (An earlier thirteenth change, `Bwe::current_estimate`, was made and
+//! taken out again the same day with the estimator it read;
+//! `src/bwe/api.rs` is as upstream has it and is not pinned.)
+//!
+//! By `git status -- crates/vendor/str0m` on the tree that carried changes
+//! one to eleven (nine to eleven uncommitted), the twelfth and thirteenth
+//! touch three files: `session.rs` and `change/direct.rs`, already
+//! pinned, and `change/sdp.rs`, pinned from now on. Not compared against
+//! the registry copy of pristine 0.19.0.
+//!
+//! ## The fourteenth change: a retransmission carries no padding
+//!
+//! Upstream pads every RTP packet it sends to the SRTP block size (16
+//! bytes of payload) and sets the padding bit. For a first transmission
+//! that is as upstream has it. For a retransmission (an RTX packet: a
+//! NACK's answer, `StreamTx::resend`, a spurious resend used as padding)
+//! the fork adds none:
+//!
+//! - `src/streams/send.rs` - in `poll_packet`, `NextPacketKind::Resend`
+//!   is written without `RtpHeader::pad_packet`.
+//!
+//! By RFC 4588 and RFC 3550 the padded packet was correct. A libwebrtc
+//! receiver restores the original behind a copy of the RTX packet's
+//! header, padding bit included, without the padding, and the restored
+//! packet then loses as many bytes from its tail as its last byte says.
+//! Seen on a live call (2026-10-07): of 12 957 second copies of light
+//! video frames a Chrome viewer restored, 848 were intact, which is the
+//! one in sixteen whose RTX packet needed no padding, and 12 109 were
+//! the frame less its last byte, 0x01. One file, already pinned; the
+//! test is `a_retransmission_restores_to_the_payload_that_was_sent` in
+//! that file.
+//!
+//! ## The fifteenth change: what is missing can be given up (2026-10-09)
+//!
+//! [ADR-0070](../../../docs/adr/0070-call-media-through-a-loss-burst.md),
+//! note of 2026-10-09. Upstream (and the fork until now) asks for a missing
+//! packet until its request count runs out or it leaves the window, whatever
+//! has happened since. `StreamRx::give_up_missing` ends the requests for
+//! every packet of a receive stream that is missing at that moment:
+//!
+//! - `src/streams/register_nack.rs` - `NackRegister::give_up_missing` sets
+//!   the request count of every missing packet in the active window to its
+//!   maximum; one test added.
+//! - `src/streams/register.rs`, `src/streams/receive.rs` - pass it through
+//!   (`ReceiverRegister::give_up_missing`, `StreamRx::give_up_missing`).
+//!
+//! Nothing else changes: the packets stay missing, one that still arrives is
+//! taken as new, and a packet that goes missing afterwards is asked for on
+//! the usual schedule. The SFU calls it when it has asked the publisher for a
+//! key frame at the end of a burst of loss that was not repaired, and for a
+//! stream nobody is being sent (`media::drive_burst_keyframes`): each further
+//! request would be a retransmission sent ahead of the key frame on a path
+//! that has just recovered. Three files, all already pinned.
+//!
 //! ## What this guard is for
 //!
 //! `crates/vendor/str0m` is ~40k lines of third-party code that nobody on
@@ -307,19 +483,19 @@ const PINNED: &[(&str, &str)] = &[
     ),
     (
         "src/streams/register_nack.rs",
-        "0923e6e78993717b1be646058d5560f067ad5cd9d56046dfa3f6ae014f59c5a2",
+        "ba87d6479f618c2898f494dfe79c1c1ba5624e71fad68ca8dc220b9fc4c0a4ae",
     ),
     (
         "src/streams/register.rs",
-        "c4e149ef9032dd1f8cc5198f7f52a2ad0272ff2886487964ab09eb61bed70755",
+        "f4e40ef8e4e96035e559160aaead050d58b364d3172b768e7ccd915ce7c025ca",
     ),
     (
         "src/streams/receive.rs",
-        "aaa5d8189f866c87c79f4d751c3c332ca2607056f8fcab43d2294d4a91186fa0",
+        "6c52c3d6519a516289c6cd8f2626372286041bb2bec0cd42b7c45035a1db4c28",
     ),
     (
         "src/streams/mod.rs",
-        "039dda876bba5fdf27b404520c70cc8c6592bb0d15df9b24a37537e9db867629",
+        "dbfc18db1a403814096f2a75f6c1d45fc44b2119073ab996f19b8ea73ed9c4c8",
     ),
     (
         "src/_internal_test_exports/fuzz.rs",
@@ -359,15 +535,19 @@ const PINNED: &[(&str, &str)] = &[
     ),
     (
         "src/session.rs",
-        "6cbeafc1393e99903476a808f3b32a2ba09ca9961d90f2184aae06c22e47fed3",
+        "a79e27702f8ca4a08d65ee2053bc918c409790150e10f2da86e42a27af4bb0c9",
     ),
     (
         "src/streams/send.rs",
-        "039fb15aae4f1502d1be2dff1a4639dde260d1bda0db6bc845d4647bc8051909",
+        "d80928fccf18cef13fbb741aabb272df00391f235fa0154ab87ae33dde6d084c",
     ),
     (
         "src/change/direct.rs",
-        "21b9ea88c532a966e7625da07c2e3ad3f6b717a4d0efbf8ceae9c08f6a9464d1",
+        "793584faf3371099a3cc2f533a9e6b42402f43c2b771e71f9919919a3ac45a8b",
+    ),
+    (
+        "src/change/sdp.rs",
+        "12274a94b56b88b0c4893e482f9eff14b1ac7040dffb35288c79639bd7603ce5",
     ),
 ];
 
@@ -410,8 +590,13 @@ fn vendored_str0m_matches_pinned_fork_state() {
          Confirm the delta against pristine str0m 0.19.0 is still only the \
          per-packet `frame_position` capability, the NACK retry schedule, \
          the audio `red` payload type, the video `red` + `ulpfec` pair, the \
-         receiver-report loss clamp and the FEC-receiver hooks on \
-         `DirectApi` (see this file's module doc), then re-pin:\n\n{}\n",
+         receiver-report loss clamp, the FEC hooks on `DirectApi`, the \
+         per-stream NACK schedule, `StreamTx::resend`, the receiver \
+         feedback getters, transport-wide congestion control per direction \
+         the transport-wide feedback records and retransmissions without \
+         padding (see this file's module \
+         doc), then \
+         re-pin:\n\n{}\n",
         drifted.join("\n")
     );
 }
@@ -549,4 +734,161 @@ fn the_fec_sender_hooks_are_present() {
         stream.keep_sent_rtp(false);
     }
     assert_eq!(api.take_sent_rtp(), None, "asking keeps nothing by itself");
+}
+
+/// The ninth, tenth and eleventh fork changes, asserted against the library:
+/// a receive stream can be given a NACK schedule of its own, and a send
+/// stream can be asked to resend and to say what its receiver reported. On a
+/// session that has received and sent nothing, nothing is resent and every
+/// counter is zero.
+#[test]
+fn the_loss_burst_hooks_are_present() {
+    use std::time::{Duration, Instant};
+    use str0m::media::{MediaKind, Mid};
+    use str0m::Rtc;
+
+    let now = Instant::now();
+    let mut rtc = Rtc::builder().set_rtp_mode(true).build(now);
+    let mid = Mid::from("v");
+    let mut api = rtc.direct_api();
+    let _ = api.declare_media(mid, MediaKind::Video);
+    let stream = api.declare_stream_tx(1.into(), Some(2.into()), mid, None);
+    assert!(!stream.resend(1.into(), now), "nothing was sent");
+    assert_eq!(stream.nacked_packets(), 0);
+    assert_eq!(stream.receiver_reports(), 0);
+    assert_eq!(stream.last_fraction_lost(), 0);
+    let stream = api.expect_stream_rx(7.into(), Some(8.into()), mid, None);
+    stream.set_nack_retry_interval(Some(Duration::from_millis(20)));
+    stream.set_nack_retry_interval(None);
+}
+
+/// The fifteenth fork change, asserted against the library: a receive stream
+/// can be told to stop asking for what is missing. On a stream that has
+/// received nothing, nothing is given up.
+#[test]
+fn missing_packets_can_be_given_up() {
+    use std::time::Instant;
+    use str0m::media::{MediaKind, Mid};
+    use str0m::Rtc;
+
+    let mut rtc = Rtc::builder().set_rtp_mode(true).build(Instant::now());
+    let mid = Mid::from("v");
+    let mut api = rtc.direct_api();
+    let _ = api.declare_media(mid, MediaKind::Video);
+    let stream = api.expect_stream_rx(7.into(), Some(8.into()), mid, None);
+    assert_eq!(stream.give_up_missing(), 0);
+}
+
+/// The twelfth fork change, asserted against the library: with the switch
+/// on, a media line the remote side offered is answered without the
+/// transport-wide sequence number and without `transport-cc` feedback, and
+/// a media line this side offers carries both. With it off (the default)
+/// both carry both.
+#[test]
+fn transport_wide_congestion_control_can_be_per_direction() {
+    use std::time::Instant;
+    use str0m::change::SdpOffer;
+    use str0m::media::{Direction, MediaKind};
+    use str0m::Rtc;
+
+    let sections = |sdp: &str| -> Vec<String> {
+        sdp.split("\r\nm=")
+            .skip(1)
+            .map(|section| format!("m={section}"))
+            .collect()
+    };
+    let names_it =
+        |section: &str| section.contains("transport-wide-cc") && section.contains(" transport-cc");
+    let names_none =
+        |section: &str| !section.contains("transport-wide-cc") && !section.contains("transport-cc");
+
+    for on in [false, true] {
+        let now = Instant::now();
+        let mut remote = Rtc::builder().build(now);
+        let mut change = remote.sdp_api();
+        change.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+        change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+        let (offer, _pending) = change.apply().expect("an offer");
+        let offer = offer.to_sdp_string();
+        assert!(sections(&offer).iter().all(|s| names_it(s)));
+
+        let mut local = Rtc::builder().build(now);
+        local.direct_api().set_twcc_on_local_media_only(on);
+        let answer = local
+            .sdp_api()
+            .accept_offer(SdpOffer::from_sdp_string(&offer).expect("parses"))
+            .expect("answers")
+            .to_sdp_string();
+        let answered = sections(&answer);
+        assert_eq!(answered.len(), 2);
+        for section in &answered {
+            assert!(
+                if on {
+                    names_none(section)
+                } else {
+                    names_it(section)
+                },
+                "switch {on}: the answer to a remote line:\n{section}"
+            );
+            assert!(section.contains("abs-send-time"), "the rest stays");
+        }
+        assert!(answered[1].contains("goog-remb") && answered[1].contains("nack"));
+
+        // A line this side offers, in a later offer of its own.
+        let mut change = local.sdp_api();
+        change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+        let (own, _pending) = change.apply().expect("an offer");
+        let own = sections(&own.to_sdp_string());
+        assert_eq!(own.len(), 3);
+        for section in &own[..2] {
+            assert!(
+                if on {
+                    names_none(section)
+                } else {
+                    names_it(section)
+                },
+                "switch {on}: a remote line in a later offer:\n{section}"
+            );
+        }
+        assert!(names_it(&own[2]), "switch {on}: an own line:\n{}", own[2]);
+    }
+}
+
+/// The thirteenth fork change, asserted against the library: the records
+/// of the remote side's transport-wide feedback can be kept and taken, and
+/// nothing is kept unless asked.
+#[test]
+fn transport_wide_feedback_records_can_be_taken() {
+    use std::time::Instant;
+    use str0m::Rtc;
+
+    let now = Instant::now();
+    let mut rtc = Rtc::builder().set_rtp_mode(true).build(now);
+    let mut api = rtc.direct_api();
+    assert!(api.take_twcc_feedback().is_empty());
+    api.keep_twcc_feedback(true);
+    let records: Vec<(Instant, usize, Option<Instant>)> = api.take_twcc_feedback();
+    assert!(records.is_empty(), "nothing was reported yet");
+    api.keep_twcc_feedback(false);
+    assert!(api.take_twcc_feedback().is_empty());
+}
+
+/// What ADR-0070 step 4 relies on and the fork did not have to add: the
+/// playout-delay header extension is one upstream knows.
+#[test]
+fn upstream_knows_the_playout_delay_extension() {
+    use str0m::rtp::{Extension, ExtensionMap};
+
+    let mut map = ExtensionMap::standard();
+    assert_eq!(
+        map.id_of(Extension::PlayoutDelay),
+        None,
+        "not in the standard map: a session has to ask for it"
+    );
+    map.set(5, Extension::PlayoutDelay);
+    assert_eq!(map.id_of(Extension::PlayoutDelay), Some(5));
+    assert_eq!(
+        Extension::PlayoutDelay.as_uri(),
+        "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"
+    );
 }

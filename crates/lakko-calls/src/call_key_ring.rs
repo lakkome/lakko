@@ -29,7 +29,8 @@
 //! The core stays **time-source-free**: the caller supplies `now_ms` on rekey +
 //! prune; the ring never reads a clock.
 
-use crate::sframe::{CallKey, ParticipantKey, CALL_KEY_LEN};
+use crate::media_frame::MediaFrameParts;
+use crate::sframe::{media_frame_refusal, CallKey, ParticipantKey, CALL_KEY_LEN};
 use crate::{Error, Result};
 
 /// Default SFrame epoch-overlap window — the previous-epoch key is retained this
@@ -241,6 +242,41 @@ impl CallKeyRing {
         Err(Error::Crypto(
             "framed frame failed authentication under current key (no overlap window active)"
                 .into(),
+        ))
+    }
+
+    /// Open a sealed media frame in the ADR-0071 layout
+    /// (`clear_prefix || ciphertext_and_tag || sframe_header || trailer`) with
+    /// the same overlap behaviour as [`Self::try_open_with_overlap`], and
+    /// return the encoded frame `clear_prefix || plaintext`.
+    ///
+    /// The frame is split once; the KID that selects the per-stream key
+    /// (ADR-0035) is read from the frame's own SFrame header, so the caller
+    /// passes nothing but the bytes. The current key is tried first and, on
+    /// an authentication failure, the retained previous key. The header, the
+    /// clear prefix and the trailer do not depend on the seed, so a late
+    /// frame from the old epoch splits the same way.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Crypto`] when the frame is malformed (returned at once, with
+    ///   no key tried) or authenticates under **neither** key. Nothing of the
+    ///   input is returned.
+    pub fn try_open_media_frame_with_overlap(&self, wire: &[u8]) -> Result<Vec<u8>> {
+        let parts = MediaFrameParts::split(wire).map_err(|e| media_frame_refusal(&e))?;
+        let kid = parts.header.kid;
+        let current = self.current.participant_key(kid)?;
+        match current.open_media_parts(&parts) {
+            Ok(frame) => return Ok(frame),
+            Err(Error::Crypto(_)) => {},
+            Err(other) => return Err(other),
+        }
+        if let Some(prev) = self.previous.as_ref() {
+            let prev_key = prev.key.participant_key(kid)?;
+            return prev_key.open_media_parts(&parts);
+        }
+        Err(Error::Crypto(
+            "media frame failed authentication under current key (no overlap window active)".into(),
         ))
     }
 

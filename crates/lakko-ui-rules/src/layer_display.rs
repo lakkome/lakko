@@ -9,7 +9,18 @@
 //! a second and then plays the late second fast. The light layer (a quarter
 //! of the size, 150 kbit/s) is repaired in a fraction of that. So a viewer
 //! receives both as two tracks, decodes both all the time, and the tile shows
-//! the light one the moment the full one stands still.
+//! the light one once the full one has really stopped.
+//!
+//! "Really stopped" is the point of the two thresholds below. A full track
+//! that delivers its frames at a steady average rate but in clumps (a
+//! publisher on a congested uplink: 28 frames a second with a few gaps of
+//! about 200 ms every two seconds, seen on a live call) is a picture worth
+//! showing: sharp, and moving. Such gaps are counted as displayed stalls
+//! ([`FULL_STALL_MS`]) because the viewer does see them, but they neither
+//! send the tile to the light copy nor keep it there ([`FULL_STOPPED_MS`]).
+//! Before the two were separate one threshold did both jobs, and a tile whose
+//! full track had one gap of 151 ms a second showed the light copy for the
+//! rest of the call.
 //!
 //! This module is the rule and its counters, written once because web had it
 //! in TypeScript and iOS and Android were about to write it twice more. Pure:
@@ -23,11 +34,11 @@
 //! - [`ShownLayer::Full`] is shown by default, and always while there is no
 //!   light track.
 //! - `Full` -> `Light` when the full track has presented no frame for
-//!   [`FULL_STALL_MS`] and the light track presented one within
+//!   [`FULL_STOPPED_MS`] and the light track presented one within
 //!   [`LIGHT_FRESH_MS`].
 //! - `Light` -> `Full` only once the full track has presented frames with no
-//!   gap longer than [`FULL_STALL_MS`] for [`FULL_STEADY_MS`]. A gap inside
-//!   that window starts it again. The window also hides the fast catch-up
+//!   gap longer than [`FULL_STOPPED_MS`] for [`FULL_STEADY_MS`]. A longer gap
+//!   inside that window starts it again. The window also hides the fast catch-up
 //!   playback that follows a stall.
 //! - Before the full track's first frame, `Light` is shown only when the full
 //!   track has presented nothing for [`FIRST_FRAME_GRACE_MS`] while the light
@@ -41,7 +52,7 @@
 //! became the shown one, when that is later) until its next frame or until it
 //! stops being shown. A stall the switch to `Light` cuts short is counted at
 //! the length it had when the switch happened: with the tile's tick that is
-//! between [`FULL_STALL_MS`] and that plus one tick, and it is what the
+//! between [`FULL_STOPPED_MS`] and that plus one tick, and it is what the
 //! viewer saw.
 //!
 //! Everything is integer arithmetic on `u64` milliseconds, saturating, so
@@ -49,19 +60,33 @@
 //! runs backwards: a timestamp earlier than the latest one seen is read as
 //! the latest one seen.
 
-/// The full track is standing still once it has presented no frame for this
-/// long, milliseconds. Chosen, not measured: about four frame intervals at
-/// 30 frames a second and two at 15, so ordinary jitter does not trip it.
+/// The shown track is counted as standing still (a displayed stall) once it
+/// has presented no frame for more than this, milliseconds. Chosen, not
+/// measured: about four frame intervals at 30 frames a second and two at 15,
+/// so ordinary jitter is not counted. It only counts; what is shown is
+/// decided by [`FULL_STOPPED_MS`].
 pub const FULL_STALL_MS: u64 = 150;
+
+/// The full track has really stopped once it has presented no frame for this
+/// long, milliseconds: the tile then shows a playing light track, and a full
+/// track counts as playing again only while its gaps stay within this.
+/// Chosen, not measured: twice [`FULL_STALL_MS`], so that a track delivering
+/// frames in clumps with gaps of about 200 ms (seen on a live call from a
+/// publisher on a congested uplink, together with the 50 ms of
+/// [`LAYER_TICK_MS`] by which a gap is noticed late) stays the shown one,
+/// while a burst of loss, which stops a 720p stream for about a second, still
+/// hands over to the light copy in under a third of that.
+pub const FULL_STOPPED_MS: u64 = 300;
 
 /// The light track is playing if it presented a frame within this,
 /// milliseconds. Chosen, not measured: longer than [`FULL_STALL_MS`] so a
-/// light track at a low frame rate still counts as playing when the full one
-/// is found standing.
+/// light track at a low frame rate, or one whose frames arrive in clumps like
+/// the full one's, still counts as playing when the full one is found
+/// stopped.
 pub const LIGHT_FRESH_MS: u64 = 250;
 
 /// How long the full track must present frames without a gap longer than
-/// [`FULL_STALL_MS`] before the tile returns to it, milliseconds. Chosen, not
+/// [`FULL_STOPPED_MS`] before the tile returns to it, milliseconds. Chosen, not
 /// measured: the late second a recovered stream plays fast was about a second
 /// long on the calls that prompted this.
 pub const FULL_STEADY_MS: u64 = 1000;
@@ -73,7 +98,7 @@ pub const FIRST_FRAME_GRACE_MS: u64 = 1500;
 
 /// How often a tile calls [`LayerDisplay::tick`], milliseconds, so a track
 /// that stands still is noticed without a frame arriving. Chosen, not
-/// measured: a third of [`FULL_STALL_MS`].
+/// measured: a third of [`FULL_STALL_MS`], a sixth of [`FULL_STOPPED_MS`].
 pub const LAYER_TICK_MS: u64 = 50;
 
 /// Which track a tile shows.
@@ -138,7 +163,7 @@ pub struct LayerDisplay {
     last_full: Option<u64>,
     last_light: Option<u64>,
     /// Start of the full track's current run of frames with no gap longer
-    /// than [`FULL_STALL_MS`]; `None` while it has none.
+    /// than [`FULL_STOPPED_MS`]; `None` while it has none.
     steady_since: Option<u64>,
     /// How much of the displayed stall in progress is already counted.
     stall_counted: u64,
@@ -182,7 +207,7 @@ impl LayerDisplay {
         }
         let follows_closely = self
             .last_full
-            .is_some_and(|last| now.saturating_sub(last) <= FULL_STALL_MS);
+            .is_some_and(|last| now.saturating_sub(last) <= FULL_STOPPED_MS);
         if self.steady_since.is_none() || !follows_closely {
             self.steady_since = Some(now);
         }
@@ -295,7 +320,7 @@ impl LayerDisplay {
             }
             let standing = full_gap.map_or_else(
                 || now.saturating_sub(self.started_at) >= FIRST_FRAME_GRACE_MS,
-                |gap| gap >= FULL_STALL_MS,
+                |gap| gap >= FULL_STOPPED_MS,
             );
             if standing {
                 // The run of steady full frames is over; the next full frame
@@ -306,8 +331,8 @@ impl LayerDisplay {
             return;
         }
         // Shown: light.
-        if !full_gap.is_some_and(|gap| gap <= FULL_STALL_MS) {
-            // A gap inside the steady window starts it again.
+        if !full_gap.is_some_and(|gap| gap <= FULL_STOPPED_MS) {
+            // A stop inside the steady window starts it again.
             self.steady_since = None;
             return;
         }
@@ -407,6 +432,7 @@ mod tests {
     #[test]
     fn the_constants_are_the_chosen_values() {
         assert_eq!(FULL_STALL_MS, 150);
+        assert_eq!(FULL_STOPPED_MS, 300);
         assert_eq!(LIGHT_FRESH_MS, 250);
         assert_eq!(FULL_STEADY_MS, 1000);
         assert_eq!(FIRST_FRAME_GRACE_MS, 1500);
@@ -433,17 +459,18 @@ mod tests {
     fn switches_to_light_when_full_stalls_while_light_is_fresh() {
         let mut d = playing();
         // Full stops at 1000; light keeps playing.
-        play(&mut d, Which::LightOnly, 1020, 1140, 20);
-        assert_eq!(d.tick(1149), Full);
-        assert_eq!(d.tick(1150), Light);
+        play(&mut d, Which::LightOnly, 1020, 1280, 20);
+        assert_eq!(d.tick(1299), Full);
+        assert_eq!(d.tick(1300), Light);
         assert_eq!(d.counters().light_switches, 1);
     }
 
     #[test]
     fn switches_on_a_light_frame_as_well_as_on_a_tick() {
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1140, 20);
-        assert_eq!(d.light_frame(1160), Light);
+        play(&mut d, Which::LightOnly, 1020, 1280, 20);
+        assert_eq!(d.light_frame(1290), Full);
+        assert_eq!(d.light_frame(1300), Light);
     }
 
     #[test]
@@ -460,10 +487,13 @@ mod tests {
     #[test]
     fn does_not_switch_to_a_light_track_that_is_not_fresh() {
         let mut d = playing();
-        // Light's last frame was at 1000 as well; at 1251 it is 251 ms old.
-        assert_eq!(d.tick(1250), Light);
+        // Light's last frame is at 1100: at 1350 it is 250 ms old, at 1351
+        // it is 251.
+        play(&mut d, Which::LightOnly, 1020, 1100, 20);
+        assert_eq!(d.tick(1350), Light);
         let mut e = playing();
-        assert_eq!(e.tick(1251), Full);
+        play(&mut e, Which::LightOnly, 1020, 1100, 20);
+        assert_eq!(e.tick(1351), Full);
         assert_eq!(e.tick(2000), Full);
         assert_eq!(e.counters().light_switches, 0);
     }
@@ -481,20 +511,20 @@ mod tests {
 
         // The same while light is the shown one.
         let mut e = playing();
-        play(&mut e, Which::LightOnly, 1020, 1200, 20);
+        play(&mut e, Which::LightOnly, 1020, 1400, 20);
         assert_eq!(e.shown(), Light);
-        for t in (1500..=2200).step_by(50) {
+        for t in (1700..=2400).step_by(50) {
             assert_eq!(e.tick(t), Light);
         }
         assert_eq!(e.counters().light_switches, 1);
-        // Light's last frame was at 1200.
+        // Light's last frame was at 1400.
         assert_eq!(e.counters().stall_max_ms, 1000);
     }
 
     #[test]
     fn returns_to_full_only_after_the_steady_window() {
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1200, 20);
+        play(&mut d, Which::LightOnly, 1020, 1400, 20);
         assert_eq!(d.shown(), Light);
         // Full comes back at 2000 and plays without a gap; light keeps
         // playing.
@@ -510,7 +540,7 @@ mod tests {
     #[test]
     fn returns_on_a_tick_too_once_the_window_has_passed() {
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1200, 20);
+        play(&mut d, Which::LightOnly, 1020, 1400, 20);
         play(&mut d, Which::Both, 2000, 2980, 20);
         assert_eq!(d.shown(), Light);
         assert_eq!(d.tick(3000), Full);
@@ -519,17 +549,17 @@ mod tests {
     #[test]
     fn starts_the_steady_window_again_after_a_gap_inside_it() {
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1200, 20);
-        // Full plays 2000..2500, then a gap of 200 ms, then plays on from
-        // 2700.
-        for t in (2000..=4000u64).step_by(20) {
+        play(&mut d, Which::LightOnly, 1020, 1400, 20);
+        // Full plays 2000..2500, then stops for 400 ms, then plays on from
+        // 2900.
+        for t in (2000..=4200u64).step_by(20) {
             d.light_frame(t);
-            if !(2501..2700).contains(&t) {
+            if !(2501..2900).contains(&t) {
                 d.full_frame(t);
             }
             // 1000 ms after the first return (3000) is not enough: the
-            // window restarted at 2700 and ends at 3700.
-            assert_eq!(d.shown(), if t < 3700 { Light } else { Full }, "t={t}");
+            // window restarted at 2900 and ends at 3900.
+            assert_eq!(d.shown(), if t < 3900 { Light } else { Full }, "t={t}");
         }
         assert_eq!(d.counters().light_switches, 1);
     }
@@ -537,21 +567,21 @@ mod tests {
     #[test]
     fn starts_the_steady_window_again_when_a_tick_sees_the_gap() {
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1200, 20);
+        play(&mut d, Which::LightOnly, 1020, 1400, 20);
         play(&mut d, Which::FullOnly, 2000, 2500, 20);
-        assert_eq!(d.tick(2700), Light);
-        play(&mut d, Which::FullOnly, 2700, 3680, 20);
+        assert_eq!(d.tick(2850), Light);
+        play(&mut d, Which::FullOnly, 2850, 3830, 20);
         assert_eq!(d.shown(), Light);
-        assert_eq!(d.full_frame(3700), Full);
+        assert_eq!(d.full_frame(3850), Full);
     }
 
     #[test]
     fn a_gap_of_exactly_the_threshold_does_not_restart_the_window() {
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1200, 20);
+        play(&mut d, Which::LightOnly, 1020, 1400, 20);
         d.full_frame(2000);
-        d.full_frame(2150);
-        play(&mut d, Which::FullOnly, 2200, 2980, 20);
+        d.full_frame(2300);
+        play(&mut d, Which::FullOnly, 2320, 2980, 20);
         assert_eq!(d.full_frame(3000), Full);
     }
 
@@ -572,15 +602,140 @@ mod tests {
     #[test]
     fn goes_back_to_full_at_once_when_the_light_track_goes_away() {
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1200, 20);
+        play(&mut d, Which::LightOnly, 1020, 1400, 20);
         assert_eq!(d.shown(), Light);
-        assert_eq!(d.set_light_available(false, 1210), Full);
+        assert_eq!(d.set_light_available(false, 1410), Full);
         assert_eq!(d.counters().light_switches, 1);
         // A light track that comes back is not fresh until it presents a
         // frame.
-        assert_eq!(d.set_light_available(true, 1220), Full);
-        assert_eq!(d.light_frame(1230), Light);
+        assert_eq!(d.set_light_available(true, 1420), Full);
+        assert_eq!(d.light_frame(1430), Light);
         assert_eq!(d.counters().light_switches, 2);
+    }
+
+    // ----- a full track that delivers its frames in clumps ------------------
+
+    /// When the frames of a track arrive that delivers 28 a second on average
+    /// with three gaps of about 200 ms in every two seconds: the middle track
+    /// of a publisher on a congested uplink, as a viewer's receiver reported
+    /// it on a live call (`decoded=57 freezes=3 freeze_s=0.59` per 2 s).
+    /// 56 frames per 2000 ms: 52 intervals of 26 ms, three of 200 ms, and
+    /// one of 48 ms that closes the period.
+    fn clumped(from: u64, to: u64) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut t = from;
+        let mut i = 0u64;
+        while t <= to {
+            out.push(t);
+            let in_period = i % 56;
+            t += match in_period {
+                10 | 28 | 46 => 200,
+                55 => 48,
+                _ => 26,
+            };
+            i += 1;
+        }
+        out
+    }
+
+    /// Drive a tile over `[from, to]` the way a real one is driven: the full
+    /// track's frames at `full`, the light track's every 33 ms, and a tick
+    /// every [`LAYER_TICK_MS`]. Returns the time spent on each layer, in
+    /// milliseconds, sampled every millisecond.
+    fn drive(d: &mut LayerDisplay, full: &[u64], from: u64, to: u64) -> (u64, u64) {
+        let (mut on_full, mut on_light) = (0u64, 0u64);
+        let mut next_full = 0usize;
+        for t in from..=to {
+            while next_full < full.len() && full[next_full] <= t {
+                if full[next_full] == t {
+                    d.full_frame(t);
+                }
+                next_full += 1;
+            }
+            if (t - from) % 33 == 0 {
+                d.light_frame(t);
+            }
+            if (t - from) % LAYER_TICK_MS == 0 {
+                d.tick(t);
+            }
+            match d.shown() {
+                Full => on_full += 1,
+                Light => on_light += 1,
+            }
+        }
+        (on_full, on_light)
+    }
+
+    #[test]
+    fn the_clumped_pattern_is_the_one_measured() {
+        let frames = clumped(0, 1999);
+        assert_eq!(frames.len(), 56);
+        let gaps: Vec<u64> = frames.windows(2).map(|w| w[1] - w[0]).collect();
+        assert_eq!(gaps.iter().filter(|g| **g == 200).count(), 3);
+        assert!(gaps.iter().all(|g| *g == 200 || *g <= 48));
+        assert_eq!(clumped(0, 2000).last(), Some(&2000));
+    }
+
+    #[test]
+    fn a_full_track_that_arrives_in_clumps_stays_shown() {
+        let mut d = LayerDisplay::new(0, true);
+        let (on_full, on_light) = drive(&mut d, &clumped(0, 20_000), 0, 20_000);
+        assert_eq!(on_light, 0);
+        assert_eq!(on_full, 20_001);
+        assert_eq!(d.counters().light_switches, 0);
+        assert_eq!(d.counters().light_ms, 0);
+        // The gaps are what the viewer saw and are counted as that: three of
+        // 200 ms in every two seconds.
+        assert_eq!(d.counters().stall_max_ms, 200);
+        assert_eq!(d.counters().stall_total_ms, 30 * 200);
+    }
+
+    #[test]
+    fn a_tile_on_light_returns_to_a_full_track_that_arrives_in_clumps() {
+        // Both play, then the full track really stops for a second.
+        let mut d = LayerDisplay::new(0, true);
+        let steady: Vec<u64> = (0..=1000).step_by(20).collect();
+        drive(&mut d, &steady, 0, 1000);
+        assert_eq!(d.shown(), Full);
+        drive(&mut d, &[], 1001, 1999);
+        assert_eq!(d.shown(), Light);
+        // It comes back in clumps and keeps arriving that way.
+        let (on_full, on_light) = drive(&mut d, &clumped(2000, 12_000), 2000, 12_000);
+        // Shown again once it has played for the steady window, and it stays.
+        assert_eq!(on_light, FULL_STEADY_MS);
+        assert_eq!(on_full, 10_001 - FULL_STEADY_MS);
+        assert_eq!(d.shown(), Full);
+        assert_eq!(d.counters().light_switches, 1);
+    }
+
+    #[test]
+    fn a_full_track_that_really_stops_still_hands_over_to_light() {
+        let mut d = LayerDisplay::new(0, true);
+        drive(&mut d, &clumped(0, 4000), 0, 4000);
+        assert_eq!(d.shown(), Full);
+        // Nothing more on the full track; light plays on.
+        let (on_full, on_light) = drive(&mut d, &[], 4001, 6000);
+        assert_eq!(d.shown(), Light);
+        // Handed over by the first tick after the stop threshold has passed.
+        assert!(on_full <= FULL_STOPPED_MS + LAYER_TICK_MS, "{on_full}");
+        assert!(
+            on_light >= 2000 - FULL_STOPPED_MS - LAYER_TICK_MS,
+            "{on_light}"
+        );
+        assert_eq!(d.counters().light_switches, 1);
+    }
+
+    #[test]
+    fn a_full_track_whose_gaps_pass_the_stop_threshold_is_not_returned_to() {
+        // One frame every 400 ms is not a playing picture: the light copy
+        // stays.
+        let mut d = LayerDisplay::new(0, true);
+        let steady: Vec<u64> = (0..=1000).step_by(20).collect();
+        drive(&mut d, &steady, 0, 1000);
+        let slow: Vec<u64> = (1400..=9000).step_by(400).collect();
+        drive(&mut d, &slow, 1001, 9000);
+        assert_eq!(d.shown(), Light);
+        assert_eq!(d.counters().light_switches, 1);
     }
 
     // ----- before the full track's first frame -----------------------------
@@ -638,31 +793,34 @@ mod tests {
     #[test]
     fn counts_the_time_light_was_shown() {
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1140, 20);
-        assert_eq!(d.tick(1150), Light);
-        play(&mut d, Which::LightOnly, 1160, 1980, 20);
+        play(&mut d, Which::LightOnly, 1020, 1280, 20);
+        assert_eq!(d.tick(1300), Light);
+        play(&mut d, Which::LightOnly, 1320, 1980, 20);
         // Full back from 2000, shown again at 3000.
         play(&mut d, Which::Both, 2000, 3000, 20);
         assert_eq!(d.shown(), Full);
         d.tick(3500);
-        assert_eq!(d.counters().light_ms, 3000 - 1150);
+        assert_eq!(d.counters().light_ms, 3000 - 1300);
         assert_eq!(d.counters().light_switches, 1);
     }
 
     #[test]
     fn counts_a_stall_the_switch_cut_short_at_the_length_it_had() {
-        // First look after the full track stopped is at a gap of 180 ms.
+        // First look after the full track stopped is at a gap of 330 ms.
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1140, 20);
-        assert_eq!(d.tick(1180), Light);
-        assert_eq!(d.counters().stall_max_ms, 180);
-        assert_eq!(d.counters().stall_total_ms, 180);
-        // A look at exactly the threshold switches before any stall is
-        // counted.
+        play(&mut d, Which::LightOnly, 1020, 1280, 20);
+        assert_eq!(d.tick(1330), Light);
+        assert_eq!(d.counters().stall_max_ms, 330);
+        assert_eq!(d.counters().stall_total_ms, 330);
+        // With the tile's tick the stall is seen growing and is counted once,
+        // at the length it had when the switch cut it short.
         let mut e = playing();
-        play(&mut e, Which::LightOnly, 1020, 1140, 20);
-        assert_eq!(e.tick(1150), Light);
-        assert_eq!(e.counters().stall_total_ms, 0);
+        play(&mut e, Which::LightOnly, 1020, 1280, 20);
+        assert_eq!(e.tick(1200), Full);
+        assert_eq!(e.tick(1250), Full);
+        assert_eq!(e.tick(1300), Light);
+        assert_eq!(e.counters().stall_max_ms, 300);
+        assert_eq!(e.counters().stall_total_ms, 300);
     }
 
     #[test]
@@ -732,7 +890,7 @@ mod tests {
     #[test]
     fn never_lets_time_run_backwards() {
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1200, 20);
+        play(&mut d, Which::LightOnly, 1020, 1400, 20);
         assert_eq!(d.shown(), Light);
         let before = d.counters();
         d.tick(900);
@@ -746,7 +904,7 @@ mod tests {
     #[test]
     fn counts_nothing_for_the_hidden_time_and_starts_again_on_full() {
         let mut d = playing();
-        play(&mut d, Which::LightOnly, 1020, 1200, 20);
+        play(&mut d, Which::LightOnly, 1020, 1400, 20);
         assert_eq!(d.shown(), Light);
         let before = d.counters();
         assert_eq!(d.resync(60_000), Full);

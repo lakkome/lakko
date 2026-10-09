@@ -97,6 +97,16 @@ impl ReceiverRegister {
         new
     }
 
+    // LAKKO FORK: see `NackRegister::set_retry_interval`.
+    pub fn set_nack_retry_interval(&mut self, interval: Option<std::time::Duration>) {
+        self.nack.set_retry_interval(interval);
+    }
+
+    // LAKKO FORK: see `NackRegister::give_up_missing`.
+    pub fn give_up_missing(&mut self) -> usize {
+        self.nack.give_up_missing()
+    }
+
     /// Generates a NACK report
     // LAKKO FORK: takes the time (see `NackRegister::nack_reports`).
     pub fn nack_report(&mut self, now: Instant) -> Option<impl Iterator<Item = Nack>> {

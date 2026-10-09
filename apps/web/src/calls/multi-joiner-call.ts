@@ -93,6 +93,7 @@ import { accountIdHexOfBytes } from "../profile/profile-store";
 import { callTileName, EarlyRelays, profileClaimMatchesPeer } from "./tile-name";
 import { ENDED_FOR_ALL } from "./end-for-everyone";
 import { splitStreamId, withLightStream, withoutLightStream } from "./light-stream";
+import type { VideoQuality } from "./video-wants";
 
 /** A profile a member sealed into the call, as the profile store takes it. */
 export type AnnouncedProfile = IncomingProfile;
@@ -213,6 +214,18 @@ export class MultiJoinerCall {
    *  (`light-stream.ts`): a second picture of a peer already in
    *  `remoteStreams`, never a participant, a tile or an audio sink. */
   readonly remoteLightStreams: Accessor<ReadonlyMap<string, MediaStream>>;
+  private readonly setRemoteMiddleStreams: (
+    fn: (prev: ReadonlyMap<string, MediaStream>) => ReadonlyMap<string, MediaStream>,
+  ) => void;
+  /** Remote peer id -> that peer's middle stream (`light-stream.ts`,
+   *  ADR-0070 step 5): the picture a grid tile watches in place of the main
+   *  one. Never a participant, a tile or an audio sink. */
+  readonly remoteMiddleStreams: Accessor<ReadonlyMap<string, MediaStream>>;
+  /** Remote peer id -> the picture the SFU says it gives this device of them
+   *  (`video-given.ts`, ADR-0070 step 6). A peer absent from it is given
+   *  what is asked for; empty with downlink control off. */
+  readonly remoteVideoGiven: Accessor<ReadonlyMap<string, VideoQuality>>;
+  private readonly setRemoteVideoGiven: (given: ReadonlyMap<string, VideoQuality>) => void;
   /** Local capture stream once media is published (the self-preview tile). */
   readonly localStream: Accessor<MediaStream | null>;
   private readonly setLocalStream: (stream: MediaStream | null) => void;
@@ -307,6 +320,20 @@ export class MultiJoinerCall {
     this.setRemoteLightStreams = (fn): void => {
       setRemoteLightStreams(fn);
     };
+    const [remoteMiddleStreams, setRemoteMiddleStreams] = createSignal<
+      ReadonlyMap<string, MediaStream>
+    >(new Map());
+    this.remoteMiddleStreams = remoteMiddleStreams;
+    this.setRemoteMiddleStreams = (fn): void => {
+      setRemoteMiddleStreams(fn);
+    };
+    const [remoteVideoGiven, setRemoteVideoGiven] = createSignal<
+      ReadonlyMap<string, VideoQuality>
+    >(new Map());
+    this.remoteVideoGiven = remoteVideoGiven;
+    this.setRemoteVideoGiven = (given): void => {
+      setRemoteVideoGiven(given);
+    };
     const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
     this.localStream = localStream;
     this.setLocalStream = (stream): void => {
@@ -348,6 +375,9 @@ export class MultiJoinerCall {
           this.onSfuPeerJoined(peerId, pseudo, tag),
         onPeerLeft: (peerId): void => this.onSfuPeerLeft(peerId),
         onRemoteTrack: (rt): void => this.onRemoteTrack(rt),
+        // The SFU's `video-given` frames are read by the session this call
+        // wraps; here they only reach the tiles.
+        onVideoGiven: (given): void => this.setRemoteVideoGiven(given),
         onRemoteMediaState: (peerId, cameraOn): void => {
           // Media-state is authoritative — record it so a later (racy) track
           // arrival for a muted peer defers to it (the join-race guard in
@@ -555,6 +585,30 @@ export class MultiJoinerCall {
     return this.remoteLightStreams().get(peerId);
   }
 
+  /** Look up a roster participant id (`peer-<id>`) to its middle stream,
+   *  when its publisher sends one. */
+  remoteMiddleStreamFor(participantId: string): MediaStream | undefined {
+    const peerId = participantId.startsWith(PEER_PREFIX)
+      ? participantId.slice(PEER_PREFIX.length)
+      : participantId;
+    return this.remoteMiddleStreams().get(peerId);
+  }
+
+  /** Look up a roster participant id (`peer-<id>`) to the picture the SFU
+   *  says it gives of that person; `undefined` when it has not said. */
+  remoteVideoGivenFor(participantId: string): VideoQuality | undefined {
+    const peerId = participantId.startsWith(PEER_PREFIX)
+      ? participantId.slice(PEER_PREFIX.length)
+      : participantId;
+    return this.remoteVideoGiven().get(peerId);
+  }
+
+  /** A tile says which picture of a peer it shows, or `null` when it stops
+   *  (`video-wants.ts`); the session asks the SFU accordingly. */
+  reportTileVideoQuality(tile: object, peerId: string, quality: VideoQuality | null): void {
+    this.session.reportTileVideoQuality(tile, peerId, quality);
+  }
+
   /** Tear down the call. Idempotent. */
   hangUp(): void {
     this.clearAdmissionTimer();
@@ -564,6 +618,8 @@ export class MultiJoinerCall {
     this.session.hangUp();
     this.setRemoteStreams(() => new Map());
     this.setRemoteLightStreams(() => new Map());
+    this.setRemoteMiddleStreams(() => new Map());
+    this.setRemoteVideoGiven(new Map());
     this.setLocalStream(null);
     this.setVideoPublishState("off");
     callActions.reset();
@@ -709,8 +765,9 @@ export class MultiJoinerCall {
     this.peerUsernames.delete(peerId);
     this.peerPersons.delete(peerId);
     this.namingInputs.delete(peerId);
-    // The companion goes with its peer.
+    // The companion and the middle track go with their peer.
     this.setRemoteLightStreams((prev) => withoutLightStream(prev, peerId));
+    this.setRemoteMiddleStreams((prev) => withoutLightStream(prev, peerId));
     callActions.participantLeft(id);
     // Someone who leaves can come back: forget their admission (else the
     // G-22 dedup re-serves a Welcome a fresh page cannot open and they wait
@@ -752,15 +809,16 @@ export class MultiJoinerCall {
   }
 
   private onRemoteTrack(rt: SfuRemoteTrack): void {
-    // A light companion (`light-stream.ts`) goes into its own map and touches
-    // nothing else: no roster entry, no camera flag, no entry in
-    // `remoteStreams`. Mirrors `sfu-call-ui.ts` `addLightStream`.
+    // A light companion or a middle track (`light-stream.ts`) goes into its
+    // own map and touches nothing else: no roster entry, no camera flag, no
+    // entry in `remoteStreams`. Mirrors `sfu-call-ui.ts` `addCopyStream`.
     const id = splitStreamId(rt.streamId);
-    if (id.light) {
+    if (id.role !== "main") {
       if (rt.track.kind !== "video") return;
-      this.setRemoteLightStreams((prev) => withLightStream(prev, id.peerId, rt.stream));
+      const set = id.role === "light" ? this.setRemoteLightStreams : this.setRemoteMiddleStreams;
+      set((prev) => withLightStream(prev, id.peerId, rt.stream));
       rt.track.addEventListener("ended", () => {
-        this.setRemoteLightStreams((prev) => withoutLightStream(prev, id.peerId, rt.stream));
+        set((prev) => withoutLightStream(prev, id.peerId, rt.stream));
       });
       return;
     }

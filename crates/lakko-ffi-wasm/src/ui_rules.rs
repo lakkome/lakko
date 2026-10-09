@@ -18,8 +18,10 @@ use lakko_ui_rules::call_bar::{
 };
 use lakko_ui_rules::call_group::{
     call_grid as rust_call_grid, call_stage as rust_call_stage,
-    ringback_plays as rust_ringback_plays, CallGrid as RustCallGrid,
-    StageCandidate as RustStageCandidate,
+    middle_sender_wanted as rust_middle_sender_wanted, ringback_plays as rust_ringback_plays,
+    tile_video_quality as rust_tile_video_quality, CallGrid as RustCallGrid,
+    StageCandidate as RustStageCandidate, TileVideoQuality as RustTileVideoQuality,
+    LIGHT_MAX_WIDTH_PX, MAIN_MIN_WIDTH_PX, MIDDLE_SENDER_MIN_PEOPLE,
 };
 use lakko_ui_rules::capture::call_holds_capture as rust_call_holds_capture;
 use lakko_ui_rules::conversation::{
@@ -943,6 +945,94 @@ pub fn call_stage(flags: &[u8], last_spoke_at_ms: &[f64], pinned: Option<u32>) -
     rust_call_stage(&people, pinned).and_then(|index| u32::try_from(index).ok())
 }
 
+/// Which of a person's video tracks a call tile asks the call server for
+/// (`docs/ux/group-call-grid.md` section 7.6, ADR-0070 step 5). The light
+/// track always arrives beside it.
+#[wasm_bindgen(js_name = TileVideoQuality)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TileVideoQuality {
+    /// The main track: the full picture.
+    Main = 0,
+    /// The middle track: the camera at half size.
+    Middle = 1,
+    /// The light track alone.
+    Light = 2,
+}
+
+impl From<RustTileVideoQuality> for TileVideoQuality {
+    fn from(quality: RustTileVideoQuality) -> Self {
+        match quality {
+            RustTileVideoQuality::Main => Self::Main,
+            RustTileVideoQuality::Middle => Self::Middle,
+            RustTileVideoQuality::Light => Self::Light,
+        }
+    }
+}
+
+/// Which track a tile asks for. `people` is everyone in the call, this
+/// device's own person included; `tile_width_px` is the width the tile is
+/// drawn at in **physical** pixels (CSS pixels times `devicePixelRatio`);
+/// `pinned_or_stage` says the tile is the pinned person or the stage.
+///
+/// A call of two: `Main`. A pinned or stage tile at least
+/// {@link tileMainMinWidthPx} wide: `Main`. Otherwise a tile narrower than
+/// {@link tileLightMaxWidthPx}: `Light`. Otherwise: `Middle`.
+#[wasm_bindgen(js_name = tileVideoQuality)]
+#[must_use]
+pub fn tile_video_quality(
+    people: u32,
+    tile_width_px: u32,
+    pinned_or_stage: bool,
+) -> TileVideoQuality {
+    rust_tile_video_quality(people, tile_width_px, pinned_or_stage).into()
+}
+
+/// The name a `TileVideoQuality` has in the SFU's `video-wants` frame:
+/// `main`, `middle` or `light` (what `composeSfuVideoWants` takes).
+#[wasm_bindgen(js_name = tileVideoQualityName)]
+#[must_use]
+pub fn tile_video_quality_name(quality: TileVideoQuality) -> String {
+    match quality {
+        TileVideoQuality::Main => "main",
+        TileVideoQuality::Middle => "middle",
+        TileVideoQuality::Light => "light",
+    }
+    .to_owned()
+}
+
+/// Whether this device sends the middle copy of its camera: only from
+/// {@link middleSenderMinPeople} people in the call on (its own person
+/// included).
+#[wasm_bindgen(js_name = middleSenderWanted)]
+#[must_use]
+pub fn middle_sender_wanted(people: u32) -> bool {
+    rust_middle_sender_wanted(people)
+}
+
+/// A pinned or stage tile at least this wide, in physical pixels, asks for
+/// the main track. Chosen, not measured.
+#[wasm_bindgen(js_name = tileMainMinWidthPx)]
+#[must_use]
+pub fn tile_main_min_width_px() -> u32 {
+    MAIN_MIN_WIDTH_PX
+}
+
+/// A tile narrower than this, in physical pixels, asks for the light track
+/// alone. Chosen, not measured.
+#[wasm_bindgen(js_name = tileLightMaxWidthPx)]
+#[must_use]
+pub fn tile_light_max_width_px() -> u32 {
+    LIGHT_MAX_WIDTH_PX
+}
+
+/// A person sends the middle copy of their camera from this many people in
+/// the call on. Chosen.
+#[wasm_bindgen(js_name = middleSenderMinPeople)]
+#[must_use]
+pub fn middle_sender_min_people() -> u32 {
+    MIDDLE_SENDER_MIN_PEOPLE
+}
+
 /// Which of a remote person's two video tracks a call tile shows
 /// (`docs/ux/group-call-grid.md` section 7.5).
 #[wasm_bindgen(js_name = ShownLayer)]
@@ -1123,6 +1213,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_tile_video_rule_crosses_the_boundary_intact() {
+        assert_eq!(
+            (
+                tile_main_min_width_px(),
+                tile_light_max_width_px(),
+                middle_sender_min_people()
+            ),
+            (960, 240, 3)
+        );
+        assert_eq!(tile_video_quality(2, 100, false), TileVideoQuality::Main);
+        assert_eq!(tile_video_quality(3, 960, true), TileVideoQuality::Main);
+        assert_eq!(tile_video_quality(3, 959, true), TileVideoQuality::Middle);
+        assert_eq!(tile_video_quality(3, 2000, false), TileVideoQuality::Middle);
+        assert_eq!(tile_video_quality(3, 240, false), TileVideoQuality::Middle);
+        assert_eq!(tile_video_quality(3, 239, false), TileVideoQuality::Light);
+        assert_eq!(tile_video_quality(3, 239, true), TileVideoQuality::Light);
+        assert!(!middle_sender_wanted(2));
+        assert!(middle_sender_wanted(3));
+        // The names are the SFU frame's own.
+        for quality in [
+            TileVideoQuality::Main,
+            TileVideoQuality::Middle,
+            TileVideoQuality::Light,
+        ] {
+            assert!(
+                lakko_sfu_proto::VideoQuality::from_wire(&tile_video_quality_name(quality))
+                    .is_some()
+            );
+        }
+        assert_eq!(tile_video_quality_name(TileVideoQuality::Middle), "middle");
+    }
+
+    #[test]
     fn the_layer_display_crosses_the_boundary_intact() {
         assert_eq!(
             (
@@ -1139,17 +1262,18 @@ mod tests {
             assert_eq!(d.full_frame(f64::from(t)), ShownLayer::Full);
             assert_eq!(d.light_frame(f64::from(t)), ShownLayer::Full);
         }
-        for t in (1020..=1140).step_by(20) {
+        for t in (1020..=1280).step_by(20) {
             d.light_frame(f64::from(t));
         }
-        // Fractions of a millisecond are dropped: 1149.9 is 1149.
-        assert_eq!(d.tick(1149.9), ShownLayer::Full);
-        assert_eq!(d.tick(1180.5), ShownLayer::Light);
+        // Fractions of a millisecond are dropped: 1299.9 is 1299, one short
+        // of the 300 ms without a full frame at which the tile hands over.
+        assert_eq!(d.tick(1299.9), ShownLayer::Full);
+        assert_eq!(d.tick(1330.5), ShownLayer::Light);
         assert_eq!(d.shown(), ShownLayer::Light);
-        assert_eq!(d.counters(), vec![1.0, 0.0, 180.0, 180.0]);
-        assert_eq!(d.drain(), vec![1.0, 0.0, 180.0, 180.0]);
+        assert_eq!(d.counters(), vec![1.0, 0.0, 330.0, 330.0]);
+        assert_eq!(d.drain(), vec![1.0, 0.0, 330.0, 330.0]);
         assert_eq!(d.drain(), vec![0.0; 4]);
-        assert_eq!(d.set_light_available(false, 1200.0), ShownLayer::Full);
+        assert_eq!(d.set_light_available(false, 1350.0), ShownLayer::Full);
         // Nothing a browser can hand over moves the clock backwards or
         // panics.
         for odd in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -5.0, 1e300] {

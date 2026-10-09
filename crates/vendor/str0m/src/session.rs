@@ -25,7 +25,7 @@ use crate::rtp_::SeqNo;
 use crate::rtp_::{Bitrate, ExtensionMap, Mid, Rtcp, RtcpFb};
 use crate::rtp_::{RtpHeader, SessionId, TwccPacketId, extend_u16};
 use crate::rtp_::{SrtpContext, Ssrc};
-use crate::rtp_::{TwccRecvRegister, TwccSendRegister};
+use crate::rtp_::{TwccRecvRegister, TwccSendRecord, TwccSendRegister};
 use crate::stats::StatsSnapshot;
 use crate::streams::{RtpPacket, Streams};
 use crate::util::{Soonest, already_happened, not_happening};
@@ -127,6 +127,19 @@ pub(crate) struct Session {
     // by `DirectApi::take_sent_rtp`.
     pub(crate) sent_rtp: VecDeque<Vec<u8>>,
 
+    // LAKKO FORK: negotiate transport-wide congestion control only on the
+    // media lines this side offered (see
+    // `DirectApi::set_twcc_on_local_media_only`).
+    pub(crate) twcc_on_local_media_only: bool,
+
+    // LAKKO FORK: what the receiver's transport-wide feedback said of each
+    // packet sent, kept for the caller when asked for (see
+    // `DirectApi::keep_twcc_feedback`): when it was sent, its size, and
+    // when the receiver says it arrived (`None`: reported as not
+    // received). Oldest first, at most `MAX_TWCC_FEEDBACK_KEPT`.
+    pub(crate) keep_twcc_feedback: bool,
+    pub(crate) twcc_feedback: VecDeque<(Instant, usize, Option<Instant>)>,
+
     #[cfg(feature = "_internal_test_exports")]
     pending_probe: Option<crate::bwe_::ProbeClusterConfig>,
 }
@@ -192,6 +205,9 @@ impl Session {
                 None
             },
             // LAKKO FORK: off unless asked for through the direct API.
+            twcc_on_local_media_only: false,
+            keep_twcc_feedback: false,
+            twcc_feedback: VecDeque::new(),
             keep_received_rtp: false,
             pending_packet_received: None,
             // LAKKO FORK: empty until a send stream asks for it.
@@ -685,6 +701,22 @@ impl Session {
                 trace!("Handle TWCC: {:?}", twcc);
                 let maybe_records = self.twcc_tx_register.apply_report(twcc, now);
 
+                // LAKKO FORK: hand the records of this report to the caller
+                // too, when it asked for them. A caller that never takes
+                // them loses the oldest.
+                let maybe_records = maybe_records.map(|records| {
+                    let records: Vec<&TwccSendRecord> = records.collect();
+                    if self.keep_twcc_feedback {
+                        for r in &records {
+                            keep_twcc_record(
+                                &mut self.twcc_feedback,
+                                (r.local_send_time(), r.size(), r.remote_recv_time()),
+                            );
+                        }
+                    }
+                    records.into_iter()
+                });
+
                 if let (Some(maybe_records), Some(bwe)) = (maybe_records, &mut self.bwe) {
                     bwe.update(maybe_records, now);
                 }
@@ -1009,7 +1041,16 @@ impl Session {
             return None;
         }
 
-        Some(self.last_nack + NACK_MIN_INTERVAL)
+        // LAKKO FORK: a stream with its own, shorter retry interval
+        // (`StreamRx::set_nack_retry_interval`) makes the whole session
+        // build NACKs that often, or its requests would go out on the
+        // 33 ms tick whatever its interval.
+        let interval = self
+            .streams
+            .min_nack_retry_interval()
+            .map_or(NACK_MIN_INTERVAL, |i| i.min(NACK_MIN_INTERVAL));
+
+        Some(self.last_nack + interval)
     }
 
     fn twcc_at(&self) -> Option<Instant> {
@@ -1193,6 +1234,22 @@ pub struct PacketReceipt {
 // `DirectApi::take_sent_rtp` before the oldest is dropped.
 const MAX_SENT_RTP_KEPT: usize = 1024;
 
+// LAKKO FORK: most transport-wide feedback records held for the caller
+// (`DirectApi::take_twcc_feedback`); the oldest is dropped beyond it.
+const MAX_TWCC_FEEDBACK_KEPT: usize = 8192;
+
+// LAKKO FORK: one transport-wide feedback record for the caller; the
+// oldest is dropped beyond the bound.
+fn keep_twcc_record(
+    kept: &mut VecDeque<(Instant, usize, Option<Instant>)>,
+    record: (Instant, usize, Option<Instant>),
+) {
+    if kept.len() >= MAX_TWCC_FEEDBACK_KEPT {
+        kept.pop_front();
+    }
+    kept.push_back(record);
+}
+
 /// Find the PayloadParams for the given Pt, either when the Pt is the main Pt for the Codec or
 /// when it's the RTX Pt.
 fn main_payload_params(c: &CodecConfig, pt: Pt) -> Option<&PayloadParams> {
@@ -1207,5 +1264,30 @@ fn update_max_seq(map: &mut HashMap<Ssrc, SeqNo>, ssrc: Ssrc, seq_no: SeqNo) {
     let current = map.entry(ssrc).or_insert(seq_no);
     if seq_no > *current {
         *current = seq_no;
+    }
+}
+
+// LAKKO FORK: the transport-wide feedback records kept for the caller.
+#[cfg(test)]
+mod lakko_twcc_feedback_test {
+    use super::*;
+
+    #[test]
+    fn nothing_is_kept_unless_asked_for_and_the_oldest_record_goes_first() {
+        let now = Instant::now();
+        let mut session = Session::new(&RtcConfig::default());
+        assert!(!session.keep_twcc_feedback, "off by default");
+        assert!(session.twcc_feedback.is_empty());
+
+        for i in 0..MAX_TWCC_FEEDBACK_KEPT + 3 {
+            let received = (i % 2 == 0).then_some(now);
+            keep_twcc_record(&mut session.twcc_feedback, (now, i, received));
+        }
+        assert_eq!(session.twcc_feedback.len(), MAX_TWCC_FEEDBACK_KEPT);
+        assert_eq!(session.twcc_feedback.front(), Some(&(now, 3, None)));
+        assert_eq!(
+            session.twcc_feedback.back(),
+            Some(&(now, MAX_TWCC_FEEDBACK_KEPT + 2, Some(now)))
+        );
     }
 }

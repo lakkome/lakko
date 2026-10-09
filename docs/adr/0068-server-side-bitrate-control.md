@@ -171,3 +171,70 @@ over-use, and then stays within 300-650 kbit/s. Not yet seen on a call.
 - A wrong estimate is Lakko's fault and Lakko's to fix.
 - Invariants #2 and C-39 hold: the estimator reads header fields, sizes and
   arrival times, never a payload.
+
+## Amendment, 2026-10-07: a cut for over-use needs a standing queue
+
+Seen on live calls on the test stack: a publisher on a mobile network was
+cut for over-use again and again with no loss (503, 191, 53 kbit/s in
+fifteen seconds; in an earlier call 2.7 Mbit/s had arrived from the same
+network before the estimate was walked down to 73 to 200 kbit/s for
+minutes). The browser sends 320x180 at such an estimate, so that person
+is a blur for everyone. The round-trip time stood at 40 to 96 ms except
+in the two intervals of the deepest cuts (388 and 202 ms); the log had no
+line for the queue at a cut.
+
+Cause, in the rule this ADR took from libwebrtc: the delay detector reads
+a trend, a mobile uplink's delay moves by tens of milliseconds with the
+radio's scheduling, and a cut is to 0.85 of what is arriving. The
+publisher obeys, less arrives, and the next cut is taken from that. In
+the estimator's model a path with such jitter, no limit and no loss was
+cut 34 times in a minute, to 326 kbit/s from 2 Mbit/s.
+
+Decided:
+
+- A cut for over-use is made only when a queue stands on the path: the
+  smallest delay (arrival less abs-send-time) of the last 200 ms at least
+  25 ms above the smallest of the last 15 to 30 s, for 300 ms. The
+  detector's word without that is doubted and counted, and the cut is
+  made if the queue goes on standing. A queue 75 ms deep that has stood
+  300 ms is cut on without the detector.
+- After a cut the queue has to stand as long again before the next, so a
+  cut is never anchored to the rate the previous one imposed unless the
+  path is still congested at it.
+- Unchanged: the way back (to the estimate before an episode at four
+  times a second; slowly on a path cut again within ten seconds), and
+  the loss rules (a burst changes nothing, lasting loss steps down). No
+  floor.
+- The queue watch is shared with the downlink estimate of ADR-0070 step 6
+  (`uplink_estimate::QueueWatch`), where the same rule was first needed.
+- Every cut is logged with its rule, the queue, the trend and the
+  arriving rate.
+
+All constants chosen, not measured. In the model: the jitter above cuts
+nothing in a minute; a path narrowed from 2 Mbit/s to 800 kbit/s is at or
+under 800 within 3 s and back at 2 Mbit/s within 15 s of widening. Not
+known until the next call: whether a real mobile uplink shows queues of
+25 ms that are not congestion.
+
+### The same day, after the next call
+
+The rule held a mobile publisher at 1.8 to 2.8 Mbit/s while it was alone
+on its link. Two defects showed and are fixed:
+
+- 21 of 51 cuts were logged with no queue reading. A cut re-armed the
+  wait by pretending a queue had begun to stand, and a reading of "too
+  few packets" left an old one in place. The decision now reads the
+  queue when it is made: 25 ms or more at that moment, standing 300 ms,
+  300 ms since the last cut; without a reading nothing is cut.
+- The publisher then sat at 291 kbit/s for minutes with a queue of
+  8 ms: its detector alternated between over-use and under-use about
+  twice a second, and either state stops the rise in libwebrtc's rule.
+  Decided: **the queue reading decides, the detector only asks for
+  cuts.** With no queue standing the estimate rises whatever the
+  detector says; while one stands nothing rises.
+
+Two publishers behind one bottleneck each keep their own estimate and
+are each cut to 0.85 of their own arriving rate; nothing divides the
+path between them. Not built. The log of that call does not show the
+Firefox publisher ignoring REMB (what arrived followed its estimate
+within about a quarter).

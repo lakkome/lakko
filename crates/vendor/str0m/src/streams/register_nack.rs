@@ -34,8 +34,17 @@ const MAX_NACKS: u8 = 25;
 /// tick, so 60 ms means every second tick: about 66 ms between requests and
 /// about 1.6 s from the first to the last. Chosen, not measured.
 fn retry_interval(_attempts: u8) -> Duration {
-    Duration::from_millis(60)
+    DEFAULT_RETRY_INTERVAL
 }
+
+/// LAKKO FORK: the default of the above, and the interval `MAX_NACKS` is
+/// counted against.
+const DEFAULT_RETRY_INTERVAL: Duration = Duration::from_millis(60);
+
+/// LAKKO FORK: the shortest per-stream retry interval that can be set
+/// (`NackRegister::set_retry_interval`). Below this the request count that
+/// keeps the overall span would not fit the per-packet counter.
+pub(crate) const MIN_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Circular buffer size
 const BUFFER_SIZE: u64 = MAX_MISORDER + 1;
@@ -47,6 +56,10 @@ pub struct NackRegister {
 
     /// Range of seq numbers considered NACK reporting.
     active: Option<Range<SeqNo>>,
+
+    // LAKKO FORK: a per-stream retry interval. `None` is the schedule above
+    // (`retry_interval`, `MAX_NACKS`), unchanged.
+    retry: Option<Duration>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -58,12 +71,19 @@ struct PacketStatus {
 }
 
 impl PacketStatus {
-    fn needs_nack(&self, now: Instant) -> bool {
+    // LAKKO FORK: `retry` is the stream's own retry interval, if it has one.
+    // The number of requests then grows as the interval shrinks, so a packet
+    // is asked for over the same span of time either way.
+    fn needs_nack(&self, now: Instant, retry: Option<Duration>) -> bool {
+        let (interval, max_nacks) = match retry {
+            None => (retry_interval(self.nack_count), MAX_NACKS),
+            Some(interval) => (interval, max_nacks_for(interval)),
+        };
         !self.received
-            && self.nack_count < MAX_NACKS
-            && self.last_nack.map_or(true, |at| {
-                now.saturating_duration_since(at) >= retry_interval(self.nack_count)
-            })
+            && self.nack_count < max_nacks
+            && self
+                .last_nack
+                .map_or(true, |at| now.saturating_duration_since(at) >= interval)
     }
 
     // LAKKO FORK: record one request sent at `now`.
@@ -85,6 +105,15 @@ impl PacketStatus {
     }
 }
 
+/// LAKKO FORK: how many times a packet is asked for at a per-stream retry
+/// interval: as many as cover the span `MAX_NACKS` requests cover at the
+/// default interval, at least one, at most what the counter holds.
+fn max_nacks_for(interval: Duration) -> u8 {
+    let span = DEFAULT_RETRY_INTERVAL.as_micros() * MAX_NACKS as u128;
+    let interval = interval.max(MIN_RETRY_INTERVAL).as_micros();
+    (span / interval).clamp(1, u8::MAX as u128) as u8
+}
+
 struct NackIterator<'a> {
     reg: &'a mut NackRegister,
     next: u64,
@@ -97,8 +126,9 @@ impl<'a> Iterator for NackIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let now = self.now;
-        self.next =
-            (self.next..=self.end).find(|s| self.reg.packet_mut((*s).into()).needs_nack(now))?;
+        let retry = self.reg.retry;
+        self.next = (self.next..=self.end)
+            .find(|s| self.reg.packet_mut((*s).into()).needs_nack(now, retry))?;
 
         let mut entry = NackEntry {
             pid: self.next as u16,
@@ -110,7 +140,7 @@ impl<'a> Iterator for NackIterator<'a> {
 
         for (i, s) in (self.next..self.end).take(16).enumerate() {
             let packet = self.reg.packet_mut(s.into());
-            if packet.needs_nack(now) {
+            if packet.needs_nack(now, retry) {
                 self.reg.packet_mut(self.next.into()).mark_nacked(now);
                 entry.blp |= 1 << i
             }
@@ -129,6 +159,7 @@ impl NackRegister {
         let mut n = NackRegister {
             packets: vec![PacketStatus::default(); BUFFER_SIZE as usize],
             active: None,
+            retry: None,
         };
 
         if let Some(seq) = max_seq_no {
@@ -136,6 +167,32 @@ impl NackRegister {
         }
 
         n
+    }
+
+    // LAKKO FORK: ask for a missing packet of this stream every `interval`
+    // instead of on the default schedule; `None` goes back to the default.
+    // Clamped to `MIN_RETRY_INTERVAL` at least.
+    pub fn set_retry_interval(&mut self, interval: Option<Duration>) {
+        self.retry = interval.map(|i| i.max(MIN_RETRY_INTERVAL));
+    }
+
+    // LAKKO FORK: stop asking for every packet that is missing right now.
+    // The packets stay missing (one that still arrives is taken as new);
+    // only the requests end. A packet that goes missing later is asked for
+    // as usual. Returns how many packets were given up.
+    pub fn give_up_missing(&mut self) -> usize {
+        let Some(Range { start, end }) = self.active.clone() else {
+            return 0;
+        };
+        let mut given_up = 0;
+        for seq in *start..=*end {
+            let p = self.packet_mut(seq.into());
+            if !p.received && p.nack_count != u8::MAX {
+                p.nack_count = u8::MAX;
+                given_up += 1;
+            }
+        }
+        given_up
     }
 
     pub fn accepts(&self, seq: SeqNo) -> bool {
@@ -218,7 +275,9 @@ impl NackRegister {
     // LAKKO FORK: takes the time, so repeat requests follow `retry_interval`.
     pub fn nack_reports(&mut self, now: Instant) -> Option<impl Iterator<Item = Nack>> {
         let Range { start, end } = self.active.clone()?;
-        let start = (*start..=*end).find(|s| self.packet_mut((*s).into()).needs_nack(now))?;
+        let retry = self.retry;
+        let start =
+            (*start..=*end).find(|s| self.packet_mut((*s).into()).needs_nack(now, retry))?;
 
         Some(
             ReportList::lists_from_iter(NackIterator {
@@ -722,6 +781,82 @@ mod test {
         }
         let active = reg.active.clone().expect("nack range");
         assert_eq!(*active.start, 1001, "the hole at 1001 is still tracked");
+    }
+
+    // LAKKO FORK: packets given up are not asked for again, on either
+    // schedule; one that arrives after all is taken; a packet that goes
+    // missing afterwards is asked for as usual.
+    #[test]
+    fn lakko_given_up_packets_are_not_asked_for_again() {
+        for retry in [None, Some(Duration::from_millis(20))] {
+            let t0 = Instant::now();
+            let mut reg = NackRegister::new(None);
+            reg.set_retry_interval(retry);
+            assert_eq!(reg.give_up_missing(), 0, "nothing received yet");
+            reg.update(100.into());
+            reg.update(104.into());
+            assert!(reg.nack_reports(t0).is_some());
+            assert_eq!(reg.give_up_missing(), 3);
+            assert_eq!(reg.give_up_missing(), 0, "each packet is given up once");
+            for step in 1..40u64 {
+                let now = t0 + Duration::from_millis(100 * step);
+                assert!(reg.nack_reports(now).is_none(), "asked at step {step}");
+            }
+            // A packet that was given up and arrives after all is new.
+            assert!(reg.accepts(102.into()));
+            assert!(reg.update(102.into()));
+            assert!(!reg.update(102.into()));
+            // A packet that goes missing later is asked for.
+            let later = t0 + Duration::from_secs(5);
+            reg.update(107.into());
+            let nacks: Vec<crate::rtp_::Nack> = reg.nack_reports(later).expect("asked").collect();
+            assert_eq!(nacks.len(), 1);
+            let entries: Vec<u16> = nacks[0].reports.iter().map(|e| e.pid).collect();
+            assert_eq!(entries, vec![105], "105 and 106, and none of the old ones");
+            assert_eq!(nacks[0].reports.iter().next().map(|e| e.blp), Some(1));
+        }
+    }
+
+    // LAKKO FORK: a stream given its own retry interval is asked on it, for
+    // as long as the default schedule asks, and a stream without one keeps
+    // the default schedule.
+    #[test]
+    fn lakko_a_stream_can_be_asked_at_its_own_interval() {
+        let run = |retry: Option<Duration>| -> Vec<u64> {
+            let mut reg = NackRegister::new(None);
+            reg.set_retry_interval(retry);
+            reg.update(100.into());
+            reg.update(102.into());
+            let t0 = Instant::now();
+            let mut sent = Vec::new();
+            // A session that offers a NACK every 10 ms.
+            for tick in 0..400u64 {
+                let now = t0 + Duration::from_millis(10 * tick);
+                if reg.nack_reports(now).map(|r| r.count()).unwrap_or(0) > 0 {
+                    sent.push(10 * tick);
+                }
+            }
+            sent
+        };
+        let fast = run(Some(Duration::from_millis(20)));
+        assert_eq!(fast.len(), 75, "1.5 s at 20 ms: {fast:?}");
+        assert!(fast.windows(2).all(|p| p[1] - p[0] == 20), "{fast:?}");
+        assert_eq!(*fast.last().expect("requests"), 1_480);
+
+        let default = run(None);
+        assert_eq!(default.len(), usize::from(MAX_NACKS));
+        assert!(default.windows(2).all(|p| p[1] - p[0] == 60), "{default:?}");
+
+        // Set and taken back: the default schedule again.
+        let mut reg = NackRegister::new(None);
+        reg.set_retry_interval(Some(Duration::from_millis(20)));
+        reg.set_retry_interval(None);
+        assert_eq!(reg.retry, None);
+        // Never below the floor.
+        reg.set_retry_interval(Some(Duration::from_millis(1)));
+        assert_eq!(reg.retry, Some(super::MIN_RETRY_INTERVAL));
+        assert_eq!(super::max_nacks_for(Duration::from_millis(1)), 150);
+        assert_eq!(super::max_nacks_for(Duration::from_secs(10)), 1);
     }
 
     #[test]

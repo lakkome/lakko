@@ -50,6 +50,10 @@ pub struct StreamRx {
     /// Defaults to false.
     suppress_nack: bool,
 
+    // LAKKO FORK: this stream's own NACK retry interval, if it was given
+    // one (`StreamRx::set_nack_retry_interval`).
+    nack_retry_interval: Option<Duration>,
+
     /// Timestamp when we got some indication of remote using this stream.
     last_used: Instant,
 
@@ -149,6 +153,7 @@ impl StreamRx {
             midrid,
             cname: None,
             suppress_nack,
+            nack_retry_interval: None,
             last_used: already_happened(),
             last_clock_rate: None,
             sender_info: None,
@@ -234,6 +239,39 @@ impl StreamRx {
     /// desirable to manually suppress NACK sending regardless of RTX setting.
     pub fn suppress_nack(&mut self, suppress: bool) {
         self.suppress_nack = suppress;
+    }
+
+    // LAKKO FORK: a per-stream NACK schedule (the SFU asks for a missing
+    // packet of a low-rate stream more often than for one of a full one).
+
+    /// Ask for a missing packet of this stream again every `interval`, for
+    /// as long as the default schedule asks; `None` restores the default
+    /// schedule. The interval is at least 10 ms. NACKs for the whole session
+    /// are then built at least that often.
+    pub fn set_nack_retry_interval(&mut self, interval: Option<Duration>) {
+        self.nack_retry_interval =
+            interval.map(|i| i.max(super::register_nack::MIN_RETRY_INTERVAL));
+    }
+
+    // LAKKO FORK: let go of what is missing (the SFU has asked the sender
+    // for a key frame instead, or nobody is being sent the stream).
+    /// Stop asking the remote side to retransmit the packets of this stream
+    /// that are missing right now. They stay missing, and one that still
+    /// arrives is delivered; a packet that goes missing later is asked for as
+    /// usual. Returns how many packets were given up.
+    pub fn give_up_missing(&mut self) -> usize {
+        self.register
+            .as_mut()
+            .map_or(0, ReceiverRegister::give_up_missing)
+    }
+
+    // LAKKO FORK: the interval above, for the session's NACK tick.
+    pub(crate) fn nack_retry_interval(&self) -> Option<Duration> {
+        if self.nack_enabled() {
+            self.nack_retry_interval
+        } else {
+            None
+        }
     }
 
     pub(crate) fn receiver_report_at(&self) -> Instant {
@@ -654,7 +692,13 @@ impl StreamRx {
             return None;
         }
 
-        let nacks = self.register.as_mut().and_then(|r| r.nack_report(now))?;
+        // LAKKO FORK: the register is created with the first packet and
+        // again after a reset, so the stream's interval is handed over here.
+        let retry = self.nack_retry_interval;
+        let nacks = self.register.as_mut().and_then(|r| {
+            r.set_nack_retry_interval(retry);
+            r.nack_report(now)
+        })?;
 
         for mut nack in nacks {
             nack.sender_ssrc = sender_ssrc;

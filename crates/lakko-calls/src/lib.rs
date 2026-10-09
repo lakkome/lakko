@@ -30,6 +30,10 @@
 //!     derivation via HKDF over the seed + sender leaf index.
 //!     Counter-based per-frame nonce composition matches
 //!     RFC 9605 §4.4.
+//!   * [`media_frame`] — ADR-0071. The sealed media frame layout
+//!     (`clear_prefix || ciphertext || sframe_header || trailer`):
+//!     the split, the trailer, the AAD, and the sender's clear-prefix
+//!     rule per codec.
 //!   * [`group_call`] — Phase 3c1. Multi-participant ledger
 //!     that owns the [`CallKey`] seed + tracks which leaves
 //!     are currently on the call (a subset of the MLS
@@ -54,6 +58,7 @@ pub mod error;
 pub mod group_call;
 pub mod header;
 pub mod link_invite;
+pub mod media_frame;
 pub mod quality;
 pub mod safety_number;
 pub mod session;
@@ -68,6 +73,10 @@ pub use error::{Error, Result};
 pub use group_call::{GroupCallScope, GroupCallSession, Participant, SignalingOutcome};
 pub use header::{HeaderError, SframeHeader, MAX_HEADER_LEN};
 pub use link_invite::{accept_call_invite, AcceptedCallInvite};
+pub use media_frame::{
+    clear_prefix_len, vp8_is_key_frame, MediaCodec, MediaFrameError, MediaFrameParts,
+    MAX_CLEAR_PREFIX_LEN, MEDIA_FRAME_VERSION,
+};
 pub use quality::{
     estimate_quality, recommend_bitrate, AudioCodec, QualityLevel, QualitySample, QualitySampler,
     QualityScore, DEFAULT_SAMPLE_WINDOW, MAX_SAMPLE_WINDOW, OPUS_MAX_BITRATE_BPS,

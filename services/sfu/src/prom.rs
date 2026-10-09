@@ -79,7 +79,10 @@ pub mod names {
     /// write; `wrong_layer` — a simulcast packet for a layer
     /// this subscriber is not receiving, dropped by design;
     /// `stale` — a packet older than a simulcast switch point,
-    /// whose downstream sequence number is already taken). A
+    /// whose downstream sequence number is already taken;
+    /// `not_wanted` — a packet of a main or middle track the
+    /// subscriber does not show, ADR-0070 step 5, dropped by
+    /// design). A
     /// spike in `no_writer` is the signal that subscribers are
     /// starved (renegotiation stuck), which is the
     /// fanout-fairness alarm; `wrong_layer` is expected traffic
@@ -126,6 +129,36 @@ pub mod names {
     /// simulcast.
     pub const LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL: &str =
         "lakko_sfu_media_light_companion_packets_forwarded_total";
+    /// Cumulative count of second copies of light companion packets sent
+    /// to subscribers (ADR-0070 step 3; `LAKKO_SFU_LIGHT_DUPLICATE`). Each
+    /// goes out as a retransmission nobody asked for, some tens of
+    /// milliseconds after the packet itself. Against
+    /// `LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL` it should be close to one
+    /// for one; far below means subscribers negotiated no RTX.
+    pub const LIGHT_DUPLICATES_SENT_TOTAL: &str = "lakko_sfu_media_light_duplicates_sent_total";
+    /// Cumulative count of times the minimum playout delay of a
+    /// (subscriber, publisher) pair was raised after a burst of loss on
+    /// the publisher's uplink or the subscriber's downlink (ADR-0070 step
+    /// 4; `LAKKO_SFU_PLAYOUT_DELAY`). A pair is raised at most once per
+    /// three minutes while bursts keep coming. See `crate::playout_delay`.
+    pub const PLAYOUT_DELAY_RAISES_TOTAL: &str = "lakko_sfu_playout_delay_raises_total";
+    /// Cumulative count of changes of what a subscriber is given of a
+    /// publisher's video under downlink control (ADR-0070 step 6;
+    /// `LAKKO_SFU_DOWNLINK_CONTROL`), one per (subscriber, publisher) per
+    /// change, labelled `direction`: `down` when a larger track was given
+    /// up (the subscriber's downlink is short, or it asked for less), `up`
+    /// when one was given back. See `crate::downlink_allocation`.
+    pub const DOWNLINK_GIVEN_CHANGES_TOTAL: &str = "lakko_sfu_downlink_given_changes_total";
+    /// Cumulative count of probes of subscribers' downlinks that ended
+    /// (ADR-0070 step 6), labelled `outcome`: `carried` (the path carried
+    /// the rate of the next larger set, which is then given), or why not
+    /// (`trouble`, `loss`, `short`, `no-feedback`, `disturbed`). See
+    /// `crate::downlink_probe`.
+    pub const DOWNLINK_PROBES_TOTAL: &str = "lakko_sfu_downlink_probes_total";
+    /// Cumulative bytes of padding sent for those probes: copies of
+    /// packets already sent, on retransmission streams.
+    pub const DOWNLINK_PROBE_PADDING_BYTES_TOTAL: &str =
+        "lakko_sfu_downlink_probe_padding_bytes_total";
 }
 
 /// Failures while installing the recorder. The exporter
@@ -236,6 +269,31 @@ impl MetricsExporter {
         metrics::describe_counter!(
             names::LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL,
             "RTP packets forwarded on light companion tracks of simulcast video"
+        );
+        // Described and not pre-initialised, like the counter above: they
+        // appear with the first light companion packet sent twice and the
+        // first playout delay raised.
+        metrics::describe_counter!(
+            names::LIGHT_DUPLICATES_SENT_TOTAL,
+            "Second copies of light companion packets sent to subscribers"
+        );
+        metrics::describe_counter!(
+            names::PLAYOUT_DELAY_RAISES_TOTAL,
+            "Times a subscriber's minimum playout delay for a publisher was raised after a burst"
+        );
+        // Described and not pre-initialised: labelled, and only under
+        // downlink control.
+        metrics::describe_counter!(
+            names::DOWNLINK_GIVEN_CHANGES_TOTAL,
+            "Changes of what a subscriber is given of a publisher's video under downlink control"
+        );
+        metrics::describe_counter!(
+            names::DOWNLINK_PROBES_TOTAL,
+            "Probes of subscribers' downlinks that ended, by outcome"
+        );
+        metrics::describe_counter!(
+            names::DOWNLINK_PROBE_PADDING_BYTES_TOTAL,
+            "Bytes of padding sent for probes of subscribers' downlinks"
         );
         // Initialise each counter / gauge so it ships a zero
         // sample at the first scrape.

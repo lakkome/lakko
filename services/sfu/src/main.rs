@@ -28,6 +28,7 @@ use lakko_svc_sfu::{
 };
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     dotenv_in_debug();
@@ -78,6 +79,8 @@ async fn main() -> anyhow::Result<()> {
                 diagnostics: cfg.media_diagnostics,
                 video_fec: cfg.video_fec,
                 uplink_fallback: cfg.uplink_fallback,
+                protection: cfg.protection,
+                downlink_control: cfg.downlink_control,
             },
             cfg.bitrate_control,
         )
@@ -101,6 +104,10 @@ async fn main() -> anyhow::Result<()> {
             media_diagnostics = ?cfg.media_diagnostics,
             video_fec = cfg.video_fec,
             uplink_fallback = cfg.uplink_fallback,
+            light_duplicate = cfg.protection.light_duplicate,
+            playout_delay = cfg.protection.playout_delay,
+            burst_keyframe = cfg.protection.burst_keyframe,
+            downlink_control = cfg.downlink_control,
             "media: UDP socket bound; routing task spawned; ICE host candidate advertised"
         );
         Some(handle)

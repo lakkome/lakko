@@ -15,14 +15,14 @@
  * owns `getStats()` and the timer.
  */
 
-import type { LayerDisplayCounters } from "./layer-display";
+import type { LayerDisplayCounters, TileFrameCounts } from "./layer-display";
 
 /**
- * Which of a remote camera's two tracks a video receiver carries: the `main`
- * one or the `light` companion (`light-stream.ts`). `-` when the browser's
- * report does not say which track the receiver belongs to.
+ * Which of a remote camera's tracks a video receiver carries: the `main` one,
+ * the `middle` one or the `light` companion (`light-stream.ts`). `-` when the
+ * browser's report does not say which track the receiver belongs to.
  */
-export type ReceiverLayer = "main" | "light" | "-";
+export type ReceiverLayer = "main" | "middle" | "light" | "-";
 
 /** One remote stream's cumulative receiver counters. */
 export interface InboundCounters {
@@ -43,12 +43,17 @@ export interface InboundCounters {
   readonly totalSamplesReceived: number;
 }
 
-/** What this device's own camera sender reports for one simulcast layer
- *  (or for the whole camera when it is sent as one encoding). */
+/**
+ * Which of this device's camera senders an outbound stream belongs to
+ * (ADR-0070 steps 1 and 5): the `main` one, the `middle` one or the `light`
+ * one.
+ */
+export type CameraSenderName = "main" | "middle" | "light";
+
+/** What one of this device's own camera senders reports. */
 export interface OutboundVideo {
-  /** The layer's RTP stream id (`q`, `f`); `null` when the camera is sent as
-   *  one encoding. */
-  readonly rid: string | null;
+  /** Which sender: the main camera, its middle copy or its light copy. */
+  readonly sender: CameraSenderName;
   readonly scalabilityMode: string | null;
   readonly qualityLimitationReason: string | null;
   readonly frameWidth: number | null;
@@ -62,10 +67,11 @@ export interface MediaReading {
   /** Keyed by the stats id of the `inbound-rtp` entry, which stays the same
    *  for a stream across readings. */
   readonly inbound: ReadonlyMap<string, InboundCounters>;
-  /** The camera sender's first layer, or `null` with no camera. */
+  /** The main camera sender, or `null` with no camera. */
   readonly outboundVideo: OutboundVideo | null;
-  /** Every layer the camera sender reports, in the report's order. */
-  readonly outboundVideoLayers: readonly OutboundVideo[];
+  /** Every camera sender that reports: the main one first, then the middle
+   *  one, then the light one. */
+  readonly outboundVideoSenders: readonly OutboundVideo[];
 }
 
 /** The parts of an `RTCStatsReport` entry this module reads. */
@@ -90,13 +96,23 @@ function strOrNull(entry: StatsEntry, key: string): string | null {
  * Reduce a stats report (as its entries) to a reading. `lightTrackIds` holds
  * the ids of the remote tracks that are light companions; a video receiver
  * whose `trackIdentifier` is among them is `light`, any other is `main`.
+ * `lightOutboundIds` holds the stats ids of the `outbound-rtp` entries of
+ * this device's light camera sender (read from that sender's own
+ * `getStats()`, which every engine scopes to the sender); a video
+ * `outbound-rtp` entry whose id is among them is the `light` sender, any
+ * other the `main` one. `middleTrackIds` and `middleOutboundIds` are the same
+ * two sets for the middle track and the middle sender (ADR-0070 step 5); an
+ * id in both a light and a middle set is read as light.
  */
 export function readMedia(
   entries: Iterable<StatsEntry>,
   lightTrackIds: ReadonlySet<string> = new Set(),
+  lightOutboundIds: ReadonlySet<string> = new Set(),
+  middleTrackIds: ReadonlySet<string> = new Set(),
+  middleOutboundIds: ReadonlySet<string> = new Set(),
 ): MediaReading {
   const inbound = new Map<string, InboundCounters>();
-  const outboundVideoLayers: OutboundVideo[] = [];
+  const bySender: Record<CameraSenderName, OutboundVideo[]> = { main: [], middle: [], light: [] };
   for (const e of entries) {
     const type = e["type"];
     const kind = e["kind"];
@@ -108,7 +124,15 @@ export function readMedia(
       inbound.set(id, {
         kind,
         layer:
-          kind === "audio" ? null : trackId === null ? "-" : lightTrackIds.has(trackId) ? "light" : "main",
+          kind === "audio"
+            ? null
+            : trackId === null
+              ? "-"
+              : lightTrackIds.has(trackId)
+                ? "light"
+                : middleTrackIds.has(trackId)
+                  ? "middle"
+                  : "main",
         packetsReceived: num(e, "packetsReceived"),
         packetsLost: num(e, "packetsLost"),
         nackCount: num(e, "nackCount"),
@@ -123,9 +147,18 @@ export function readMedia(
         totalSamplesReceived: num(e, "totalSamplesReceived"),
       });
     } else if (type === "outbound-rtp" && kind === "video") {
-      // One camera sender; one entry for each simulcast layer it sends.
-      outboundVideoLayers.push({
-        rid: strOrNull(e, "rid"),
+      // Three camera senders at most, one entry each.
+      const id = e["id"];
+      const sender: CameraSenderName =
+        typeof id !== "string"
+          ? "main"
+          : lightOutboundIds.has(id)
+            ? "light"
+            : middleOutboundIds.has(id)
+              ? "middle"
+              : "main";
+      bySender[sender].push({
+        sender,
         scalabilityMode: strOrNull(e, "scalabilityMode"),
         qualityLimitationReason: strOrNull(e, "qualityLimitationReason"),
         frameWidth: numOrNull(e, "frameWidth"),
@@ -135,7 +168,11 @@ export function readMedia(
       });
     }
   }
-  return { inbound, outboundVideo: outboundVideoLayers[0] ?? null, outboundVideoLayers };
+  return {
+    inbound,
+    outboundVideo: bySender.main[0] ?? null,
+    outboundVideoSenders: [...bySender.main, ...bySender.middle, ...bySender.light],
+  };
 }
 
 /** How one stream changed between two readings. */
@@ -196,7 +233,7 @@ function fixed(n: number | null, digits: number): string {
 }
 
 /** One plain-text line per stream (log format: ASCII, no names). A video
- *  line ends with `layer=`: `main`, `light`, or `-` when unknown. */
+ *  line ends with `layer=`: `main`, `middle`, `light`, or `-` when unknown. */
 export function describeDeltas(label: string, deltas: ReadonlyMap<string, StreamDelta>): string[] {
   const lines: string[] = [];
   let n = 0;
@@ -215,48 +252,108 @@ export function describeDeltas(label: string, deltas: ReadonlyMap<string, Stream
   return lines;
 }
 
+/** The picture of a peer this device asks the SFU for: the name it has in
+ *  the `video-wants` frame (`video-wants.ts`). */
+export type ShownWant = "main" | "middle" | "light";
+
 /**
- * What one remote peer's tile showed, in one line: how often it switched to
- * the light track, how long the light track was the shown one, and the
- * longest and the total displayed stall (`layer-display.ts`). Whole
- * milliseconds. `peerId` is the SFU's per-call peer id, the same one the
- * stream ids carry.
+ * What one remote peer's tile showed, in one line: the picture this device
+ * asks for of them now (`want`), the one the SFU says it gives (`given`,
+ * ADR-0070 step 6; `-` when it has not said, as with downlink control off),
+ * how often the tile switched to the light
+ * track, how long the light track was the shown one, and the longest and the
+ * total displayed stall (`layer-display.ts`). Whole milliseconds. `peerId` is
+ * the SFU's per-call peer id, the same one the stream ids carry.
+ *
+ * With `frames` (what the tile observed on its two elements), the line also
+ * says what the rule's own counters cannot: `now` (what is shown), `heavy`
+ * (`yes`: the heavy picture has shown a frame; `never`: it has shown none
+ * since it was put in the tile; `none`: the tile has no heavy picture),
+ * `heavy_frames` and `light_frames` (frames observed on each element in the
+ * interval) and `heavy_gap_max_ms` (the longest time without a heavy frame).
+ * Read with the receivers' `decoded=` of the same interval: a tile on the
+ * light copy with `heavy=never` and nothing decoded on the heavy track is
+ * waiting for a first key frame; `heavy=never` (or `heavy_frames=0`) while
+ * the heavy track decodes means the element's frames do not reach the rule;
+ * `heavy=yes` with `heavy_frames` near the decoded count means the rule
+ * keeps the light copy, and `heavy_gap_max_ms` says against which threshold.
  */
-export function describeShown(label: string, peerId: string, shown: LayerDisplayCounters): string {
+export function describeShown(
+  label: string,
+  peerId: string,
+  shown: LayerDisplayCounters,
+  want: ShownWant,
+  given: ShownWant | null = null,
+  frames?: TileFrameCounts,
+): string {
   return (
-    `${label} shown peer=${peerId} light_switches=${shown.lightSwitches}` +
+    `${label} shown peer=${peerId} want=${want} given=${given ?? "-"}` +
+    ` light_switches=${shown.lightSwitches}` +
     ` light_ms=${Math.round(shown.lightMs)} stall_max_ms=${Math.round(shown.stallMaxMs)}` +
-    ` stall_total_ms=${Math.round(shown.stallTotalMs)}`
+    ` stall_total_ms=${Math.round(shown.stallTotalMs)}` +
+    (frames === undefined
+      ? ""
+      : ` now=${frames.shownNow} heavy=${frames.heavy} heavy_frames=${frames.heavyFrames}` +
+        ` heavy_gap_max_ms=${Math.round(frames.heavyGapMaxMs)} light_frames=${frames.lightFrames}`)
   );
 }
 
-/** {@link describeShown} for every peer, in the map's order. */
+/** {@link describeShown} for every peer, in the map's order. `wantOf` says
+ *  which picture is asked for of each, `givenOf` which one the SFU gives
+ *  (`null` when it has not said). */
 export function describeShownPeers(
   label: string,
   byPeer: ReadonlyMap<string, LayerDisplayCounters>,
+  wantOf: (peerId: string) => ShownWant,
+  givenOf: (peerId: string) => ShownWant | null = () => null,
+  framesOf: (peerId: string) => TileFrameCounts | undefined = () => undefined,
 ): string[] {
-  return [...byPeer].map(([peerId, shown]) => describeShown(label, peerId, shown));
+  return [...byPeer].map(([peerId, shown]) =>
+    describeShown(label, peerId, shown, wantOf(peerId), givenOf(peerId), framesOf(peerId)),
+  );
 }
 
-/** One camera layer in one line, or `null` when there is none. A simulcast
- *  layer's line ends with its `rid`; a single encoding's line has none, as
- *  before simulcast. */
+/** One person whose shown picture a `video-given` frame changed
+ *  (`video-given.ts`). */
+export interface GivenChangeLine {
+  readonly peer: string;
+  readonly wanted: ShownWant;
+  readonly given: ShownWant | null;
+}
+
+/**
+ * One line for one `video-given` frame that changed the picture a tile shows:
+ * every person it changed, each as `peer= want= given=` (`given=-` when the
+ * frame no longer names them). `null` when it changed nobody's.
+ */
+export function describeGivenChanges(label: string, changes: readonly GivenChangeLine[]): string | null {
+  if (changes.length === 0) return null;
+  return (
+    `${label} ` +
+    changes.map((c) => `peer=${c.peer} want=${c.wanted} given=${c.given ?? "-"}`).join(" | ")
+  );
+}
+
+/** One camera sender in one line, or `null` when there is none. The line
+ *  ends with which sender it is: `sender=main`, `sender=middle` or
+ *  `sender=light`. */
 export function describeOutbound(label: string, out: OutboundVideo | null): string | null {
   if (out === null) return null;
   const size = out.frameWidth !== null && out.frameHeight !== null ? `${out.frameWidth}x${out.frameHeight}` : "-";
   return (
     `${label} send video mode=${out.scalabilityMode ?? "-"} size=${size}` +
     ` fps=${fixed(out.framesPerSecond, 0)} limited_by=${out.qualityLimitationReason ?? "-"}` +
-    (out.rid === null ? "" : ` rid=${out.rid}`)
+    ` sender=${out.sender}`
   );
 }
 
-/** The camera sender, one line for each layer it sends. A layer the browser
- *  has stopped sending reports no size and no frame rate (`-`). */
-export function describeOutboundLayers(label: string, layers: readonly OutboundVideo[]): string[] {
+/** The camera, one line for each of its senders (main, middle, light). A sender
+ *  the browser is sending nothing on reports no size and no frame rate
+ *  (`-`). */
+export function describeOutboundSenders(label: string, senders: readonly OutboundVideo[]): string[] {
   const lines: string[] = [];
-  for (const layer of layers) {
-    const line = describeOutbound(label, layer);
+  for (const sender of senders) {
+    const line = describeOutbound(label, sender);
     if (line !== null) lines.push(line);
   }
   return lines;
@@ -265,7 +362,7 @@ export function describeOutboundLayers(label: string, layers: readonly OutboundV
 /** What the sending side of the call reports, cumulative where it counts. */
 export interface SenderReading {
   /** Camera `outbound-rtp`: frames and packets this device produced, summed
-   *  over the simulcast layers. */
+   *  over every camera sender. */
   readonly framesEncoded: number;
   readonly packetsSent: number;
   readonly retransmittedPacketsSent: number;
@@ -273,14 +370,14 @@ export interface SenderReading {
   readonly pliCount: number;
   readonly firCount: number;
   readonly hugeFramesSent: number;
-  /** Bits a second the encoder is currently asked for, summed over the
-   *  layers; `null` if unknown. */
+  /** Bits a second the encoders are currently asked for, summed over the
+   *  senders; `null` if unknown. */
   readonly targetBitrate: number | null;
-  /** What the far end (the SFU) says it lost of this stream, 0..1; the worst
-   *  layer's figure. */
+  /** What the far end (the SFU) says it lost of the camera, 0..1; the worse
+   *  of the senders' figures. */
   readonly remoteFractionLost: number | null;
   /** Round trip the far end's reports give, in milliseconds; the largest
-   *  across the layers. */
+   *  across the senders. */
   readonly remoteRttMs: number | null;
   /** The browser's own estimate of what it may send, bits a second. */
   readonly availableOutgoingBitrate: number | null;
@@ -290,8 +387,17 @@ export interface SenderReading {
   readonly videoCodec: string | null;
 }
 
-/** Reduce a stats report to the sender reading, or `null` with no camera. */
-export function readSender(entries: Iterable<StatsEntry>): SenderReading | null {
+/**
+ * Reduce a stats report to the sender reading, or `null` with no camera.
+ * Every camera sender is summed. `lightOutboundIds` and `middleOutboundIds`
+ * are as in {@link readMedia}; they only decide whose codec is named (the
+ * main sender's, when it reports).
+ */
+export function readSender(
+  entries: Iterable<StatsEntry>,
+  lightOutboundIds: ReadonlySet<string> = new Set(),
+  middleOutboundIds: ReadonlySet<string> = new Set(),
+): SenderReading | null {
   const outs: StatsEntry[] = [];
   const remotes: StatsEntry[] = [];
   let pair: StatsEntry | null = null;
@@ -309,7 +415,9 @@ export function readSender(entries: Iterable<StatsEntry>): SenderReading | null 
       if (pair === null || e["nominated"] === true) pair = e;
     }
   }
-  const first = outs[0];
+  const isCopy = (e: StatsEntry): boolean =>
+    typeof e["id"] === "string" && (lightOutboundIds.has(e["id"]) || middleOutboundIds.has(e["id"]));
+  const first = outs.find((e) => !isCopy(e)) ?? outs[0];
   if (first === undefined) return null;
   const sum = (key: string): number => outs.reduce((acc, e) => acc + num(e, key), 0);
   /** The largest value any entry reports, or `null` when none reports one. */

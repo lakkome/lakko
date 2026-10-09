@@ -8,6 +8,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Status:** Accepted
 - **Date:** 2026-06-02
 - **Context:** SFU multi-party arc — making web (RTCRtpScriptTransform) and native (libwebrtc FrameEncryptorInterface) clients decrypt each other's SFrame media on the same SFU call.
+- **Amended by:** [ADR-0071](0071-codec-header-in-the-clear.md) (Proposed, 2026-10-07): for call media the SFrame header moves to the end of the frame, a codec-header prefix stays in the clear at its start, and the AAD is the header plus that prefix plus a 3-byte trailer; still never host RTP metadata. Built on web only so far.
 
 > **Update (2026-07) — the header is now RFC 9605 §4.3 wire-compatible.** An
 > earlier revision of `SframeHeader::encode` used a Lakko-custom first-byte

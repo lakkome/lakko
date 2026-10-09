@@ -16,6 +16,9 @@
 //!   tiles in a scroll area with fixed shapes. The same call on the same width
 //!   drew three different grids, and none of them filled the screen.
 //! - **Who is on the stage** in the layout with one large tile.
+//! - **Which picture a tile asks for** (ADR-0070 step 5): the main one, the
+//!   middle one or the light one alone, by how many people are in the call
+//!   and how large the tile is drawn.
 //!
 //! Everything here is integer arithmetic, so wasm, iOS and Android cannot
 //! round a tile differently. The numbers (page caps, minimum widths, gaps,
@@ -242,6 +245,81 @@ pub fn call_stage(people: &[StageCandidate], pinned: Option<usize>) -> Option<us
     people.iter().position(|p| p.is_local)
 }
 
+/// Which of a person's video tracks a call tile asks the call server for
+/// (`docs/ux/group-call-grid.md` section 7.6, ADR-0070 step 5).
+///
+/// The light track always arrives beside the one named here, and
+/// [`crate::layer_display`] goes on deciding, frame by frame, whether the
+/// tile shows it instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TileVideoQuality {
+    /// The main track: the full picture.
+    Main,
+    /// The middle track: the camera at half size.
+    Middle,
+    /// The light track alone.
+    Light,
+}
+
+/// A pinned or stage tile at least this wide, in physical pixels, asks for
+/// the main track. Chosen, not measured: three quarters of the 1280-pixel
+/// width of the main picture, below which the middle picture stretched to
+/// the tile is taken to be good enough.
+pub const MAIN_MIN_WIDTH_PX: u32 = 960;
+
+/// A tile narrower than this, in physical pixels, asks for the light track
+/// alone. Chosen, not measured: three quarters of the 320-pixel width of
+/// the light picture, so the light picture is never stretched by more than
+/// a third before the middle one takes over.
+pub const LIGHT_MAX_WIDTH_PX: u32 = 240;
+
+/// A person sends the middle copy of their camera from this many people in
+/// the call on (this device's own person included). Chosen: in a call of
+/// two the one other person is shown large and asks for the main track.
+pub const MIDDLE_SENDER_MIN_PEOPLE: u32 = 3;
+
+/// Which track a tile asks for.
+///
+/// `people` is everyone in the call, this device's own person included.
+/// `tile_width_px` is the width the tile is drawn at in **physical**
+/// pixels (points times the display scale), since that is what a picture
+/// is stretched over. `pinned_or_stage` says the tile is the pinned person
+/// or the stage of the focus layout.
+///
+/// - A call of two (one other person), whatever the tile's size: `Main`.
+/// - A pinned or stage tile at least [`MAIN_MIN_WIDTH_PX`] wide: `Main`.
+/// - Otherwise a tile narrower than [`LIGHT_MAX_WIDTH_PX`]: `Light`.
+/// - Otherwise: `Middle`.
+///
+/// A tile that is not on screen at all (another page) is the caller's to
+/// leave out or ask `Light` for; this rule is asked about a drawn tile.
+#[must_use]
+pub const fn tile_video_quality(
+    people: u32,
+    tile_width_px: u32,
+    pinned_or_stage: bool,
+) -> TileVideoQuality {
+    if people < MIDDLE_SENDER_MIN_PEOPLE {
+        return TileVideoQuality::Main;
+    }
+    if pinned_or_stage && tile_width_px >= MAIN_MIN_WIDTH_PX {
+        return TileVideoQuality::Main;
+    }
+    if tile_width_px < LIGHT_MAX_WIDTH_PX {
+        return TileVideoQuality::Light;
+    }
+    TileVideoQuality::Middle
+}
+
+/// Whether this device sends the middle copy of its camera: only from
+/// [`MIDDLE_SENDER_MIN_PEOPLE`] people in the call on (this device's own
+/// person included). In a call of two nobody would be forwarded it, so the
+/// sender stays inactive and costs no encoder and no uplink.
+#[must_use]
+pub const fn middle_sender_wanted(people: u32) -> bool {
+    people >= MIDDLE_SENDER_MIN_PEOPLE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +500,100 @@ mod tests {
     fn alone_in_the_call_the_own_tile_is_the_stage() {
         assert_eq!(call_stage(&[person(true, false)], None), Some(0));
         assert_eq!(call_stage(&[], None), None);
+    }
+
+    #[test]
+    fn a_call_of_two_shows_the_main_picture_at_any_size() {
+        for people in [0, 1, 2] {
+            for width in [0, 1, LIGHT_MAX_WIDTH_PX - 1, 400, 5000] {
+                for pinned in [false, true] {
+                    assert_eq!(
+                        tile_video_quality(people, width, pinned),
+                        TileVideoQuality::Main,
+                        "{people} people, {width} px, pinned {pinned}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn from_three_people_a_grid_tile_is_middle_or_light_by_its_width() {
+        for people in [3, 4, 10, u32::MAX] {
+            // The light boundary: narrower than it is light.
+            assert_eq!(
+                tile_video_quality(people, 0, false),
+                TileVideoQuality::Light
+            );
+            assert_eq!(
+                tile_video_quality(people, LIGHT_MAX_WIDTH_PX - 1, false),
+                TileVideoQuality::Light
+            );
+            assert_eq!(
+                tile_video_quality(people, LIGHT_MAX_WIDTH_PX, false),
+                TileVideoQuality::Middle
+            );
+            // A grid tile is never main, however wide.
+            for width in [MAIN_MIN_WIDTH_PX - 1, MAIN_MIN_WIDTH_PX, 4000, u32::MAX] {
+                assert_eq!(
+                    tile_video_quality(people, width, false),
+                    TileVideoQuality::Middle,
+                    "{width} px"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pinned_or_stage_tile_is_main_only_when_wide_enough() {
+        assert_eq!(
+            tile_video_quality(3, MAIN_MIN_WIDTH_PX, true),
+            TileVideoQuality::Main
+        );
+        assert_eq!(
+            tile_video_quality(3, u32::MAX, true),
+            TileVideoQuality::Main
+        );
+        // One pixel short: the middle picture.
+        assert_eq!(
+            tile_video_quality(3, MAIN_MIN_WIDTH_PX - 1, true),
+            TileVideoQuality::Middle
+        );
+        assert_eq!(
+            tile_video_quality(3, LIGHT_MAX_WIDTH_PX, true),
+            TileVideoQuality::Middle
+        );
+        // A pinned tile drawn tiny is still light.
+        assert_eq!(
+            tile_video_quality(3, LIGHT_MAX_WIDTH_PX - 1, true),
+            TileVideoQuality::Light
+        );
+    }
+
+    #[test]
+    fn the_middle_sender_runs_from_three_people() {
+        assert!(!middle_sender_wanted(0));
+        assert!(!middle_sender_wanted(1));
+        assert!(!middle_sender_wanted(2));
+        assert!(middle_sender_wanted(3));
+        assert!(middle_sender_wanted(u32::MAX));
+        // The two rules turn at the same count: nobody asks for a middle
+        // track in a call where nobody sends one.
+        for people in 0..6 {
+            let asked = tile_video_quality(people, 400, false) == TileVideoQuality::Middle;
+            assert_eq!(asked, middle_sender_wanted(people), "{people}");
+        }
+    }
+
+    #[test]
+    fn the_thresholds_are_the_documented_ones() {
+        assert_eq!(
+            (
+                MAIN_MIN_WIDTH_PX,
+                LIGHT_MAX_WIDTH_PX,
+                MIDDLE_SENDER_MIN_PEOPLE
+            ),
+            (960, 240, 3)
+        );
     }
 }

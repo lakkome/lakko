@@ -461,6 +461,63 @@ noticed without a frame arriving. Each client also counts, per person, how often
 and for how long the lighter copy was shown and how long a picture stood still
 on screen; the counts go to the call's diagnostic log only.
 
+### 7.6 Which picture a tile shows, by people and by size
+
+A person whose camera is on sends up to three copies of their picture: the
+**full** one (720p), a **middle** one (half the size, 360p) and the **light**
+one of 7.5 (a quarter, 180p). The middle copy is sent only from three people
+in the call on. A viewer's device asks the call server for the one copy that
+suits each tile, and the server stops sending the others, so a call of many
+people does not carry a full picture per person to every device.
+
+The rule, the same on web, iOS and Android:
+
+| The call and the tile | Picture shown |
+|---|---|
+| Two people in the call (one other person), at any size | Full |
+| Three or more people; the pinned person or the stage of the focus layout, drawn at least 960 pixels wide | Full |
+| Three or more people; a tile drawn narrower than 240 pixels (a filmstrip thumbnail, a crowded grid on a phone) | Light |
+| Three or more people; any other tile, a pinned or stage tile narrower than 960 pixels included | Middle |
+
+- **Pixels are the device's own**, not points: a tile 200 points wide on a
+  3x phone is 600 pixels and shows the middle picture, the same tile on a 1x
+  laptop is 200 pixels and shows the light one. That is the size a picture
+  is actually stretched over.
+- **People** counts everyone in the call, this device's own person included.
+- A tile on another page of the grid, which nobody sees, is outside this
+  rule: the rule is asked about a tile that is drawn. Open for the
+  maintainer: such a tile asking for the light picture alone (the call
+  server supports it).
+- The light copy keeps arriving beside whichever picture a tile shows, and
+  the rule of 7.5 is unchanged: when the picture a tile shows stands still,
+  the tile shows the light copy until the picture plays again.
+
+**What a person sees when a tile changes size** (a pin, the layout switch, a
+window resize, a rotation, a third person joining): the tile keeps the
+picture it has until the first frame of the new one arrives, then cuts to it
+in the same box with the same crop. Until then, if the old picture has
+already stopped, the light copy fills in under 7.5. The new picture starts
+at a full frame the sender is asked for, which normally takes a fraction of
+a second. No spinner, no badge, no label and nothing for a screen reader:
+the person on the tile has not changed, only how sharp they are.
+
+**Not a pause.** A tile showing the middle or the light picture is in the
+*Video* state of 7.1, not *Video paused* (7.4): the person is seen moving.
+
+The two thresholds (960 and 240 pixels) and the count (three people) are
+chosen, not measured. They and the rule are written once
+(`crates/lakko-ui-rules`, `call_group::tile_video_quality` and
+`middle_sender_wanted`) and every client asks that one rule, so the three
+clients ask for the same picture for the same tile. A client re-asks when a
+tile's width crosses a threshold or the people count crosses three, sending
+the whole set of its tiles at once, and should let a resize settle (a few
+hundred milliseconds, the client's own choice) before it does, so dragging
+a window edge does not ask for a full frame on every step.
+
+Built so far: the rule, and the call server's side of it. No client asks
+yet: until one does, every tile is sent the full and the light picture, as
+before.
+
 ## 8. Call-level connection states
 
 `calls.md` 4.3 ends a group call on any lost connection, because the transport

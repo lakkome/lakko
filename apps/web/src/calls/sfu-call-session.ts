@@ -42,12 +42,16 @@
  *
  * ## Scope / deferred
  *
- * MVP: one publish offer at connect; SFU-driven subscribe
- * renegotiation; SFrame on every track; trickle ICE both ways.
- * Deferred (each a follow-up, none a security gap):
- *   * Client-initiated mid-call renegotiation (add / drop a track
- *     after the first offer) — needs perfect-negotiation glare
- *     handling.
+ * One publish offer at connect; SFU-driven subscribe renegotiation;
+ * client-initiated renegotiation when the camera is turned on mid-call;
+ * SFrame on every track; trickle ICE both ways. The camera is published as
+ * three ordinary senders, a main one, a light one and a middle one (ADR-0070
+ * steps 1 and 5); every offer this client makes names the `mid`s of the last
+ * two to the SFU. The middle one sends only from three people in the call
+ * on. The session also tells the SFU which picture of each person this
+ * device shows (`video-wants.ts`), so the SFU forwards a heavy track only
+ * where it is shown.
+ * Deferred (a follow-up, not a security gap):
  *   * Per-remote connection-quality stats.
  *
  * Mapping a remote `ontrack` to its source participant IS resolved:
@@ -57,9 +61,12 @@
  * session surfaces is exactly that peer id. `sfu-call-ui.ts` keys the
  * roster tile off it (`peer-<streamId>`).
  *
- * Security invariant #4 (no non-E2EE fallback): if the browser lacks
- * `RTCRtpScriptTransform`, `connect()` throws BEFORE any media is
- * published — the call never opens unencrypted.
+ * Security invariant #4 (no non-E2EE fallback): if the browser can hand
+ * encoded frames to the SFrame worker by neither `RTCRtpScriptTransform`
+ * nor `createEncodedStreams()` (`./sframe-transport.ts`), `connect()`
+ * throws BEFORE any media is captured: the call never opens unencrypted.
+ * On the `createEncodedStreams()` path the peer connection is built for it
+ * and every sender and receiver has its streams taken (`coverSFrame`).
  */
 
 import {
@@ -78,12 +85,23 @@ import {
   type SfuWelcome,
 } from "./sfu-signaling-client";
 import { loadWasm } from "../wasm";
+import { describeLocalCamera } from "./local-preview";
 import {
   attachReceiverSFrame,
   attachSenderSFrame,
+  coverEncodedStreams,
+  syncSenderCodecs,
   rekeySFrame,
   isSFrameTransformSupported,
+  SFRAME_STREAM_CAMERA_LIGHT,
+  SFRAME_STREAM_CAMERA_MIDDLE,
+  type SFrameStreamIndex,
 } from "./sframe-transform";
+import {
+  sframePeerConnectionConfig,
+  sframeTransport,
+  sframeTransportLine,
+} from "./sframe-transport";
 import {
   audioTrackConstraint,
   CAMERA_CAPTURE_SIZE,
@@ -93,15 +111,21 @@ import {
 import { captureWithFallback, type CaptureFallback } from "./capture-fallback";
 import { SFU_KEEPALIVE_TICK_MS, sfuKeepaliveAction } from "./sfu-keepalive";
 import {
-  addCameraSender,
+  addCameraSenderMidCall,
+  addCopySender,
   addGroupCallSender,
-  CAMERA_SIMULCAST_ENABLED,
-  requestCameraLayers,
+  CAMERA_COPY_KINDS,
+  configureCopySender,
+  removeCopySender,
+  setCopySenderActive,
+  type CameraCopyKind,
+  type CopySender,
 } from "./camera-sender";
 import {
   deltaOf,
   describeDeltas,
-  describeOutboundLayers,
+  describeOutboundSenders,
+  describeGivenChanges,
   describeSender,
   describeShownPeers,
   readMedia,
@@ -111,6 +135,14 @@ import {
 } from "./media-counters";
 import { shownLayerLedger } from "./layer-display";
 import { splitStreamId } from "./light-stream";
+import { registerVideoFrameSource } from "./video-frame-watch";
+import { VideoGivenBook, videoGivenChanges, type VideoGivenEntry } from "./video-given";
+import {
+  VideoWantsBook,
+  VideoWantsSender,
+  type VideoQuality,
+  type VideoWantsFrame,
+} from "./video-wants";
 
 /** Lifecycle phases the SFU session can be in. */
 export type SfuCallState =
@@ -187,10 +219,11 @@ export interface SfuRemoteTrack {
   /**
    * The MSID stream id the SFU tagged the track with. The SFU pins
    * this to the source peer id (see the module doc), so the caller
-   * maps it straight to a participant (`peer-<streamId>`). A simulcast
-   * publisher's light companion track arrives under the peer id plus
-   * `LIGHT_STREAM_SUFFIX`; the caller reads either with `splitStreamId`
-   * (`light-stream.ts`) and never makes a participant of a companion.
+   * maps it straight to a participant (`peer-<streamId>`). The light
+   * companion track of a publisher's camera arrives under the peer id plus
+   * `LIGHT_STREAM_SUFFIX` and its middle track under the peer id plus
+   * `MIDDLE_STREAM_SUFFIX`; the caller reads all three with `splitStreamId`
+   * (`light-stream.ts`) and never makes a participant of either.
    */
   readonly streamId: string;
   readonly track: MediaStreamTrack;
@@ -218,6 +251,14 @@ export interface SfuCallCallbacks {
   ): void;
   /** A participant left. */
   onPeerLeft?(peerId: string): void;
+  /**
+   * What the SFU gives this device of each person's video changed
+   * (ADR-0070 step 6, `video-given.ts`): the whole set as it stands, by SFU
+   * peer id. A person it does not name is given what is asked for. Empty
+   * until an SFU with downlink control on says something, and again once
+   * the call is torn down.
+   */
+  onVideoGiven?(given: ReadonlyMap<string, VideoQuality>): void;
   /** A remote media track arrived (already SFrame-decrypting). */
   onRemoteTrack?(remote: SfuRemoteTrack): void;
   /** The local capture stream is ready (fired once, at publish time). The
@@ -286,6 +327,28 @@ function seedsEqual(a: Uint8Array, b: Uint8Array): boolean {
 /** How often the media counters are logged (ADR-0067 step 1). */
 const MEDIA_COUNTERS_INTERVAL_MS = 2_000;
 
+/** The SFrame stream index each copy of the camera is sealed under. Stated,
+ *  never derived from the track kind: each is a further video sender of the
+ *  participant and must not share the camera's key, nor the other's. */
+function copyStreamIndex(kind: CameraCopyKind): SFrameStreamIndex {
+  return kind === "light" ? SFRAME_STREAM_CAMERA_LIGHT : SFRAME_STREAM_CAMERA_MIDDLE;
+}
+
+/** One copy of the camera, as the session keeps it. */
+interface CopySlot {
+  /** The copy's sender; `null` while there is no camera sender, and when a
+   *  browser would not take one. Never more than one per kind. */
+  sender: CopySender | null;
+  /** The SFrame transform id of {@link sender}. */
+  transformId: string | null;
+  /** A browser that will not take this copy is named once per call. */
+  refusalWarned: boolean;
+}
+
+function emptyCopySlot(): CopySlot {
+  return { sender: null, transformId: null, refusalWarned: false };
+}
+
 export class SfuCallSession {
   private state: SfuCallState = "idle";
   private pc: RTCPeerConnection | null = null;
@@ -301,6 +364,8 @@ export class SfuCallSession {
   /** Ids of every attached SFrame transform (senders + receivers), so a
    *  mid-call rekey can target them all (G-18, ADR-0029). */
   private readonly transformIds = new Set<string>();
+  /** Said once per call when a sender is found with no SFrame transform. */
+  private unsealedSenderWarned = false;
   /** Call-key seed of the CURRENT MLS epoch. Starts at `config.seed` (or
    *  `null` on the ADR-0032 deferred-publish path, set later by
    *  {@link publish}) and advances on `rekey` so a late-arriving receiver
@@ -327,6 +392,46 @@ export class SfuCallSession {
   private videoPublishState: VideoPublishState = "off";
 
   /**
+   * The camera's copies (ADR-0070 steps 1 and 5): each a clone of the camera
+   * track on a transceiver of its own, sealed under its own SFrame stream
+   * index. The light one is a quarter of the size and always sent; the middle
+   * one is half the size and sent only while {@link middleWanted}. A copy a
+   * browser would not take is absent and the call goes on without it.
+   */
+  private readonly copies: Record<CameraCopyKind, CopySlot> = {
+    light: emptyCopySlot(),
+    middle: emptyCopySlot(),
+  };
+  /** Whether the middle sender's encoding was last asked to be active;
+   *  `null` before it was asked anything, and after a refusal (so the next
+   *  look asks again). */
+  private middleActiveAsked: boolean | null = null;
+  /** Serializes the `setParameters` calls that start and stop the middle
+   *  sender: a browser refuses one made while another is pending. */
+  private middleActiveChain: Promise<void> = Promise.resolve();
+  private middleActiveWarned = false;
+
+  /** The shared rules, once loaded (`connect()`). */
+  private wasm: Awaited<ReturnType<typeof loadWasm>> | null = null;
+
+  /**
+   * What this device shows of each person (`video-wants.ts`): the people of
+   * the call as the SFU names them, and the picture every mounted tile
+   * reports. Sent to the SFU as a whole whenever it changes.
+   */
+  private readonly wantsBook = new VideoWantsBook();
+  private readonly wantsSender: VideoWantsSender;
+  /**
+   * What the SFU says it gives of each person (`video-given.ts`). Read by the
+   * tiles and the media counters; never fed back into {@link wantsBook}, so
+   * the SFU keeps being asked for what the tiles really want.
+   */
+  private readonly givenBook = new VideoGivenBook();
+  /** The publish offer is out: the SFU has media state for this peer, and
+   *  takes a `video-wants` frame only from then on. */
+  private publishOfferSent = false;
+
+  /**
    * The local camera on/off state, broadcast to peers over the opaque SFU
    * `signal-relay` (camera-off-cleanup). Initialised from the initial media
    * request; updated by every path that flips the local camera
@@ -350,10 +455,13 @@ export class SfuCallSession {
   private mediaCountersTimer: ReturnType<typeof setInterval> | null = null;
   private mediaCountersLast: MediaReading | null = null;
   private senderCountersLast: SenderReading | null = null;
-  /** The ids of the remote tracks that are light companions
-   *  (`light-stream.ts`), so the media counters can say which receiver is
-   *  which. */
-  private readonly lightTrackIds = new Set<string>();
+  /** The ids of the remote tracks that are light companions and middle
+   *  tracks (`light-stream.ts`), so the media counters can say which receiver
+   *  is which. */
+  private readonly copyTrackIds: Record<CameraCopyKind, Set<string>> = {
+    light: new Set<string>(),
+    middle: new Set<string>(),
+  };
   private lastInboundMs = 0;
   private lastPingMs = 0;
   private pingNonce = 0;
@@ -367,6 +475,110 @@ export class SfuCallSession {
     this.publishLeaf = config.localLeaf ?? 0;
     this.localCameraOn = config.media.video;
     this.nowMs = config.nowMs ?? Date.now;
+    this.wantsSender = new VideoWantsSender(this.wantsBook, (frame) => this.sendVideoWants(frame), {
+      now: () => this.nowMs(),
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    });
+  }
+
+  /**
+   * A tile says which picture of `peerId` it shows (`video-wants.ts`), or
+   * `null` when it stops showing one. `tile` is any object that stays the
+   * same for the tile's lifetime. The session asks the SFU for the highest
+   * quality any tile of a person wants, `light` for a person no tile shows,
+   * and tells it whenever that changes.
+   */
+  reportTileVideoQuality(tile: object, peerId: string, quality: VideoQuality | null): void {
+    if (this.wantsBook.setTile(tile, peerId, quality)) this.wantsSender.changed();
+  }
+
+  /** The picture of `peerId` this device asks the SFU for now. */
+  videoQualityOf(peerId: string): VideoQuality {
+    return this.wantsBook.qualityOf(peerId);
+  }
+
+  /** What the SFU gives of `peerId` now; `undefined` when it has not said
+   *  (downlink control off, or a person its last frame did not name). */
+  videoGivenOf(peerId: string): VideoQuality | undefined {
+    return this.givenBook.givenOf(peerId);
+  }
+
+  /**
+   * A `video-given` frame: the SFU's whole set replaces the last one. The
+   * tiles are told, and one line says whose shown picture it changed. What
+   * this device asks for is left as it is.
+   */
+  private onVideoGivenFrame(entries: readonly VideoGivenEntry[]): void {
+    const before = this.givenBook.snapshot();
+    this.givenBook.replace(entries);
+    const line = describeGivenChanges(
+      "call video given",
+      videoGivenChanges(
+        this.wantsBook.wants(),
+        (peerId) => before.get(peerId),
+        (peerId) => this.givenBook.givenOf(peerId),
+      ),
+    );
+    if (line !== null) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    this.callbacks.onVideoGiven?.(this.givenBook.snapshot());
+  }
+
+  /** Put one `video-wants` frame on the wire; `false` when it cannot go yet
+   *  (the sender then tries again at its next call). */
+  private sendVideoWants(frame: VideoWantsFrame): boolean {
+    const signaling = this.signaling;
+    if (signaling === null || !this.publishOfferSent) return false;
+    try {
+      signaling.sendVideoWants(frame.peers, frame.qualities);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Whether the middle sender sends now: the shared rule
+   * (`middle_sender_wanted`) over the people in the call, this device's own
+   * person included. `false` while the rule cannot be asked.
+   */
+  private middleWanted(): boolean {
+    try {
+      return this.wasm?.middleSenderWanted(this.wantsBook.people()) ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Make the middle sender's encoding active or not, as {@link middleWanted}
+   * says now. `setParameters` only: the media line stays and nothing is
+   * renegotiated. Called on every change of the roster; a no-op when the
+   * encoding was already asked for what is wanted.
+   */
+  private syncMiddleActive(): void {
+    const middle = this.copies.middle.sender;
+    if (middle === null) return;
+    const want = this.middleWanted();
+    if (this.middleActiveAsked === want) return;
+    this.middleActiveAsked = want;
+    this.middleActiveChain = this.middleActiveChain.then(async () => {
+      if (this.copies.middle.sender !== middle) return;
+      const ok = await setCopySenderActive(middle.sender, want);
+      if (ok || this.copies.middle.sender !== middle) return;
+      // Asked again at the next look (a roster change, or the counters tick).
+      if (this.middleActiveAsked === want) this.middleActiveAsked = null;
+      if (!this.middleActiveWarned) {
+        this.middleActiveWarned = true;
+        // eslint-disable-next-line no-console
+        console.warn(
+          `SfuCallSession: the middle camera sender could not be ${want ? "started" : "stopped"}`,
+        );
+      }
+    });
   }
 
   /**
@@ -401,8 +613,9 @@ export class SfuCallSession {
    * the publish offer has been sent; remote tracks arrive
    * asynchronously through `onRemoteTrack`.
    *
-   * Throws (before any media capture) if the browser lacks
-   * `RTCRtpScriptTransform` — invariant #4, no non-E2EE fallback.
+   * Throws (before any media capture) if the browser can hand encoded
+   * frames to the SFrame worker by neither interface
+   * (`./sframe-transport.ts`) - invariant #4, no non-E2EE fallback.
    */
   async connect(): Promise<void> {
     if (this.state !== "idle") {
@@ -410,10 +623,14 @@ export class SfuCallSession {
     }
     if (!isSFrameTransformSupported()) {
       throw new Error(
-        "RTCRtpScriptTransform is unavailable — refusing to join the SFU " +
-          "call without SFrame media encryption (security invariant #4)",
+        "Neither RTCRtpScriptTransform nor createEncodedStreams is available: " +
+          "refusing to join the SFU call without SFrame media encryption " +
+          "(security invariant #4)",
       );
     }
+    // Which of the two interfaces carries this call's frames to the worker.
+    // eslint-disable-next-line no-console
+    console.info(sframeTransportLine());
     this.setState("connecting");
 
     // 1. Open signaling first so the PC's trickled ICE + the publish
@@ -428,6 +645,7 @@ export class SfuCallSession {
         onSignalRelay: (f): void => this.onSignalRelayFrame(f),
         onSdpAnswer: (f): void => void this.onSdpAnswer(f),
         onSdpOffer: (f): void => this.onSdpOffer(f),
+        onVideoGiven: (given): void => this.onVideoGivenFrame(given),
         onPong: (): void => {
           this.lastInboundMs = this.nowMs();
         },
@@ -452,6 +670,13 @@ export class SfuCallSession {
     } catch (err) {
       this.fail("signaling connect failed", err);
       throw err;
+    }
+
+    // The shared rules (the signaling client has loaded the module already).
+    try {
+      this.wasm = await loadWasm();
+    } catch {
+      this.wasm = null;
     }
 
     // The socket is open and the Welcome has arrived: start the keepalive.
@@ -530,6 +755,8 @@ export class SfuCallSession {
         track.enabled = on;
       }
     }
+    // The copies follow the camera.
+    this.setCopiesEnabled(on);
     this.setLocalCameraOn(on);
   }
 
@@ -602,9 +829,10 @@ export class SfuCallSession {
     }
     // A live video sender already exists (a call started as video, or a prior
     // publishVideo): just re-enable — no capture, no renegotiation.
-    const existing = pc.getSenders().find((s) => s.track?.kind === "video");
+    const existing = this.mainSenderOf(pc, "video");
     if (existing?.track != null && existing.track.readyState === "live") {
       existing.track.enabled = true;
+      this.setCopiesEnabled(true);
       this.setVideoPublishState("live");
       // Camera is live again — tell peers (camera-off-cleanup).
       this.setLocalCameraOn(true);
@@ -643,35 +871,37 @@ export class SfuCallSession {
       // permission withdrawn) takes the new track in place: one sender, one
       // SFrame transform and one frame counter per stream, and no
       // renegotiation.
-      const ended = pc2
-        .getSenders()
-        .find((s) => s.track?.kind === "video" && s.track.readyState === "ended");
+      const ended = this.mainSenderOf(pc2, "video", "ended");
       if (ended?.track != null) {
         const old = ended.track;
         await ended.replaceTrack(track);
         localStream.removeTrack(old);
         localStream.addTrack(track);
+        // The copies' clones ended with the camera they were cloned from:
+        // each takes a clone of the new track, in place as well.
+        await this.followCamera(pc2, track, seed);
         this.setVideoPublishState("live");
         this.setLocalCameraOn(true);
         this.callbacks.onLocalStream?.(localStream);
         return;
       }
       localStream.addTrack(track);
-      // With simulcast (the present setting) the sender needs a transceiver
-      // of its own: the encodings can only be given when it is created.
-      // Without it this stays `addTrack`, which mid-call may reuse a video
-      // transceiver the SFU already negotiated; the layers are then asked for
+      // The main sender: `addTrack`, which mid-call may reuse a video
+      // transceiver the SFU already negotiated; the layers are asked for
       // separately.
-      let sender: RTCRtpSender;
-      if (CAMERA_SIMULCAST_ENABLED) {
-        sender = addCameraSender(pc2, track, localStream);
-      } else {
-        sender = pc2.addTrack(track, localStream);
-        void requestCameraLayers(sender);
-      }
+      const sender = addCameraSenderMidCall(pc2, track, localStream);
       this.transformIds.add(
         attachSenderSFrame(sender, { seed, localLeaf: this.publishLeaf }),
       );
+      // The copies, added and sealed in the same turn as the main one, so
+      // the renegotiation `addTrack` asked for finds all of them.
+      await this.followCamera(pc2, track, seed);
+      if (this.pc !== pc2) {
+        // Torn down while the copies were being set up.
+        track.stop();
+        this.setVideoPublishState("off");
+        return;
+      }
       // Adding the sender fired onnegotiationneeded -> the SDP renegotiation runs in the
       // background. The self-preview is live now (the local track is live), so
       // report `live`; a background renegotiation failure only affects what
@@ -717,7 +947,8 @@ export class SfuCallSession {
   ): Promise<void> {
     if (this.pc === null || this.localStream === null) return;
     if (deviceId.length === 0) return;
-    const sender = this.pc.getSenders().find((s) => s.track?.kind === kind);
+    const pc = this.pc;
+    const sender = this.mainSenderOf(pc, kind);
     if (sender === undefined) return;
 
     const constraints: MediaStreamConstraints =
@@ -764,6 +995,204 @@ export class SfuCallSession {
       t.stop();
     }
     this.localStream.addTrack(newTrack);
+    // The copies follow the camera to the new device. Their old clones are
+    // stopped there; the old camera track was stopped just above. A copy the
+    // browser would not take is not tried again here.
+    if (kind === "video" && this.pc === pc && this.activeSeed !== null) {
+      await this.followCamera(pc, newTrack, this.activeSeed, false);
+    }
+  }
+
+  /** The copies' clones are enabled and disabled with the camera. */
+  private setCopiesEnabled(on: boolean): void {
+    for (const kind of CAMERA_COPY_KINDS) {
+      const copy = this.copies[kind].sender;
+      if (copy !== null) copy.track.enabled = on;
+    }
+  }
+
+  /**
+   * This device's microphone sender or main camera sender: the sender of
+   * `kind` that is not one of the camera's copies. With `readyState`, only
+   * one whose track is in that state.
+   */
+  private mainSenderOf(
+    pc: RTCPeerConnection,
+    kind: "audio" | "video",
+    readyState?: MediaStreamTrackState,
+  ): RTCRtpSender | undefined {
+    const copySenders = CAMERA_COPY_KINDS.map((k) => this.copies[k].sender?.sender);
+    return pc
+      .getSenders()
+      .find(
+        (s) =>
+          !copySenders.includes(s) &&
+          s.track?.kind === kind &&
+          (readyState === undefined || s.track.readyState === readyState),
+      );
+  }
+
+  /**
+   * Make every copy of the camera carry a copy of `cameraTrack` (ADR-0070
+   * steps 1 and 5).
+   *
+   * A copy that is not there yet is added (unless `addMissing` is `false`):
+   * a clone of the camera on a transceiver of its own, with its size and its
+   * bitrate ceiling, sealed under its own SFrame stream index before any
+   * offer can be built (security invariant #4). Every missing copy is added
+   * and sealed in this same turn, before anything is awaited. A copy already
+   * there has its clone replaced in place: same sender, same transform, same
+   * frame counter, and no renegotiation. There is never a second one of a
+   * kind.
+   *
+   * Never fails the call. A browser that takes no such sender, takes none
+   * with the right size, or cannot seal it leaves the call without that copy,
+   * said once.
+   */
+  private async followCamera(
+    pc: RTCPeerConnection,
+    cameraTrack: MediaStreamTrack,
+    seed: Uint8Array,
+    addMissing = true,
+  ): Promise<void> {
+    await Promise.all(
+      CAMERA_COPY_KINDS.map((kind) => this.followCameraWith(kind, pc, cameraTrack, seed, addMissing)),
+    );
+    // The roster may have crossed three people while a copy was set up.
+    this.syncMiddleActive();
+  }
+
+  /** {@link followCamera} for one copy. Runs up to the copy being added and
+   *  sealed without awaiting anything. */
+  private async followCameraWith(
+    kind: CameraCopyKind,
+    pc: RTCPeerConnection,
+    cameraTrack: MediaStreamTrack,
+    seed: Uint8Array,
+    addMissing: boolean,
+  ): Promise<void> {
+    const slot = this.copies[kind];
+    const existing = slot.sender;
+    if (existing !== null) {
+      let clone: MediaStreamTrack;
+      try {
+        clone = cameraTrack.clone();
+      } catch (err) {
+        this.dropCopySender(kind, pc, "the camera track cannot be cloned", err);
+        return;
+      }
+      clone.enabled = cameraTrack.enabled;
+      const old = existing.track;
+      try {
+        await existing.sender.replaceTrack(clone);
+      } catch (err) {
+        clone.stop();
+        this.dropCopySender(kind, pc, `the ${kind} sender would not take the new camera`, err);
+        return;
+      }
+      old.stop();
+      if (slot.sender !== existing) {
+        // Torn down (or removed) while the track was being replaced.
+        clone.stop();
+        return;
+      }
+      existing.track = clone;
+      return;
+    }
+    if (!addMissing) return;
+
+    // The middle sender is created sending or not as the roster says now;
+    // the light one always sends.
+    const active = kind === "middle" ? this.middleWanted() : undefined;
+    const added = addCopySender(
+      pc,
+      cameraTrack,
+      kind,
+      (what, err) => this.warnNoCopySender(kind, what, err),
+      active,
+    );
+    if (added === null) return;
+    const copy = added.copy;
+    copy.track.enabled = cameraTrack.enabled;
+    slot.sender = copy;
+    if (kind === "middle") this.middleActiveAsked = active ?? null;
+    try {
+      slot.transformId = attachSenderSFrame(copy.sender, {
+        seed,
+        localLeaf: this.publishLeaf,
+        streamIndex: copyStreamIndex(kind),
+      });
+      this.transformIds.add(slot.transformId);
+    } catch (err) {
+      // An unsealed sender is never left in place (invariant #4).
+      this.dropCopySender(kind, pc, "its SFrame transform could not be attached", err);
+      return;
+    }
+    if (!added.configured) {
+      // The browser refused the size and the ceiling with the transceiver;
+      // ask again on the sender. Without them this would be another
+      // full-size camera, so a refusal here removes the sender.
+      const ok = await configureCopySender(copy.sender, kind, active);
+      if (slot.sender !== copy) return;
+      if (!ok) {
+        this.dropCopySender(kind, pc, "its size and bitrate ceiling were refused", undefined);
+      }
+    }
+  }
+
+  /** Remove a copy's sender and say why, once per call. */
+  private dropCopySender(kind: CameraCopyKind, pc: RTCPeerConnection, what: string, err: unknown): void {
+    this.warnNoCopySender(kind, what, err);
+    const slot = this.copies[kind];
+    const copy = slot.sender;
+    if (copy === null) return;
+    slot.sender = null;
+    if (slot.transformId !== null) this.transformIds.delete(slot.transformId);
+    slot.transformId = null;
+    if (kind === "middle") this.middleActiveAsked = null;
+    removeCopySender(pc, copy);
+  }
+
+  private warnNoCopySender(kind: CameraCopyKind, what: string, err: unknown): void {
+    const slot = this.copies[kind];
+    if (slot.refusalWarned) return;
+    slot.refusalWarned = true;
+    // eslint-disable-next-line no-console
+    console.warn(`SfuCallSession: publishing the camera without a ${kind} sender: ${what}`, err ?? "");
+  }
+
+  /**
+   * The `mid`s of the offer's m-lines that carry the `kind` copy of the
+   * camera: one while there is such a sender with a `mid` (it has one once a
+   * local description that includes it is set), none otherwise. Sent with
+   * every offer this client makes, so the SFU forwards that m-line as the
+   * camera's light companion, or as its middle track.
+   */
+  private copyMids(kind: CameraCopyKind): string[] {
+    const mid = this.copies[kind].sender?.transceiver.mid;
+    return typeof mid === "string" && mid.length > 0 ? [mid] : [];
+  }
+
+  /**
+   * The stats ids of the `outbound-rtp` entries of the `kind` copy's sender,
+   * read from the sender's own report, so the media counters can name each
+   * camera sender. Empty without that sender or when the browser does not
+   * answer.
+   */
+  private async copyOutboundIds(kind: CameraCopyKind): Promise<Set<string>> {
+    const ids = new Set<string>();
+    const copy = this.copies[kind].sender;
+    if (copy === null) return ids;
+    try {
+      const report = await copy.sender.getStats();
+      for (const e of report.values() as Iterable<Record<string, unknown>>) {
+        const id = e["id"];
+        if (e["type"] === "outbound-rtp" && typeof id === "string") ids.add(id);
+      }
+    } catch {
+      // The lines then name that sender `main`.
+    }
+    return ids;
   }
 
   /**
@@ -775,9 +1204,33 @@ export class SfuCallSession {
     this.stopMediaCounters();
     // The tiles of this call start from nothing.
     shownLayerLedger.reset();
+    this.localCameraSaid = false;
     this.mediaCountersTimer = setInterval(() => {
       void this.sampleMediaCounters(pc);
     }, MEDIA_COUNTERS_INTERVAL_MS);
+  }
+
+  /** Whether the `call local camera` line was written for this call. */
+  private localCameraSaid = false;
+
+  /**
+   * Say once, at the first counters interval at which there is a camera, the
+   * state of the camera track and of each copy of it that is sent
+   * (`local-preview.ts`): whether the track the own preview plays still
+   * gives frames once it has clones.
+   */
+  private sayLocalCameraOnce(): void {
+    if (this.localCameraSaid) return;
+    const main = this.localStream?.getVideoTracks()[0];
+    if (main === undefined) return;
+    this.localCameraSaid = true;
+    // eslint-disable-next-line no-console
+    console.info(
+      describeLocalCamera(main, [
+        ["light", this.copies.light.sender?.track],
+        ["middle", this.copies.middle.sender?.track],
+      ]),
+    );
   }
 
   private async sampleMediaCounters(pc: RTCPeerConnection): Promise<void> {
@@ -785,19 +1238,30 @@ export class SfuCallSession {
     let reading: MediaReading;
     let sender: SenderReading | null;
     try {
+      const lightOutbound = await this.copyOutboundIds("light");
+      const middleOutbound = await this.copyOutboundIds("middle");
       const report = await pc.getStats();
       const entries = [...(report.values() as Iterable<Record<string, unknown>>)];
-      reading = readMedia(entries, this.lightTrackIds);
-      sender = readSender(entries);
+      reading = readMedia(
+        entries,
+        this.copyTrackIds.light,
+        lightOutbound,
+        this.copyTrackIds.middle,
+        middleOutbound,
+      );
+      sender = readSender(entries, lightOutbound, middleOutbound);
     } catch {
       return;
     }
     if (this.pc !== pc) return;
+    this.sayLocalCameraOnce();
+    // A start or stop of the middle sender the browser refused is asked again.
+    this.syncMiddleActive();
     for (const line of describeDeltas("call media interval", deltaOf(this.mediaCountersLast, reading))) {
       // eslint-disable-next-line no-console
       console.info(line);
     }
-    for (const line of describeOutboundLayers("call media interval", reading.outboundVideoLayers)) {
+    for (const line of describeOutboundSenders("call media interval", reading.outboundVideoSenders)) {
       // eslint-disable-next-line no-console
       console.info(line);
     }
@@ -806,8 +1270,16 @@ export class SfuCallSession {
       console.info(describeSender("call media interval", this.senderCountersLast, sender));
       this.senderCountersLast = sender;
     }
-    // What each remote tile showed over the interval (`layer-display.ts`).
-    for (const line of describeShownPeers("call media interval", shownLayerLedger.takeInterval())) {
+    // What each remote tile showed over the interval, and the frames it
+    // observed on its two elements (`layer-display.ts`).
+    const tileFrames = shownLayerLedger.takeFrames();
+    for (const line of describeShownPeers(
+      "call media interval",
+      shownLayerLedger.takeInterval(),
+      (peerId) => this.wantsBook.qualityOf(peerId),
+      (peerId) => this.givenBook.givenOf(peerId) ?? null,
+      (peerId) => tileFrames.get(peerId),
+    )) {
       // eslint-disable-next-line no-console
       console.info(line);
     }
@@ -829,7 +1301,12 @@ export class SfuCallSession {
       // eslint-disable-next-line no-console
       console.info(line);
     }
-    for (const line of describeShownPeers("call media total", shownLayerLedger.totals())) {
+    for (const line of describeShownPeers(
+      "call media total",
+      shownLayerLedger.totals(),
+      (peerId) => this.wantsBook.qualityOf(peerId),
+      (peerId) => this.givenBook.givenOf(peerId) ?? null,
+    )) {
       // eslint-disable-next-line no-console
       console.info(line);
     }
@@ -872,9 +1349,37 @@ export class SfuCallSession {
       }
       this.localStream = null;
     }
+    // The copies' clones are not in the local stream (the self-preview shows
+    // one picture), so they are stopped here.
+    for (const kind of CAMERA_COPY_KINDS) {
+      const slot = this.copies[kind];
+      if (slot.sender !== null) {
+        try {
+          slot.sender.track.stop();
+        } catch {
+          // best-effort
+        }
+      }
+      // In place: a copy still being set up compares against this very slot.
+      slot.sender = null;
+      slot.transformId = null;
+      slot.refusalWarned = false;
+      this.copyTrackIds[kind].clear();
+    }
+    this.middleActiveAsked = null;
+    this.middleActiveWarned = false;
+    // Nothing more is asked of the SFU, and the tiles of a later call start
+    // from nothing.
+    this.wantsSender.reset();
+    this.wantsBook.clear();
+    if (this.givenBook.size() > 0) {
+      this.givenBook.clear();
+      this.callbacks.onVideoGiven?.(this.givenBook.snapshot());
+    }
+    this.publishOfferSent = false;
     this.offerQueue = [];
     this.transformIds.clear();
-    this.lightTrackIds.clear();
+    this.unsealedSenderWarned = false;
     // Reset perfect-negotiation + video-publish state so a reused instance
     // (or a late callback after teardown) starts clean.
     this.makingOffer = false;
@@ -951,11 +1456,17 @@ export class SfuCallSession {
       this.callbacks.onCaptureFallback?.(captured.fallback);
     }
 
-    const pc = new RTCPeerConnection({
-      iceServers: await this.resolveIceServers(),
-      bundlePolicy: "max-bundle",
-      rtcpMuxPolicy: "require",
-    });
+    // Built through `sframePeerConnectionConfig`: on a browser that reaches
+    // the SFrame worker by `createEncodedStreams()` the connection has to be
+    // constructed for it (`./sframe-transport.ts`); elsewhere the
+    // configuration is unchanged.
+    const pc = new RTCPeerConnection(
+      sframePeerConnectionConfig({
+        iceServers: await this.resolveIceServers(),
+        bundlePolicy: "max-bundle",
+        rtcpMuxPolicy: "require",
+      }),
+    );
     this.pc = pc;
     this.startMediaCounters(pc);
 
@@ -979,6 +1490,11 @@ export class SfuCallSession {
         }),
       );
     }
+    // The camera's copies (ADR-0070 steps 1 and 5), sealed like every sender
+    // before the offer is built.
+    const camera = stream.getVideoTracks()[0];
+    if (camera !== undefined) await this.followCamera(pc, camera, seed);
+    if (this.pc !== pc) return;
     if (stream.getTracks().length === 0) {
       // Nothing to send, but the offer still needs a media line to carry the
       // ICE/DTLS transport the SFU's own offers will reuse for what this
@@ -1008,12 +1524,18 @@ export class SfuCallSession {
       this.transformIds.add(
         attachReceiverSFrame(ev.receiver, { seed: this.activeSeed ?? seed }),
       );
-      // A light companion's receiver is named as such in the media counters.
-      if (splitStreamId(remoteStream.id).light) {
+      // Where the browser has no per-frame callback, the tile reads this
+      // receiver's statistics instead (`video-frame-watch.ts`).
+      if (ev.track.kind === "video") registerVideoFrameSource(ev.track, ev.receiver);
+      // The receiver of a light companion or of a middle track is named as
+      // such in the media counters.
+      const role = splitStreamId(remoteStream.id).role;
+      if (role !== "main") {
         const trackId = ev.track.id;
-        this.lightTrackIds.add(trackId);
+        const ids = this.copyTrackIds[role];
+        ids.add(trackId);
         ev.track.addEventListener("ended", () => {
-          this.lightTrackIds.delete(trackId);
+          ids.delete(trackId);
         });
       }
       this.callbacks.onRemoteTrack?.({
@@ -1027,6 +1549,8 @@ export class SfuCallSession {
       const s = pc.iceConnectionState;
       if (s === "connected" || s === "completed") {
         if (this.state === "connecting") this.setState("connected");
+        // Say again what this device shows, now that media flows.
+        this.wantsSender.resend();
       } else if (s === "failed") {
         this.fail("ICE connection failed");
       }
@@ -1041,7 +1565,12 @@ export class SfuCallSession {
     if (offer.sdp === undefined) {
       throw new Error("createOffer produced no SDP body");
     }
-    this.signaling?.sendSdpOffer(offer.sdp);
+    // The copies' transceivers have their `mid`s now.
+    this.signaling?.sendSdpOffer(offer.sdp, this.copyMids("light"), this.copyMids("middle"));
+    // The SFU has media state for this peer from this offer on: tell it what
+    // this device shows of everyone.
+    this.publishOfferSent = true;
+    this.wantsSender.resend();
 
     // Announce the initial camera state to any peers already in the call
     // (camera-off-cleanup) — so a peer that joined camera-off is shown off
@@ -1057,6 +1586,10 @@ export class SfuCallSession {
   private onWelcome(frame: SfuWelcome): void {
     this.lastInboundMs = this.nowMs();
     this.selfPeerId = frame.peer_id;
+    this.wantsBook.setPeers(
+      frame.roster.map((p) => p.peer_id).filter((id) => id !== frame.peer_id),
+    );
+    this.onRosterChanged(false);
     this.callbacks.onWelcome?.(frame.peer_id, frame.roster);
   }
 
@@ -1099,7 +1632,22 @@ export class SfuCallSession {
     }
   }
 
+  /**
+   * The people of the call changed: the middle sender starts or stops with
+   * the count, and the SFU is told what this device shows of the people now
+   * in it (again, whatever it is, after a join).
+   */
+  private onRosterChanged(joined: boolean): void {
+    this.syncMiddleActive();
+    if (joined) this.wantsSender.resend();
+    else this.wantsSender.changed();
+  }
+
   private onPeerJoined(frame: SfuPeerJoined): void {
+    if (frame.peer_id !== this.selfPeerId) {
+      this.wantsBook.addPeer(frame.peer_id);
+      this.onRosterChanged(true);
+    }
     this.callbacks.onPeerJoined?.(
       frame.peer_id,
       frame.account_pseudonym,
@@ -1114,6 +1662,13 @@ export class SfuCallSession {
   }
 
   private onPeerLeft(frame: SfuPeerLeft): void {
+    this.wantsBook.removePeer(frame.peer_id);
+    // What the SFU gave of them goes with them: someone who later joins
+    // under the same id starts with nothing said.
+    if (this.givenBook.removePeer(frame.peer_id)) {
+      this.callbacks.onVideoGiven?.(this.givenBook.snapshot());
+    }
+    this.onRosterChanged(false);
     this.callbacks.onPeerLeft?.(frame.peer_id);
   }
 
@@ -1166,6 +1721,31 @@ export class SfuCallSession {
     })();
   }
 
+  /**
+   * Insertable-streams browsers only (`./sframe-transport.ts`); nothing
+   * elsewhere. There a sender or receiver whose encoded streams were never
+   * taken passes no media, so after every negotiation step every receiver
+   * without a transform is given one at the current seed, and a sender left
+   * without one (the microphone, the camera, its light or middle copy) is
+   * said out loud. Nothing here can let a frame through unsealed: an
+   * uncovered endpoint is silent, not plain.
+   */
+  private coverSFrame(pc: RTCPeerConnection): void {
+    if (sframeTransport() !== "encoded-streams") return;
+    const seed = this.activeSeed;
+    if (seed === null || this.pc !== pc) return;
+    const cover = coverEncodedStreams(pc, seed);
+    for (const id of cover.attachedReceiverIds) this.transformIds.add(id);
+    if (cover.unsealedSenders.length > 0 && !this.unsealedSenderWarned) {
+      this.unsealedSenderWarned = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `SfuCallSession: ${cover.unsealedSenders.length} sender(s) have no SFrame transform; ` +
+          "their media does not flow",
+      );
+    }
+  }
+
   /** SFU's answer to our publish offer (initial or a mid-call renegotiation). */
   private async onSdpAnswer(frame: SfuSdpAnswer): Promise<void> {
     const pc = this.pc;
@@ -1174,6 +1754,10 @@ export class SfuCallSession {
       this.isSettingRemoteAnswerPending = true;
       await pc.setRemoteDescription({ type: "answer", sdp: frame.sdp });
       this.isSettingRemoteAnswerPending = false;
+      // The senders' codecs are negotiated now: the SFrame worker needs them
+      // to leave the right codec header in the clear (ADR-0071).
+      syncSenderCodecs();
+      this.coverSFrame(pc);
       // The initial publish (or a mid-call renegotiation) is now answered —
       // arm `onnegotiationneeded` for future local track changes (piece B).
       this.negotiationReady = true;
@@ -1223,7 +1807,9 @@ export class SfuCallSession {
       this.armFrameDescriptor(pc);
       await pc.setLocalDescription(); // implicit createOffer
       const sdp = pc.localDescription?.sdp;
-      if (sdp !== undefined) signaling.sendSdpOffer(sdp);
+      if (sdp !== undefined) {
+        signaling.sendSdpOffer(sdp, this.copyMids("light"), this.copyMids("middle"));
+      }
     } catch {
       // A failed renegotiation leaves the call up as-is; the publishVideo
       // caller already surfaced the local self-preview.
@@ -1290,6 +1876,12 @@ export class SfuCallSession {
           // sealed payload -- a blank tile for a peer who is sending fine.
           this.armFrameDescriptor(pc);
           await pc.setLocalDescription();
+          // Harmless when nothing changed for the senders: the worker keeps
+          // the newest table (ADR-0071).
+          syncSenderCodecs();
+          // The offer may have created transceivers: every receiver has its
+          // streams taken (insertable-streams browsers only).
+          this.coverSFrame(pc);
           const answerSdp = pc.localDescription?.sdp;
           if (answerSdp === undefined) {
             throw new Error("setLocalDescription produced no answer SDP");

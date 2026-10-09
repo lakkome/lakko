@@ -255,8 +255,11 @@ With `server`:
   the transport-wide extension from the SFU either. A libwebrtc receiver
   is then expected to run its receive-side estimator over `abs-send-time`
   and send REMB of its own (not re-read in the libwebrtc source for this
-  change, and not seen on a call); a REMB from a subscriber reaches the
-  simulcast layer policy as `Event::EgressBitrateEstimate`.
+  change, and not seen on a call). `str0m` hands a subscriber's REMB over
+  as `Event::EgressBitrateEstimate`; the SFU does not take it for the
+  subscriber's budget in the simulcast layer policy, because it follows
+  what the subscriber is being sent (see "A subscriber's REMB is not a
+  budget" below).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -287,6 +290,133 @@ REMB rounds.
   report and per 300 ms plus the round-trip time. The SFU's receiver
   reports are the RFC 3550 figure, once a second for video.
 
+### A cut needs a queue (2026-10-07)
+
+On a live call a publisher on a mobile network was walked down by cuts
+for "over-use": 503, 191, 53 kbit/s within fifteen seconds
+(07:46:06 to 07:46:16 in the log), on a path that had carried
+2.7 Mbit/s in an earlier call, with a loss of 0 to 0.8% in the SFU's own
+ingress lines and no cut for loss in the excerpt. Every lowering in the
+log is the delay rule (`last_change="overuse"`); the round-trip time the
+SFU saw stood at 40 to 96 ms in most intervals and at 388 and 202 ms in
+the two where the deepest cuts were made. What the log cannot show is
+the queue on the path at each cut: no line said it. It does now.
+
+The rule that cut is the delay detector's (`uplink_estimate.rs`,
+`PathEstimator::decrease`): the trend of delay over some twenty groups
+of packets crosses its threshold, and the estimate is put at 0.85 of
+what arrived in the last half second. Each cut makes the publisher send
+less, so less arrives, so the next cut starts lower. In the estimator's
+own model a path with a mobile network's jitter (delay climbing by 20 to
+60 ms over a tenth of a second and falling back, twice a second), no
+limit on the rate and no loss was cut 34 times in a minute, down to
+326 kbit/s from 2 Mbit/s
+(`jitter_without_a_queue_cuts_nothing`, the second half).
+
+What a publisher's uplink runs on now (`PathEstimator::confirming`):
+
+- **A cut for over-use needs a standing queue**: the smallest delay of
+  the packets of the last 200 ms at least 25 ms above the smallest the
+  path has shown in the last 15 to 30 s (`STANDING_QUEUE`), for 300 ms
+  (`QUEUE_STANDS_FOR`). Delay is arrival time less the packet's
+  abs-send-time. The smallest of a window, not its mean: jitter raises
+  some packets, a queue raises all of them.
+- **The detector's word alone is doubted**: no cut is made, and it is
+  counted. If a queue then goes on standing, the cut is made; a queue
+  75 ms deep (`DEEP_QUEUE`) that has stood 300 ms is cut on without the
+  detector.
+- **After a cut the queue has to stand as long again** before the next.
+  A cut is therefore never taken from the rate the cut before it imposed
+  unless the path is still congested at that rate; and what arrives
+  through a standing queue is what the path delivers, so the figure a
+  cut is taken from is not one a pause in the sending made small.
+- **The way back** is as before: to the estimate held before the first
+  cut of an episode at four times a second (`RESTORE_PER_SECOND`), so a
+  cut to 0.85 is undone in under 200 ms of quiet and a cut to a quarter
+  in a second; a path that is cut again within ten seconds has shown it
+  is narrower and is climbed at 8%, then 25%, then 50% a second.
+- **Loss is as before**: a burst changes nothing, loss that lasts 3 s
+  steps the estimate down once a second, with or without a queue.
+
+The queue watch is one type, `uplink_estimate::QueueWatch`, used by the
+uplink and by a subscriber's downlink (step 6 below), which adds its own
+model of the SFU's sending on top. All constants chosen, not measured.
+
+Visible: `media: a publisher's bitrate estimate was cut for over-use`
+(`rule` = `detector` or `standing-queue`, `from_kbps`, `to_kbps`,
+`arriving_kbps`, `queue_ms`, `trend`, `threshold`, `confirmed`), one
+line per cut; and on the interval line `queue_ms` and `doubted` (how
+often the detector asked for a cut with no queue standing, since the
+publisher joined).
+
+Tests (`uplink_estimate.rs`): `jitter_without_a_queue_cuts_nothing`
+(a minute of that jitter: no cut, the estimate never under its start
+value, the detector doubted; the same path cuts the old rule 34 times);
+`a_path_that_narrows_is_cut_and_comes_back_when_it_widens` (2 Mbit/s
+into a path narrowed to 800 kbit/s: at or under 800 within 3 s, between
+400 and 1000 while it lasts, every cut with a queue of 25 ms or more;
+widened again: 2 Mbit/s within 15 s);
+`a_stall_on_a_jittery_path_does_not_start_a_walk_down` (half a second
+of nothing delivered and then everything at once: at most one cut, at
+the start value or above from 2.5 s after);
+`the_loss_rules_do_not_depend_on_a_queue`;
+`the_queue_watch_reads_the_smallest_recent_delay`. And in
+`synthetic_client_e2e.rs`, `a_jittery_uplink_with_no_limit_is_not_cut`:
+a publisher sending 1.2 Mbit/s for 30 s through that jitter; no REMB
+may be under 1.2 Mbit/s. Seen: 62 REMBs, lowest 1.5 Mbit/s (the start
+value), highest 2.07; the detector asked for a cut 35 times and was
+doubted each time.
+
+**Second live call with the rule, same day, and two defects in it.**
+For the two minutes the mobile publisher was alone on its link its
+estimate held at 1.8 to 2.8 Mbit/s. Then:
+
+1. *Cuts without a queue.* 21 of the 51 cut lines of that call carry
+   `queue_ms=None`. Cause: after a cut the code re-armed the wait by
+   writing "a queue has stood since now", whether one stood or not, so
+   0.3 s later the detector's next word passed for confirmed; and a
+   queue reading that had become "too few packets to tell" left an old
+   "standing since" in place. Now the decision reads the queue at the
+   moment it is made (`update_rate_by_the_queue`): a cut needs a reading
+   of 25 ms or more now, standing 300 ms, and 300 ms since the last cut;
+   with no reading nothing is cut. The line's `queue_ms` is that
+   reading. The other 30 cuts had queues of 29 to 296 ms: two
+   publishers were sharing the mobile uplink by then and it was full.
+2. *No way back.* The same publisher then sat at 291 kbit/s for minutes
+   with a queue reading of 8 ms. Its detector went from over-use to
+   under-use and back about twice a second (`doubted` rose by about ten
+   per five-second interval), and in the rule taken from libwebrtc
+   either state stops the rise: over-use asks for a cut, under-use
+   holds. With no queue standing neither does now: the estimate rises
+   whatever the detector says. While a queue stands nothing rises.
+
+A cut is to 0.85 of what is **arriving**, not of the estimate: the line
+"from 2800 to 1854, arriving 2181" is that rule, and it is meant. A
+queue that stands while 2181 kbit/s arrives says the path carries no
+more than that, whatever the estimate was.
+
+**Two publishers behind one bottleneck** (the two phones on one mobile
+link) are not treated as one path: each has its own estimate, each sees
+the queue the two build together, and each is cut to 0.85 of its own
+arriving rate, so whoever is sending more keeps more. In that call the
+Firefox publisher held 2.0 to 4.4 Mbit/s and the Chrome one 0.3. The
+log does not show Firefox ignoring its REMB: what arrived from it stayed
+within about a quarter of its estimate through cuts and rises alike
+(estimate 2206 cut to 1221, then 1437 arriving; 4339 with 4442
+arriving). The Chrome publisher lost because it could not climb (defect
+2), not because the other would not yield. Sharing a bottleneck fairly
+would need the SFU to know that two publishers share one (same remote
+address, or queues that rise and fall together) and to divide one
+estimate between them; nothing of that is built, and the evidence so
+far asks only for defect 2 to be gone.
+
+Not known: what a real mobile uplink's delay looks like between the
+smallest and the rest (a path that holds every packet 25 ms longer for
+half a second without being congested would be cut on; one whose queue
+stays under 25 ms would not be, and is left to loss); and whether the
+388 ms round trip of the live call was a queue a cut should answer.
+The next call's log says, per cut.
+
 ### Known limits
 
 1. **A loss burst still costs the publisher seconds, through its own
@@ -313,155 +443,1503 @@ REMB rounds.
 5. **A queue that is held and released** raises the arriving rate for a
    moment, and with it the 1.5x cap; the configured maximum is the bound.
 
-## Two-track delivery of simulcast video (the `~light` contract)
+## Three-track delivery of the camera (the `~light` and `~mid` contract)
 
-Applies only to a publisher that sends a video track as simulcast layers
-(more than one rid). The Lakko web client sends two: rid `q` (the light
-one, listed first) and rid `f` (the full one). Audio and a video track
-with a single encoding are delivered as before, one downstream track each,
-and nothing here touches them.
+**What a subscriber gets.** For one publisher's camera, every subscriber is
+offered up to three video media lines (ADR-0070 steps 1 and 5):
+
+| Track | `a=msid` stream id | Carries | Forwarded |
+|---|---|---|---|
+| main | the source peer id, as for every other track | the camera as the publisher sends it | when the subscriber shows `main` (the default) |
+| middle | the source peer id followed by the literal `~mid` (`media::MIDDLE_STREAM_SUFFIX`) | the same picture at half size, capped at about 500 kbit/s | only when the subscriber shows `middle` |
+| light companion | the source peer id followed by the literal `~light` (`media::LIGHT_STREAM_SUFFIX`) | the same picture small and cheap, for as long as the track lives | always |
+
+As it appears in an SFU offer (the second token is the track id, random per
+track; taken from `three_senders_and_the_subscribers_wants`):
+
+```
+a=msid:p000000000000000118db9cab637bcab0 y8qkL7YxnDFTKe2EzHqG
+a=msid:p000000000000000118db9cab637bcab0~light nINZV9iZoFzrI45iZJKN
+a=msid:p000000000000000118db9cab637bcab0~mid 51VjERekROvrfHxvbyXs
+```
+
+A client keys a main track by the stream id as before and pairs the other
+two with it by stripping the suffix. All three are negotiated whenever the
+publisher has them; the subscriber says which heavy one it shows (below).
+It shows the light one the moment the heavy one it shows stands still; no
+key frame is needed at that moment. A client that does not know the contract
+sees further video tracks under stream ids that match no participant, and
+is sent the main and the light one, as before step 5.
+
+### What a subscriber shows (`video-wants`)
+
+```json
+{"kind":"video-wants","wants":[{"peer":"p000000000000000118db9cab637bcab0","quality":"middle"},{"peer":"p000000000000000218db9cab637bd001","quality":"light"}]}
+```
+
+`lakko_sfu_proto::ClientFrame::VideoWants`: for each publisher named, the
+picture this subscriber shows (`MediaPeer::set_video_wants`).
+
+- `main`: the main track and the light one. `middle`: the middle track and
+  the light one. `light`: the light one alone.
+- No frame ever sent, or a publisher not named: `main`. A client that knows
+  nothing of this is served as before.
+- `middle` asked of a publisher that has no middle track open on this
+  subscriber: `main`. The want is kept and applies when the track opens.
+- **Each frame replaces the whole set.** A publisher the new frame omits is
+  back at `main`. A peer named twice has its last entry.
+- A name that is no publisher of the call changes nothing (it is kept, and
+  applies if that peer's tracks appear). On an SFU that relays signaling
+  only the frame is taken and means nothing.
+- At most 64 entries, each `peer` 1 to 64 bytes; an unknown `quality` or an
+  unknown field is refused like any malformed frame. There is no reply.
+
+**Pausing is immediate**: the next packet of a track the subscriber does not
+show is dropped (`not_wanted`), nothing is held, and the subscriber's own
+keyframe requests on that track are not relayed.
+
+**Resuming waits for a key frame.** When a subscriber starts showing a track
+it was not being sent, the publisher is asked for a key frame on the media
+line behind it at once (`reason` `track-resume`, through the per-track rate
+limit, so a request inside the window is owed and goes out when the window
+ends) and again once a second, and the track starts at the first packet of
+a key frame (the frame descriptor's flags; header only). After five requests
+with none it starts at the next packet, as a stream without a frame
+descriptor must. The downstream stream is continuous across the pause: the
+first packet after it takes the next unused sequence number and a timestamp
+moved on by the time that passed (`StreamMap::rebase`), so the subscriber
+sees no gap and asks for no retransmission. A packet from before the resume
+point has no slot (`stale`).
+
+Not built: any choice by the SFU. It forwards what the subscriber asked for
+and does not estimate a subscriber's downlink (ADR-0070 step 6).
 
 **Why.** A home uplink that loses 40 to 75% of its datagrams for about a
 second does not repair a stream of about 250 packets a second inside that
 second; a stream of 25 to 50 packets a second is repaired in a few hundred
-milliseconds (`measure_uplink_dip`). Moving a subscriber's one track to the
+milliseconds (`measure_uplink_dip`). Moving a subscriber's one track to a
 light layer during the dip (the uplink fallback, below) was measured not to
 shorten the stall, because the switch needs a light key frame to get
-through the same dip. So the subscriber receives **both layers all the
-time, as two tracks**, decodes both, and shows the light one the moment the
-full one stands still. No key frame is needed at that moment.
+through the same dip.
 
-**The contract.** For one simulcast video track of a publisher, every
-subscriber is offered two video media lines (one SFU offer carries both):
+There are two ways a publisher produces the main and the light track. The
+Lakko clients use the first, and only it has a middle track.
 
-| Track | `a=msid` stream id | Carries |
-|---|---|---|
-| main | the source peer id, as for every other track | the heaviest layer the subscriber-bandwidth policy allows |
-| light companion | the source peer id followed by the literal `~light` (`media::LIGHT_STREAM_SUFFIX`) | the light layer only, for as long as the track lives; it never switches |
+### Three senders (the contract for publishers)
 
-As it appears in an offer (the second token is the track id, random per
-track):
+The publisher sends its camera as **ordinary senders on separate media
+lines**: the main one exactly as a client without any of this sends it (one
+encoding, no rid); a light one (the same camera scaled to a quarter and
+capped at about 150 kbit/s; SFrame stream index 3); and, from three people
+in the call on (`lakko_ui_rules::call_group::middle_sender_wanted`), a
+middle one (the camera at half size, capped at about 500 kbit/s; SFrame
+stream index 4). Each has its own key. It tells the SFU which is which in
+the offer that carries the media lines:
 
+```json
+{"kind":"sdp-offer","sdp":"...","light_mids":["2"],"middle_mids":["3"]}
 ```
-a=msid:p000000000000000518db68c125428388 xXlpmH6sL9eXgEBa3nab
-a=msid:p000000000000000518db68c125428388~light 01dTBrF6miaQ1z4I88hS
-```
 
-A client keys a main track by the stream id as before and pairs the
-companion with it by stripping the suffix. A client that does not know the
-contract sees a second video track under a stream id that matches no
-participant.
+`light_mids` and `middle_mids` (`lakko_sfu_proto::ClientFrame::SdpOffer`)
+list the `mid`s of the offer's media lines that carry the light and the
+middle copy. Each is absent when empty, and an absent field means none. At
+most 4 entries of at most 16 bytes each, per list; a frame outside that is
+refused like any malformed frame. A client may repeat the lists in every
+later offer.
 
-**Which layer is which** (`MediaPeer::simulcast_layout`, on the publisher).
-The light layer is rid `q` when the track has one; otherwise the layer with
-the lowest measured bitrate, once every layer has been measured, and it is
-fixed from then on. The heaviest layer is, with exactly two layers, the one
-that is not the light one; with more, the one with the highest measured
-bitrate. A track is known to be simulcast from its negotiation when that
-lists the rids (`a=rid` / `a=simulcast`), otherwise from the moment a second
-rid arrives on it; in the second case the companion is opened then, by a
-further offer, and the main track that is already open is left alone.
+`middle_mids` follows the rules of `light_mids` below
+(`MediaPeer::declare_middle_tracks`): one middle track per peer, the first
+that is taken; a mid that is the peer's light track is refused
+(`declared-as-the-other-copy`), and so is the reverse; the declared track
+opens on every subscriber as the **middle** track only (`~mid`), and its
+packets go to that track and nothing else, when the subscriber shows it.
 
-**The main track** is put on the heaviest layer before its first packet when
-that layer is known, instead of latching whichever layer arrives first. A
-main track that did latch another layer (the layers were not known yet) is
-moved to the heaviest by the default-layer rule of `drive_uplink_fallback`,
-at a whole key frame. The subscriber-bandwidth policy
-(`drive_layer_selection`) may still lower it; the companion is exempt from
-that policy, from `select_layer` and from the uplink fallback.
+What the SFU does with `light_mids` (`MediaPeer::declare_light_tracks`):
 
-**Each track begins at a whole key frame of its layer.** The packets of the
-selected layer are held (`SwitchWait`, at most 64 packets and one second)
-until a key frame is whole at the SFU, and the publisher is asked for one on
-that layer (`reason` `track-start`) the moment the track is open, then once a
-second until the track has begun. The request goes through the per-track
-rate limit; inside the window it is owed and goes out when the window ends.
-After five requests without a whole key frame the track stops waiting and
-begins at the next packet of its layer (a stream without frame descriptors
-never shows the SFU a key frame).
+- **A declaration is taken only for a video media line the peer sends on
+  that has not been announced yet as an ordinary track.** The lines of the
+  offer that carries the declaration always qualify: `str0m` announces a
+  line after the offer is applied. Anything else is ignored and logged
+  (`media: light-track declaration ignored`, with `reason`: `unknown-mid`,
+  `not-video`, `not-sent-by-peer`, `already-a-main-track`,
+  `another-track-of-this-kind-declared`, `declared-as-the-other-copy`), and
+  the track, if there is one, stays an
+  ordinary track of its kind.
+- **One light track per peer, the first that is taken**, for good.
+- The declared track is opened on every subscriber as a light companion
+  **only**, never as a main track. Every packet of it is forwarded to the
+  companion, verbatim (C-39), on the companion's own RTP stream: its own
+  SSRC, sequence-number and timestamp map (`src/stream_map.rs`),
+  retransmission buffer and, with `LAKKO_SFU_VIDEO_FEC=1`, FEC state.
+- The main sender is forwarded as any single-encoding video track.
+- **No layer is selected anywhere.** No track switches, and the main and
+  the light one do not wait for a key frame at the SFU: each is forwarded
+  from the first packet that arrives after the track opens. A track that
+  was paused and is shown again does wait for one (above); the middle
+  track is paused until asked for, so it always begins at one.
+- **Key frames.** When a track opens on a subscriber the publisher is asked
+  for a key frame on the media line behind it (`reason`
+  `downstream-opened`), through the per-track rate limit; a request inside
+  the window is owed and goes out when the window ends. A track that opens
+  paused (the middle track, or a main track of a publisher the subscriber
+  shows at `middle` or `light`) is not asked for. A subscriber's PLI or FIR
+  on the companion goes to the publisher's light sender, on the main track
+  to the main sender, on the middle track to the middle sender.
+- **Bitrate control** (`LAKKO_SFU_BITRATE_CONTROL=server`) is unchanged: the
+  estimate covers the publisher's whole uplink, every sender and audio, and
+  the REMB carries it on every video stream.
 
-**Key frame requests, retransmission, FEC.** A subscriber's PLI or FIR on
-the companion is relayed to the publisher for the light layer, on the main
-track for the layer it is selected to. A NACK on either is answered from
-`str0m`'s send buffer for that track. With `LAKKO_SFU_VIDEO_FEC=1` each
-track has its own FEC state: the publisher's FEC packets for a layer make
-the SFU send its own for the track that layer is on.
+A second video sender that is **not** declared is what it always was: a
+second main track under the publisher's own stream id, told from the first
+by its track id alone.
 
-**Each track is its own RTP stream**: its own SSRC, its own sequence-number
-and timestamp map (`src/stream_map.rs`), its own key frame bookkeeping.
-Payloads are forwarded verbatim on both (C-39).
+### Simulcast (the variant kept for a publisher that sends rids)
 
-**Visible.**
+A publisher that sends one video media line as simulcast layers (more than
+one rid) also reaches every subscriber as the two tracks: the main track on
+the heaviest layer and a companion on the light layer, which never
+switches. The light layer is rid `q` when the track has one, otherwise the
+layer with the lowest measured bitrate once every layer has been measured,
+fixed from then on (`MediaPeer::simulcast_layout`). A track is known to be
+simulcast from its negotiation when that lists the rids, otherwise from the
+moment a second rid arrives on it; the companion is opened then, by a
+further offer.
 
-- `media: track announced by peer` carries `simulcast`; a track found to be
-  simulcast later logs `media: track found to be simulcast from its packets`.
+In this variant each track **begins at a whole key frame of its layer**: the
+packets of the selected layer are held (`SwitchWait`, at most 64 packets and
+one second) until a key frame is whole at the SFU, and the publisher is
+asked for one on that layer (`reason` `track-start`) when the track opens,
+then once a second, five times at most. A main track that latched another
+layer is moved to the heaviest by the default-layer rule of
+`drive_uplink_fallback`. The subscriber-bandwidth policy
+(`drive_layer_selection`) may lower the main track when the SFU has a
+send-side estimate for the subscriber; the companion is exempt from it, from
+`select_layer` and from the uplink fallback.
+
+**Why the clients stopped using it (a live call, 2026-10-04).** A browser
+under REMB-only bitrate control sends its full simulcast layer only above
+about 900 kbit/s and nothing in between: every dip of the SFU's estimate
+dropped the publisher to 180p, and every attempt to switch `f` back on (a
+720p key frame burst) produced delay growth and another cut. One encoding
+has no such cliff, its encoder scales down gradually, and the same publisher
+held 720p before simulcast.
+
+**A subscriber's REMB is not a budget** (fixed the same day). On that call a
+subscriber's main track sat on `q` while `f` was arriving (`role="main"
+sent=161 wrong_layer=1427` per five seconds). Under server bitrate control
+no transport-wide feedback is negotiated, so a browser subscriber sends
+REMB, and `str0m` hands a REMB over as `Event::EgressBitrateEstimate`
+whether or not its own estimator is on. The SFU took it for the subscriber's
+budget. A REMB follows what the subscriber is being sent: when the
+publisher's heavy layer paused, the figure fell below the heavy layer's
+rate, the main track was selected to `q`, and from then on the figure could
+not grow past what `q` brings. Only a send-side estimate (`BweKind::Twcc`)
+is a budget now (`bwe_kind_bps`); with none, the default-layer rule keeps a
+main track on the heaviest layer. That a browser sends REMB here is read
+from the negotiation and the code path, not captured from the call.
+
+### Visible
+
+- `media: track announced by peer` carries `role=main|middle|light` and
+  `simulcast`; `media: offer declared light tracks` and `media: offer
+  declared middle tracks` name the peer's light and middle mid; `media:
+  subscriber's video wants changed` says, once per `video-wants` frame, the
+  subscriber and how many publishers it named at `main`, `middle` and
+  `light`; a track found to be simulcast later logs `media: track found to be
+  simulcast from its packets`.
 - Each key frame request: `media: keyframe requested from publisher` with
-  `reason` `track-start`.
+  its `reason`.
 - With `LAKKO_SFU_MEDIA_DIAG_SECS` set, the per-interval line `media: fanout
-  to subscriber over the last interval` carries `role` (`main` / `light`):
-  one line per downstream track, with the packets `sent` on each. A packet
-  of another layer is not an attempt on the companion; on the main track it
-  is counted `wrong_layer` as before.
+  to subscriber over the last interval` carries `role` (`main` / `middle` /
+  `light`), `paused=true|false` (the subscriber is being sent nothing on
+  the track: not shown, or waiting for a key frame to resume) and
+  `not_wanted` (packets dropped for that reason): one line per downstream
+  track, with the packets `sent` on each. For a
+  simulcast source a packet of another layer is not an attempt on the
+  companion; on the main track it is counted `wrong_layer`.
 - `lakko_sfu_media_light_companion_packets_forwarded_total`: packets sent on
   companion tracks. Each is also in
   `lakko_sfu_media_frames_forwarded_total`.
+- `lakko_sfu_media_frames_dropped_total{reason="not_wanted"}`: packets of a
+  main or middle track a subscriber does not show. Expected traffic from
+  three people on, not an alarm.
 
 ### Measured (`measure_two_track_dip`)
 
-The publisher and the dip of the uplink-fallback measurement below: `q` at
-50 packets a second, `f` at 250, 25 frames a second, and for one second 70%
-of the publisher's media datagrams lost, both layers and retransmissions.
-The SFU runs with its defaults (no uplink fallback). A frame is decodable
-when all its packets have arrived and the frame before it on its layer was
-decodable, starting over at a key frame. (a) is the longest interval in
-which the main track completes no decodable frame, (b) the longest in which
-neither track does: what a client that shows whichever track is alive would
-see. Twenty runs on a laptop, seeds 1 to 20 (two invocations of ten),
-2026-10-04, milliseconds:
+The publisher sends `q` at 50 packets a second and `f` at 250, 25 frames a
+second, and for one second 70% of its media datagrams are lost, both
+pictures and their retransmissions. The SFU runs with its defaults. A frame
+is decodable when all its packets have arrived and the frame before it on
+the same picture was decodable, starting over at a key frame. (a) is the
+longest interval in which the main track completes no decodable frame, (b)
+the longest in which neither track does: what a client that shows whichever
+track is alive would see.
+
+**Two senders, the light one declared** (the default of the test). Twenty
+runs on a laptop, seeds 1 to 20 (`LAKKO_DIP_RUNS=20`), the night of 2026-10-04,
+milliseconds; a `clippy` build of the workspace ran beside the first runs:
 
 | Seed | Lost / sent in the window | (a) main | light alone | (b) either | b / a |
 |---|---|---|---|---|---|
-| 1 | 644 / 893 | 525 | 739 | 391 | 0.74 |
-| 2 | 559 / 821 | 502 | 542 | 502 | 1.00 |
-| 3 | 631 / 883 | 519 | 279 | 211 | 0.41 |
-| 4 | 567 / 831 | 480 | 506 | 479 | 1.00 |
-| 5 | 630 / 883 | 322 | 630 | 322 | 1.00 |
-| 6 | 573 / 829 | 387 | 344 | 245 | 0.63 |
-| 7 | 619 / 870 | 652 | 311 | 243 | 0.37 |
-| 8 | 605 / 845 | 543 | 373 | 368 | 0.68 |
-| 9 | 581 / 830 | 413 | 331 | 275 | 0.67 |
-| 10 | 559 / 819 | 831 | 304 | 280 | 0.34 |
-| 11 | 605 / 849 | 409 | 486 | 302 | 0.74 |
-| 12 | 646 / 909 | 1035 | 797 | 792 | 0.76 |
-| 13 | 532 / 800 | 326 | 612 | 325 | 1.00 |
-| 14 | 610 / 864 | 970 | 1090 | 970 | 1.00 |
-| 15 | 619 / 887 | 310 | 488 | 248 | 0.80 |
-| 16 | 596 / 853 | 603 | 353 | 327 | 0.54 |
-| 17 | 672 / 925 | 428 | 421 | 293 | 0.68 |
-| 18 | 587 / 850 | 598 | 520 | 318 | 0.53 |
-| 19 | 617 / 860 | 655 | 422 | 344 | 0.52 |
-| 20 | 639 / 891 | 723 | 569 | 400 | 0.55 |
+| 1 | 643 / 892 | 1086 | 509 | 509 | 0.47 |
+| 2 | 555 / 816 | 477 | 543 | 477 | 1.00 |
+| 3 | 639 / 897 | 490 | 418 | 337 | 0.69 |
+| 4 | 578 / 844 | 540 | 616 | 540 | 1.00 |
+| 5 | 620 / 870 | 447 | 347 | 313 | 0.70 |
+| 6 | 584 / 846 | 512 | 684 | 478 | 0.93 |
+| 7 | 640 / 900 | 740 | 715 | 550 | 0.74 |
+| 8 | 626 / 877 | 1007 | 588 | 588 | 0.58 |
+| 9 | 592 / 844 | 420 | 654 | 313 | 0.75 |
+| 10 | 560 / 820 | 381 | 344 | 241 | 0.63 |
+| 11 | 608 / 853 | 404 | 696 | 369 | 0.91 |
+| 12 | 643 / 905 | 828 | 343 | 343 | 0.41 |
+| 13 | 527 / 792 | 279 | 375 | 202 | 0.72 |
+| 14 | 593 / 839 | 402 | 794 | 343 | 0.85 |
+| 15 | 610 / 874 | 438 | 785 | 438 | 1.00 |
+| 16 | 589 / 845 | 454 | 587 | 281 | 0.62 |
+| 17 | 665 / 916 | 548 | 411 | 411 | 0.75 |
+| 18 | 583 / 845 | 291 | 446 | 270 | 0.93 |
+| 19 | 626 / 872 | 407 | 280 | 280 | 0.69 |
+| 20 | 636 / 886 | 1034 | 246 | 246 | 0.24 |
 
-Over the twenty: the median of (a) is 522 ms and of (b) 324 ms; the longest
-(a) is 1035 ms and the longest (b) 970 ms.
+Over the twenty: the median of (a) is 454 ms and of (b) 343 ms; the longest
+(a) is 1086 ms and the longest (b) 588 ms.
 
 What the runs show:
 
-- The displayed stall is shorter with the two tracks in fifteen of the
-  twenty runs, by 20 to 66%; its median falls from 522 to 324 ms.
-- **In five of the twenty (2, 4, 5, 13, 14) the companion bought nothing**:
-  the light stream had a hole of its own at least as long over the same
-  stretch. In run 14 both stood still for about a second. The companion is
-  50 packets a second through the same loss, not a stream that is immune to
-  it: its own longest stall was 279 to 1090 ms, and in eight of the twenty
-  longer than the main track's.
+- The displayed stall is shorter with the two tracks in seventeen of the
+  twenty runs, by 7 to 76%.
+- **In three of the twenty (2, 4, 15) the companion bought nothing**: the
+  light stream had a hole of its own at least as long over the same stretch.
+  The companion is 50 packets a second through the same loss, not a stream
+  that is immune to it: its own longest stall was 246 to 794 ms, and in ten
+  of the twenty longer than the main track's.
 - (b) is never longer than (a): a client loses nothing by having the second
-  track, other than the bitrate of the light layer on its downlink.
+  track, other than the bitrate of the light picture on its downlink.
+
+**One simulcast sender** (`LAKKO_DIP_SIMULCAST=1`), the same twenty seeds,
+the same day: the median of (a) is 537 ms and of (b) 332 ms, the longest (a)
+1027 ms and the longest (b) 882 ms; (b) is shorter than (a) in nineteen of
+the twenty. The two variants do not send the same datagrams, so a seed is
+not the same loss pattern in both, and the two sets of numbers are not a
+comparison of the variants.
 
 Not measured: what a browser or a native decoder does with the two tracks
 (the subscriber is a `str0m` client in RTP mode; "decodable" is computed
 from the packets that arrived), how fast a client notices that the main
-track stands still, and anything with a real encoder's key frames.
+track stands still, anything with a real encoder's key frames, and whether
+two senders hold their resolution through a dip of the estimate on a real
+call, which is the reason for the change.
+
+## Carrying the light picture through a burst of loss (ADR-0070 steps 3 and 4)
+
+[ADR-0070](../../docs/adr/0070-call-media-through-a-loss-burst.md). The
+numbers in the section above were taken before this was built: the light
+companion was then repaired no faster than the main track. Two things
+changed, both on by default.
+
+### The light track is protected harder (step 3)
+
+**Publisher leg.** A missing packet of a publisher's light video (its
+declared light track, or the light layer of a simulcast track once the SFU
+knows which that is) is asked for again every 20 ms
+(`media::LIGHT_NACK_RETRY`, chosen, not measured); every other stream every
+60 ms as before. Both are asked for over the same 1.5 s, so the light track
+gets up to 75 requests per packet instead of 25. `str0m` builds NACKs for a
+whole session on one tick (33 ms upstream); the vendored fork makes the tick
+follow the shortest per-stream interval, so a session with a light track
+ticks every 20 ms. Seen in
+`a_missing_light_packet_is_asked_for_again_three_times_as_often` (one run,
+2026-10-05): the median gap between two requests for one light packet was
+21.0 ms and for one main-track packet 63.3 ms. The requests leave at once:
+RTCP feedback is the first thing a `str0m` session sends when polled, and
+the media loop wakes on the session's own deadline.
+
+**Subscriber leg.** Every packet written to a light companion track is sent
+to the subscriber a second time 30 ms after it reached the SFU
+(`media::LIGHT_DUPLICATE_DELAY`, chosen), as a retransmission on the
+track's RTX stream, exactly as a packet the subscriber had asked for. A
+receiver that has the first copy discards the second by its sequence
+number. Rules:
+
+- only where the subscriber negotiated RTX on the track: `str0m` keeps no
+  packet of a stream without an RTX payload type, so such a track is sent
+  once;
+- from the stream's retransmission cache (2000 packets, 3 s): a packet that
+  has left it is not sent again;
+- once per packet;
+- at most 2048 copies wait per subscriber (`media::MAX_LIGHT_DUPLICATES`);
+  one more is dropped without a log line;
+- the main track is never sent twice.
+
+`LAKKO_SFU_LIGHT_DUPLICATE=0` switches the second copy off (unset, empty or
+`1`: on; anything else refuses to start).
+
+**A subscriber's own requests.** The vendored `str0m` has no hold-off on
+answering a NACK: every request for a packet still in the cache queues a
+retransmission, for the companion as for every stream (pinned by a test in
+the vendored `streams/send.rs`). Nothing had to be lowered. How often a
+subscriber asks again is the subscriber's own choice.
+
+### Note, 2026-10-07: what a browser made of the second copies
+
+A retransmission the SFU sent (a NACK's answer, the second copy of a
+light packet, a probe's padding copy: all RTX packets) carried RTP
+padding to a multiple of 16 bytes with the padding bit set, as upstream
+`str0m` writes every packet. That is correct by RFC 4588 and RFC 3550,
+and the synthetic `str0m` clients every measurement here was made with
+restore it correctly. A Chrome viewer did not: on a live call it
+restored 848 of 12 957 second copies of light frames intact, the one in
+sixteen whose RTX packet needed no padding, and 12 109 as the frame less
+its last byte (the padding bit kept on the restored packet, the padding
+gone, the last byte read as a count); on the middle track 20 intact
+against 341, which are NACK-driven retransmissions. Since the fork's
+fourteenth change (2026-10-07) a retransmission carries no padding.
+
+So for a browser the second copies and the fast retransmissions of this
+section were unusable in fifteen cases of sixteen until then. The
+measurements below are from synthetic `str0m` clients, which restore
+correctly; they say nothing about a browser before that date. Tests:
+`a_retransmission_restores_to_the_payload_that_was_sent` in the vendored
+`streams/send.rs` (payload lengths 1 to 64, last bytes 0x00, 0x01, 0x04,
+0xff, `resend` and NACK; restored by RFC 4588 / 3550 and the way a
+libwebrtc receiver does it, which is recalled, not read for this), and
+`a_retransmission_to_a_subscriber_carries_the_original_payload_and_no_padding`
+in `synthetic_client_e2e.rs` (a subscriber losing every seventh packet:
+57 lost, 57 retransmitted, every payload equal to the original, 0 with
+the padding bit; before the change 53 of the 57 carried it).
+
+### Playout delay follows the path (step 4)
+
+`playout_delay.rs` holds the rule, one instance per (subscriber, publisher):
+the minimum playout delay is 0 until a burst of loss was seen on the
+publisher's uplink or on that subscriber's downlink, 300 ms from then on,
+and after 180 s without a burst it comes down by 100 ms every 30 s (200 at
+180 s, 100 at 210 s, 0 at 240 s). A burst at any time takes it back to 300.
+All of these are named constants, chosen, not measured.
+
+What counts as a burst:
+
+- **uplink**, per publisher, from the sequence numbers of its video packets
+  (every video stream: main, light, each simulcast layer; audio is not
+  counted; an FEC packet is a packet of its stream, see the note below): a
+  packet missing for more than 150 ms
+  (`uplink_fallback::HOLE_AGE`), or a one-second interval in which more than
+  10% of its video packets did not arrive in order (`SeqLossCounter`, the
+  counter bitrate control uses, in an instance of its own so it runs under
+  either bitrate mode; at least 20 packets expected in the interval). The
+  uplink fallback's own hole detector was not reused: it is private to a
+  policy that needs two simulcast layers and ignores the light one;
+- **downlink**, per subscriber: a receiver report on any video track the SFU
+  sends it whose loss fraction is above 10% (26/256 or more), each report
+  read once; or NACKs, over one second, for more than 10% of the video
+  packets written to it in that second (at least 20 written). Second copies
+  are not counted as NACKs.
+
+On an ordinary path with a steady 2% of loss the 150 ms rule can fire
+without any burst (a packet whose first retransmission is lost too): such a
+path then stays at 300 ms. That is what the rule as specified does; it has
+not been seen on a call.
+
+**Corrected 2026-10-09: FEC packets.** A publisher that sends ULPFEC inside
+RED numbers its FEC packets in the sequence of the media stream. The uplink
+detector was not handed them, so every FEC packet read as a missing packet
+and the uplink of such a publisher read as in a burst all the time. In the
+server log of the call of that day the pair of the one publisher that sent
+FEC was raised for `uplink-burst` in the very pass in which a joining
+subscriber was given its tracks (16:59:57.238), thirteen seconds after one
+burst on that uplink and seventeen before the next. The detector is now handed FEC packets like any
+other (`MediaPeer::observe_uplink_burst`; test
+`fec_packets_in_sequence_are_not_holes_for_the_uplink_burst_detector`).
+What remains: an FEC packet that is lost is not sent again, so it stays a
+missing packet and the 150 ms rule still reads it as a burst. On a path
+that loses anything at all, a publisher that sends FEC is therefore still
+held at 300 ms.
+
+The value travels in the playout-delay RTP header extension
+(`http://www.webrtc.org/experiments/rtp-hdrext/playout-delay`, minimum and
+maximum in 10 ms units), registered in every peer's session under id 5 and
+therefore offered to every subscriber. It is stamped on every video packet
+of that publisher to that subscriber, main track and companion alike, with
+the pair's minimum and a fixed maximum of 5 s
+(`playout_delay::MAX_PLAYOUT_DELAY_MS`), and only on a track whose media
+line negotiated it; a subscriber that left it out of its answer gets
+nothing. Audio packets are not stamped. A retransmitted packet carries the
+value it was first sent with.
+
+`LAKKO_SFU_PLAYOUT_DELAY=0` switches it off: the extension is then neither
+offered nor answered (unset, empty or `1`: on; anything else refuses to
+start).
+
+Not built: a subscriber that did not negotiate the extension is told
+nothing. ADR-0070 has the client set `jitterBufferTarget` there, which needs
+the value on the signaling socket (a frame in `lakko-sfu-proto` and the
+three clients).
+
+### Visible
+
+- `media: minimum playout delay changed` (info): `subscriber`, `publisher`,
+  `from_ms`, `to_ms`, `reason` (`uplink-burst`, `downlink-burst`, `quiet`).
+- With `LAKKO_SFU_MEDIA_DIAG_SECS` set, `media: fanout to subscriber over
+  the last interval` carries `duplicates` (second copies sent on that
+  track; not part of `sent`) and `playout_delay_ms` (what is being stamped
+  for that publisher; `None` for audio and with the feature off).
+- `lakko_sfu_playout_delay_raises_total`: one per pair per raise.
+- `lakko_sfu_media_light_duplicates_sent_total`: second copies sent.
+
+A second copy is not counted as a repair anywhere: it does not enter
+`str0m`'s NACK count, the SFU's `nacked_packets` or the `retransmitted`
+figure of the publisher's bitrate estimate (that one is the publisher's
+leg).
+
+### Measured (`measure_two_track_dip`, 2026-10-05)
+
+One second in which each media datagram is lost with probability 0.70,
+20 seeds (1 to 20, `LAKKO_DIP_RUNS=20`), two plain senders with the light
+one declared, `f` 250 packets a second on the main track and `q` 50 on the
+companion, on a laptop over loopback, each table run alone. Per track:
+**gap**, the longest interval with no decodable frame, as in the section
+above; **late**, the worst frame lateness (how much later than its usual
+transit the picture of a moment became decodable; a frame that never
+completes is answered by the next decodable frame after it); **stop**, what
+a viewer playing 300 ms late sees stand still, `max(0, late - 300)`.
+"Either" is a client that shows whichever track is alive. Milliseconds, min
+/ median / p95 / max over the 20 seeds, and in how many seeds the stop was
+zero.
+
+**Dip on the publisher's uplink, protection off**
+(`LAKKO_DIP_PROTECTION=off`: light track asked every 60 ms, sent once, no
+playout delay):
+
+| | min | median | p95 | max | zero stops |
+|---|---|---|---|---|---|
+| main gap | 328 | 602 | 1050 | 1095 |  |
+| main late | 640 | 778 | 1011 | 1055 |  |
+| main stop | 340 | 478 | 711 | 755 | 0 of 20 |
+| light gap | 228 | 453 | 985 | 1037 |  |
+| light late | 362 | 578 | 946 | 998 |  |
+| light stop | 62 | 278 | 646 | 698 | 0 of 20 |
+| either gap | 228 | 324 | 686 | 872 |  |
+| either late | 362 | 569 | 830 | 834 |  |
+| either stop | 62 | 269 | 530 | 534 | 0 of 20 |
+
+**Dip on the publisher's uplink, protection on** (the defaults):
+
+| | min | median | p95 | max | zero stops |
+|---|---|---|---|---|---|
+| main gap | 368 | 558 | 722 | 816 |  |
+| main late | 578 | 776 | 899 | 900 |  |
+| main stop | 278 | 476 | 599 | 600 | 0 of 20 |
+| light gap | 152 | 230 | 369 | 462 |  |
+| light late | 209 | 278 | 400 | 525 |  |
+| light stop | 0 | 0 | 100 | 225 | 12 of 20 |
+| either gap | 113 | 227 | 369 | 462 |  |
+| either late | 209 | 278 | 400 | 525 |  |
+| either stop | 0 | 0 | 100 | 225 | 12 of 20 |
+
+**Dip on the subscriber's downlink** (`LAKKO_DIP_DOWNLINK=1`: every media
+datagram that reaches the subscriber, retransmissions included), **protection
+off**:
+
+| | min | median | p95 | max | zero stops |
+|---|---|---|---|---|---|
+| main gap | 250 | 558 | 881 | 1057 |  |
+| main late | 627 | 814 | 1005 | 1017 |  |
+| main stop | 327 | 514 | 705 | 717 | 0 of 20 |
+| light gap | 327 | 438 | 724 | 1034 |  |
+| light late | 404 | 656 | 817 | 992 |  |
+| light stop | 104 | 356 | 517 | 692 | 0 of 20 |
+| either gap | 241 | 334 | 562 | 668 |  |
+| either late | 404 | 627 | 762 | 776 |  |
+| either stop | 104 | 327 | 462 | 476 | 0 of 20 |
+
+**Dip on the subscriber's downlink, protection on:**
+
+| | min | median | p95 | max | zero stops |
+|---|---|---|---|---|---|
+| main gap | 342 | 563 | 1027 | 1042 |  |
+| main late | 638 | 777 | 985 | 1002 |  |
+| main stop | 338 | 477 | 685 | 702 | 0 of 20 |
+| light gap | 273 | 361 | 687 | 870 |  |
+| light late | 427 | 575 | 828 | 917 |  |
+| light stop | 127 | 275 | 528 | 617 | 0 of 20 |
+| either gap | 202 | 316 | 499 | 512 |  |
+| either late | 427 | 536 | 761 | 762 |  |
+| either stop | 127 | 236 | 461 | 462 | 0 of 20 |
+
+**Dip on the subscriber's downlink, protection on, and the subscriber asks
+again every 20 ms on every stream** (`LAKKO_DIP_SUB_NACK_MS=20`; the
+subscriber in all other tables is a `str0m` client asking every 60 ms):
+
+| | min | median | p95 | max | zero stops |
+|---|---|---|---|---|---|
+| main gap | 172 | 234 | 281 | 305 |  |
+| main late | 261 | 316 | 438 | 467 |  |
+| main stop | 0 | 16 | 138 | 167 | 5 of 20 |
+| light gap | 131 | 239 | 318 | 323 |  |
+| light late | 142 | 279 | 353 | 416 |  |
+| light stop | 0 | 0 | 53 | 116 | 13 of 20 |
+| either gap | 89 | 158 | 239 | 251 |  |
+| either late | 142 | 237 | 299 | 347 |  |
+| either stop | 0 | 0 | 0 | 47 | 19 of 20 |
+
+What the runs show:
+
+- **Uplink.** The light track's worst lateness fell from a median of 578 ms
+  to 278 ms and its worst case from 998 to 525 ms. A viewer playing 300 ms
+  late sees no stop in 12 of the 20 dips, and a stop of 3 to 225 ms in the
+  other 8. That is not "nearly every dip". What limits it: a missing packet
+  is known to be missing only when a later packet of the same stream
+  arrives, which at 50 packets a second with three in ten arriving takes 67
+  ms on average and sometimes several times that; and each retransmission
+  is itself lost seven times in ten, so some packets need ten or more
+  20 ms rounds. The publisher here is a `str0m` client that answers every
+  request; a libwebrtc sender does not resend a packet it resent less than
+  one round trip ago, so on a real path slower than 20 ms it answers fewer.
+- **Downlink.** One second copy changes little at this loss rate: half of
+  the packets lose both copies, and what is left is repaired on the
+  subscriber's own request schedule (60 ms here), exactly as the main track
+  is. The stop is never zero. With the subscriber asking every 20 ms the
+  light track's numbers match the uplink case and a client showing either
+  track sees no stop in 19 of 20; how often a browser asks again is the
+  browser's own rule and was not read from any source in this tree.
+- The main track is not helped by any of this on the uplink, by design.
+
+Not measured: a browser or native receiver (whether it honours the
+playout-delay extension, what it does with a second copy on the RTX stream,
+how often it sends NACKs), loss rates other than 0.70, loss in both
+directions at once, a path with delay, and the cost in bitrate on a real
+call (in these runs the companion's retransmission stream carried as many
+datagrams as its main stream, as intended).
+
+## Key frame requests are bounded
+
+The SFU holds no media, so a subscriber without a reference frame can
+only be helped by the publisher sending a key frame, and the SFU asks
+for one (PLI) when a track opens, starts or resumes, when a subscriber
+asks, and when a burst of loss on the publisher's stream has ended
+unrepaired (the next section). Every request for one publisher track goes
+through one gate (`MediaPeer::request_keyframe_limited`, `keyframe_ask`):
+
+- **Rate**: at most one per 500 ms per publisher track
+  (`KEYFRAME_REQUEST_MIN_INTERVAL`); a request inside the window is owed
+  and sent when it ends.
+- **Settled by a key frame**: a key frame seen arriving on the track
+  (frame descriptor) drops what is owed on it; it is forwarded to every
+  subscriber the track is being sent to, the one that asked included.
+- **A subscriber's own request** on one of its tracks is relayed at
+  once and, while it goes on asking, again after 1 s, 2 s, 4 s and then
+  every 8 s (`PLI_RELAY_FIRST_INTERVAL`, `PLI_RELAY_MAX_INTERVAL`).
+  A subscriber that has sent none for 2 s (`PLI_RELAY_QUIET`) has what
+  it asked for; its next request is a new need and is relayed at once.
+  Counted per (subscriber, track), so one receiver that cannot decode a
+  stream does not take the others' requests away. A request on a track
+  the subscriber is not being sent is dropped. A subscriber's request
+  is **not** counted against the bound below: the subscriber is the one
+  that knows whether a key frame reached it.
+- **The SFU's own requests** (a track opening, starting or resuming, a
+  burst ending unrepaired) on
+  a track that shows no key frame after 5 (`KEYFRAME_UNANSWERED_MAX`)
+  go out once per 10 s (`KEYFRAME_UNANSWERED_RETRY`), until a key frame
+  is seen. That is every publisher whose packets carry no frame
+  descriptor (Firefox negotiates none: the SFU never sees its key
+  frames) and every sender that is switched off.
+- **A track that waits for a key frame to resume** starts at the next
+  packet when that packet carries no frame descriptor: nothing in it
+  says where a key frame begins. With a descriptor it waits for one, at
+  most 5 requests a second apart, as before
+  (`START_KEYFRAME_REQUESTS`).
+
+All intervals and counts chosen, not measured.
+
+Why: on the first live call (two Chrome, one Firefox, four and a half
+minutes) every light and middle sender of every publisher was asked
+about 270 times, from the moment the third peer joined (19:42:14 in the
+log; before it the two Chrome peers had 3 owed requests in all, at the
+start). The only caller of the gate that is not bounded by itself is
+the relay of subscribers' own requests (`relay_keyframe_requests`): the
+rate limit let two a second through for as long as a subscriber asked,
+and nothing counted whether the key frames it was sent stopped it
+asking. Which receiver asked is not in the log (a received PLI was not
+logged); the timing points at the receivers of the new peer's tracks
+and the new peer as a receiver. Chrome answered each request: 263 to 267
+key frames per light and middle sender in the SFU's own interval lines.
+
+Tests: `a_track_that_shows_no_key_frame_is_asked_a_bounded_number_of_times`,
+`a_key_frame_settles_the_debts_of_its_track`,
+`a_subscriber_that_keeps_asking_is_relayed_less_and_less_often`
+(unit), and in `synthetic_client_e2e.rs`
+`a_subscriber_that_keeps_asking_does_not_cost_a_key_frame_a_second` and
+`a_publisher_without_a_frame_descriptor_is_asked_a_bounded_number_of_times`:
+three publishers of three senders and a subscriber that sends a PLI on
+every track it receives five times a second for 20 s; no publisher
+track may be asked more than 10 times. Seen: 5 on each track that was
+being sent (6 on one without a descriptor), 1 on a main track that was
+paused, 0 on middle tracks nobody wanted. The rule before would have
+let about 40 through (two a second); that build was not run.
+
+**Amended 2026-10-07, after a viewer waited more than half a minute
+for a Firefox publisher's main picture** (packets arriving and not
+decodable, the viewer asking five times a second). Read from the code,
+not from that call's server log, which I did not have: as first built,
+a subscriber's requests on a track that shows no key frame were subject
+to the bound of 5 and then one in 10 s, and to a wait of its own that
+doubled to 30 s; and the track had first been held back for the five
+seconds its resume waits for a key frame the SFU could not have
+recognised. Now a subscriber's request is exempt from the bound, its
+own wait stops at 8 s and starts again after 2 s of quiet, and a track
+without descriptors resumes at its next packet. Unit tests
+`a_subscriber_that_went_quiet_is_relayed_at_once_when_it_asks_again`,
+`a_subscribers_request_is_not_counted_against_the_unanswered_bound`,
+`a_resuming_track_without_frame_descriptors_starts_at_the_next_packet`;
+e2e
+`a_subscriber_of_a_publisher_without_a_descriptor_is_asked_for_while_it_asks`
+(the subscriber asks for 9 s, then stops): on every track it was being
+sent the publisher was asked at 0, 0.4, 1.0, 3.0 and 7.0 s and not
+again. The storm tests still hold: 5 per track with descriptors, 6
+without, in 20 s.
+
+**Not built, for the maintainer to decide: reading the key frame bit
+from the payload.** Since ADR-0071 the VP8 payload descriptor and frame
+tag of a web client's frames are in the clear, and the low bit of the
+first byte after the payload descriptor says key frame or not. The SFU
+could then see key frames on a stream without a frame descriptor: debts
+would be settled by observation, and a track could start at a key frame
+again. It would take a parser of the VP8 payload descriptor (variable
+length: the X, I, L, T, K bits and a one- or two-byte picture id) run on
+attacker-chosen bytes, hence a fuzz target; a per-codec switch (VP9,
+H.264 and AV1 mark key frames differently); and a rule for clients that
+do not leave the header clear (the natives today), where the same bytes
+are ciphertext and the bit means nothing. It would change invariant
+C-39 from "the SFU never reads a payload" to "the SFU reads the codec's
+clear frame header of a payload and nothing after it", and the SFU
+would then act on bytes the sender controls and the receiver does not
+authenticate separately. What is built instead needs none of that: the
+subscriber's asking is the signal.
+
+Changed with it: `a_late_joiners_first_keyframe_is_requested_and_pli_bursts_collapse`
+used to assert that the nine repeats of a ten-PLI burst cost a second
+request when the window ended. They no longer do; the test now asserts
+one request for the burst and one more when the subscriber asks again
+after the wait.
+
+Not covered: the simulcast uplink-fallback requests
+(`request_layer_keyframe_at`) keep their own retry and are not counted
+here. Seen in the same log and not looked into: audio from both Chrome
+peers to the Firefox peer was never sent (`no_codec_match=250` per
+interval on `Mid(0)`).
+
+## A key frame at the end of an unrepaired burst (2026-10-09)
+
+`burst_keyframe.rs` holds the rule, `media::drive_burst_keyframes` acts on
+it. On unless `LAKKO_SFU_BURST_KEYFRAME=0` (unset, empty or `1`: on;
+anything else refuses to start).
+
+### What was seen
+
+A live call on the test stack, 2026-10-09, three browsers; the publisher
+that matters was Chrome on a home Wi-Fi. From the maintainer's packet
+capture of its uplink: a burst of loss every 30 s, each 0.5 to 1.4 s long;
+in a burst the audio stream lost about 80% of its packets for a second, the
+main video 148 to 223 packets, the light and the middle video 22 to 80
+each, and the retransmission stream lost heavily in the same windows. The
+viewers counted 19.5 s (Firefox) and 9.2 s (Safari) of stalls, all on that
+publisher's picture, on its heavy and its light track alike.
+
+From the SFU's own log of that call (read for this change): once the
+third peer had joined, the only key frame requests for that publisher were
+`subscriber-pli`, seven of them: six between 4.0 and 5.1 s after the
+bursts of 17:00:14, 17:01:14 and 17:02:14 began, and one at 17:01:22. The
+SFU asked for none of its own. After the later bursts (17:03:44 to
+17:05:14) the log, which ends at 17:05:30, has no key frame request for
+that publisher at all; why the viewers did not ask then was not looked
+into. Over the ten seconds around the burst of 17:00:14 the count of that
+publisher's packets that arrived out of order, which is how a
+retransmission arrives, rose by 195 (`retransmitted` 401 at 17:00:10, 596
+at 17:00:20, all streams together), against the several hundred the
+capture says were lost, and the estimate of its uplink was cut from 5000
+to 1250 kbit/s at 17:00:15.2. So the burst was not repaired, the SFU could
+know it when the burst ended, and the picture stood until a viewer's own
+decoder gave up three seconds later.
+
+### The rule
+
+Per video stream of a publisher (main, middle and light each on its own;
+each simulcast layer on its own), from the sequence numbers of its packets
+as they reach the SFU, retransmissions, FEC packets and packets rebuilt
+from FEC included:
+
+- a **burst** opens with the first missing packet;
+- it has **ended** when 5 packets in a row arrived in sequence
+  (`BURST_END_PACKETS`) and no packet went missing for 120 ms
+  (`BURST_END_QUIET`);
+- it ended **unrepaired** when a packet is then still missing 300 ms after
+  it was first known missing (`UNREPAIRED_AFTER`: the playout delay a
+  viewer is asked to hold), or when the burst outran retransmission: a
+  packet missing for more than 1.5 s (`RETRANSMISSION_SPAN`: how long the
+  SFU asks for one packet) or more than 512 packets behind the newest
+  (`RETRANSMISSION_WINDOW`);
+- a burst that ended with every packet there asks for nothing, and neither
+  does one whose missing packets all precede a key frame that has started
+  arriving;
+- one request per burst per stream. A packet that goes missing before the
+  request is the same burst going on, and the wait starts over.
+
+All of these are named constants, chosen, not measured. The 120 ms doubles
+as retransmission's last chance: when a burst counts as ended, every
+packet still missing has been asked for at least twice more (every 60 ms;
+every 20 ms on a light stream) on a path that is carrying packets again.
+
+The request:
+
+- goes through the gate of the section above with the reason
+  `uplink-burst-end`: at most one per 500 ms per track (inside the window
+  it is owed and goes out as `owed`), and none while the track has been
+  asked 5 times without showing a key frame;
+- is made only for a stream some subscriber is being sent: a downstream
+  track of it open and not paused (`MediaPeer::is_sent_stream`). A main
+  track nobody shows is not asked for; when it is shown again it is asked
+  for as `track-resume`;
+- is logged twice: `media: keyframe requested from publisher` and, for
+  every burst that ended unrepaired whether or not anything was asked,
+  `media: a burst of loss on a publisher's stream ended unrepaired`
+  (`lost`, `still_missing`, `beyond_repair`, `lasted_ms`, `key_frame` =
+  `asked` / `owed` / `not-asked` / `nobody-watching`, `given_up`).
+
+**A stream that carries FEC is judged by number.** A lost FEC packet takes
+a sequence number and is not sent again (recalled from libwebrtc, not read
+for this), so on such a stream a packet that stays missing is media
+somebody needs or an FEC packet nobody does, and nothing says which. There
+the burst ended unrepaired only when more packets stay missing than 2
+(`FEC_SLACK`) plus one and a half times the FEC share of what the burst
+lost; the share is counted over the last packets that arrived in sequence
+(up to 1024). One or two packets that stay missing on such a stream never
+cost a key frame. A stream on which no FEC packet has been seen is judged
+exactly. The cost of judging by number: a burst that leaves only a few
+media packets unrepaired on an FEC stream is not noticed, and a viewer
+asks as before.
+
+### The packets of the burst are no longer asked for
+
+Decided: yes. When the key frame is asked for or owed, and when the burst
+ended unrepaired on a stream nobody is being sent, the SFU stops asking the
+publisher for the packets of that stream that are missing at that moment
+(`StreamRx::give_up_missing`, the fifteenth change to the vendored
+`str0m`; `UPSTREAM.md`). Packets that go missing afterwards, the key
+frame's own included, are asked for as before. When nothing is asked (the
+unanswered bound) the requests go on.
+
+From the code: without it a packet is asked for up to 1.5 s after its
+first request, so for up to half a second after the key frame request the
+SFU would go on asking for the whole burst, 25 or 75 times a packet in all.
+By the time of the request each of those packets has been asked for at
+least twice on the recovered path and has not come; a key frame makes it
+useless to every viewer; and each answer is a retransmission. From the
+measurement below, with the capped publisher: after the burst the SFU
+asked for a median of 2355 sequence numbers before the change (1280 to
+3284) and 625 after (331 to 1238), and the publisher put a median of 195
+retransmissions on the wire before (149 to 298) and 46 after (0 to 358).
+Not measured: whether those retransmissions delay a key frame at a real
+sender. A libwebrtc sender paces retransmissions ahead of new video
+(recalled, not read for this), and on the call above its allowed rate had
+just been cut to a quarter; the test's publisher has no pacer.
+
+### Measured (`measure_burst_end_key_frame`)
+
+`synthetic_client_e2e.rs`, ignored by default, run by name. The burst as
+measured on the call: each media datagram the publisher sends, on both
+pictures and their retransmission streams, lost with probability 0.80 for
+one second (`LAKKO_DIP_P`, default 0.80 here; `measure_two_track_dip`
+keeps its 0.70 and takes `LAKKO_DIP_P=0.80` too). Two plain senders, `f`
+250 packets a second on the main track and `q` 50 on the light companion,
+everything else of the SFU at its defaults, 20 seeds, each run twice:
+**before** (the key frame at the end of a burst switched off) and
+**after**. On a laptop over loopback, debug build, 2026-10-09, each table
+run alone. **gap**: the longest interval with no decodable frame; **stop**:
+what a viewer playing 300 ms late sees stand still; **asked**: when the
+request reached the publisher, **first** / **whole**: when the first
+packet of the key frame, and all of it, had reached the subscriber, all
+three from the end of the burst. Milliseconds, min / median / p95 / max.
+
+The test's subscriber never asks for a key frame itself, so "before" a
+track that is not repaired stays broken to the end of the run (2.5 s after
+the last frame); on the call a browser asked after about three seconds.
+
+**The publisher throws queued retransmissions away above 15% of what it
+sends** (`LAKKO_DIP_PUBLISHER=capped`, the default: upstream `str0m`'s
+cap, a stand-in for a sender that does not repair a whole burst):
+
+| | before | after |
+|---|---|---|
+| main gap | 1502 / 5969 / 6086 / 6851 | 1139 / 1217 / 1498 / 1530 |
+| main stop | 1867 / 5642 / 5989 / 6546 | 790 / 889 / 1215 / 1294 |
+| main decodable at the end of the run | 1 of 20 | 20 of 20 |
+| main asked | never | 109 / 156 / 206 / 217 (20 of 20) |
+| main key frame first packet | | 150 / 215 / 558 / 1334 |
+| main key frame whole | | 169 / 233 / 628 / 1345 |
+| light gap | 972 / 1259 / 1807 / 2064 | 792 / 1155 / 1263 / 2340 |
+| light stop | 635 / 953 / 1487 / 1717 | 703 / 833 / 922 / 1996 |
+| light decodable at the end of the run | 20 of 20 | 20 of 20 |
+| light asked | never | 109 / 156 / 1384 / 1384 (12 of 20) |
+| light key frame whole | | 154 / 204 / 2018 / 2018 |
+
+**The publisher answers every request** (`LAKKO_DIP_PUBLISHER=all`, as in
+`measure_two_track_dip`):
+
+| | before | after |
+|---|---|---|
+| main gap | 338 / 640 / 1089 / 1093 | 435 / 833 / 1089 / 1089 |
+| main stop | 560 / 671 / 747 / 752 | 521 / 637 / 748 / 748 |
+| light gap | 210 / 367 / 595 / 680 | 189 / 346 / 803 / 940 |
+| light stop | 24 / 148 / 368 / 415 | 34 / 172 / 461 / 600 |
+| key frames asked for | 0 | 0 |
+
+What the runs show, plainly:
+
+- **With a publisher that repairs the burst, the change does nothing.**
+  No key frame was asked for in any of the 20 runs, which is the rule
+  working ("a burst that retransmission repaired asks for nothing"). The
+  two columns of the second table are the same SFU behaviour; their
+  difference is the spread of the model (a seed is not the same loss
+  pattern twice: the publisher's retransmissions fall differently).
+- **With a publisher that does not, the main track is back about 1.2 s
+  after the burst began** (the second of the burst and about 0.2 s),
+  where before it was not back at all without a viewer asking. The
+  request reached the publisher 109 to 217 ms after the burst ended and
+  the whole key frame the subscriber a median of 233 ms after it ended.
+- **The light track gains little in this model**: its 40 or so lost
+  packets were repaired in every run before the change (the cap had not
+  yet bitten), a key frame was asked for in 12 of 20 runs after, and its
+  median stop moved from 953 to 833 ms, which is within the spread.
+- **Nothing here shortens the second of the burst itself.** A viewer
+  300 ms behind still sees the picture stand for 0.8 to 0.9 s.
+- **Two outliers, not explained**: in run 16 the main key frame's first
+  packet reached the subscriber 1.2 s after it was asked for and the
+  light track was asked for only 1.4 s after the burst; in run 18 the
+  delays were 0.35 and 0.3 s. Thirteen further runs (seeds 16 to 18 and 1
+  to 10 again, with `LAKKO_DIP_DETAIL=1`) showed none: the key frame was
+  written 141 to 249 ms after the burst and was whole at the subscriber
+  7 to 90 ms later. The test loop and the SFU share one thread; a stall of
+  that thread would look like this. Not established.
+
+Not measured, and not known: what a browser does. Whether Chrome answers
+the PLI at once on a path it has just cut its rate on, how large its key
+frame is at that rate and how long it takes to get through behind the
+retransmissions already queued, and whether a viewer's decoder takes the
+key frame up at once or has already asked for another. The live figure to
+compare with, once deployed: the time from a burst's end to
+`uplink-burst-end` in the log and the viewers' stall counters, against the
+three seconds measured before.
+
+### Tests
+
+Unit, `burst_keyframe.rs`: a clean stream, a repaired burst (nothing), an
+unrepaired burst (one answer, 120 ms after the stream is in sequence
+again), a short burst (answered when its packets are 300 ms late, not
+before; repaired in time: nothing), a second burst inside the wait, a lull
+of four packets inside a burst, a stream that stops in a burst, a burst
+longer than the window, bounds, a key frame that has started arriving,
+each stream on its own, and the two FEC rules. Unit, `media.rs`:
+`an_unrepaired_burst_asks_the_publisher_once_after_the_stated_time`,
+`a_burst_that_retransmission_repaired_asks_the_publisher_for_nothing`,
+`a_stream_no_subscriber_is_being_sent_is_not_asked_for_a_key_frame`
+(nobody else in the call, a subscriber of another publisher, a track still
+negotiating, a main track the subscriber does not show),
+`a_burst_end_request_respects_the_rate_limit_and_the_unanswered_bound`,
+`each_stream_of_a_publisher_is_asked_for_on_its_own`,
+`a_key_frame_that_arrived_since_and_the_switch_off_ask_for_nothing`. End
+to end: `an_unrepaired_uplink_burst_ends_with_a_key_frame_asked_by_the_sfu`
+and `a_repaired_uplink_burst_costs_no_key_frame`. Vendored:
+`lakko_given_up_packets_are_not_asked_for_again`.
+
+## Downlink control (`LAKKO_SFU_DOWNLINK_CONTROL`, ADR-0070 step 6)
+
+The SFU estimates what each subscriber's downlink carries and, when it is
+short, gives up the larger video tracks first. Without it the SFU sends a
+subscriber everything it asks for, whatever its path carries.
+
+**Off unless `LAKKO_SFU_DOWNLINK_CONTROL=1`, and only under
+`LAKKO_SFU_BITRATE_CONTROL=server`** (unset, empty or `0`: off; anything
+else: the SFU refuses to start). With `client` bitrate control it is off
+whatever the switch says. Off, nothing of this section happens. It is off
+by default because **it has never been run against a browser or a native
+client.** The web client reads `video-given` (host-tested only); iOS and
+Android do not. Its acceptance tests
+against synthetic `str0m` clients (below) failed an independent check
+twice on 2026-10-06 (the first build dropped packets on the link once
+settled; the second passed only because attempts with late publisher
+frames were discarded); on the third build each of the five passed 3 of 3
+alone in that check, with no attempt discarded.
+
+### How it works
+
+- **Negotiation per direction.** The transport-wide sequence number
+  extension and `a=rtcp-fb:<pt> transport-cc` are negotiated on the media
+  lines the SFU offers (the ones it sends on) and on none of the lines a
+  peer offers (the ones it publishes on), which stay exactly as
+  server-side bitrate control has them: `abs-send-time`, `goog-remb`, no
+  transport-wide congestion control. Both directions share one transport.
+  Upstream `str0m` negotiates the two per session, on every line alike, so
+  this needed a change to the vendored crate
+  (`DirectApi::set_twcc_on_local_media_only`, the twelfth; see
+  `UPSTREAM.md`). A peer's own receive-only line is a line the SFU could
+  send on and never does (it opens a line of its own for every track), so
+  it carries neither. Asserted on the SDP in
+  `downlink_control_negotiates_transport_cc_only_on_the_lines_the_sfu_offers`,
+  `transport_wide_congestion_control_can_be_per_direction` and the
+  end-to-end runs.
+- **The estimate is the SFU's own**, not `str0m`'s. `str0m`'s send-side
+  estimator and its pacer stay off (`enable_bwe` is not called); the
+  first attempt at this step ran on it and failed, see "The first
+  attempt". The SFU takes the records of the subscriber's transport-wide
+  feedback from `str0m` (per packet sent: send time, size, reported
+  arrival time or "not received"; the thirteenth vendored change,
+  `DirectApi::keep_twcc_feedback` / `take_twcc_feedback`) and feeds them
+  to `uplink_estimate::PathEstimator`, the estimator a publisher's uplink
+  already runs (`UplinkEstimator` is the same type): the delay trend over
+  send-time groups; over-use cuts to 0.85 of the rate **acknowledged as
+  arriving**; a burst of loss with no delay growth changes nothing; loss
+  that lasts 3 s steps the estimate down. The subscriber's arrival clock
+  is placed on the SFU's by its first acknowledged packet; only
+  differences matter. The budget is **unknown** until the feedback has
+  acknowledged a packet; from then on it is this estimate and nothing
+  else.
+- **The estimate never stands above what the path has said.** Until the
+  path has said anything (no cut kept, no probe ended) the estimate is
+  the start value: 1.5 times the largest demand of the last 10 s, at most
+  20 Mbit/s (`DOWNLINK_CEILING_BPS`). From the first kept cut on there is
+  a limit (`Downlink::limit_bps`): a kept cut sets it to the larger of the
+  cut estimate and the rate then acknowledged as arriving; a failed probe
+  lowers it to just under the probe's target; a carried probe raises it
+  to 1.1 times its target. The estimator's own climb stops at the smaller
+  of the demand ceiling and that limit. Before this rule the estimate
+  climbed on its own after every cut that was taken back (a cut during a
+  probe or in the second after it), to the demand ceiling of about
+  18 Mbit/s on a 7.5 Mbit/s link, and the allocation's "what is on the
+  wire fits the budget" test then held nothing back.
+- **A cut needs a queue.** A cut always lands below what the set being
+  sent needs, so on the downlink a false alarm costs a picture. A cut is
+  kept only when a queue stands on the path: the smallest delay of the
+  packets acknowledged in the last 200 ms is at least 25 ms above the
+  smallest of the last 15 to 30 s (`DOWNLINK_STANDING_QUEUE`), and has
+  been for 300 ms (`DOWNLINK_QUEUE_STANDS_FOR`). Otherwise the estimate
+  is put back; if the queue then goes on standing, the cut is made after
+  all (a full queue shows no more growth, so the detector would not speak
+  again). Lasting loss needs no queue. On a real cut the retransmission
+  caches of the subscriber's main and middle tracks are emptied: in the
+  first runs the link lost about 1500 retransmissions in the second after
+  the first cut.
+- **A queue the SFU's own sending built is not that queue** (third
+  round). The SFU forwards a packet when it arrives (ADR-0066), so a
+  publisher whose frames stall and then arrive together reaches every
+  subscriber as a clump, and a clump stands in the queue of any path for
+  a while. Three rules keep that from costing a picture:
+  - *The model.* For every packet the feedback speaks of, the SFU works
+    out how long it would have waited on a path that carries exactly the
+    estimate, given when and how much the SFU sent before it
+    (`Downlink::explained_delay`). A cut is judged by the queue **beyond**
+    that (`excess_queue`); a probe is still judged by the queue as the
+    delay shows it.
+  - *The shadow.* The model is not exact (in the e2e test, debug build,
+    36 ms of an 84 ms queue stayed unexplained while the SFU was writing
+    the clump out to four peers). When a packet would have waited 50 ms
+    (`DOWNLINK_CLUMP`) and the path has carried what is being sent
+    quietly for at least a second of the last four, no queue counts for
+    1 s (`DOWNLINK_CLUMP_SHADOW`), at most once in 3 s
+    (`DOWNLINK_CLUMP_ONCE_PER`). The key frames a call starts with are a
+    clump too; they get no shadow, because nothing is known of the path
+    yet.
+  - *The first cut is held.* On a path that has been carrying what is
+    sent quietly, the first kept cut does not lower the estimate; it is
+    made if the queue stands for another 300 ms. (A cut is to 0.85 of
+    what arrived in the last half second, which after a 200 ms gap in
+    what was sent is about half of what the path carries.) At most once
+    in 5 s.
+  What this costs: a path that really got narrower during a clump is
+  noticed up to 1 s later, and on a steady path the first real cut comes
+  300 ms later. No packet is delayed: smoothing the clump toward the
+  subscriber was considered and not built: it would hold media back by
+  up to the length of the stall, and the packets wait that long either
+  way, in the SFU or in the path's queue. What it would save is the
+  path's queue overflowing: a clump of all three publishers in the e2e
+  test comes to 136 ms of the link's 150 ms queue.
+- **A deep queue is cut on without the detector.** A queue 75 ms beyond
+  the sending's own (`DOWNLINK_DEEP_QUEUE`) that has stood 300 ms cuts
+  the estimate even when the delay detector never spoke, once per
+  300 ms. Found on a 2.35 Mbit/s link under 12 Mbit/s of demand: the
+  queue filled inside the detector's first window, showed no growth
+  after, stood at 108 ms for 28 s, and the SFU cut nothing and answered
+  about 3600 retransmission requests a second.
+- **The allocation** (`src/downlink_allocation.rs`, pure): audio and every
+  light track come first (a light track counted twice while each of its
+  packets is sent twice) and are never given up; then, in the subscriber's
+  order of importance, each publisher gets the heavy track it asked for if
+  what is left of the budget covers its measured rate times 1.2
+  (`HEADROOM_NUM` / `HEADROOM_DEN`), else the next smaller one that fits.
+  An unknown budget gives everyone what they asked for.
+  **Down at once**, when what is being given no longer fits the budget as
+  it is on the wire (the headroom is asked for to give a track, not to
+  keep it). **Up only on proof**: a publisher is moved up only when the
+  whole set after the move, as it is on the wire, is no more than what the
+  path was seen to carry: the rate of a probe that just passed, or what is
+  arriving on a quiet path (no probe running, no over-use, no trouble for
+  3 s). The estimate alone never gives anything back, so the weakness of
+  the first attempt (a step reached by arithmetic) does not exist. A
+  publisher that has just joined starts at its light track. While the set
+  being given fits, the rule only re-shares what that set needs, so an
+  estimate that has drifted up takes nothing from anyone; a change of
+  importance moves a track at once. A track's measured rate is the mean
+  of what arrived on it from its publisher in the last two full seconds
+  (from a quarter of a second on while it has none yet), zero after two
+  silent ones: with one second alone, the second a publisher stalled in
+  made a larger set look affordable and a probe started toward it. It
+  runs every 100 ms per subscriber.
+- **Probes** (`src/downlink_probe.rs`, pure). What arrives cannot lead
+  the estimate up while the heavy tracks are paused, so before the next
+  larger set is given the SFU tries its rate on the path: for 1 s
+  (`PROBE_DURATION`) it adds padding to the media so that the two
+  together run at what that set needs **with** its headroom. Padding is
+  never new media: copies of video packets already sent to that
+  subscriber, on the retransmission stream (`StreamTx::resend`), which a
+  receiver discards by sequence number.
+  **A probe climbs.** The rate rises in a straight line from what is
+  already on the wire to the target over the first 400 ms (`PROBE_RAMP`)
+  and the verdict is taken over the rest.
+  **A probe cannot fill a queue while feedback is silent.** Padding is
+  held back whenever the bytes sent since the newest packet any feedback
+  has reported exceed what the path delivers in the time feedback has
+  been silent plus 40 ms (`PROBE_QUEUE_ALLOWANCE`). "What the path
+  delivers" is the rate acknowledged in the probe's own reports; the
+  silence counted is at most the feedback lag measured on that subscriber
+  while its path was quiet (send to report of the same packet, between 30
+  and 400 ms, 150 ms until measured). The bound uses no delay figure and
+  needs no report to arrive: with none, padding stops after that much.
+  A probe whose padding was held back by more than 20 ms worth of its
+  target (`PROBE_SHORTFALL`) has not shown the rate and ends `short`.
+  **Verdict.** The set is given only if, of the packets sent on the
+  probe's plateau, at least 90% of the target rate was acknowledged and
+  at most 10% were reported missing, and no queue grew: a queue 25 ms
+  deeper than at the probe's start in two reports running ends the probe
+  at once (`trouble`). A probe that is carried also resets the delay
+  baseline (see "Seen, not explained").
+  **Which set.** The most important publisher's next track; once a probe
+  has failed, the cheapest single move the waits allow, so a set the path
+  does carry is reached before the one it does not is tried again.
+  **When.** One probe at a time per subscriber; none while a cut is
+  pending, while a queue stands or stood in the last 3 s, or while the
+  detector says over-use; none for 2 s after the path itself cut the
+  estimate (`PROBE_AFTER_TROUBLE`); after a failed probe the next toward
+  that rate or more waits 5 s, then 8 s every time (`PROBE_FIRST_RETRY`,
+  `PROBE_MAX_RETRY`), one toward at most four fifths of it 1 s; after a
+  carried one 0.5 s (`PROBE_AFTER_SUCCESS`). At most 20 Mbit/s
+  (`PROBE_MAX_BPS`), padding in steps of at most 20 ms worth of the
+  rate, at most 64 copies a pass. **No padding on top of a clump:** while
+  the media just written would itself wait 25 ms on a path that carries
+  the estimate, no padding is added, and a clump of 50 ms while a probe
+  runs ends the probe as `disturbed`: nothing is held against the rate,
+  the limit does not move, and the next probe may start 2 s later (a
+  probe that a late clump ended as `trouble` cost the full 8 s wait).
+  A cut the estimator makes while a probe
+  runs, or within 1 s after it, is taken back: a failed probe changes the
+  limit and when the next may start, never what is being given.
+  All constants chosen, not measured.
+- **Applying it.** The given quality replaces the asked-for one in the
+  per-track gate (`MediaPeer::video_quality_given`): pause is immediate,
+  resume starts at a key frame, as in step 5. A track paused under
+  downlink control has its retransmission cache emptied.
+- **Telling the subscriber.** `ServerFrame::VideoGiven { given: [{ peer,
+  quality }] }`, kind `video-given`: the whole set, every publisher the
+  subscriber has a video track of, most important first, at most 64
+  entries; sent when the set changes and after every `video-wants`.
+  Example:
+  `{"kind":"video-given","given":[{"peer":"p1","quality":"main"},{"peer":"p2","quality":"middle"},{"peer":"p3","quality":"light"}]}`.
+  On UniFFI `SfuServerFrame::VideoGiven { given: Vec<SfuVideoGiven> }`
+  with `SfuVideoGiven { peer: String, quality: TileVideoQuality }`; on
+  wasm `validateSfuServerFrame` returns `"video-given"` and
+  `parseSfuVideoGiven(json)` returns `[peer0, quality0, peer1, ...]`.
+- **Visible.** Info lines: `media: what a subscriber is given of a
+  publisher's video changed` (`subscriber`, `publisher`, `from`, `to`,
+  `wanted`, `budget_kbps`, `carried_kbps`); `media: trying the next
+  larger set on a subscriber's downlink` (`target_kbps`, `budget_kbps`);
+  `media: a probe of a subscriber's downlink ended` (`outcome`:
+  `carried` / `trouble` / `loss` / `short` / `no-feedback`,
+  `target_kbps`, `carried_kbps`, `padding_bytes`); `media: the estimate
+  of a subscriber's downlink was lowered` (`reason`, `to_kbps`,
+  `standing_queue_ms`, `taken_back`). With `LAKKO_SFU_MEDIA_DIAG_SECS`
+  set, one line per subscriber per interval: `media: subscriber downlink
+  over the last interval`. Counters:
+  `lakko_sfu_downlink_given_changes_total{direction}`,
+  `lakko_sfu_downlink_probes_total{outcome}`,
+  `lakko_sfu_downlink_probe_padding_bytes_total`.
+
+### Measured (2026-10-05 and 06)
+
+Three publishers, each sending main 3.1 Mbit/s, middle 0.5 and light
+0.15 as three declared senders at 25 frames a second, and one subscriber
+asking for the main picture of all three (12.1 Mbit/s with headroom),
+through the production media task under `server` bitrate control. The
+subscriber's downlink is a link model in the test: a rate, a 150 ms
+drop-tail queue, optionally a fixed delay and jitter after it, optionally
+a dip. Synthetic `str0m` clients, debug build, one idle machine, **no
+browser**. **The tables in this section are from the build before the
+second round; what the current build did is under "The second round".**
+Each test was run three times alone on that build
+(`cargo test ... <name> -- --nocapture`); all fifteen runs passed, and an
+independent check then failed (see the head of this section).
+
+**A 7.5 Mbit/s downlink**, lifted after 40 s
+(`a_narrow_downlink_gives_up_the_larger_pictures_and_gets_them_back`).
+It carries one main and two middles (5.9 Mbit/s with headroom, 5.1 on
+the wire); two mains and a middle need 9.0.
+
+| Run | First downgrade | Settled on main, middle, middle | Link drops in the first 2 s / after | All main after the lift |
+|---|---|---|---|---|
+| 1 | 0.67 s | 4.7 s | 802 / 0 | 7.1 s |
+| 2 | 0.67 s | 5.2 s | 725 / 0 | 4.6 s |
+| 3 | 0.66 s | 3.8 s | 718 / 0 | 6.9 s |
+
+Run 1 in full (`given` is main / middle / light publishers; the times of
+cuts and probes are from the SFU's log, whose clock started about 0.3 s
+before the test's, the times of what was given are the test's):
+
+| Time | What happened |
+|---|---|
+| 0 s | given 3/0/0: budget unknown |
+| 0.67 and 0.88 s | cuts with a queue of 18 and 97 ms, taken back (not yet standing 300 ms) |
+| 0.98 s | cut to 5.6 Mbit/s, queue 106 ms, kept; given 1/0/2 (0.67 s by the test's clock) |
+| second 0 | the link dropped 334 main packets, 28 light, 23 light second copies, 417 retransmissions; none in any later second |
+| 3.0-4.1 s | probe toward 5.3 Mbit/s carried (5.35 acknowledged, 169 kB of padding); given 1/1/1, then 1/2/0 at 4.7 s |
+| 5.1 s | probe toward 9.0 failed after 0.33 s (queue 41 ms, 166 kB) |
+| 10.5, 18.9, 27.4, 35.8 s | probes toward 9.0 failed after 0.30, 0.34, 0.30, 0.30 s (150 to 175 kB each); given 1/2/0 throughout, nothing dropped |
+| 40.0 s | limit lifted |
+| 44.2-45.3 s | probe toward 9.0 carried (508 kB); given 2/1/0 |
+| 46.3-47.4 s | probe toward 12.4 carried (607 kB); given 3/0/0 |
+
+Padding in that run: 2.09 MB in 50 s, of which 1.1 MB in the two probes
+that got the main tracks back. While the limit stood: about 160 kB every
+8 s. From a second after it settled until the lift, every light packet
+was handed to the subscriber (asserted in every run).
+
+**The same link with 50 ms of one-way delay and up to 10 ms of jitter**
+(`a_narrow_downlink_with_delay_and_jitter_settles_the_same`): first
+downgrade at 0.75, 0.77, 0.76 s; settled at 5.2, 5.2, 5.4 s; drops 868 /
+0, 888 / 0, 971 / 0; all main 5.3, 5.2, 5.4 s after the lift.
+
+**An unlimited link**
+(`a_subscriber_on_an_unlimited_downlink_is_never_downgraded`): three
+mains from the first frame to the last in all three runs; no probe
+(nobody was given less than asked).
+
+**The dip of ADR-0070 on an unlimited link** (30% of media datagrams
+arriving for one second, from the tenth second;
+`a_dip_on_an_unlimited_downlink_does_not_leave_the_subscriber_downgraded`,
+which allows 8 s in all): no downgrade in the three runs. In six more
+runs of the final code, five had none and one gave less than three mains
+for 5.15 s (main, main, middle at 12.02 s, main, middle, middle at
+12.22 s, back to main, main, middle at 15.06 s and to three mains at
+17.17 s): the retransmissions after the dip put a queue of about 33 ms
+on the path between the SFU and the test's subscriber for more than
+300 ms.
+
+**Downlink control off, the same 7.5 Mbit/s link**
+(`downlink_control_switched_off_changes_nothing`): no `video-given`, no
+transport-wide congestion control in any SDP, everything goes on being
+sent; 65 to 78% of the bytes that got through were on retransmission
+streams and the test's own loop fell seconds behind under the flood.
+
+### The second round (2026-10-06)
+
+The independent check's failing run showed a probe toward 9.0 Mbit/s that
+put 247 kB of padding on the 7.5 Mbit/s link before the feedback that
+would have ended it arrived, with the budget reading 13.7 to 18 Mbit/s.
+Three causes, each changed in the SFU:
+
+1. **The budget stood above the link** because the estimator climbs by
+   its own rule after a cut, cuts made around a probe were taken back to
+   the estimate from before the probe, and the only ceiling was 1.5 times
+   demand (about 18 Mbit/s here). Now the limit described above. Seen
+   after the change, in the per-second timelines of the runs: 5.8 to
+   6.8 Mbit/s while the link was 7.5, and 9.0 to 9.9 only after a probe
+   toward 9.0 had been carried once the limit was lifted.
+2. **A probe could overflow the queue** because it started at its full
+   rate and was stopped only by feedback. Now the climb and the bound on
+   unreported bytes described above. In the unit test
+   `a_probe_above_the_path_builds_a_bounded_queue` a probe toward
+   8 Mbit/s on modelled paths of 4, 5, 6 and 7 Mbit/s never queued more
+   than 80 ms and ended `short`; `padding_stops_when_feedback_does` shows
+   the bound with no report at all. In the runs, failed probes toward 9.0
+   ended after 0.3 to 0.6 s with 130 to 210 kB of padding (`trouble`) or
+   ran their second with 64 to 85 kB (`short`), and the link dropped
+   nothing.
+3. **Seconds in which the link was handed 1.5 times the usual number of
+   packets were not the SFU's sending.** The timeline now prints, per
+   second, the first transmissions the SFU sent on each track and what
+   the test's publishers wrote. Around a probe the SFU's column stayed at
+   350 / 250 / 150 while "handed to the subscriber" read 336 and then
+   364: the link's queue moving packets across the second's edge. Where
+   the SFU's own column moved (336 / 237 / 144, then 368 / 276 / 161) the
+   publishers' column showed frames written late (23 frames, then 27; the
+   latest 118 to 132 ms late): the test's publishers, on a loaded
+   machine. The SFU forwards a packet when it arrives (ADR-0066) and has
+   no pacer; none was added.
+
+Also changed: no probe while a cut is pending or a queue is younger than
+3 s (one started into the first second's overflow); the cheapest allowed
+move after a failure and the two-report rule (one run with delay and
+jitter stayed on main, middle, light for the whole 40 s); the feedback
+lag and its floor are measured per subscriber instead of a constant 30 ms
+(on the 50 ms path every probe after the lift ended `short`).
+
+Runs on the current build, debug, one machine with a browser and other
+sessions running (load average about 6.5), all with
+`LAKKO_SFU_DOWNLINK_CONTROL` set by the test:
+
+| What | Runs | Passed | Figures |
+|---|---|---|---|
+| narrow test alone by name (`--ignored --exact`) | 10 | 10 | settled 3.7 to 5.5 s; all main 6.0 to 7.9 s after the lift; 644 to 942 link drops in the first 2 s, 0 after |
+| the same with 50 ms delay and 10 ms jitter, alone | 10 | 10 | settled 3.8 to 5.8 s; all main 7.0 to 8.9 s after the lift; 0 link drops after the first 2 s |
+| dip on an unlimited link, alone | 3 | 3 | two runs never downgraded; one had less than three mains for 5.54 s (bound 8 s) |
+| unlimited link, alone | 3 | 3 | never downgraded |
+| the four-package `cargo test` with the two narrow tests un-ignored, first batch | 3 | 0 | all three failed with "too loaded to measure in 4 attempts": every attempt was discarded, no assertion about the SFU was reached |
+| the same after the tests were made to take turns (below), six attempts | 3 | 3 | narrow: settled 3.8 to 5.5 s, all main 6.3 to 7.8 s; with jitter: settled 3.9 to 5.9 s, all main 6.9 to 8.6 s; 0 link drops after the first 2 s |
+
+Four of the ten narrow runs alone and two of the ten jitter runs needed a
+discarded attempt. Of twelve discarded attempts looked at, eleven had no
+link drop after the first two seconds; the twelfth was a 15 s stall of
+the machine. Earlier builds of this round failed runs: the jitter test
+0 of 8 (probes `short` after the lift), then 9 of 10 (a cut caused by
+publisher frames written 118 to 132 ms late), then 7 of 8 (stuck on
+main, middle, light); each led to a change named above.
+
+**The two narrow tests stay `#[ignore]`d and the switch stays off**; that
+is the maintainer's to change. Twenty-six passing runs on one machine
+against a synthetic client do not show the link cannot drop a packet.
+
+### The third round (2026-10-06): a publisher's clump
+
+The second round's tests discarded any run in which a publisher's frame
+was written more than 80 ms late. An independent check found that the
+four attempts so discarded were the ones that would have failed (a
+subscriber left on main, middle, light 20 s after the lift; all main
+17 s after it). A publisher whose uplink stalls for 150 to 250 ms and
+then delivers its frames together is an ordinary condition, so the
+discard hid the case that matters. It is gone; the condition is now made
+on purpose.
+
+**What a clump triggered**, reproduced with every publisher's frames
+withheld for 200 ms (`DL_CLUMP`) and written together:
+
+1. *A kept cut from the queue the clump itself built.* 1.0 Mbit of
+   clump is 136 ms of queue on the 7.5 Mbit/s link; it stood above 25 ms
+   for more than 300 ms, and the cut was kept at 4.8 Mbit/s (queue 73 ms)
+   with the set on the wire needing 5.1: the main picture was taken away
+   0.3 s later and came back 2.6 s after that by a probe; in another run
+   the steady set was back 6.3 s after the clump.
+2. *A limit set far too low.* The cut is to 0.85 of what arrived in the
+   last half second, and the half second held the stall: 2.6 Mbit/s in
+   the independent check's run, on a path that had been carrying 5.1.
+3. *And then no way back* (the run that ended on two middles and a
+   light): every probe from a small set ended `short`. The second copies
+   of the light packets were counted in what the probe had sent **and**
+   taken out of its schedule, so every probe ran short of its target by
+   their rate, 0.47 Mbit/s: nothing at 9 Mbit/s, a third of the target
+   at 1.5. No probe toward three middles could pass on any path. This
+   was a defect of the second round's probe, not of the clump.
+4. *A probe started in the stall.* With a track's cost measured over one
+   second, the second of the stall made two mains look like 7.1 Mbit/s
+   instead of 9.0; a probe started toward it, and its padding on top of
+   the clump overflowed the link's queue by two packets (one of twelve
+   runs of an intermediate build).
+5. *A probe ended by a clump* counted as a failure of its rate and cost
+   the 8 s wait (a run of an intermediate build settled after 13.9 s).
+
+Fixed in the SFU as described above (the model of the SFU's own sending,
+the clump's shadow, the held first cut, the two-second cost of a track,
+no padding on a clump, `disturbed` probes), and in the probe (second
+copies counted once; a probe held back during its climb passes when the
+whole target was acknowledged on the plateau; the delivered rate that
+bounds the padding rises at once instead of by halves).
+
+**Found on the way, with a link that carries a fifth of the demand**
+(2.35 Mbit/s, `a_very_narrow_downlink_gets_everything_back_when_it_is_lifted`):
+the SFU never cut at all (now the deep-queue rule); an intermediate
+build of that rule cut at every pass of the media loop, 1089 times in a
+second, to the 30 kbit/s floor (now once per 300 ms, and to a fraction
+of the rate as of the last arrival, not "as of now"); and with an
+estimate that low the padding rule saw every media packet as a clump
+(the model's rate is now never below what is steadily written).
+
+**Runs on the final build** (debug, one machine, load average 3 to 4
+during the batch, each test alone by name with a 420 s kill):
+
+| Test | Passed | Settled | All main after the lift | Link drops after 2 s | Discarded attempts |
+|---|---|---|---|---|---|
+| narrow | 10 of 10 | 3.7 to 5.6 s | 5.8 to 7.5 s | 0 | 1 (loop stood 307 ms) |
+| narrow, delay and jitter | 10 of 10 | 5.5 to 5.8 s | 6.1 to 6.7 s | 0 | 1 (266 ms) |
+| clumps (one publisher at 20 s, all at 30 s, all 0.3 s after the lift) | 10 of 10 | 5.4 to 5.5 s | 5.8 to 6.1 s | 0 | 0 |
+| clumps, delay and jitter | 10 of 10 | 5.5 to 5.8 s | 6.1 to 6.8 s | 0 | 0 |
+| very narrow (2.35 Mbit/s, lifted at 20 s) | 3 of 3 | on two middles and a light | 9.4, 9.5, 11.1 s | 0 after the first 8 s | 0 |
+| dip on an unlimited link | 3 of 3 | never downgraded | | | 0 |
+| unlimited link | 3 of 3 | never downgraded | | | 0 |
+
+In all twenty clump runs no `video-given` frame followed a clump before
+the lift: the set did not move. The two discarded attempts had the same
+timelines as passing ones.
+
+The four-package `cargo test` with the five step-6 tests un-ignored for
+the run: 3 of 3 passed (46 passed, 2 ignored in
+`synthetic_client_e2e.rs`). In them: narrow settled 5.5 s, all main 5.9
+to 6.3 s; with jitter 3.8 to 5.6 s and 6.4 to 7.9 s; clumps, both
+variants, no `video-given` after a clump before the lift, all main 5.8
+to 6.6 s; very narrow all main 8.4 to 10.7 s; no link drop after the
+first two seconds anywhere. One attempt was discarded: the very narrow
+test's first, whose loop stood still for 7.1 s (the first seconds of a
+link that carries a fifth of the demand, with the rest of the file
+starting beside it; not looked into further).
+
+Runs of intermediate builds of this round that failed, each leading to
+a change above: 11 of 12 passed (the four narrow and clump tests, three
+runs each; the failure was the probe started in the stall); 39 of 40
+(ten runs each; the failure was the probe ended by a clump, settled
+after 13.9 s); very narrow 2 of 3 (the cut at every pass); the plain
+clump test 9 of 10 (the first cut a second late behind the key frames'
+shadow, then the cut to the floor);
+and one batch that was killed after a run was found alive 2 h 13 min in
+(see below), on a machine whose load average was 25 to 40 from other
+work: its two finished attempts had the test's loop standing still for
+2.2 and 2.4 s, and in one the subscriber went to three light pictures
+at 34 s. That was the lasting-loss rule: for more than two seconds
+nothing was handed to the subscriber at all (the timeline shows 0
+packets in seconds 32 and 33, frames written up to 2.9 s late), the
+estimate was stepped to the floor for loss, and the probes brought the
+pictures back from 37 s on. A subscriber whose path delivers nothing
+for seconds is given the light pictures; that is the rule working, on a
+stall the machine made.
+
+**What remains weak**
+
+- A clump is forwarded as it arrives. All three publishers stalling
+  together for 200 ms is 136 ms of the test link's 150 ms queue; a
+  longer stall, or a shorter queue, overflows it, and nothing in the SFU
+  prevents that.
+- In a clump's shadow (1 s) and behind a held first cut (300 ms) a path
+  that really got narrower is noticed late. Clumps more often than once
+  in 3 s get no shadow and are judged by the model alone, which in the
+  debug build left 36 ms of 84 unexplained.
+- After a failed probe the next toward the same rate waits 8 s, so a
+  limit lifted just after a failure is found 8 s later; the very narrow
+  link was back on three mains 9.4 to 11.1 s after the lift, and from
+  three lights the same walk can exceed 15 s.
+- A path that delivers nothing for about three seconds sends the
+  estimate to its floor (the loss rule); the pictures come back one
+  probe at a time.
+- Twice after the lift a run gave the third publisher its main picture
+  for about 0.1 s before the second (`MmM` then `MMm`): the order of
+  importance is not kept for a moment when two moves are affordable.
+  Not looked into.
+- The frame-rate of feedback, the size of real clumps and everything
+  else about a browser are still unknown; no browser has been run.
+
+### What does not pass, and what the runs depend on
+
+- **The tests discard a run they could not measure**: one in which their
+  own loop stood still for more than 250 ms (`DL_WORST_STALL`). Up to
+  three attempts (`DL_ATTEMPTS`). The second round also discarded a run
+  in which a publisher's frame was written more than 80 ms late; that
+  rule hid exactly the runs that mattered and is gone (third round). The
+  downlink tests take turns (`DL_ONE_AT_A_TIME`). A discarded attempt is
+  printed with its reason; its assertions are not evaluated. Every
+  attempt has a deadline (`run_for` + 90 s) and the test a watchdog on
+  the wall clock that ends the process: one run was found alive 2 h
+  13 min after it started, its log ending 131 s in; the monotonic clock
+  the run's own deadline used does not move while the machine sleeps,
+  which is the likeliest cause and was not proven.
+
+- **Run together with the rest of the file, the tests are not
+  measurements.** `cargo test -p lakko-svc-sfu` runs the 45 tests of
+  `synthetic_client_e2e.rs` at once; the downlink tests' own loop (the
+  three publishers, the link and the subscriber live in it) then stood
+  still for whole seconds and both acceptance tests failed on that run.
+  The tests now measure their own loop: a run in which it stood still for
+  more than 250 ms is printed, discarded and repeated (four attempts then, six now;
+  see the item above). Alone, the longest stall seen then was 28 to 179 ms.
+- Earlier builds of this step failed runs that the final one passes, each
+  for a reason that was then fixed: a failed probe cut the estimate
+  (now taken back); the first move tried was always the most important
+  publisher's, so a cheaper one was never tried; a drifting estimate took
+  a middle track away for a main one the path does not carry; jitter
+  alone cut the estimate; a set given at exactly what it needs was taken
+  away again by the next measurement; a moment's stall of the publishers
+  lowered the ceiling and with it the estimate; a step of the delay
+  after a dip kept every later probe from starting. Rounds of fifteen
+  runs on intermediate builds had 3, 5, 2, 0 and 2 failures. The final
+  build has been through one round of fifteen and the six extra dip
+  runs.
+- On the limited link with delay and jitter, one run of an intermediate
+  build lost 21 datagrams to a failed probe at 4 to 6 s (its target had
+  been measured in the second that held the resumed tracks' key frames).
+  The wait after a carried probe was raised from 0.5 to 1 s and "a
+  smaller rate" made to mean four fifths; the three runs since had no
+  drop after the first two seconds. Three runs do not show it cannot
+  happen.
+
+### Seen, not explained
+
+After the dip, in every dip run, the delay the SFU computes from the
+subscriber's feedback (reported arrival less send time) stepped up by 12
+to 25 ms and stayed there for the rest of the run, on a loopback link
+with no queue. Before the dip it stood a steady 16 to 17 ms above the
+smallest value of the run. Whether that is how the `str0m` client in the
+test builds its feedback after a gap, or something in how the SFU places
+the arrival clock, was not found. It is why a carried probe resets the
+delay baseline and why a probe measures the queue from where it stood
+when it started; without those the subscriber stayed downgraded for the
+rest of the run (seen: 13 s). What a browser's feedback does here is not
+known.
+
+**2026-10-07.** The step was seen at 26 to 34 ms, above the 25 ms a
+standing queue is read at, and it stayed there for eight seconds on an
+unlimited link; a frame one of the test's publishers wrote 118 ms late
+then set the detector off, the "queue" confirmed it, and the subscriber
+lost a picture (`a_dip_on_an_unlimited_downlink_...`, twice in the full
+test run that day). Now a delay that has stood above the path's
+smallest for 3 s, under 75 ms, with no cut kept or pending, no probe
+and no over-use, is taken as the path's own
+(`take_a_settled_delay_as_the_paths_own`; unit test
+`a_delay_that_settles_higher_becomes_the_baseline`). The cause of the
+step is still not found. The cost: a real queue that stands shallow and
+steady for 3 s is no longer evidence; one that grows or goes deep is.
+
+### The first attempt (2026-10-05)
+
+The step was first built on `str0m`'s own send-side estimator and failed
+both acceptance tests: a second of tail drops on the 7.5 Mbit/s link took
+the estimate to 178 and 185 kbit/s (its loss-based bound is 100 kbit/s
+divided by the loss above 5%), it could not rise above 1.5 times what was
+being sent while the heavy tracks were paused (three light pictures for
+39 s in one run), all three were back on main 41.4 and 43.4 s after the
+lift, and on an unlimited loopback link it lowered the estimate 1.16 s
+after the start on the word of its first probe. With its loss-based part
+switched off it stood at 10.7 Mbit/s on the 7.5 Mbit/s link. The
+thirteenth vendored change of that attempt (`Bwe::current_estimate`) was
+taken out again.
+
+### Not verified
+
+- **No browser, no native client.** A browser is expected to keep taking
+  the SFU's REMB as the ceiling of what it publishes and to send
+  transport-wide feedback for what it receives on the SFU's lines. Not
+  run. Not read: whether libwebrtc accepts the transport-wide extension
+  on some media lines of a bundle and not on others, what Firefox and
+  Safari do, how often each sends feedback (a probe ends on the feedback
+  it gets, and the test's client reports about every 100 ms), and whether
+  a browser's jitter buffer or statistics are disturbed by a second of
+  retransmission-stream copies it discards.
+- Paths other than the ones above: more than three publishers, a queue
+  shorter than the 25 ms a cut needs (such a path shows loss and no
+  delay, and is cut only by the 3 s loss rule), a path whose rate changes
+  slowly, competing traffic.
+- The fuzz target of the SFU was compile-checked, not run.
 
 ## Uplink fallback (simulcast publishers, off by default)
 

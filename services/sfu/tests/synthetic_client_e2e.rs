@@ -87,7 +87,8 @@ use lakko_svc_sfu::frame_descriptor::{
 };
 use lakko_svc_sfu::media::{
     spawn_media_task, spawn_media_task_advertising, spawn_media_task_with_bitrate_control,
-    spawn_media_task_with_options, BitrateControl, MediaTaskHandle, MediaTaskOptions,
+    spawn_media_task_with_options, BitrateControl, LossProtection, MediaTaskHandle,
+    MediaTaskOptions,
 };
 use lakko_svc_sfu::peer::{Peer, PeerId, PeerRegistry};
 use lakko_svc_sfu::protocol::ServerFrame;
@@ -176,6 +177,19 @@ struct SyntheticClient {
     withhold_in: Option<u16>,
     /// The first SSRC media arrived on.
     main_in_ssrc: Option<u32>,
+    /// Lose, on the way in, every n-th media datagram on the first SSRC
+    /// media arrives on (first transmissions only; the retransmission
+    /// stream gets through): packets a NACK then asks for again.
+    lose_in_every: Option<u64>,
+    /// Media datagrams seen on that SSRC so far, and how many were lost.
+    main_in_seen: u64,
+    main_in_lost: u64,
+    /// Every packet that arrived on another SSRC (the retransmission
+    /// stream), as `str0m` reports it with raw packets on: whether its
+    /// header had the padding bit set, and its payload with any padding
+    /// removed (the two bytes of the original sequence number, then the
+    /// original payload).
+    rtx_in: Vec<(bool, Vec<u8>)>,
     /// Datagrams lost under `withhold_in`: (SSRC, sequence number).
     withheld_in: Vec<(u32, u16)>,
     /// REMBs this client received: (when, bitrate in bits per second, the
@@ -185,10 +199,21 @@ struct SyntheticClient {
     /// retransmissions alike) with a fixed probability while a time window
     /// is open. Used by the uplink-dip measurements only.
     dip: Option<DipLoss>,
+    /// A mobile uplink's jitter on this client's outgoing media: from
+    /// this moment on, twice a second, the delay climbs by 20 to 60 ms
+    /// over a tenth of a second and falls back over the next. Nothing is
+    /// lost and the rate is not limited.
+    uplink_jitter_from: Option<Instant>,
+    /// Outgoing media held by that jitter: when it goes on the wire, the
+    /// datagram, where to.
+    uplink_held: std::collections::VecDeque<(Instant, Vec<u8>, SocketAddr)>,
     /// The simulcast layer each keyframe request this client received as a
     /// publisher named, in order. One entry per request counted in
     /// `keyframe_requests_seen`.
     keyframe_request_rids: Vec<Option<Rid>>,
+    /// The media line (this client's own mid) each of those named, entry
+    /// for entry: what tells two plain senders of one publisher apart.
+    keyframe_request_mids: Vec<Mid>,
     /// When each of those arrived, entry for entry.
     keyframe_request_at: Vec<Instant>,
     /// When each packet in `rtp_got` was handed over, entry for entry.
@@ -197,6 +222,59 @@ struct SyntheticClient {
     /// arrived on, entry for entry, resolved from the packet's SSRC: what
     /// tells two downstream tracks of one publisher apart.
     rtp_got_track: Vec<Option<Mid>>,
+    /// The playout-delay header extension each packet in `rtp_got`
+    /// carried, entry for entry, as (minimum, maximum) in milliseconds.
+    /// `None` when the packet carried none or this client's session does
+    /// not know the extension.
+    rtp_got_playout: Vec<Option<(u64, u64)>>,
+    /// Lose each incoming media datagram (first transmissions and
+    /// retransmissions alike) with a fixed probability while a time window
+    /// is open: a dip on this client's downlink.
+    dip_in: Option<DipLoss>,
+    /// Incoming media datagrams lost under `dip_in`, and how many arrived
+    /// in all.
+    dip_in_lost: Vec<RtpSeen>,
+    /// The one-byte header extension ids seen on incoming media datagrams
+    /// (SRTP leaves the header extension block readable).
+    in_ext_ids: std::collections::BTreeSet<u8>,
+}
+
+/// The ids of the one-byte header extensions (RFC 8285) in the cleartext
+/// header of an RTP datagram.
+fn one_byte_extension_ids(datagram: &[u8]) -> Vec<u8> {
+    let mut ids = Vec::new();
+    let Some(&first) = datagram.first() else {
+        return ids;
+    };
+    if first & 0x10 == 0 {
+        return ids;
+    }
+    let start = 12 + 4 * usize::from(first & 0x0f);
+    let Some(head) = datagram.get(start..start + 4) else {
+        return ids;
+    };
+    if head[0] != 0xbe || head[1] != 0xde {
+        return ids;
+    }
+    let len = 4 * usize::from(u16::from_be_bytes([head[2], head[3]]));
+    let Some(block) = datagram.get(start + 4..start + 4 + len) else {
+        return ids;
+    };
+    let mut i = 0;
+    while i < block.len() {
+        let b = block[i];
+        if b == 0 {
+            i += 1;
+            continue;
+        }
+        let id = b >> 4;
+        if id == 15 {
+            break;
+        }
+        ids.push(id);
+        i += 2 + usize::from(b & 0x0f);
+    }
+    ids
 }
 
 /// A window of random loss on a client's outgoing media datagrams.
@@ -338,14 +416,25 @@ impl SyntheticClient {
             nacks_seen: Vec::new(),
             wire_got: Vec::new(),
             withhold_in: None,
+            lose_in_every: None,
+            main_in_seen: 0,
+            main_in_lost: 0,
+            rtx_in: Vec::new(),
             main_in_ssrc: None,
             withheld_in: Vec::new(),
             rembs_seen: Vec::new(),
             dip: None,
+            uplink_jitter_from: None,
+            uplink_held: std::collections::VecDeque::new(),
             keyframe_request_rids: Vec::new(),
+            keyframe_request_mids: Vec::new(),
             keyframe_request_at: Vec::new(),
             rtp_got_at: Vec::new(),
             rtp_got_track: Vec::new(),
+            rtp_got_playout: Vec::new(),
+            dip_in: None,
+            dip_in_lost: Vec::new(),
+            in_ext_ids: std::collections::BTreeSet::new(),
         }
     }
 
@@ -467,6 +556,26 @@ impl SyntheticClient {
         let mut api = self.rtc.direct_api();
         let stream = api.stream_tx_by_mid(mid, None)?;
         Some((*stream.ssrc(), stream.rtx().map(|rtx| *rtx)))
+    }
+
+    /// How much later than now an outgoing datagram goes on the wire
+    /// under [`Self::uplink_jitter_from`]; `None` when it goes at once
+    /// (no jitter set, not media, or nothing held and no delay due).
+    fn uplink_jitter_extra(&self, datagram: &[u8]) -> Option<Duration> {
+        let from = self.uplink_jitter_from?;
+        rtp_seen(datagram)?;
+        let since = Instant::now().checked_duration_since(from)?;
+        let micros = u64::try_from(since.as_micros()).unwrap_or(u64::MAX);
+        let (slot, into) = (micros / 500_000, micros % 500_000);
+        let peak = 20_000 + (slot * 17 % 41) * 1_000;
+        let extra = if into < 100_000 {
+            peak * into / 100_000
+        } else if into < 200_000 {
+            peak * (200_000 - into) / 100_000
+        } else {
+            0
+        };
+        (extra > 0 || !self.uplink_held.is_empty()).then(|| Duration::from_micros(extra))
     }
 
     /// Whether an outgoing datagram goes on the wire. Media datagrams are
@@ -655,6 +764,54 @@ impl SyntheticClient {
             .is_ok()
     }
 
+    /// Build a SendOnly offer adding **two plain video senders**, each one
+    /// encoding with no rid, as a client that sends its camera twice (the
+    /// picture itself and a light copy) does; with `audio`, an audio
+    /// sender ahead of them. Returns the mids: audio, main video, light
+    /// video.
+    fn create_two_sender_publisher_offer(
+        &mut self,
+        audio: bool,
+    ) -> (String, SdpPendingOffer, Option<Mid>, Mid, Mid) {
+        let mut change = self.rtc.sdp_api();
+        let mut add = |kind, stream: &str| {
+            change.add_media(
+                kind,
+                Direction::SendOnly,
+                Some(stream.to_owned()),
+                None,
+                None,
+            )
+        };
+        let audio_mid = audio.then(|| add(MediaKind::Audio, "two-sender-publisher"));
+        let main = add(MediaKind::Video, "two-sender-publisher");
+        let light = add(MediaKind::Video, "two-sender-publisher-light");
+        let (offer, pending) = change.apply().expect("at least one change → Some(offer)");
+        (offer.to_sdp_string(), pending, audio_mid, main, light)
+    }
+
+    /// Build a SendOnly offer adding **three plain video senders**, each one
+    /// encoding with no rid, as a client that sends its camera three times
+    /// (the picture itself, a light copy and a middle copy, ADR-0070 step
+    /// 5) does. Returns the mids: main, light, middle.
+    fn create_three_sender_publisher_offer(&mut self) -> (String, SdpPendingOffer, Mid, Mid, Mid) {
+        let mut change = self.rtc.sdp_api();
+        let mut add = |stream: &str| {
+            change.add_media(
+                MediaKind::Video,
+                Direction::SendOnly,
+                Some(stream.to_owned()),
+                None,
+                None,
+            )
+        };
+        let main = add("three-sender-publisher");
+        let light = add("three-sender-publisher-light");
+        let middle = add("three-sender-publisher-middle");
+        let (offer, pending) = change.apply().expect("at least one change → Some(offer)");
+        (offer.to_sdp_string(), pending, main, light, middle)
+    }
+
     /// Build a SendOnly **video simulcast** publisher offer announcing the given
     /// `rids` (e.g. `["l", "h"]`). str0m sends each layer on its own SSRC; the
     /// SFU resolves each packet's stream to its rid, which is exactly what
@@ -719,17 +876,45 @@ impl SyntheticClient {
     /// `connected` on `Event::Connected`, and returns the
     /// payload bytes of every `Event::MediaData` observed
     /// this pass.
+    #[allow(clippy::too_many_lines)]
     async fn drain(&mut self) -> Vec<Vec<u8>> {
         // Clone the Arc so we can `send_to` (shared borrow
         // of the socket) while `poll_output` holds a mut
         // borrow of `self.rtc`.
         let socket = self.socket.clone();
         let mut payloads = Vec::new();
+        while self
+            .uplink_held
+            .front()
+            .is_some_and(|(at, _, _)| *at <= Instant::now())
+        {
+            if let Some((_, datagram, to)) = self.uplink_held.pop_front() {
+                let _ = socket.send_to(&datagram, to).await;
+            }
+        }
         loop {
             match self.rtc.poll_output() {
                 Ok(Output::Transmit(t)) => {
                     if self.keep_outgoing(&t.contents) {
-                        let _ = socket.send_to(&t.contents, t.destination).await;
+                        match self.uplink_jitter_extra(&t.contents) {
+                            Some(extra) => {
+                                // In order: never before the one held
+                                // ahead of it.
+                                let at = (Instant::now() + extra).max(
+                                    self.uplink_held
+                                        .back()
+                                        .map_or_else(Instant::now, |(at, _, _)| *at),
+                                );
+                                self.uplink_held.push_back((
+                                    at,
+                                    t.contents.to_vec(),
+                                    t.destination,
+                                ));
+                            },
+                            None => {
+                                let _ = socket.send_to(&t.contents, t.destination).await;
+                            },
+                        }
                     }
                 },
                 Ok(Output::Event(event)) => match event {
@@ -743,6 +928,7 @@ impl SyntheticClient {
                     Event::KeyframeRequest(req) => {
                         self.keyframe_requests_seen += 1;
                         self.keyframe_request_rids.push(req.rid);
+                        self.keyframe_request_mids.push(req.mid);
                         self.keyframe_request_at.push(Instant::now());
                     },
                     Event::RawPacket(raw) => {
@@ -751,6 +937,11 @@ impl SyntheticClient {
                             let bps = remb.bitrate.max(0.0) as u64;
                             self.rembs_seen
                                 .push((Instant::now(), bps, remb.ssrcs.clone()));
+                        }
+                        if let RawPacket::RtpRx(header, data) = &*raw {
+                            if self.main_in_ssrc.is_some_and(|main| main != *header.ssrc) {
+                                self.rtx_in.push((header.has_padding, data.clone()));
+                            }
                         }
                         if let RawPacket::RtcpRx(Rtcp::Nack(nack)) = *raw {
                             let now = Instant::now();
@@ -779,6 +970,19 @@ impl SyntheticClient {
                             .stream_rx(&packet.header.ssrc)
                             .map(|stream| stream.mid());
                         self.rtp_got_track.push(track);
+                        let ext = &packet.header.ext_vals;
+                        self.rtp_got_playout
+                            .push(
+                                ext.play_delay_min
+                                    .zip(ext.play_delay_max)
+                                    .map(|(min, max)| {
+                                        let ms = |t: str0m::media::MediaTime| {
+                                            u64::try_from(Duration::from(t).as_millis())
+                                                .expect("a short delay")
+                                        };
+                                        (ms(min), ms(max))
+                                    }),
+                            );
                         self.rtp_got.push(RtpGot {
                             pt: *packet.header.payload_type,
                             seq: packet.header.sequence_number,
@@ -829,10 +1033,24 @@ impl SyntheticClient {
 
     /// Feed an inbound datagram (if it came from the SFU).
     fn feed_receive(&mut self, bytes: &[u8], source: SocketAddr, sfu_addr: SocketAddr) {
+        self.feed_receive_at(bytes, source, sfu_addr, Instant::now());
+    }
+
+    /// As [`Self::feed_receive`], with the moment the datagram arrived
+    /// given: what a link model between the socket and the client says,
+    /// which is what the client's transport-wide feedback then reports.
+    fn feed_receive_at(
+        &mut self,
+        bytes: &[u8],
+        source: SocketAddr,
+        sfu_addr: SocketAddr,
+        at: Instant,
+    ) {
         if source != sfu_addr {
             return;
         }
-        if let Some(rtp) = rtp_seen(bytes) {
+        if let Some(mut rtp) = rtp_seen(bytes) {
+            rtp.at = at;
             if let Some(withheld) = self.withhold_in {
                 let main = *self.main_in_ssrc.get_or_insert(rtp.ssrc);
                 if rtp.ssrc != main || rtp.seq == withheld {
@@ -840,13 +1058,28 @@ impl SyntheticClient {
                     return;
                 }
             }
+            if let Some(every) = self.lose_in_every {
+                let main = *self.main_in_ssrc.get_or_insert(rtp.ssrc);
+                if rtp.ssrc == main {
+                    self.main_in_seen += 1;
+                    if self.main_in_seen % every == 0 {
+                        self.main_in_lost += 1;
+                        return;
+                    }
+                }
+            }
+            if self.dip_in.as_mut().is_some_and(|d| d.loses(rtp.at)) {
+                self.dip_in_lost.push(rtp);
+                return;
+            }
+            self.in_ext_ids.extend(one_byte_extension_ids(bytes));
             self.rtp_in.push(rtp);
         }
         let Ok(contents) = bytes.try_into() else {
             return;
         };
         let input = Input::Receive(
-            Instant::now(),
+            at,
             Receive {
                 proto: Protocol::Udp,
                 source,
@@ -3056,11 +3289,13 @@ async fn a_late_joiners_first_keyframe_is_requested_and_pli_bursts_collapse() {
          exactly one keyframe request"
     );
 
-    // (3) The nine PLIs that fell inside the window are owed, not dropped:
-    //     once the window ends the SFU asks once more by itself, although B
-    //     stays silent. A subscriber that asked once and then waited would
-    //     otherwise be left without a picture until it asked again (seen on
-    //     a live call: nine seconds).
+    // (3) The nine PLIs that followed the first are not relayed and not
+    //     owed: the subscriber has just been asked for, and one that goes
+    //     on asking is relayed again only after
+    //     `PLI_RELAY_FIRST_INTERVAL` (then less and less often). Before
+    //     this rule each burst cost a second request when the window
+    //     ended, and a receiver that never stopped asking cost its
+    //     publisher two key frames a second for a whole call.
     pump(
         &mut a,
         &mut b,
@@ -3071,11 +3306,30 @@ async fn a_late_joiners_first_keyframe_is_requested_and_pli_bursts_collapse() {
     .await;
     assert_eq!(
         a.keyframe_requests_seen - baseline,
-        2,
-        "a request held back by the rate limit must go out when the window \
-         ends, exactly once"
+        1,
+        "the repeats of one burst do not become a second request by themselves"
     );
-    // And it is settled: nothing more follows while nobody asks.
+    // A subscriber that still has no picture asks again; a second later
+    // that is relayed, once, however often it asks.
+    pump(
+        &mut a,
+        &mut b,
+        sfu_addr,
+        Duration::from_millis(400),
+        Some((publisher_mid, &payload, &descriptor, &mut frame_idx)),
+    )
+    .await;
+    for _ in 0..5 {
+        assert!(b.send_pli(b_video_mid));
+        pump(
+            &mut a,
+            &mut b,
+            sfu_addr,
+            Duration::from_millis(10),
+            Some((publisher_mid, &payload, &descriptor, &mut frame_idx)),
+        )
+        .await;
+    }
     pump(
         &mut a,
         &mut b,
@@ -3087,7 +3341,7 @@ async fn a_late_joiners_first_keyframe_is_requested_and_pli_bursts_collapse() {
     assert_eq!(
         a.keyframe_requests_seen - baseline,
         2,
-        "an owed request is sent once, not repeated"
+        "a subscriber that asks again after the wait is relayed, once"
     );
 }
 
@@ -4337,6 +4591,8 @@ async fn run_uplink_loss(video_fec: bool, withhold_downlink: bool) -> UplinkLoss
             diagnostics: None,
             video_fec,
             uplink_fallback: false,
+            protection: LossProtection::default(),
+            downlink_control: false,
         },
     )
     .await
@@ -5327,6 +5583,278 @@ async fn run_bitrate_control(bitrate: BitrateControl) -> BitrateRun {
     }
 }
 
+/// A publisher on a mobile uplink: 1.2 Mbit/s of video for thirty
+/// seconds through a path whose delay moves by 20 to 60 ms twice a second
+/// and that loses nothing and limits nothing. Returns every REMB the
+/// publisher received with its time since the first media packet.
+async fn run_jittery_uplink() -> Vec<(Duration, u64)> {
+    const SENDING: Duration = Duration::from_secs(30);
+    let estimator = EstimatorConfig {
+        start_bps: 1_500_000,
+        max_bps: 5_000_000,
+    };
+    // `LAKKO_SFU_E2E_LOG=1` prints the SFU's own lines, the estimate's
+    // interval line among them (how often the detector was doubted).
+    if std::env::var_os("LAKKO_SFU_E2E_LOG").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
+    let peers = PeerRegistry::new();
+    let (media, sfu_addr) = spawn_media_task_with_bitrate_control(
+        "127.0.0.1:0".parse().unwrap(),
+        None,
+        peers,
+        MediaTaskOptions {
+            diagnostics: Some(Duration::from_secs(5)),
+            ..MediaTaskOptions::default()
+        },
+        BitrateControl::Server(estimator),
+    )
+    .await
+    .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new_rtp_mode_video_publisher(false).await;
+    let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
+    let answer = media
+        .accept_offer(PeerId::fresh(), "jittery-uplink".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts the publisher offer");
+    a.accept_answer(a_pending, &answer)
+        .expect("the publisher applies the SFU's answer");
+
+    let deadline = Instant::now() + SENDING + Duration::from_secs(30);
+    let mut buf = [0u8; 2048];
+    let mut first_media_at: Option<Instant> = None;
+    let mut next_write = Instant::now();
+    let mut seq: u64 = 1;
+    loop {
+        let now = Instant::now();
+        assert!(now < deadline, "the jittery-uplink run never finished");
+        if first_media_at.is_some_and(|at| now.duration_since(at) >= SENDING) {
+            break;
+        }
+        if a.is_connected() && now >= next_write {
+            // Three packets of 1000 bytes every 20 ms: 1.2 Mbit/s.
+            let rtp_time = u32::try_from(seq * 600).expect("a short test stream");
+            let mut wrote = true;
+            for i in 0..3u64 {
+                wrote &=
+                    a.write_video_rtp(mid, UPLINK_VP8_PT, seq + i, rtp_time, i == 2, &[0x5a; 1000]);
+            }
+            if wrote {
+                seq += 3;
+                next_write += Duration::from_millis(20);
+                if next_write + Duration::from_millis(200) < now {
+                    next_write = now;
+                }
+            }
+        }
+        let _ = a.drain().await;
+        if first_media_at.is_none() {
+            first_media_at = a.rtp_out.first().map(|rtp| rtp.at);
+            if let Some(at) = first_media_at {
+                a.uplink_jitter_from = Some(at + Duration::from_secs(2));
+            }
+        }
+        a.rtp_out.clear();
+        a.wire_headers.clear();
+        while let Ok((n, src)) = a.socket.try_recv_from(&mut buf) {
+            a.feed_receive(&buf[..n], src, sfu_addr);
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        a.feed_timeout();
+    }
+    let first = first_media_at.expect("the loop ends only after media");
+    a.rembs_seen
+        .iter()
+        .map(|(at, bps, _)| (at.saturating_duration_since(first), *bps))
+        .collect()
+}
+
+/// A publisher whose uplink has a mobile network's jitter and no limit is
+/// not cut: every REMB it is sent, from first to last, is at least the
+/// rate it is sending. On a live call (2026-10-07) such a publisher was
+/// walked from 2.7 Mbit/s to 53 kbit/s by cuts for "over-use" with no
+/// loss, each anchored to the rate the cut before it had imposed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::print_stderr)]
+async fn a_jittery_uplink_with_no_limit_is_not_cut() {
+    /// What the publisher sends. No REMB may be below it.
+    const SENT_BPS: u64 = 1_200_000;
+    let rembs = tokio::time::timeout(Duration::from_secs(90), Box::pin(run_jittery_uplink()))
+        .await
+        .expect("the run ends by itself");
+    let lowest = rembs.iter().map(|(_, bps)| *bps).min().expect("REMBs came");
+    let highest = rembs.iter().map(|(_, bps)| *bps).max().expect("REMBs came");
+    eprintln!(
+        "jittery uplink: {} REMBs, lowest {lowest} highest {highest} bit/s",
+        rembs.len()
+    );
+    assert!(rembs.len() >= 25, "about one a second: {}", rembs.len());
+    assert!(
+        lowest >= SENT_BPS,
+        "a REMB below what the path was carrying: {:?}",
+        rembs
+            .iter()
+            .filter(|(_, bps)| *bps < SENT_BPS)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The payload of the `n`-th packet of [`run_lossy_subscriber`]: its
+/// number in the first four bytes, a length that runs through 5 to 68,
+/// and a last byte that runs through the values a padding count could be
+/// mistaken in (0, 1, 4, 255).
+fn lossy_payload(n: u32) -> Vec<u8> {
+    let len = 5 + (n as usize % 64);
+    let mut payload = vec![0x5a; len];
+    payload[..4].copy_from_slice(&n.to_be_bytes());
+    payload[len - 1] = [0x00, 0x01, 0x04, 0xff][n as usize % 4];
+    payload
+}
+
+/// One publisher, one subscriber that loses every seventh media packet on
+/// the way in and asks for it again. Returns what arrived on the
+/// subscriber's retransmission stream (padding bit, payload) and how many
+/// packets it lost.
+async fn run_lossy_subscriber() -> (Vec<(bool, Vec<u8>)>, u64) {
+    const PACKETS: u32 = 400;
+    let peers = PeerRegistry::new();
+    let mut registered = register_subscribers(&peers, "lossy-subscriber", 1).await;
+    let (b_id, mut b_rx) = registered.pop().expect("one registered");
+    let (media, sfu_addr) = spawn_media_task_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        None,
+        peers,
+        MediaTaskOptions::default(),
+    )
+    .await
+    .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new_rtp_mode_video_publisher(false).await;
+    let mut b =
+        SyntheticClient::build(Rtc::builder().set_rtp_mode(true).enable_raw_packets(true)).await;
+    b.lose_in_every = Some(7);
+
+    let (b_offer, b_pending) = b.create_video_subscriber_offer();
+    let answer = media
+        .accept_offer(b_id.clone(), "lossy-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts the subscriber offer");
+    b.accept_answer(b_pending, &answer)
+        .expect("B applies the SFU's answer");
+    let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
+    let answer = media
+        .accept_offer(PeerId::fresh(), "lossy-call".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts the publisher offer");
+    a.accept_answer(a_pending, &answer)
+        .expect("A applies the SFU's answer");
+
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut buf = [0u8; 2048];
+    let mut next_write = Instant::now();
+    let mut n: u32 = 0;
+    let mut subscribed = false;
+    let mut done_at: Option<Instant> = None;
+    loop {
+        let now = Instant::now();
+        assert!(now < deadline, "the lossy-subscriber run never finished");
+        // A second after the last packet: time for the last NACKs.
+        if done_at.is_some_and(|at| now >= at + Duration::from_secs(1)) {
+            break;
+        }
+        if subscribed && a.is_connected() && b.is_connected() && n < PACKETS && now >= next_write {
+            let seq = u64::from(n) + 1;
+            let rtp_time = n * 900;
+            if a.write_video_rtp(mid, UPLINK_VP8_PT, seq, rtp_time, true, &lossy_payload(n)) {
+                n += 1;
+                next_write = now + Duration::from_millis(5);
+                if n == PACKETS {
+                    done_at = Some(now);
+                }
+            }
+        }
+        for client in [&mut a, &mut b] {
+            let _ = client.drain().await;
+        }
+        a.rtp_out.clear();
+        a.wire_headers.clear();
+        b.rtp_in.clear();
+        if let Ok(ServerFrame::SdpOffer { sdp }) = b_rx.try_recv() {
+            let answer = b.answer_renegotiation(&sdp).expect("B answers");
+            media
+                .accept_renegotiation_answer(b_id.clone(), answer)
+                .await
+                .expect("the SFU takes B's answer");
+            subscribed = true;
+        }
+        for client in [&mut a, &mut b] {
+            while let Ok((len, src)) = client.socket.try_recv_from(&mut buf) {
+                client.feed_receive(&buf[..len], src, sfu_addr);
+                let _ = client.drain().await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        for client in [&mut a, &mut b] {
+            client.feed_timeout();
+        }
+    }
+    (b.rtx_in.clone(), b.main_in_lost)
+}
+
+/// A subscriber that loses packets and asks for them again gets
+/// retransmissions it can use: no retransmission carries the RTP padding
+/// bit, and each one's payload behind its two bytes of original sequence
+/// number is, byte for byte, a payload the publisher sent.
+///
+/// A libwebrtc receiver restores the original packet behind a copy of
+/// the retransmission's header. With the padding bit set there and the
+/// padding itself gone, it then took as many bytes off the tail as the
+/// last byte says: on a live call (2026-10-07) fifteen of sixteen
+/// retransmitted frames reached a Chrome viewer one byte short. The
+/// byte-exact model of that restore is the vendored crate's
+/// `a_retransmission_restores_to_the_payload_that_was_sent`; this is the
+/// same property through the SFU, for retransmissions a NACK asked for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::print_stderr)]
+async fn a_retransmission_to_a_subscriber_carries_the_original_payload_and_no_padding() {
+    let (rtx, lost) =
+        tokio::time::timeout(Duration::from_secs(60), Box::pin(run_lossy_subscriber()))
+            .await
+            .expect("the run ends by itself");
+    let padded = rtx.iter().filter(|(padding, _)| *padding).count();
+    let mut restored = 0usize;
+    for (_, payload) in &rtx {
+        // Padding-only packets of the retransmission stream carry nothing.
+        if payload.len() < 2 + 5 {
+            continue;
+        }
+        let original = &payload[2..];
+        let n = u32::from_be_bytes([original[0], original[1], original[2], original[3]]);
+        assert_eq!(
+            original,
+            &lossy_payload(n)[..],
+            "retransmission of packet {n} is not the payload that was sent"
+        );
+        restored += 1;
+    }
+    eprintln!(
+        "lossy subscriber: lost {lost} first transmissions, received {} packets on the \
+         retransmission stream, {restored} of them carrying a payload, {padded} with the \
+         padding bit",
+        rtx.len()
+    );
+    assert!(lost >= 40, "the subscriber lost packets: {lost}");
+    assert!(
+        restored as u64 >= lost * 9 / 10,
+        "nearly every lost packet came again: {restored} of {lost}"
+    );
+    assert_eq!(padded, 0, "no retransmission carries the padding bit");
+}
+
 /// `LAKKO_SFU_BITRATE_CONTROL=server` (ADR-0068): no SDP the SFU writes
 /// names transport-wide congestion control, on any media line, as a header
 /// extension or as RTCP feedback, while `goog-remb` and `abs-send-time`
@@ -6170,7 +6698,10 @@ struct FbFrame {
 
 /// One simulcast layer of the publisher in a fallback run.
 struct FbLayer {
-    rid: Rid,
+    /// The simulcast layer it is sent on; `None` for a plain sender.
+    rid: Option<Rid>,
+    /// The publisher's media line it is sent on, once offered.
+    mid: Option<Mid>,
     /// First payload byte of its packets.
     tag: u8,
     /// Packets per delta frame.
@@ -6243,9 +6774,28 @@ fn fb_descriptor(frame: u64, key: bool, i: u64, n: u64) -> Vec<u8> {
     }
 }
 
-/// How a simulcast run ([`run_simulcast`]) is set up.
+/// How the publisher of a two-track run sends its two pictures.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Senders {
+    /// One media line, simulcast: `q` (light) and `f`.
+    Simulcast,
+    /// Two plain senders on two media lines, the second declared in the
+    /// offer as the light copy. What the Lakko clients do.
+    TwoDeclared,
+    /// Two plain senders and an audio sender; the offer declares the audio
+    /// line and a mid that does not exist as light, and neither video line.
+    TwoMisdeclared,
+    /// The publisher joins with audio alone and turns its camera on once
+    /// connected: a later offer adds the two senders, the second declared
+    /// light.
+    TwoDeclaredMidCall,
+}
+
+/// How a two-track run ([`run_simulcast`]) is set up.
 #[derive(Clone, Copy)]
 struct SimulcastCase {
+    /// How the publisher sends.
+    senders: Senders,
     /// Run the SFU with the uplink fallback switched on. Off is the
     /// default of the service.
     fallback: bool,
@@ -6260,6 +6810,24 @@ struct SimulcastCase {
     /// running after its last frame.
     stream: Duration,
     settle: Duration,
+    /// What the SFU does to carry video through a burst of loss.
+    protection: LossProtection,
+    /// The dip is on the subscriber's downlink (every media datagram it
+    /// is sent) instead of the publisher's uplink.
+    downlink_dip: bool,
+    /// The subscriber's session knows the playout-delay header extension,
+    /// as a libwebrtc receiver's does.
+    playout_ext: bool,
+    /// How often the subscriber asks again for a missing packet, on every
+    /// stream; `None` is the vendored `str0m`'s default (60 ms).
+    subscriber_nack: Option<Duration>,
+    /// The publisher's cap on retransmitted bytes (`set_rtx_cache`): above
+    /// this share of what it sends, queued retransmissions are thrown
+    /// away. `None`: it answers every request, however many. `Some(0.15)`
+    /// is upstream `str0m`'s default, used here as a stand-in for a sender
+    /// that does not repair a whole burst (see
+    /// `measure_burst_end_key_frame`).
+    publisher_rtx_cap: Option<f32>,
 }
 
 /// What a subscriber received on one of its downstream tracks, as a
@@ -6290,9 +6858,17 @@ struct TrackSeen {
 /// frame needs: a key frame begins a new chain.
 ///
 /// Asserted on the way: every payload is byte for byte what the publisher
-/// wrote for that packet, and every stretch of a layer begins with the
-/// first packet of a key frame.
-fn fb_track_seen(got: &[(&RtpGot, Instant)], layers: &[FbLayer; 2]) -> TrackSeen {
+/// wrote for that packet, and, with `key_frame_starts`, every stretch of a
+/// layer begins with the first packet of a key frame. That holds for a
+/// simulcast source, whose tracks the SFU starts and switches at a whole
+/// key frame; a plain sender is forwarded from whichever packet arrives
+/// first, like any single-encoding track, and its first frames are simply
+/// not shown until its key frame arrives.
+fn fb_track_seen(
+    got: &[(&RtpGot, Instant)],
+    layers: &[FbLayer; 2],
+    key_frame_starts: bool,
+) -> TrackSeen {
     use std::collections::BTreeMap;
     let of = |layer: u8| &layers[usize::from(layer == b'f')];
     let mut arrived: BTreeMap<(u8, u64, u64), Instant> = BTreeMap::new();
@@ -6312,7 +6888,7 @@ fn fb_track_seen(got: &[(&RtpGot, Instant)], layers: &[FbLayer; 2]) -> TrackSeen
         if stretches.last().map(|s| s.0) != Some(layer) {
             let info = of(layer).frames[usize::try_from(frame).expect("fits")];
             assert!(
-                info.key && i == 0,
+                !key_frame_starts || (info.key && i == 0),
                 "a stretch of layer {} begins with the first packet of a key frame \
                  (frame {frame}, packet {i}, key {})",
                 char::from(layer),
@@ -6397,6 +6973,10 @@ fn fb_longest_gap(shown: &[Instant], alive: bool, end: Instant) -> (f64, Option<
     longest
 }
 
+/// One packet a subscriber was handed: its track, when, and the playout
+/// delay it carried as (minimum, maximum) in milliseconds.
+type PlayoutSeen = (Option<Mid>, Instant, Option<(u64, u64)>);
+
 /// Everything one simulcast run observed.
 struct SimulcastRun {
     /// The publisher's SFU-side peer id: the MSID stream id of the main
@@ -6409,7 +6989,16 @@ struct SimulcastRun {
     light_mid: Option<Mid>,
     main: TrackSeen,
     light: TrackSeen,
-    /// Packets that arrived on neither of the two tracks.
+    /// Every other video track of the publisher the SFU offered the
+    /// subscriber: its mid, its MSID stream id and what arrived on it.
+    others: Vec<(Mid, String, TrackSeen)>,
+    /// The MSID stream ids of the audio media lines the SFU offered.
+    audio_streams: Vec<String>,
+    /// The publisher's own mids of its light (`q`) and main (`f`) sender;
+    /// one mid twice for a simulcast publisher.
+    pub_light_mid: Mid,
+    pub_main_mid: Mid,
+    /// Packets that arrived on none of those tracks.
     stray: usize,
     /// When the publisher wrote its first frame, when the subscriber
     /// joined, and when the run stopped.
@@ -6418,13 +7007,60 @@ struct SimulcastRun {
     ended: Instant,
     /// The loss window.
     window: (Instant, Instant),
-    /// Keyframe requests the publisher received: the layer named and when.
-    keyframe_requests: Vec<(Option<Rid>, Instant)>,
+    /// Keyframe requests the publisher received: the publisher's media
+    /// line and the layer named, and when.
+    keyframe_requests: Vec<(Mid, Option<Rid>, Instant)>,
     /// Media datagrams the publisher lost inside the window, of how many
     /// it sent there.
     lost: usize,
     sent_in_window: usize,
     frame_every: Duration,
+    /// Datagrams that reached the subscriber on the light companion's
+    /// main stream and on its retransmission stream.
+    light_in: (usize, usize),
+    /// The same for the main track.
+    main_in: (usize, usize),
+    /// Every packet the subscriber was handed: its track, when, and the
+    /// playout delay it carried as (minimum, maximum) in milliseconds.
+    playout: Vec<PlayoutSeen>,
+    /// The one-byte header extension ids seen on the media datagrams that
+    /// reached the subscriber.
+    in_ext_ids: Vec<u8>,
+    /// The NACKs the publisher received: when, media SSRC, sequence
+    /// number.
+    nacks: Vec<(Instant, u32, u16)>,
+    /// The SSRC the publisher sends its light picture on.
+    pub_light_ssrc: u32,
+    /// When the publisher wrote each frame of its light (`q`) and of its
+    /// main (`f`) picture.
+    written_q: Vec<Instant>,
+    written_f: Vec<Instant>,
+    /// The key frames the publisher wrote on its light and on its main
+    /// picture: (frame number, packets).
+    keys_q: Vec<(u64, u64)>,
+    keys_f: Vec<(u64, u64)>,
+    /// When each retransmission the publisher sent reached the wire.
+    rtx_out: Vec<Instant>,
+}
+
+/// The MSID stream ids of the audio media lines of an SDP the SFU sent.
+fn audio_msids(sdp: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_audio = false;
+    for line in sdp.lines() {
+        if line.starts_with("m=") {
+            in_audio = line.starts_with("m=audio");
+        }
+        if in_audio {
+            if let Some(stream) = line
+                .strip_prefix("a=msid:")
+                .and_then(|rest| rest.split_whitespace().next())
+            {
+                out.push(stream.to_owned());
+            }
+        }
+    }
+    out
 }
 
 /// The video media lines of an SDP the SFU sent, as (mid, MSID stream id).
@@ -6443,15 +7079,17 @@ fn video_msids(sdp: &str) -> Vec<(Mid, String)> {
         .collect()
 }
 
-/// Publisher A streams two simulcast layers (`q` at 50 packets a second,
-/// `f` at 250) to subscriber B through the production media task. With a
+/// Publisher A streams two pictures (`q` at 50 packets a second, `f` at
+/// 250) to subscriber B through the production media task: as two
+/// simulcast layers of one media line, or as two plain senders on two media
+/// lines ([`Senders`]). With a
 /// dip, for one second each media datagram A sends, on either layer and on
 /// the retransmission streams, is lost with probability `p`. A answers a
 /// keyframe request for a layer with a key frame on that layer, as an
 /// encoder does.
 ///
-/// B is offered two downstream tracks for A's one: the main track and the
-/// light companion. What arrived on each is worked out separately
+/// B is offered two downstream tracks for A's camera: the main track and
+/// the light companion. What arrived on each is worked out separately
 /// ([`fb_track_seen`]): B is a decoder in outline, one per track.
 #[allow(
     clippy::too_many_lines,
@@ -6474,6 +7112,8 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
             diagnostics: None,
             video_fec: false,
             uplink_fallback: case.fallback,
+            protection: case.protection,
+            downlink_control: false,
         },
     )
     .await
@@ -6489,11 +7129,20 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
             ),
     )
     .await;
-    let mut b = SyntheticClient::build(Rtc::builder().set_rtp_mode(true).set_extension(
+    let mut b_config = Rtc::builder().set_rtp_mode(true).set_extension(
         GENERIC_FRAME_DESCRIPTOR_ID,
         generic_frame_descriptor_extension(),
-    ))
-    .await;
+    );
+    if case.playout_ext {
+        b_config = b_config.set_extension(
+            lakko_svc_sfu::media::PLAYOUT_DELAY_EXTENSION_ID,
+            str0m::rtp::Extension::PlayoutDelay,
+        );
+    }
+    let mut b = SyntheticClient::build(b_config).await;
+    // Incoming streams of B put on the case's NACK schedule so far.
+    let mut b_scheduled: Vec<u32> = Vec::new();
+    let mut b_in_read = 0usize;
 
     let mut joined: Option<Instant> = None;
     if case.late_join.is_none() {
@@ -6506,24 +7155,52 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
             .expect("B applies the SFU's answer");
         joined = Some(Instant::now());
     }
-    // The light layer is listed first, as the web client lists it.
     let a_id = PeerId::fresh();
-    let (a_offer, a_pending, mid) = a.create_video_simulcast_publisher_offer(&["q", "f"]);
-    let a_answer = media_task
-        .accept_offer(a_id.clone(), call.to_owned(), a_offer)
-        .await
-        .expect("SFU accepts A's simulcast offer");
-    a.accept_answer(a_pending, &a_answer)
-        .expect("A applies the SFU's answer");
+    // The publisher's mids of its light and main picture, once offered.
+    let mut pub_mids: Option<(Mid, Mid)> = None;
+    {
+        let (a_offer, a_pending, light_mids) = match case.senders {
+            Senders::Simulcast => {
+                // The light layer is listed first, as the web client lists it.
+                let (offer, pending, mid) = a.create_video_simulcast_publisher_offer(&["q", "f"]);
+                pub_mids = Some((mid, mid));
+                (offer, pending, Vec::new())
+            },
+            Senders::TwoDeclared => {
+                let (offer, pending, _, main, light) = a.create_two_sender_publisher_offer(false);
+                pub_mids = Some((light, main));
+                (offer, pending, vec![light.to_string()])
+            },
+            Senders::TwoMisdeclared => {
+                let (offer, pending, audio, main, light) =
+                    a.create_two_sender_publisher_offer(true);
+                pub_mids = Some((light, main));
+                let audio = audio.expect("an audio sender");
+                (offer, pending, vec![audio.to_string(), "zz".to_owned()])
+            },
+            Senders::TwoDeclaredMidCall => {
+                let (offer, pending, _) = a.create_audio_publisher_offer();
+                (offer, pending, Vec::new())
+            },
+        };
+        let a_answer = media_task
+            .accept_offer_with_light(a_id.clone(), call.to_owned(), a_offer, light_mids)
+            .await
+            .expect("SFU accepts A's offer");
+        a.accept_answer(a_pending, &a_answer)
+            .expect("A applies the SFU's answer");
+    }
 
-    let rid_q = Rid::from("q");
-    let rid_f = Rid::from("f");
+    let simulcast = case.senders == Senders::Simulcast;
+    let rid_q = simulcast.then(|| Rid::from("q"));
+    let rid_f = simulcast.then(|| Rid::from("f"));
     let frame_every = Duration::from_micros(1_000_000 / DIP_FPS);
     let total_frames = case.stream.as_micros() as u64 / frame_every.as_micros() as u64;
 
     let mut layers = [
         FbLayer {
             rid: rid_q,
+            mid: pub_mids.map(|m| m.0),
             tag: b'q',
             packets: FB_Q_PACKETS,
             payload: FB_Q_PAYLOAD,
@@ -6533,6 +7210,7 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
         },
         FbLayer {
             rid: rid_f,
+            mid: pub_mids.map(|m| m.1),
             tag: b'f',
             packets: FB_F_PACKETS,
             payload: FB_F_PAYLOAD,
@@ -6572,12 +7250,32 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
         // frame.
         while plis_handled < a.keyframe_request_rids.len() {
             let rid = a.keyframe_request_rids[plis_handled];
+            let on = a.keyframe_request_mids[plis_handled];
             plis_handled += 1;
             for layer in &mut layers {
-                if rid.is_none() || rid == Some(layer.rid) {
+                if layer.mid == Some(on) && (rid.is_none() || rid == layer.rid) {
                     layer.want_key = true;
                 }
             }
+        }
+        // The camera turned on mid-call: once connected, a second offer
+        // adds the two senders and declares the light one.
+        if pub_mids.is_none() && a.is_connected() {
+            let (offer, pending, _, main, light) = a.create_two_sender_publisher_offer(false);
+            let answer = media_task
+                .accept_offer_with_light(
+                    a_id.clone(),
+                    call.to_owned(),
+                    offer,
+                    vec![light.to_string()],
+                )
+                .await
+                .expect("SFU accepts A's camera offer");
+            a.accept_answer(pending, &answer)
+                .expect("A applies the SFU's answer");
+            pub_mids = Some((light, main));
+            layers[0].mid = Some(light);
+            layers[1].mid = Some(main);
         }
         // A late subscriber joins once the publisher has streamed a while.
         if joined.is_none() {
@@ -6607,16 +7305,25 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
                 }
             }
         }
-        let b_ready = case.late_join.is_some() || (b.is_connected() && !offers.is_empty());
-        if t0.is_none() && a.is_connected() && b_ready {
+        // B has answered an offer that carries video: its tracks are open.
+        let b_has_video = offers.iter().any(|sdp| {
+            video_msids(sdp)
+                .iter()
+                .any(|(_, stream)| stream.starts_with(&a_id.to_string()))
+        });
+        let b_ready = case.late_join.is_some() || (b.is_connected() && b_has_video);
+        if t0.is_none() && a.is_connected() && b_ready && pub_mids.is_some() {
             let mut api = a.rtc.direct_api();
             let mut ready = true;
             for layer in &layers {
-                match api.stream_tx_by_mid(mid, Some(layer.rid)) {
+                let stream = layer
+                    .mid
+                    .and_then(|mid| api.stream_tx_by_mid(mid, layer.rid));
+                match stream {
                     Some(stream) if stream.rtx().is_some() => {
                         // No cap on retransmitted bytes, as a browser has
                         // none.
-                        stream.set_rtx_cache(4000, Duration::from_secs(3), None);
+                        stream.set_rtx_cache(4000, Duration::from_secs(3), case.publisher_rtx_cap);
                         main_ssrcs.push(*stream.ssrc());
                     },
                     _ => ready = false,
@@ -6627,12 +7334,17 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
                 let from = start + DIP_WINDOW_OPENS;
                 let until = from + DIP_WINDOW;
                 let (p, seed) = case.dip.unwrap_or((0.0, 0));
-                a.dip = Some(DipLoss {
+                let dip = DipLoss {
                     from,
                     until,
                     p,
                     rng: seed,
-                });
+                };
+                if case.downlink_dip {
+                    b.dip_in = Some(dip);
+                } else {
+                    a.dip = Some(dip);
+                }
                 t0 = Some(start);
                 window = Some((from, until));
             } else {
@@ -6666,7 +7378,7 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
                         layer.next_seq += 1;
                         let mut api = a.rtc.direct_api();
                         let stream = api
-                            .stream_tx_by_mid(mid, Some(layer.rid))
+                            .stream_tx_by_mid(layer.mid.expect("offered"), layer.rid)
                             .expect("send stream");
                         stream
                             .write_rtp(
@@ -6720,6 +7432,21 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
         }
         let _ = a.drain().await;
         let _ = b.drain().await;
+        if let Some(retry) = case.subscriber_nack {
+            // Every stream B receives is asked on the case's schedule, from
+            // its first packet on.
+            let fresh: Vec<u32> = b.rtp_in[b_in_read..].iter().map(|p| p.ssrc).collect();
+            b_in_read = b.rtp_in.len();
+            for ssrc in fresh {
+                if b_scheduled.contains(&ssrc) {
+                    continue;
+                }
+                if let Some(stream) = b.rtc.direct_api().stream_rx(&ssrc.into()) {
+                    stream.set_nack_retry_interval(Some(retry));
+                    b_scheduled.push(ssrc);
+                }
+            }
+        }
         a.feed_timeout();
         b.feed_timeout();
     };
@@ -6731,13 +7458,20 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
     let light_stream = format!("{a_id}{LIGHT_STREAM_SUFFIX}");
     let mut main_mid = None;
     let mut light_mid = None;
+    let mut video_tracks: Vec<(Mid, String)> = Vec::new();
     for (mid, stream) in offers.iter().flat_map(|sdp| video_msids(sdp)) {
         if stream == a_id.to_string() {
             main_mid = Some(mid);
         } else if stream == light_stream {
             light_mid = Some(mid);
         }
+        // The publisher's tracks only: B's own media line is in the SFU's
+        // offers as well.
+        if stream.starts_with(&a_id.to_string()) && !video_tracks.iter().any(|(m, _)| *m == mid) {
+            video_tracks.push((mid, stream));
+        }
     }
+    let audio_streams: Vec<String> = offers.iter().flat_map(|sdp| audio_msids(sdp)).collect();
 
     assert_eq!(b.rtp_got.len(), b.rtp_got_at.len());
     assert_eq!(b.rtp_got.len(), b.rtp_got_track.len());
@@ -6750,18 +7484,67 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
             .map(|((got, at), _)| (got, *at))
             .collect()
     };
-    let main = fb_track_seen(&on(main_mid), &layers);
-    let light = fb_track_seen(&on(light_mid), &layers);
-    let stray = b.rtp_got.len() - main.packets - light.packets;
+    let main = fb_track_seen(&on(main_mid), &layers, simulcast);
+    let light = fb_track_seen(&on(light_mid), &layers, simulcast);
+    let others: Vec<(Mid, String, TrackSeen)> = video_tracks
+        .into_iter()
+        .filter(|(mid, _)| Some(*mid) != main_mid && Some(*mid) != light_mid)
+        .map(|(mid, stream)| {
+            let seen = fb_track_seen(&on(Some(mid)), &layers, simulcast);
+            (mid, stream, seen)
+        })
+        .collect();
+    let stray = b.rtp_got.len()
+        - main.packets
+        - light.packets
+        - others
+            .iter()
+            .map(|(_, _, seen)| seen.packets)
+            .sum::<usize>();
+    let (pub_light_mid, pub_main_mid) = pub_mids.expect("the publisher offered its video");
 
     let in_win = |at: Instant| at >= from && at < until;
-    let lost = a.rtp_dropped.iter().filter(|p| in_win(p.at)).count();
-    let sent_in_window = lost + a.rtp_out.iter().filter(|p| in_win(p.at)).count();
+    let (lost, sent_in_window) = if case.downlink_dip {
+        let lost = b.dip_in_lost.len();
+        (
+            lost,
+            lost + b.rtp_in.iter().filter(|p| in_win(p.at)).count(),
+        )
+    } else {
+        let lost = a.rtp_dropped.iter().filter(|p| in_win(p.at)).count();
+        (
+            lost,
+            lost + a.rtp_out.iter().filter(|p| in_win(p.at)).count(),
+        )
+    };
     assert!(
-        a.rtp_dropped.iter().all(|p| in_win(p.at)),
+        a.rtp_dropped.iter().all(|p| in_win(p.at)) && b.dip_in_lost.iter().all(|p| in_win(p.at)),
         "nothing is lost outside the window"
     );
     assert_eq!(main_ssrcs.len(), 2);
+    // Datagrams that reached B on the light companion's main stream and on
+    // its retransmission stream.
+    let mut datagrams_in = |track: Option<Mid>| -> (usize, usize) {
+        track
+            .and_then(|mid| {
+                let mut api = b.rtc.direct_api();
+                let stream = api.stream_rx_by_mid(mid, None)?;
+                Some((*stream.ssrc(), stream.rtx().map(|rtx| *rtx)))
+            })
+            .map_or((0, 0), |(ssrc, rtx)| {
+                let count = |of: u32| b.rtp_in.iter().filter(|p| p.ssrc == of).count();
+                (count(ssrc), rtx.map_or(0, count))
+            })
+    };
+    let light_in = datagrams_in(light_mid);
+    let main_in = datagrams_in(main_mid);
+    let playout: Vec<PlayoutSeen> = b
+        .rtp_got_track
+        .iter()
+        .zip(&b.rtp_got_at)
+        .zip(&b.rtp_got_playout)
+        .map(|((track, at), delay)| (*track, *at, *delay))
+        .collect();
 
     SimulcastRun {
         publisher: a_id,
@@ -6770,21 +7553,54 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
         light_mid,
         main,
         light,
+        others,
+        audio_streams,
+        pub_light_mid,
+        pub_main_mid,
         stray,
         started: t0.expect("the publisher streamed"),
         joined: joined.expect("the subscriber joined"),
         ended,
         window: (from, until),
         keyframe_requests: a
-            .keyframe_request_rids
+            .keyframe_request_mids
             .iter()
             .copied()
+            .zip(a.keyframe_request_rids.iter().copied())
             .zip(a.keyframe_request_at.iter().copied())
+            .map(|((mid, rid), at)| (mid, rid, at))
             .collect(),
         lost,
         sent_in_window,
         frame_every,
+        light_in,
+        main_in,
+        playout,
+        in_ext_ids: b.in_ext_ids.iter().copied().collect(),
+        nacks: a.nacks_seen.clone(),
+        pub_light_ssrc: main_ssrcs[0],
+        written_q: layers[0].frames.iter().map(|f| f.at).collect(),
+        written_f: layers[1].frames.iter().map(|f| f.at).collect(),
+        keys_q: fb_key_frames(&layers[0]),
+        keys_f: fb_key_frames(&layers[1]),
+        rtx_out: a
+            .rtp_out
+            .iter()
+            .filter(|p| !main_ssrcs.contains(&p.ssrc))
+            .map(|p| p.at)
+            .collect(),
     }
+}
+
+/// The key frames of one layer: (frame number, packets).
+fn fb_key_frames(layer: &FbLayer) -> Vec<(u64, u64)> {
+    layer
+        .frames
+        .iter()
+        .enumerate()
+        .filter(|(_, frame)| frame.key)
+        .map(|(i, frame)| (i as u64, frame.n))
+        .collect()
 }
 
 /// One uplink-fallback run: [`run_simulcast`] with a dip, reduced to what
@@ -6795,14 +7611,20 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
 /// guarantees it), and frames of the layer left behind that were still
 /// incomplete are never shown. The stall is the longest gap between two
 /// consecutive moments a frame could be shown.
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 async fn run_uplink_fallback_dip(fallback: bool, p: f64, seed: u64) -> FallbackRun {
     let run = Box::pin(run_simulcast(SimulcastCase {
+        senders: Senders::Simulcast,
         fallback,
         dip: Some((p, seed)),
         late_join: None,
         stream: FB_STREAM,
         settle: FB_SETTLE,
+        protection: LossProtection::default(),
+        downlink_dip: false,
+        playout_ext: false,
+        subscriber_nack: None,
+        publisher_rtx_cap: None,
     }))
     .await;
     let (from, _) = run.window;
@@ -6836,7 +7658,7 @@ async fn run_uplink_fallback_dip(fallback: bool, p: f64, seed: u64) -> FallbackR
         let plis: Vec<String> = run
             .keyframe_requests
             .iter()
-            .map(|(rid, at)| format!("{rid:?}@{:.0}", signed_ms(*at)))
+            .map(|(_, rid, at)| format!("{rid:?}@{:.0}", signed_ms(*at)))
             .collect();
         #[allow(clippy::print_stderr)]
         {
@@ -6875,7 +7697,7 @@ async fn run_uplink_fallback_dip(fallback: bool, p: f64, seed: u64) -> FallbackR
     let in_or_after = |rid: Rid| {
         run.keyframe_requests
             .iter()
-            .filter(move |(r, at)| *r == Some(rid) && *at >= from)
+            .filter(move |(_, r, at)| *r == Some(rid) && *at >= from)
     };
     let (rid_q, rid_f) = (Rid::from("q"), Rid::from("f"));
 
@@ -6890,7 +7712,7 @@ async fn run_uplink_fallback_dip(fallback: bool, p: f64, seed: u64) -> FallbackR
         frozen,
         late,
         shown: shown.len(),
-        first_q_request: in_or_after(rid_q).next().map(|(_, at)| signed_ms(*at)),
+        first_q_request: in_or_after(rid_q).next().map(|(_, _, at)| signed_ms(*at)),
         plis_q: in_or_after(rid_q).count(),
         plis_f: in_or_after(rid_f).count(),
         lost: run.lost,
@@ -7050,11 +7872,17 @@ fn assert_two_tracks(run: &SimulcastRun) {
 #[tokio::test]
 async fn a_simulcast_publisher_reaches_a_subscriber_as_two_tracks() {
     let run = Box::pin(run_simulcast(SimulcastCase {
+        senders: Senders::Simulcast,
         fallback: false,
         dip: None,
         late_join: None,
         stream: Duration::from_secs(3),
         settle: Duration::from_millis(700),
+        protection: LossProtection::default(),
+        downlink_dip: false,
+        playout_ext: false,
+        subscriber_nack: None,
+        publisher_rtx_cap: None,
     }))
     .await;
     assert_two_tracks(&run);
@@ -7086,11 +7914,17 @@ async fn a_simulcast_publisher_reaches_a_subscriber_as_two_tracks() {
 async fn a_late_joiner_gets_both_tracks_each_from_a_key_frame() {
     let join_after = Duration::from_millis(1500);
     let run = Box::pin(run_simulcast(SimulcastCase {
+        senders: Senders::Simulcast,
         fallback: false,
         dip: None,
         late_join: Some(join_after),
         stream: Duration::from_millis(4500),
         settle: Duration::from_millis(700),
+        protection: LossProtection::default(),
+        downlink_dip: false,
+        playout_ext: false,
+        subscriber_nack: None,
+        publisher_rtx_cap: None,
     }))
     .await;
     assert_two_tracks(&run);
@@ -7101,7 +7935,7 @@ async fn a_late_joiner_gets_both_tracks_each_from_a_key_frame() {
         let asked = run
             .keyframe_requests
             .iter()
-            .any(|(r, at)| *r == Some(Rid::from(rid)) && *at >= run.joined);
+            .any(|(_, r, at)| *r == Some(Rid::from(rid)) && *at >= run.joined);
         assert!(asked, "a key frame on {rid} was asked for after the join");
         let (_, first_at, _) = seen.stretches[0];
         let (first_shown, written) = seen.shown[0];
@@ -7113,35 +7947,316 @@ async fn a_late_joiner_gets_both_tracks_each_from_a_key_frame() {
     }
 }
 
+// ============================================================
+// Two-track delivery from two senders: the publisher sends its camera
+// on two ordinary media lines and declares the light one in its offer.
+// ============================================================
+
+/// The `a=mid` and `a=msid` lines of every offer the SFU sent the
+/// subscriber, for the test log.
+#[allow(clippy::print_stderr)]
+fn print_offer_msids(what: &str, run: &SimulcastRun) {
+    for (i, offer) in run.offers.iter().enumerate() {
+        let lines: Vec<&str> = offer
+            .lines()
+            .filter(|l| l.starts_with("a=msid:") || l.starts_with("a=mid:") || l.starts_with("m="))
+            .collect();
+        eprintln!("{what}: the SFU's offer {i} to the subscriber: {lines:?}");
+    }
+}
+
+/// A publisher with two plain video senders, the second declared light in
+/// its offer, and a subscriber: the subscriber is offered two video tracks
+/// whose MSID stream ids are the publisher's peer id and that id followed
+/// by `~light`; the packets of the main sender arrive on the first and the
+/// packets of the light sender on the second, byte for byte, and nothing
+/// arrives anywhere else.
+#[tokio::test]
+async fn two_senders_with_the_light_one_declared_reach_a_subscriber_as_two_tracks() {
+    let run = Box::pin(run_simulcast(SimulcastCase {
+        senders: Senders::TwoDeclared,
+        fallback: false,
+        dip: None,
+        late_join: None,
+        stream: Duration::from_secs(3),
+        settle: Duration::from_millis(700),
+        protection: LossProtection::default(),
+        downlink_dip: false,
+        playout_ext: false,
+        subscriber_nack: None,
+        publisher_rtx_cap: None,
+    }))
+    .await;
+    print_offer_msids("two senders", &run);
+    assert_two_tracks(&run);
+    assert!(run.others.is_empty(), "no third video track");
+    assert_ne!(run.pub_main_mid, run.pub_light_mid);
+    // The two senders were offered together and are opened together.
+    assert_eq!(run.offers.len(), 1, "one renegotiation for the two tracks");
+    let frames = |seen: &TrackSeen| seen.shown.len();
+    assert!(
+        frames(&run.main) >= 70 && frames(&run.light) >= 70,
+        "about 75 frames a sender in three seconds: main {}, light {}",
+        frames(&run.main),
+        frames(&run.light)
+    );
+    // No layer is involved: every keyframe request names a media line and
+    // no rid.
+    assert!(run
+        .keyframe_requests
+        .iter()
+        .all(|(_, rid, _)| rid.is_none()));
+}
+
+/// A subscriber that joins a two-sender publisher already streaming gets
+/// both tracks, and the SFU asks the publisher for a key frame on each of
+/// its two media lines once the subscriber can receive; each track can be
+/// shown from a key frame written after the join.
+///
+/// A plain sender is forwarded from the first packet that arrives after
+/// the track opens, as any single-encoding track is: what precedes its key
+/// frame reaches the subscriber and cannot be shown.
+#[tokio::test]
+async fn a_late_joiner_of_two_senders_gets_both_tracks_and_a_key_frame_on_each() {
+    let join_after = Duration::from_millis(1500);
+    let run = Box::pin(run_simulcast(SimulcastCase {
+        senders: Senders::TwoDeclared,
+        fallback: false,
+        dip: None,
+        late_join: Some(join_after),
+        stream: Duration::from_millis(4500),
+        settle: Duration::from_millis(700),
+        protection: LossProtection::default(),
+        downlink_dip: false,
+        playout_ext: false,
+        subscriber_nack: None,
+        publisher_rtx_cap: None,
+    }))
+    .await;
+    print_offer_msids("two senders, late joiner", &run);
+    assert_two_tracks(&run);
+    assert!(run.others.is_empty());
+    assert!(run.joined >= run.started + join_after);
+    for (what, pub_mid, seen) in [
+        ("light", run.pub_light_mid, &run.light),
+        ("main", run.pub_main_mid, &run.main),
+    ] {
+        let asked = run
+            .keyframe_requests
+            .iter()
+            .any(|(mid, rid, at)| *mid == pub_mid && rid.is_none() && *at >= run.joined);
+        assert!(
+            asked,
+            "a key frame on the {what} sender was asked for after the join"
+        );
+        let (first_shown, written) = seen.shown[0];
+        assert!(
+            written >= run.joined && first_shown >= run.joined,
+            "the {what} track is shown from a key frame written after the join"
+        );
+    }
+}
+
+/// A declaration that names an audio media line, and one that names a mid
+/// the offer does not have, are ignored: the audio track is an ordinary
+/// audio track, and the publisher's two video senders, neither of them
+/// declared, are two ordinary main tracks, as two video senders of one
+/// peer are without any declaration: both under the publisher's peer id
+/// as MSID stream id, told apart by track id alone, and no `~light`
+/// anywhere.
+#[tokio::test]
+async fn a_declaration_naming_an_audio_or_unknown_mid_is_ignored() {
+    let run = Box::pin(run_simulcast(SimulcastCase {
+        senders: Senders::TwoMisdeclared,
+        fallback: false,
+        dip: None,
+        late_join: None,
+        stream: Duration::from_secs(2),
+        settle: Duration::from_millis(700),
+        protection: LossProtection::default(),
+        downlink_dip: false,
+        playout_ext: false,
+        subscriber_nack: None,
+        publisher_rtx_cap: None,
+    }))
+    .await;
+    print_offer_msids("misdeclared", &run);
+    let publisher = run.publisher.to_string();
+    assert!(
+        run.offers.iter().all(|sdp| !sdp.contains("~light")),
+        "no light companion was offered"
+    );
+    assert_eq!(run.light_mid, None);
+    assert!(run.light.packets == 0);
+    // Two video tracks, both under the publisher's own stream id.
+    assert!(run.main_mid.is_some());
+    assert_eq!(run.others.len(), 1, "a second main video track");
+    let (other_mid, other_stream, other) = &run.others[0];
+    assert_eq!(*other_stream, publisher);
+    assert_ne!(Some(*other_mid), run.main_mid);
+    // Each carries one of the two senders, whole and verbatim.
+    let layers_of = |seen: &TrackSeen| -> Vec<char> {
+        seen.stretches.iter().map(|s| char::from(s.0)).collect()
+    };
+    let mut carried = [layers_of(&run.main), layers_of(other)];
+    carried.sort();
+    assert_eq!(carried, [vec!['f'], vec!['q']]);
+    assert!(run.main.alive && other.alive);
+    assert_eq!(run.stray, 0);
+    // The audio line that was named is an ordinary audio track.
+    assert_eq!(run.audio_streams, vec![publisher]);
+}
+
+/// The camera turned on mid-call: a publisher that joined with audio alone
+/// adds its two video senders in a later offer, the second declared light.
+/// The subscriber gets the two tracks exactly as when they came with the
+/// first offer.
+#[tokio::test]
+async fn two_senders_added_in_a_later_offer_reach_a_subscriber_as_two_tracks() {
+    let run = Box::pin(run_simulcast(SimulcastCase {
+        senders: Senders::TwoDeclaredMidCall,
+        fallback: false,
+        dip: None,
+        late_join: None,
+        stream: Duration::from_secs(3),
+        settle: Duration::from_millis(700),
+        protection: LossProtection::default(),
+        downlink_dip: false,
+        playout_ext: false,
+        subscriber_nack: None,
+        publisher_rtx_cap: None,
+    }))
+    .await;
+    print_offer_msids("camera on mid-call", &run);
+    assert_two_tracks(&run);
+    assert!(run.others.is_empty());
+    // The audio track was offered first, the two video tracks after it.
+    assert!(run.offers.len() >= 2, "{} offers", run.offers.len());
+    let publisher = run.publisher.to_string();
+    assert!(
+        video_msids(&run.offers[0])
+            .iter()
+            .all(|(_, stream)| !stream.starts_with(&publisher)),
+        "the first offer carries none of the publisher's video"
+    );
+    assert_eq!(run.audio_streams.first(), Some(&publisher));
+    let frames = |seen: &TrackSeen| seen.shown.len();
+    assert!(
+        frames(&run.main) >= 70 && frames(&run.light) >= 70,
+        "main {}, light {}",
+        frames(&run.main),
+        frames(&run.light)
+    );
+}
+
+/// The usual time from a frame being written to it being decodable on a
+/// track, in milliseconds: the median over the frames written between one
+/// second into the stream and the opening of the loss window. `0.0` when
+/// none was shown in that time.
+fn dip_baseline(seen: &TrackSeen, started: Instant, from: Instant) -> f64 {
+    let mut usual: Vec<f64> = seen
+        .shown
+        .iter()
+        .filter(|(_, written)| *written >= started + Duration::from_secs(1) && *written < from)
+        .map(|(at, written)| dip_ms(at.saturating_duration_since(*written)))
+        .collect();
+    if usual.is_empty() {
+        return 0.0;
+    }
+    dip_quartet(&mut usual)[1]
+}
+
+/// The worst frame lateness on `tracks`, in milliseconds, and whether every
+/// moment was reached before the run ended.
+///
+/// `moments` are the instants the publisher wrote a frame at. A viewer has
+/// the picture of a moment once any frame written at or after it is
+/// decodable on one of `tracks` (a frame that never completes is passed
+/// over by the next key frame). On time means the track's usual transit
+/// after the moment ([`dip_baseline`]); the lateness of a moment is how
+/// much later than that it was reached, never below zero. A moment that
+/// was not reached by the end of the run counts up to the end.
+fn dip_lateness(
+    moments: &[Instant],
+    tracks: &[(&TrackSeen, f64)],
+    from: Instant,
+    ended: Instant,
+) -> (f64, bool) {
+    let mut worst = 0.0_f64;
+    let mut all_reached = true;
+    for moment in moments.iter().filter(|m| **m >= from) {
+        let mut best: Option<f64> = None;
+        for (seen, baseline) in tracks {
+            for (at, written) in &seen.shown {
+                if written < moment {
+                    continue;
+                }
+                let late = dip_ms(at.saturating_duration_since(*moment)) - baseline;
+                best = Some(best.map_or(late, |b: f64| b.min(late)));
+            }
+        }
+        let late = best.unwrap_or_else(|| {
+            all_reached = false;
+            dip_ms(ended.saturating_duration_since(*moment))
+        });
+        worst = worst.max(late.max(0.0));
+    }
+    (worst, all_reached)
+}
+
+/// The playout delay a viewer is assumed to hold in the third figure of
+/// `measure_two_track_dip`, in milliseconds: what the SFU asks for after a
+/// burst ([`lakko_svc_sfu::playout_delay::BURST_DELAY_MS`]).
+const DIP_VIEWER_DELAY_MS: f64 = 300.0;
+
 /// Measure what a subscriber that shows whichever of its two tracks is
-/// alive would see when a simulcast publisher's uplink loses most of its
-/// datagrams for one second. Prints a table; asserts nothing about the
-/// numbers.
+/// alive would see when most datagrams are lost for one second, on the
+/// publisher's uplink or on the subscriber's own downlink. Prints a table;
+/// asserts nothing about the numbers.
 ///
-/// The dip is the one of `measure_uplink_dip` and of
-/// `the_uplink_fallback_carries_a_subscriber_through_a_dip`: [`DipLoss`] on
-/// every media datagram the publisher sends, both layers and their
-/// retransmission streams, for [`DIP_WINDOW`]. The SFU runs as it does by
-/// default (no uplink fallback). Per seed:
+/// The dip is [`DipLoss`] for [`DIP_WINDOW`]: on every media datagram the
+/// publisher sends (both pictures and their retransmission streams), or,
+/// with `LAKKO_DIP_DOWNLINK` set, on every media datagram that reaches the
+/// subscriber. The SFU runs without the uplink fallback. Per seed and per
+/// track (main: `f`, 250 packets a second; light: the companion, `q`, 50
+/// packets a second; either: a client that shows whichever is alive):
 ///
-/// - **(a) main**: the longest interval in which the main track (`f`, 250
-///   packets a second) completes no decodable frame;
-/// - **light**: the same for the light companion (`q`, 50 packets a second);
-/// - **(b) either**: the longest interval in which neither track completes
-///   a decodable frame, the stall of a client that shows whichever track
-///   is alive.
+/// - **gap**: the longest interval in which no decodable frame completes;
+/// - **late**: the worst frame lateness ([`dip_lateness`]): how much later
+///   than its usual transit the picture of a moment became decodable;
+/// - **stop**: what a viewer playing [`DIP_VIEWER_DELAY_MS`] late would
+///   see stand still: the lateness beyond that delay.
 ///
 /// A decodable frame is [`fb_track_seen`]'s: complete, and every frame
-/// before it on its layer back to a key frame complete, which is the chain
-/// of `measure_uplink_dip`. A `+` marks a track whose chain was broken at
-/// the end of the run; the time to the end of the run is then counted.
+/// before it on its layer back to a key frame complete. A `+` marks a track
+/// whose chain was broken at the end of the run (gap) or a moment never
+/// reached (late); the time to the end of the run is then counted.
 ///
-/// `LAKKO_DIP_SEED` (a number, default 1) is the first seed,
-/// `LAKKO_DIP_RUNS` (default 10) how many consecutive seeds are run, and
-/// `LAKKO_DIP_P` (default 0.70) the loss probability.
+/// The publisher sends the two pictures as two plain senders, the light one
+/// declared in its offer, which is what the Lakko clients do; with
+/// `LAKKO_DIP_SIMULCAST` set it sends them as two simulcast layers of one
+/// media line instead.
+///
+/// - `LAKKO_DIP_SEED` (default 1): the first seed; `LAKKO_DIP_RUNS`
+///   (default 10): how many consecutive seeds; `LAKKO_DIP_P` (default
+///   0.70): the loss probability. The burst measured on a live call
+///   (2026-10-09) is `LAKKO_DIP_P=0.80`: about eight datagrams in ten
+///   lost for one second ([`measure_burst_end_key_frame`] uses it).
+/// - `LAKKO_DIP_BURST_KEYFRAME=off`: the SFU does not ask for a key frame
+///   at the end of an unrepaired burst (the behaviour before 2026-10-09;
+///   the tables in the README were taken that way).
+/// - `LAKKO_DIP_PROTECTION=off`: the SFU without ADR-0070 step 3 (the light
+///   track asked again every 60 ms like every stream, each light packet
+///   sent once) and step 4. Anything else, or unset: everything on.
+/// - `LAKKO_DIP_SUB_NACK_MS`: how often the subscriber asks again for a
+///   missing packet (default: the vendored `str0m`'s 60 ms).
 #[tokio::test]
-#[ignore = "a measurement, about a minute and a half: run by name with --nocapture"]
-#[allow(clippy::print_stderr, clippy::cast_precision_loss)]
+#[ignore = "a measurement, about three minutes for 20 seeds: run by name with --nocapture"]
+#[allow(
+    clippy::print_stderr,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
 async fn measure_two_track_dip() {
     let env = |name: &str| std::env::var(name).ok();
     let first: u64 = env("LAKKO_DIP_SEED")
@@ -7153,83 +8268,3268 @@ async fn measure_two_track_dip() {
     let p: f64 = env("LAKKO_DIP_P")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.70);
+    let senders = if env("LAKKO_DIP_SIMULCAST").is_some() {
+        Senders::Simulcast
+    } else {
+        Senders::TwoDeclared
+    };
+    let protected = env("LAKKO_DIP_PROTECTION").as_deref() != Some("off");
+    let burst_keyframe = env("LAKKO_DIP_BURST_KEYFRAME").as_deref() != Some("off");
+    let protection = if protected {
+        LossProtection {
+            burst_keyframe,
+            ..LossProtection::default()
+        }
+    } else {
+        LossProtection::off()
+    };
+    let downlink_dip = env("LAKKO_DIP_DOWNLINK").is_some();
+    let subscriber_nack = env("LAKKO_DIP_SUB_NACK_MS")
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_millis);
     eprintln!(
-        "\ntwo-track dip: p {p:.2} for {} ms, f {} packets/s on the main track, q {} packets/s \
-         on the light companion, times in ms",
+        "\ntwo-track dip on the {} ({}), protection {}, subscriber asks again every {} ms: \
+         p {p:.2} for {} ms, f {} packets/s on the main track, q {} packets/s on the light \
+         companion, times in ms",
+        if downlink_dip {
+            "subscriber's downlink"
+        } else {
+            "publisher's uplink"
+        },
+        if senders == Senders::Simulcast {
+            "one simulcast sender"
+        } else {
+            "two plain senders, the light one declared"
+        },
+        if protected { "on" } else { "off" },
+        subscriber_nack.map_or(60, |d| d.as_millis()),
         DIP_WINDOW.as_millis(),
         FB_F_PACKETS * DIP_FPS,
         FB_Q_PACKETS * DIP_FPS
     );
     eprintln!(
-        "{:>5} | {:>9} | {:>9} {:>8} | {:>9} {:>8} | {:>9} {:>8} | {:>7}",
-        "seed", "lost/sent", "(a) main", "ended", "light", "ended", "(b) either", "ended", "b/a"
+        "{:>4} | {:>9} | {:>17} | {:>17} | {:>17} | {:>9}",
+        "seed",
+        "lost/sent",
+        "main gap/late/stop",
+        "light gap/late/stop",
+        "either gap/late/stop",
+        "q rtx/sent"
     );
-    let mut table: Vec<(f64, f64, f64)> = Vec::new();
+    // Per seed: gap, late and stop for main, light and either.
+    let mut table: Vec<[f64; 9]> = Vec::new();
     for seed in first..first + runs {
         let run = Box::pin(run_simulcast(SimulcastCase {
+            senders,
             fallback: false,
             dip: Some((p, seed)),
             late_join: None,
             stream: DIP_STREAM,
             settle: DIP_SETTLE,
+            protection,
+            downlink_dip,
+            playout_ext: true,
+            subscriber_nack,
+            publisher_rtx_cap: None,
         }))
         .await;
         let (from, _) = run.window;
-        let signed = |at: Option<Instant>| {
-            at.map_or_else(
-                || "-".to_owned(),
-                |at| {
-                    if at >= from {
-                        format!("{:.0}", dip_ms(at.duration_since(from)))
-                    } else {
-                        format!("-{:.0}", dip_ms(from.duration_since(at)))
-                    }
-                },
-            )
-        };
         let times = |seen: &TrackSeen| -> Vec<Instant> { seen.shown.iter().map(|s| s.0).collect() };
-        let main = fb_longest_gap(&times(&run.main), run.main.alive, run.ended);
-        let light = fb_longest_gap(&times(&run.light), run.light.alive, run.ended);
+        let main_gap = fb_longest_gap(&times(&run.main), run.main.alive, run.ended);
+        let light_gap = fb_longest_gap(&times(&run.light), run.light.alive, run.ended);
         let mut both = times(&run.main);
         both.extend(times(&run.light));
         both.sort_unstable();
         let either_alive = run.main.alive || run.light.alive;
-        let either = fb_longest_gap(&both, either_alive, run.ended);
-        let mark = |ms: f64, alive: bool| format!("{ms:.0}{}", if alive { "" } else { "+" });
+        let either_gap = fb_longest_gap(&both, either_alive, run.ended);
+
+        let base_main = dip_baseline(&run.main, run.started, from);
+        let base_light = dip_baseline(&run.light, run.started, from);
+        let main_late = dip_lateness(&run.written_f, &[(&run.main, base_main)], from, run.ended);
+        let light_late = dip_lateness(&run.written_q, &[(&run.light, base_light)], from, run.ended);
+        // The main picture's frame is written first in a tick, so its
+        // moments are the ones a frame of either track can answer.
+        let either_late = dip_lateness(
+            &run.written_f,
+            &[(&run.main, base_main), (&run.light, base_light)],
+            from,
+            run.ended,
+        );
+        let stop = |late: f64| (late - DIP_VIEWER_DELAY_MS).max(0.0);
+        let cell = |gap: f64, alive: bool, late: (f64, bool)| {
+            format!(
+                "{gap:.0}{}/{:.0}{}/{:.0}",
+                if alive { "" } else { "+" },
+                late.0,
+                if late.1 { "" } else { "+" },
+                stop(late.0)
+            )
+        };
         eprintln!(
-            "{:>5} | {:>9} | {:>9} {:>8} | {:>9} {:>8} | {:>9} {:>8} | {:>7.2}",
+            "{:>4} | {:>9} | {:>17} | {:>17} | {:>17} | {:>9}",
             seed,
             format!("{}/{}", run.lost, run.sent_in_window),
-            mark(main.0, run.main.alive),
-            signed(main.1),
-            mark(light.0, run.light.alive),
-            signed(light.1),
-            mark(either.0, either_alive),
-            signed(either.1),
-            either.0 / main.0.max(1.0)
+            cell(main_gap.0, run.main.alive, main_late),
+            cell(light_gap.0, run.light.alive, light_late),
+            cell(either_gap.0, either_alive, either_late),
+            format!("{}/{}", run.light_in.1, run.light_in.0),
         );
-        table.push((main.0, light.0, either.0));
+        table.push([
+            main_gap.0,
+            main_late.0,
+            stop(main_late.0),
+            light_gap.0,
+            light_late.0,
+            stop(light_late.0),
+            either_gap.0,
+            either_late.0,
+            stop(either_late.0),
+        ]);
     }
-    let median = |pick: fn(&(f64, f64, f64)) -> f64| {
-        let mut values: Vec<f64> = table.iter().map(pick).collect();
-        dip_quartet(&mut values)
+    eprintln!("min / median / p95 / max over {} seeds:", table.len());
+    let names = [
+        "main   gap",
+        "main   late",
+        "main   stop",
+        "light  gap",
+        "light  late",
+        "light  stop",
+        "either gap",
+        "either late",
+        "either stop",
+    ];
+    for (column, name) in names.iter().enumerate() {
+        let mut values: Vec<f64> = table.iter().map(|row| row[column]).collect();
+        let zero = values.iter().filter(|v| **v <= 0.0).count();
+        let q = dip_quartet(&mut values);
+        let zeros = if name.ends_with("stop") {
+            format!("   (zero in {zero} of {})", table.len())
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "  {name:<12} {:>5.0} / {:>5.0} / {:>5.0} / {:>5.0}{zeros}",
+            q[0], q[1], q[2], q[3]
+        );
+    }
+}
+
+// ============================================================
+// A key frame at the end of an unrepaired burst (ADR-0070, note of
+// 2026-10-09).
+// ============================================================
+
+/// The loss measured on a live call on 2026-10-09 (a home Wi-Fi uplink,
+/// every 30 s): about eight datagrams in ten lost for one second
+/// ([`DIP_WINDOW`]), media and retransmissions alike.
+const MEASURED_BURST_P: f64 = 0.80;
+
+/// Upstream `str0m`'s cap on retransmitted bytes, which the fork removed
+/// for the SFU's own sending. Given back to the test's publisher it stands
+/// in for a sender that does not repair a whole burst.
+const CAPPED_PUBLISHER: f32 = 0.15;
+
+/// A cap so low that the test's publisher sends little a second time: a
+/// burst on its main stream (some two hundred packets lost) stays
+/// unrepaired. `str0m` works the share out at intervals, so the forty or so
+/// packets its light stream loses are sometimes all sent again before the
+/// cap bites.
+const UNREPAIRING_PUBLISHER: f32 = 0.001;
+
+/// One two-sender run through the measured burst on the publisher's
+/// uplink, with every protection of the SFU on and the key frame at the
+/// end of a burst switched as said.
+async fn run_burst_end(
+    burst_keyframe: bool,
+    publisher_rtx_cap: Option<f32>,
+    p: f64,
+    seed: u64,
+    stream: Duration,
+    settle: Duration,
+) -> SimulcastRun {
+    Box::pin(run_simulcast(SimulcastCase {
+        senders: Senders::TwoDeclared,
+        fallback: false,
+        dip: Some((p, seed)),
+        late_join: None,
+        stream,
+        settle,
+        protection: LossProtection {
+            burst_keyframe,
+            ..LossProtection::default()
+        },
+        downlink_dip: false,
+        playout_ext: true,
+        subscriber_nack: None,
+        publisher_rtx_cap,
+    }))
+    .await
+}
+
+/// What one track of a [`run_burst_end`] run came to. Milliseconds; the
+/// last four relative to the end of the loss window.
+struct BurstEndTrack {
+    /// Longest interval with no decodable frame, and whether the chain was
+    /// alive at the end of the run (when not, the time to the end counts).
+    gap: f64,
+    alive: bool,
+    /// What a viewer playing [`DIP_VIEWER_DELAY_MS`] late sees stand still.
+    stop: f64,
+    /// When the first key frame request since the window opened reached
+    /// the publisher on this track.
+    asked: Option<f64>,
+    /// When the first packet of the first key frame written since the
+    /// window opened reached the subscriber, and when the whole of it had.
+    key_first: Option<f64>,
+    key_whole: Option<f64>,
+    /// Key frame requests that reached the publisher on this track since
+    /// the window opened.
+    requests: usize,
+    /// When the publisher wrote that key frame.
+    key_written: Option<f64>,
+    /// Of its packets, how many reached the subscriber within 20 ms of the
+    /// first one: the rest came by retransmission.
+    key_at_once: Option<(usize, u64)>,
+}
+
+/// Reduce one track of `run` to [`BurstEndTrack`]. `tag` is the picture's
+/// payload tag (`q` light, `f` main), `pub_mid` the publisher's media line.
+#[allow(clippy::cast_precision_loss)]
+fn burst_end_track(
+    run: &SimulcastRun,
+    seen: &TrackSeen,
+    tag: u8,
+    pub_mid: Mid,
+    written: &[Instant],
+    keys: &[(u64, u64)],
+) -> BurstEndTrack {
+    let (from, until) = run.window;
+    let rel = |at: Instant| {
+        if at >= until {
+            dip_ms(at.duration_since(until))
+        } else {
+            -dip_ms(until.duration_since(at))
+        }
     };
-    let (a, l, b) = (median(|r| r.0), median(|r| r.1), median(|r| r.2));
-    eprintln!(
-        "min/median/p95/max over {} seeds: (a) main {:.0}/{:.0}/{:.0}/{:.0}, light \
-         {:.0}/{:.0}/{:.0}/{:.0}, (b) either {:.0}/{:.0}/{:.0}/{:.0}",
-        table.len(),
-        a[0],
-        a[1],
-        a[2],
-        a[3],
-        l[0],
-        l[1],
-        l[2],
-        l[3],
-        b[0],
-        b[1],
-        b[2],
-        b[3]
+    let times: Vec<Instant> = seen.shown.iter().map(|s| s.0).collect();
+    let gap = fb_longest_gap(&times, seen.alive, run.ended).0;
+    let baseline = dip_baseline(seen, run.started, from);
+    let late = dip_lateness(written, &[(seen, baseline)], from, run.ended).0;
+    let requests: Vec<Instant> = run
+        .keyframe_requests
+        .iter()
+        .filter(|(mid, _, at)| *mid == pub_mid && *at >= from)
+        .map(|(_, _, at)| *at)
+        .collect();
+    let key = keys.iter().copied().find(|(frame, _)| {
+        usize::try_from(*frame)
+            .ok()
+            .and_then(|i| written.get(i))
+            .is_some_and(|at| *at >= from)
+    });
+    let key_first = key
+        .and_then(|(frame, _)| seen.arrived.get(&(tag, frame, 0)))
+        .map(|at| rel(*at));
+    let key_whole = key.and_then(|(frame, n)| {
+        (0..n)
+            .map(|i| seen.arrived.get(&(tag, frame, i)).copied())
+            .collect::<Option<Vec<Instant>>>()
+            .and_then(|all| all.into_iter().max())
+            .map(rel)
+    });
+    let key_written = key
+        .and_then(|(frame, _)| written.get(usize::try_from(frame).ok()?))
+        .map(|at| rel(*at));
+    let key_at_once = key.and_then(|(frame, n)| {
+        let first = (0..n)
+            .filter_map(|i| seen.arrived.get(&(tag, frame, i)))
+            .min()?;
+        let soon = (0..n)
+            .filter_map(|i| seen.arrived.get(&(tag, frame, i)))
+            .filter(|at| at.saturating_duration_since(*first) <= Duration::from_millis(20))
+            .count();
+        Some((soon, n))
+    });
+    BurstEndTrack {
+        gap,
+        alive: seen.alive,
+        stop: (late - DIP_VIEWER_DELAY_MS).max(0.0),
+        asked: requests.first().map(|at| rel(*at)),
+        key_first,
+        key_whole,
+        requests: requests.len(),
+        key_written,
+        key_at_once,
+    }
+}
+
+/// The SFU asks the publisher for a key frame on a video stream on which a
+/// burst has ended unrepaired, without any subscriber asking, and the
+/// subscriber has a decodable picture on both tracks again; switched off,
+/// nobody asks (the test's subscriber never does).
+///
+/// The publisher sends little a second time ([`UNREPAIRING_PUBLISHER`]), so
+/// the burst on its main stream is not repaired; its light stream is asked
+/// for only in the runs in which it was not repaired either. With a
+/// publisher that answers every request the burst is repaired and nothing
+/// is asked, which `a_repaired_uplink_burst_costs_no_key_frame` pins.
+#[tokio::test]
+async fn an_unrepaired_uplink_burst_ends_with_a_key_frame_asked_by_the_sfu() {
+    let stream = Duration::from_secs(5);
+    let settle = Duration::from_millis(1500);
+    let on = run_burst_end(
+        true,
+        Some(UNREPAIRING_PUBLISHER),
+        MEASURED_BURST_P,
+        1,
+        stream,
+        settle,
+    )
+    .await;
+    assert_two_tracks(&on);
+    let light = burst_end_track(
+        &on,
+        &on.light,
+        b'q',
+        on.pub_light_mid,
+        &on.written_q,
+        &on.keys_q,
     );
+    let main = burst_end_track(
+        &on,
+        &on.main,
+        b'f',
+        on.pub_main_mid,
+        &on.written_f,
+        &on.keys_f,
+    );
+    assert!(
+        main.asked.is_some(),
+        "the main stream was asked for a key frame"
+    );
+    for (name, track) in [("light", &light), ("main", &main)] {
+        if let Some(asked) = track.asked {
+            assert!(
+                (0.0..=1000.0).contains(&asked),
+                "{name}: asked {asked:.0} ms after the burst ended"
+            );
+            let whole = track
+                .key_whole
+                .unwrap_or_else(|| panic!("the {name} key frame reached the subscriber whole"));
+            assert!(
+                whole > asked,
+                "{name}: whole at {whole:.0}, asked at {asked:.0}"
+            );
+        }
+        assert!(
+            track.requests <= 2,
+            "{name}: one request per burst (and at most one repeat), saw {}",
+            track.requests
+        );
+        assert!(
+            track.alive,
+            "{name}: decodable at the end of the run (longest gap {:.0} ms)",
+            track.gap
+        );
+    }
+
+    let off = run_burst_end(
+        false,
+        Some(UNREPAIRING_PUBLISHER),
+        MEASURED_BURST_P,
+        1,
+        stream,
+        settle,
+    )
+    .await;
+    let (from, _) = off.window;
+    assert!(
+        off.keyframe_requests.iter().all(|(_, _, at)| *at < from),
+        "switched off, nobody asks after the burst: {:?}",
+        off.keyframe_requests
+            .iter()
+            .map(|(mid, _, at)| (*mid, dip_ms(at.saturating_duration_since(from))))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A burst the publisher repairs costs no key frame: with a publisher that
+/// answers every retransmission request, the SFU asks for none after the
+/// loss window, and both tracks are decodable at the end.
+#[tokio::test]
+async fn a_repaired_uplink_burst_costs_no_key_frame() {
+    let run = run_burst_end(
+        true,
+        None,
+        0.50,
+        1,
+        Duration::from_secs(5),
+        Duration::from_millis(1500),
+    )
+    .await;
+    assert_two_tracks(&run);
+    let (from, _) = run.window;
+    let after: Vec<_> = run
+        .keyframe_requests
+        .iter()
+        .filter(|(_, _, at)| *at >= from)
+        .map(|(mid, _, at)| (*mid, dip_ms(at.duration_since(from))))
+        .collect();
+    assert!(after.is_empty(), "asked for a key frame: {after:?}");
+    assert!(run.lost > 100, "the burst lost packets: {}", run.lost);
+    assert!(run.main.alive && run.light.alive);
+}
+
+/// Measure what asking for a key frame at the end of an unrepaired burst
+/// buys, on the burst measured on a live call ([`MEASURED_BURST_P`] for
+/// [`DIP_WINDOW`] on the publisher's uplink). Prints a table; asserts
+/// nothing about the numbers.
+///
+/// Every seed is run twice: **before** (`LossProtection::burst_keyframe`
+/// off: the SFU of 2026-10-08) and **after** (on). Per track (main: `f`,
+/// 250 packets a second; light: `q`, 50 packets a second):
+///
+/// - **gap**: the longest interval in which no decodable frame completes
+///   ([`fb_track_seen`]); a `+` marks a chain still broken when the run
+///   ended, [`DIP_SETTLE`] after the last frame, and the time to the end is
+///   then counted;
+/// - **stop**: what a viewer playing [`DIP_VIEWER_DELAY_MS`] late sees
+///   stand still;
+/// - **asked**: when the first key frame request reached the publisher,
+///   from the end of the burst;
+/// - **first** / **whole**: when the first packet of that key frame, and
+///   all of it, had reached the subscriber, from the end of the burst.
+///
+/// The test's subscriber never asks for a key frame itself. On the live
+/// call a browser did, about three seconds after the burst had ended.
+///
+/// - `LAKKO_DIP_SEED` (default 1), `LAKKO_DIP_RUNS` (default 20),
+///   `LAKKO_DIP_P` (default 0.80).
+/// - `LAKKO_DIP_PUBLISHER`: `capped` (default): the publisher throws
+///   queued retransmissions away above 15% of what it sends
+///   ([`CAPPED_PUBLISHER`]), so a burst stays unrepaired; `all`: it answers
+///   every request, as in `measure_two_track_dip`. Neither is a browser:
+///   what a libwebrtc sender retransmits after a burst was not measured.
+/// - `LAKKO_DIP_DETAIL`: one more line per track and run, about the key
+///   frame itself.
+#[tokio::test]
+#[ignore = "a measurement, about seven minutes for 20 seeds: run by name with --nocapture"]
+#[allow(
+    clippy::print_stderr,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
+async fn measure_burst_end_key_frame() {
+    let env = |name: &str| std::env::var(name).ok();
+    let first: u64 = env("LAKKO_DIP_SEED")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let runs: u64 = env("LAKKO_DIP_RUNS")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    let p: f64 = env("LAKKO_DIP_P")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(MEASURED_BURST_P);
+    let capped = env("LAKKO_DIP_PUBLISHER").as_deref() != Some("all");
+    let cap = capped.then_some(CAPPED_PUBLISHER);
+    eprintln!(
+        "\nkey frame at the end of an unrepaired burst: p {p:.2} for {} ms on the publisher's \
+         uplink, publisher {}, f {} packets/s on the main track, q {} packets/s on the light \
+         companion, times in ms; asked / first / whole from the end of the burst",
+        DIP_WINDOW.as_millis(),
+        if capped {
+            "caps its retransmissions at 15%"
+        } else {
+            "answers every request"
+        },
+        FB_F_PACKETS * DIP_FPS,
+        FB_Q_PACKETS * DIP_FPS
+    );
+    eprintln!(
+        "{:>4} {:>6} | {:>9} | {:>30} | {:>30} | {:>11}",
+        "seed",
+        "",
+        "lost/sent",
+        "main gap/stop asked/first/whole",
+        "light gap/stop asked/first/whole",
+        "nacks/rtx"
+    );
+    let opt = |v: Option<f64>| v.map_or_else(|| "-".to_owned(), |v| format!("{v:.0}"));
+    let cell = |t: &BurstEndTrack| {
+        format!(
+            "{:.0}{}/{:.0} {}/{}/{}",
+            t.gap,
+            if t.alive { "" } else { "+" },
+            t.stop,
+            opt(t.asked),
+            opt(t.key_first),
+            opt(t.key_whole)
+        )
+    };
+    // [before, after] x [main, light].
+    let mut rows: [Vec<BurstEndTrack>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for seed in first..first + runs {
+        for (i, on) in [false, true].into_iter().enumerate() {
+            let run = run_burst_end(on, cap, p, seed, DIP_STREAM, DIP_SETTLE).await;
+            let (_, until) = run.window;
+            let main = burst_end_track(
+                &run,
+                &run.main,
+                b'f',
+                run.pub_main_mid,
+                &run.written_f,
+                &run.keys_f,
+            );
+            let light = burst_end_track(
+                &run,
+                &run.light,
+                b'q',
+                run.pub_light_mid,
+                &run.written_q,
+                &run.keys_q,
+            );
+            // Sequence numbers the publisher was asked for, and
+            // retransmissions it put on the wire, after the burst.
+            let nacks = run.nacks.iter().filter(|(at, _, _)| *at >= until).count();
+            let rtx = run.rtx_out.iter().filter(|at| **at >= until).count();
+            eprintln!(
+                "{:>4} {:>6} | {:>9} | {:>30} | {:>30} | {:>11}",
+                seed,
+                if on { "after" } else { "before" },
+                format!("{}/{}", run.lost, run.sent_in_window),
+                cell(&main),
+                cell(&light),
+                format!("{nacks}/{rtx}")
+            );
+            if env("LAKKO_DIP_DETAIL").is_some() {
+                for (name, t) in [("main", &main), ("light", &light)] {
+                    eprintln!(
+                        "       {name}: key frame written {} ms after the burst, {:?} of its \
+                         packets at the subscriber within 20 ms of the first, {} request(s)",
+                        opt(t.key_written),
+                        t.key_at_once,
+                        t.requests
+                    );
+                }
+            }
+            rows[2 * i].push(main);
+            rows[2 * i + 1].push(light);
+        }
+    }
+    eprintln!("min / median / p95 / max over {runs} seeds:");
+    let names = [
+        "before main ",
+        "before light",
+        "after  main ",
+        "after  light",
+    ];
+    for (name, tracks) in names.iter().zip(&rows) {
+        let line = |what: &str, mut values: Vec<f64>, of: usize| {
+            if values.is_empty() {
+                eprintln!("  {name} {what:<6} -   (0 of {of})");
+                return;
+            }
+            let n = values.len();
+            let q = dip_quartet(&mut values);
+            eprintln!(
+                "  {name} {what:<6} {:>5.0} / {:>5.0} / {:>5.0} / {:>5.0}   ({n} of {of})",
+                q[0], q[1], q[2], q[3]
+            );
+        };
+        let of = tracks.len();
+        line("gap", tracks.iter().map(|t| t.gap).collect(), of);
+        line("stop", tracks.iter().map(|t| t.stop).collect(), of);
+        line("asked", tracks.iter().filter_map(|t| t.asked).collect(), of);
+        line(
+            "first",
+            tracks.iter().filter_map(|t| t.key_first).collect(),
+            of,
+        );
+        line(
+            "whole",
+            tracks.iter().filter_map(|t| t.key_whole).collect(),
+            of,
+        );
+        eprintln!(
+            "  {name} decodable at the end of the run in {} of {of}; key frame requests since \
+             the burst began: {}",
+            tracks.iter().filter(|t| t.alive).count(),
+            tracks.iter().map(|t| t.requests).sum::<usize>()
+        );
+    }
+}
+
+// ============================================================
+// ADR-0070 steps 3 and 4: the light track is protected harder, and the
+// playout delay follows the path.
+// ============================================================
+
+/// A two-sender run for the tests below: the light picture declared, the
+/// uplink fallback off.
+fn protected_case(
+    protection: LossProtection,
+    dip: Option<(f64, u64)>,
+    downlink_dip: bool,
+    playout_ext: bool,
+    stream: Duration,
+) -> SimulcastCase {
+    SimulcastCase {
+        senders: Senders::TwoDeclared,
+        fallback: false,
+        dip,
+        late_join: None,
+        stream,
+        settle: Duration::from_millis(1500),
+        protection,
+        downlink_dip,
+        playout_ext,
+        subscriber_nack: None,
+        publisher_rtx_cap: None,
+    }
+}
+
+/// The gaps between consecutive requests for one sequence number of the
+/// stream `ssrc`, over every sequence number asked for more than once, in
+/// milliseconds, sorted.
+fn nack_repeat_gaps(nacks: &[(Instant, u32, u16)], ssrc: u32) -> Vec<f64> {
+    let mut by_seq: std::collections::BTreeMap<u16, Vec<Instant>> =
+        std::collections::BTreeMap::new();
+    for (at, of, seq) in nacks {
+        if *of == ssrc {
+            by_seq.entry(*seq).or_default().push(*at);
+        }
+    }
+    let mut gaps: Vec<f64> = by_seq
+        .values()
+        .flat_map(|times| {
+            times
+                .windows(2)
+                .map(|pair| dip_ms(pair[1].saturating_duration_since(pair[0])))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    gaps.sort_by(f64::total_cmp);
+    gaps
+}
+
+/// ADR-0070 step 3, subscriber leg: every packet of the light companion
+/// reaches the subscriber twice, the second time on the track's
+/// retransmission stream, and the subscriber is handed each packet once.
+/// The main track is sent once. Switched off, nothing is sent twice.
+#[tokio::test]
+#[allow(clippy::cast_precision_loss)]
+async fn a_light_companion_packet_is_sent_twice_and_the_main_track_once() {
+    let stream = Duration::from_secs(2);
+    let on = Box::pin(run_simulcast(protected_case(
+        LossProtection::default(),
+        None,
+        false,
+        false,
+        stream,
+    )))
+    .await;
+    assert_two_tracks(&on);
+    let (first, second) = on.light_in;
+    assert!(first > 80, "the light track streamed: {first} datagrams");
+    assert!(
+        second as f64 >= 0.9 * first as f64 && second <= first,
+        "a second copy of nearly every light packet on the retransmission stream, and never \
+         more than one: {second} of {first}"
+    );
+    // The subscriber's own stack threw every second copy away: it was
+    // handed each packet once.
+    assert_eq!(
+        on.light.packets,
+        on.light.arrived.len(),
+        "no packet was handed over twice"
+    );
+    // The main track is sent once: nothing lost, so nothing on its
+    // retransmission stream.
+    assert!(on.main_in.0 > 400, "the main track streamed");
+    assert_eq!(on.main_in.1, 0, "no second copy of a main track packet");
+    assert_eq!(on.main.packets, on.main.arrived.len());
+
+    let off = Box::pin(run_simulcast(protected_case(
+        LossProtection {
+            light_duplicate: false,
+            ..LossProtection::default()
+        },
+        None,
+        false,
+        false,
+        stream,
+    )))
+    .await;
+    assert_two_tracks(&off);
+    assert!(off.light_in.0 > 80);
+    assert_eq!(
+        off.light_in.1, 0,
+        "switched off, nothing is sent a second time"
+    );
+}
+
+/// ADR-0070 step 3, publisher leg: through a dip on the publisher's uplink
+/// a missing packet of its declared light track is asked for again about
+/// every 20 ms, and a missing packet of its main track about every 60 ms
+/// as before. With the light schedule left alone, both are asked every
+/// 60 ms.
+#[tokio::test]
+async fn a_missing_light_packet_is_asked_for_again_three_times_as_often() {
+    let median = |gaps: &[f64]| gaps[gaps.len() / 2];
+    let fast = Box::pin(run_simulcast(protected_case(
+        LossProtection::default(),
+        Some((0.7, 1)),
+        false,
+        false,
+        DIP_STREAM,
+    )))
+    .await;
+    let light = nack_repeat_gaps(&fast.nacks, fast.pub_light_ssrc);
+    let main: Vec<f64> = {
+        let mut ssrcs: Vec<u32> = fast.nacks.iter().map(|n| n.1).collect();
+        ssrcs.sort_unstable();
+        ssrcs.dedup();
+        let other = ssrcs
+            .into_iter()
+            .find(|ssrc| *ssrc != fast.pub_light_ssrc)
+            .expect("the main stream lost packets too");
+        nack_repeat_gaps(&fast.nacks, other)
+    };
+    assert!(light.len() > 20 && main.len() > 20, "both were asked again");
+    eprintln!(
+        "repeat requests: light median {:.1} ms over {}, main median {:.1} ms over {}",
+        median(&light),
+        light.len(),
+        median(&main),
+        main.len()
+    );
+    assert!(
+        (15.0..40.0).contains(&median(&light)),
+        "the light track is asked again about every 20 ms: median {:.1} ms",
+        median(&light)
+    );
+    assert!(
+        median(&main) >= 50.0,
+        "the main track keeps its 60 ms: median {:.1} ms",
+        median(&main)
+    );
+
+    let slow = Box::pin(run_simulcast(protected_case(
+        LossProtection {
+            light_nack_retry: None,
+            ..LossProtection::default()
+        },
+        Some((0.7, 1)),
+        false,
+        false,
+        DIP_STREAM,
+    )))
+    .await;
+    let light = nack_repeat_gaps(&slow.nacks, slow.pub_light_ssrc);
+    assert!(light.len() > 20);
+    assert!(
+        median(&light) >= 50.0,
+        "without the faster schedule the light track is asked every 60 ms: median {:.1} ms",
+        median(&light)
+    );
+}
+
+/// The minimum playout delay each video packet handed to the subscriber
+/// carried, split at `at`: the values seen before it and from it on.
+fn playout_minimums(run: &SimulcastRun, track: Option<Mid>, at: Instant) -> (Vec<u64>, Vec<u64>) {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for (on, when, delay) in &run.playout {
+        if *on != track {
+            continue;
+        }
+        let (min, max) = delay.expect("every video packet carries the extension");
+        assert_eq!(
+            max,
+            u64::from(lakko_svc_sfu::playout_delay::MAX_PLAYOUT_DELAY_MS),
+            "the maximum is the fixed generous value"
+        );
+        if *when < at {
+            before.push(min);
+        } else {
+            after.push(min);
+        }
+    }
+    (before, after)
+}
+
+/// ADR-0070 step 4: a subscriber that negotiated the playout-delay header
+/// extension gets it on every video packet of the publisher, main track
+/// and light companion alike, with a minimum of 0 until a burst on the
+/// publisher's uplink and of 300 ms after it.
+#[tokio::test]
+async fn video_carries_a_playout_delay_of_300_ms_after_a_publisher_dip_and_0_before() {
+    let run = Box::pin(run_simulcast(protected_case(
+        LossProtection::default(),
+        Some((0.7, 1)),
+        false,
+        true,
+        DIP_STREAM,
+    )))
+    .await;
+    let (from, until) = run.window;
+    assert!(
+        run.in_ext_ids
+            .contains(&lakko_svc_sfu::media::PLAYOUT_DELAY_EXTENSION_ID),
+        "the extension is on the wire: ids {:?}",
+        run.in_ext_ids
+    );
+    for (name, track) in [("main", run.main_mid), ("light", run.light_mid)] {
+        assert!(track.is_some());
+        let (before, _) = playout_minimums(&run, track, from);
+        assert!(before.len() > 50, "{name}: packets before the dip");
+        assert!(
+            before.iter().all(|min| *min == 0),
+            "{name}: no delay is asked for before a burst was seen"
+        );
+        let (_, after) = playout_minimums(&run, track, until);
+        assert!(after.len() > 50, "{name}: packets after the dip");
+        assert!(
+            after.iter().all(|min| *min == 300),
+            "{name}: 300 ms on every packet once the burst was seen: {:?}",
+            after.iter().filter(|min| **min != 300).count()
+        );
+    }
+}
+
+/// ADR-0070 step 4, the other burst source: loss on the subscriber's own
+/// downlink (it asks for more than a tenth of what it is sent again, and
+/// its receiver reports say so) raises the delay of that subscriber's
+/// video too.
+#[tokio::test]
+async fn a_dip_on_the_subscribers_downlink_raises_its_playout_delay() {
+    let run = Box::pin(run_simulcast(protected_case(
+        LossProtection::default(),
+        Some((0.7, 1)),
+        true,
+        true,
+        DIP_STREAM,
+    )))
+    .await;
+    let (from, until) = run.window;
+    assert!(run.lost > 100, "the downlink lost datagrams: {}", run.lost);
+    for (name, track) in [("main", run.main_mid), ("light", run.light_mid)] {
+        let (before, _) = playout_minimums(&run, track, from);
+        assert!(
+            before.len() > 50 && before.iter().all(|min| *min == 0),
+            "{name}"
+        );
+        // Packets sent before the delay was raised are still being
+        // retransmitted for a while after the dip, with the value they
+        // were first sent with.
+        let (_, after) = playout_minimums(&run, track, until + Duration::from_secs(2));
+        assert!(after.len() > 20, "{name}: packets well after the dip");
+        assert!(
+            after.iter().all(|min| *min == 300),
+            "{name}: 300 ms once the burst was seen"
+        );
+    }
+}
+
+/// ADR-0070 step 4: a subscriber whose session does not know the
+/// playout-delay extension leaves it out of its answer and gets none on
+/// the wire, dip or no dip; and with the feature switched off, a subscriber
+/// that does know it is not offered it.
+#[tokio::test]
+async fn the_playout_delay_is_stamped_only_when_negotiated_and_switched_on() {
+    let id = lakko_svc_sfu::media::PLAYOUT_DELAY_EXTENSION_ID;
+    let extmap = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
+    // The subscriber does not know the extension.
+    let unaware = Box::pin(run_simulcast(protected_case(
+        LossProtection::default(),
+        Some((0.7, 1)),
+        false,
+        false,
+        DIP_STREAM,
+    )))
+    .await;
+    assert!(
+        unaware.offers.iter().any(|sdp| sdp.contains(extmap)),
+        "the SFU offers it"
+    );
+    assert!(
+        !unaware.in_ext_ids.contains(&id),
+        "but stamps nothing on a track that did not negotiate it: ids {:?}",
+        unaware.in_ext_ids
+    );
+    assert!(unaware.playout.iter().all(|(_, _, delay)| delay.is_none()));
+    assert!(unaware.main.packets > 500 && unaware.light.packets > 100);
+
+    // The feature is off.
+    let off = Box::pin(run_simulcast(protected_case(
+        LossProtection {
+            playout_delay: false,
+            ..LossProtection::default()
+        },
+        Some((0.7, 1)),
+        false,
+        true,
+        DIP_STREAM,
+    )))
+    .await;
+    assert!(
+        off.offers.iter().all(|sdp| !sdp.contains(extmap)),
+        "switched off, the extension is not offered"
+    );
+    assert!(!off.in_ext_ids.contains(&id));
+    assert!(off.playout.iter().all(|(_, _, delay)| delay.is_none()));
+    assert!(off.main.packets > 500 && off.light.packets > 100);
+}
+
+// ============================================================
+// ADR-0070 step 5: three senders, and the subscriber says which
+// picture it shows
+// ============================================================
+
+/// One packet the subscriber of [`three_senders_and_the_subscribers_wants`]
+/// was handed on one of its tracks.
+#[derive(Clone, Copy)]
+struct WantsGot {
+    at: Instant,
+    seq: u16,
+    /// Frame and packet index, from the payload.
+    frame: u64,
+    i: u64,
+}
+
+/// A publisher with three declared senders (main, middle, light) and a
+/// subscriber, through the production media task.
+///
+/// - The subscriber is offered three video tracks whose MSID stream ids are
+///   the publisher's peer id, that id + `~mid` and that id + `~light`.
+/// - Having said nothing, it receives the main and the light track; the
+///   middle track carries no packet.
+/// - After `video-wants: middle` the middle and the light track carry
+///   packets and the main track stops; the middle track begins at the first
+///   packet of a key frame the publisher was asked for.
+/// - After `video-wants: main` the main track resumes at the first packet
+///   of a key frame written after the request, the middle track stops, and
+///   the main track's sequence numbers run on without a gap across the
+///   pause: the subscriber asked for no retransmission on it.
+/// - Every payload arrives byte for byte, on the track of its sender.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::print_stderr
+)]
+async fn three_senders_and_the_subscribers_wants() {
+    use lakko_svc_sfu::frame_descriptor::PacketDescriptor;
+    use lakko_svc_sfu::media::{LIGHT_STREAM_SUFFIX, MIDDLE_STREAM_SUFFIX};
+    use lakko_svc_sfu::protocol::{VideoQuality, VideoWant};
+
+    // When the wants change, in frames from the start, and when the
+    // publisher stops.
+    const TO_MIDDLE: u64 = 35;
+    const TO_MAIN: u64 = 80;
+    const FRAMES: u64 = 125;
+    // A packet the SFU had already written when a set arrived may still
+    // be on its way.
+    const IN_FLIGHT: Duration = Duration::from_millis(300);
+
+    let call = "three-sender-wants-call";
+    let peers = PeerRegistry::new();
+    let mut registered = register_subscribers(&peers, call, 1).await;
+    let (b_id, mut b_rx) = registered.pop().expect("one registered");
+    let (media_task, sfu_addr) = spawn_media_task_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        None,
+        peers,
+        MediaTaskOptions {
+            diagnostics: None,
+            video_fec: false,
+            uplink_fallback: false,
+            protection: LossProtection::default(),
+            downlink_control: false,
+        },
+    )
+    .await
+    .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::build(
+        Rtc::builder()
+            .set_rtp_mode(true)
+            .enable_raw_packets(true)
+            .set_extension(
+                GENERIC_FRAME_DESCRIPTOR_ID,
+                generic_frame_descriptor_extension(),
+            ),
+    )
+    .await;
+    let mut b = SyntheticClient::build(Rtc::builder().set_rtp_mode(true).set_extension(
+        GENERIC_FRAME_DESCRIPTOR_ID,
+        generic_frame_descriptor_extension(),
+    ))
+    .await;
+
+    let (b_offer, b_pending) = b.create_video_subscriber_offer();
+    let b_answer = media_task
+        .accept_offer(b_id.clone(), call.to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    let a_id = PeerId::fresh();
+    let (a_offer, a_pending, pub_main, pub_light, pub_middle) =
+        a.create_three_sender_publisher_offer();
+    let a_answer = media_task
+        .accept_offer_with_copies(
+            a_id.clone(),
+            call.to_owned(),
+            a_offer,
+            vec![pub_light.to_string()],
+            vec![pub_middle.to_string()],
+        )
+        .await
+        .expect("SFU accepts A's offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    // Main `f`, middle `m`, light `q`.
+    let layer = |mid: Mid, tag: u8, packets: u64, payload: usize, first_seq: u64| FbLayer {
+        rid: None,
+        mid: Some(mid),
+        tag,
+        packets,
+        payload,
+        next_seq: first_seq,
+        frames: Vec::new(),
+        want_key: true,
+    };
+    let mut layers = [
+        layer(pub_main, b'f', FB_F_PACKETS, FB_F_PAYLOAD, FB_F_FIRST_SEQ),
+        layer(pub_middle, b'm', 5, 800, 40_000),
+        layer(pub_light, b'q', FB_Q_PACKETS, FB_Q_PAYLOAD, FB_Q_FIRST_SEQ),
+    ];
+
+    let frame_every = Duration::from_micros(1_000_000 / DIP_FPS);
+    let give_up = Instant::now() + Duration::from_secs(60);
+    let mut offers: Vec<String> = Vec::new();
+    let mut t0: Option<Instant> = None;
+    let mut ticks: u64 = 0;
+    let mut plis_handled = 0usize;
+    let mut finish_at: Option<Instant> = None;
+    let mut to_middle_at: Option<Instant> = None;
+    let mut to_main_at: Option<Instant> = None;
+    let mut abuf = [0u8; 2048];
+    let mut bbuf = [0u8; 2048];
+
+    loop {
+        let now = Instant::now();
+        assert!(
+            now < give_up,
+            "the run did not finish: ticks={ticks} a_connected={} b_connected={} offers={}",
+            a.is_connected(),
+            b.is_connected(),
+            offers.len()
+        );
+        if finish_at.is_some_and(|at| now >= at) {
+            break;
+        }
+        let _ = a.drain().await;
+        let _ = b.drain().await;
+        // A keyframe request on a media line makes the next frame of that
+        // sender a key frame, as an encoder does.
+        while plis_handled < a.keyframe_request_mids.len() {
+            let on = a.keyframe_request_mids[plis_handled];
+            plis_handled += 1;
+            for layer in &mut layers {
+                if layer.mid == Some(on) {
+                    layer.want_key = true;
+                }
+            }
+        }
+        if b.is_connected() {
+            while let Ok(frame) = b_rx.try_recv() {
+                if let ServerFrame::SdpOffer { sdp } = frame {
+                    let answer = b.answer_renegotiation(&sdp).expect("B answers");
+                    media_task
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .expect("the SFU takes B's answer");
+                    offers.push(sdp);
+                }
+            }
+        }
+        let b_tracks = offers
+            .iter()
+            .flat_map(|sdp| video_msids(sdp))
+            .filter(|(_, stream)| stream.starts_with(&a_id.to_string()))
+            .count();
+        if t0.is_none() && a.is_connected() && b.is_connected() && b_tracks >= 3 {
+            let mut api = a.rtc.direct_api();
+            let ready = layers.iter().all(|layer| {
+                layer
+                    .mid
+                    .and_then(|mid| api.stream_tx_by_mid(mid, None))
+                    .is_some_and(|stream| stream.rtx().is_some())
+            });
+            if ready {
+                t0 = Some(Instant::now() + Duration::from_millis(50));
+            }
+        }
+        if let Some(start) = t0 {
+            let due = start + frame_every * (ticks as u32);
+            if ticks < FRAMES && Instant::now() >= due {
+                if ticks == TO_MIDDLE {
+                    media_task
+                        .set_video_wants(
+                            b_id.clone(),
+                            vec![VideoWant {
+                                peer: a_id.to_string(),
+                                quality: VideoQuality::Middle,
+                            }],
+                        )
+                        .expect("the media task takes the wants");
+                    to_middle_at = Some(Instant::now());
+                }
+                if ticks == TO_MAIN {
+                    media_task
+                        .set_video_wants(
+                            b_id.clone(),
+                            vec![VideoWant {
+                                peer: a_id.to_string(),
+                                quality: VideoQuality::Main,
+                            }],
+                        )
+                        .expect("the media task takes the wants");
+                    to_main_at = Some(Instant::now());
+                }
+                for layer in &mut layers {
+                    let frame = layer.frames.len() as u64;
+                    let key = std::mem::take(&mut layer.want_key);
+                    let n = if key {
+                        layer.packets * FB_KEY_FACTOR
+                    } else {
+                        layer.packets
+                    };
+                    let rtp_time = 90_000 + (ticks * (90_000 / DIP_FPS)) as u32;
+                    let written = Instant::now();
+                    for i in 0..n {
+                        let mut ext = str0m::rtp::ExtensionValues::default();
+                        ext.user_values
+                            .set(PacketDescriptor(fb_descriptor(frame, key, i, n)));
+                        let seq = layer.next_seq;
+                        layer.next_seq += 1;
+                        let mut api = a.rtc.direct_api();
+                        let stream = api
+                            .stream_tx_by_mid(layer.mid.expect("offered"), None)
+                            .expect("send stream");
+                        stream
+                            .write_rtp(
+                                UPLINK_VP8_PT.into(),
+                                seq.into(),
+                                rtp_time,
+                                written,
+                                i + 1 == n,
+                                ext,
+                                true,
+                                fb_payload(layer.tag, frame, i, layer.payload),
+                            )
+                            .expect("A writes a packet");
+                    }
+                    layer.frames.push(FbFrame {
+                        key,
+                        n,
+                        at: written,
+                    });
+                }
+                ticks += 1;
+                if ticks == FRAMES {
+                    finish_at = Some(Instant::now() + Duration::from_millis(700));
+                }
+                a.feed_timeout();
+                let _ = a.drain().await;
+            }
+        }
+        while let Ok((len, src)) = a.socket.try_recv_from(&mut abuf) {
+            a.feed_receive(&abuf[..len], src, sfu_addr);
+            let _ = a.drain().await;
+        }
+        while let Ok((len, src)) = b.socket.try_recv_from(&mut bbuf) {
+            b.feed_receive(&bbuf[..len], src, sfu_addr);
+            let _ = b.drain().await;
+        }
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((len, src)) = r {
+                    a.feed_receive(&abuf[..len], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((len, src)) = r {
+                    b.feed_receive(&bbuf[..len], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
+        let _ = a.drain().await;
+        let _ = b.drain().await;
+        a.feed_timeout();
+        b.feed_timeout();
+    }
+    let to_middle_at = to_middle_at.expect("the middle picture was asked for");
+    let to_main_at = to_main_at.expect("the main picture was asked for again");
+
+    // Three MSID stream ids, as the contract spells them.
+    let main_stream = a_id.to_string();
+    let middle_stream = format!("{a_id}{MIDDLE_STREAM_SUFFIX}");
+    let light_stream = format!("{a_id}{LIGHT_STREAM_SUFFIX}");
+    for (i, offer) in offers.iter().enumerate() {
+        let lines: Vec<&str> = offer
+            .lines()
+            .filter(|l| l.starts_with("a=msid:") || l.starts_with("a=mid:") || l.starts_with("m="))
+            .collect();
+        eprintln!("three senders: the SFU's offer {i} to the subscriber: {lines:?}");
+    }
+    let mut tracks: Vec<(Mid, String)> = Vec::new();
+    for (mid, stream) in offers.iter().flat_map(|sdp| video_msids(sdp)) {
+        if stream.starts_with(&main_stream) && !tracks.iter().any(|(m, _)| *m == mid) {
+            tracks.push((mid, stream));
+        }
+    }
+    let mut streams: Vec<&str> = tracks.iter().map(|(_, s)| s.as_str()).collect();
+    streams.sort_unstable();
+    let mut expected = vec![
+        main_stream.as_str(),
+        middle_stream.as_str(),
+        light_stream.as_str(),
+    ];
+    expected.sort_unstable();
+    assert_eq!(streams, expected, "three tracks, three stream ids");
+    let mid_of = |stream: &str| {
+        tracks
+            .iter()
+            .find(|(_, s)| s == stream)
+            .map(|(mid, _)| *mid)
+            .expect("the track was offered")
+    };
+    let (main_mid, middle_mid, light_mid) = (
+        mid_of(&main_stream),
+        mid_of(&middle_stream),
+        mid_of(&light_stream),
+    );
+
+    // What arrived on each track, every payload byte for byte and on the
+    // track of its sender.
+    let on = |track: Mid, layer: &FbLayer| -> Vec<WantsGot> {
+        b.rtp_got
+            .iter()
+            .zip(&b.rtp_got_at)
+            .zip(&b.rtp_got_track)
+            .filter(|(_, t)| **t == Some(track))
+            .map(|((got, at), _)| {
+                let pl = &got.payload;
+                assert!(pl.len() >= 7, "a media packet of this test");
+                assert_eq!(
+                    pl[0],
+                    layer.tag,
+                    "a packet of sender {} on the track of sender {}",
+                    char::from(pl[0]),
+                    char::from(layer.tag)
+                );
+                let frame = u64::from(u32::from_be_bytes([pl[1], pl[2], pl[3], pl[4]]));
+                let i = u64::from(u16::from_be_bytes([pl[5], pl[6]]));
+                assert_eq!(
+                    *pl,
+                    fb_payload(layer.tag, frame, i, layer.payload),
+                    "the payload arrives byte for byte as the publisher wrote it"
+                );
+                WantsGot {
+                    at: *at,
+                    seq: got.seq,
+                    frame,
+                    i,
+                }
+            })
+            .collect()
+    };
+    let main = on(main_mid, &layers[0]);
+    let middle = on(middle_mid, &layers[1]);
+    let light = on(light_mid, &layers[2]);
+    assert_eq!(
+        main.len() + middle.len() + light.len(),
+        b.rtp_got.len(),
+        "nothing arrived anywhere else"
+    );
+    let count = |got: &[WantsGot], from: Instant, until: Instant| {
+        got.iter().filter(|p| p.at >= from && p.at < until).count()
+    };
+    let start = t0.expect("the publisher streamed");
+    let end = Instant::now();
+    eprintln!(
+        "three senders: packets main/middle/light: no wants {}/{}/{}, middle {}/{}/{}, \
+         main again {}/{}/{}",
+        count(&main, start, to_middle_at),
+        count(&middle, start, to_middle_at),
+        count(&light, start, to_middle_at),
+        count(&main, to_middle_at, to_main_at),
+        count(&middle, to_middle_at, to_main_at),
+        count(&light, to_middle_at, to_main_at),
+        count(&main, to_main_at, end),
+        count(&middle, to_main_at, end),
+        count(&light, to_main_at, end),
+    );
+
+    // No wants: main and light carry packets, the middle track none.
+    assert!(count(&main, start, to_middle_at) > 200, "main flows");
+    assert!(count(&light, start, to_middle_at) > 40, "light flows");
+    assert_eq!(
+        count(&middle, start, to_middle_at),
+        0,
+        "the middle track is not sent to a subscriber that did not ask"
+    );
+
+    // Middle: middle and light carry packets, the main track stops.
+    assert!(
+        count(&middle, to_middle_at, to_main_at) > 100,
+        "middle flows"
+    );
+    assert!(
+        count(&light, to_middle_at, to_main_at) > 40,
+        "light flows on"
+    );
+    assert_eq!(
+        count(&main, to_middle_at + IN_FLIGHT, to_main_at),
+        0,
+        "the main track stops"
+    );
+    let first_middle = middle.first().expect("the middle track carried packets");
+    let frame_of =
+        |layer: &FbLayer, frame: u64| layer.frames[usize::try_from(frame).expect("fits")];
+    assert!(
+        frame_of(&layers[1], first_middle.frame).key && first_middle.i == 0,
+        "the middle track begins at the first packet of a key frame \
+         (frame {}, packet {})",
+        first_middle.frame,
+        first_middle.i
+    );
+    assert!(
+        frame_of(&layers[1], first_middle.frame).at >= to_middle_at,
+        "a key frame the publisher wrote after it was asked"
+    );
+
+    // Main again: the main track resumes from a key frame, the middle
+    // track stops, the light track flows on.
+    assert!(count(&main, to_main_at, end) > 200, "main flows again");
+    assert!(count(&light, to_main_at, end) > 40, "light flows on");
+    assert_eq!(
+        count(&middle, to_main_at + IN_FLIGHT, end),
+        0,
+        "the middle track stops"
+    );
+    let resumed = main
+        .iter()
+        .find(|p| p.at >= to_main_at)
+        .expect("the main track resumed");
+    let resumed_at = main
+        .iter()
+        .position(|p| p.seq == resumed.seq)
+        .expect("in the list");
+    // The first packet after the pause: nothing arrived on the track for
+    // a while before it.
+    let before = main[resumed_at - 1];
+    assert!(
+        resumed.at.saturating_duration_since(before.at) > Duration::from_secs(1),
+        "the pause is visible on the main track"
+    );
+    assert!(
+        frame_of(&layers[0], resumed.frame).key && resumed.i == 0,
+        "the main track resumes at the first packet of a key frame \
+         (frame {}, packet {})",
+        resumed.frame,
+        resumed.i
+    );
+    assert!(
+        frame_of(&layers[0], resumed.frame).at >= to_main_at,
+        "a key frame the publisher wrote after it was asked"
+    );
+    assert!(
+        resumed.frame > before.frame + 20,
+        "about 45 frames of the main sender went by during the pause"
+    );
+    // No sequence gap across the pause, or anywhere: the numbers the
+    // subscriber was handed on the main track are consecutive, and it was
+    // sent no retransmission on it (it asked for none).
+    for pair in main.windows(2) {
+        assert_eq!(
+            pair[1].seq,
+            pair[0].seq.wrapping_add(1),
+            "the main track's sequence numbers are consecutive (frames {} and {})",
+            pair[0].frame,
+            pair[1].frame
+        );
+    }
+    for pair in middle.windows(2) {
+        assert_eq!(pair[1].seq, pair[0].seq.wrapping_add(1));
+    }
+    let main_rtx = {
+        let mut api = b.rtc.direct_api();
+        let stream = api.stream_rx_by_mid(main_mid, None).expect("the stream");
+        stream.rtx().map(|rtx| *rtx)
+    };
+    let main_rtx = main_rtx.expect("the main track has a retransmission stream");
+    assert_eq!(
+        b.rtp_in.iter().filter(|p| p.ssrc == main_rtx).count(),
+        0,
+        "no retransmission was sent on the main track"
+    );
+
+    // The publisher was asked for a key frame on the track that was to
+    // start, at the moment it was wanted.
+    let asked = |mid: Mid, from: Instant, until: Instant| {
+        a.keyframe_request_mids
+            .iter()
+            .zip(&a.keyframe_request_at)
+            .filter(|(m, at)| **m == mid && **at >= from && **at < until)
+            .count()
+    };
+    assert!(
+        asked(pub_middle, to_middle_at, to_main_at) >= 1,
+        "a key frame of the middle sender was asked for when it was wanted"
+    );
+    assert!(
+        asked(pub_main, to_main_at, end) >= 1,
+        "a key frame of the main sender was asked for when it was wanted again"
+    );
+    assert_eq!(
+        asked(pub_middle, start, to_middle_at),
+        0,
+        "nobody asks for a key frame of a track nobody is sent"
+    );
+}
+
+// ============================================================
+// ADR-0070 step 6: the SFU estimates a subscriber's downlink and
+// gives up the larger pictures first
+// ============================================================
+
+/// A link of a given rate with a drop-tail queue, between a client's
+/// socket and the client: a token bucket one packet deep. A datagram that
+/// arrives while the queue is full is lost; every other datagram leaves
+/// when the ones before it have, at the link's rate. With no rate the
+/// link passes everything at once, in order.
+struct RateLimitedLink {
+    /// Added to every datagram's way after the bottleneck.
+    delay: Duration,
+    /// And up to this much more, drawn per datagram; the order of the
+    /// datagrams is kept.
+    jitter: Duration,
+    /// State of the generator the jitter is drawn from, so a run repeats.
+    rng: u64,
+    /// When the datagram last handed over comes out of the delay.
+    last_out: Instant,
+    /// Bits per second; `None` passes everything.
+    rate_bps: Option<u64>,
+    /// Most bytes waiting.
+    queue_limit: usize,
+    queue: std::collections::VecDeque<(Instant, Vec<u8>, SocketAddr)>,
+    queued_bytes: usize,
+    /// When the datagram last taken leaves.
+    next_free: Instant,
+    /// Media datagrams lost at the full queue: when, and their SSRC.
+    dropped: Vec<(Instant, u32)>,
+    /// Every media datagram that reached the link: when, and its SSRC.
+    entered: Vec<(Instant, u32)>,
+    /// Media datagrams that left the link: when they left, SSRC, bytes.
+    passed: Vec<(Instant, u32, usize)>,
+}
+
+impl RateLimitedLink {
+    fn new(rate_bps: Option<u64>, queue_limit: usize) -> Self {
+        Self {
+            delay: Duration::ZERO,
+            jitter: Duration::ZERO,
+            rng: 0x5eed,
+            last_out: Instant::now(),
+            rate_bps,
+            queue_limit,
+            queue: std::collections::VecDeque::new(),
+            queued_bytes: 0,
+            next_free: Instant::now(),
+            dropped: Vec::new(),
+            entered: Vec::new(),
+            passed: Vec::new(),
+        }
+    }
+
+    /// A datagram reaches the link at `at`.
+    fn arrive(&mut self, at: Instant, bytes: &[u8], source: SocketAddr) {
+        if let Some(rtp) = rtp_seen(bytes) {
+            self.entered.push((at, rtp.ssrc));
+        }
+        let starts = at.max(self.next_free);
+        let leaves = match self.rate_bps {
+            None => starts,
+            Some(rate) => {
+                // What waits at the bottleneck is what it has not yet
+                // sent: the time until it is free, at its rate. (The
+                // delay after it holds datagrams too, and those are not
+                // in its queue.)
+                #[allow(
+                    clippy::cast_precision_loss,
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss
+                )]
+                let waiting = (self.next_free.saturating_duration_since(at).as_secs_f64()
+                    * rate as f64
+                    / 8.0) as usize;
+                if waiting + bytes.len() > self.queue_limit {
+                    if let Some(rtp) = rtp_seen(bytes) {
+                        self.dropped.push((at, rtp.ssrc));
+                    }
+                    return;
+                }
+                #[allow(clippy::cast_precision_loss)]
+                let secs = (bytes.len() * 8) as f64 / rate as f64;
+                starts + Duration::from_secs_f64(secs)
+            },
+        };
+        self.next_free = leaves;
+        self.queued_bytes += bytes.len();
+        let mut out = leaves + self.delay;
+        if !self.jitter.is_zero() {
+            self.rng = self.rng.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.rng;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^= z >> 31;
+            let micros = u64::try_from(self.jitter.as_micros()).unwrap_or(1).max(1);
+            out += Duration::from_micros(z % micros);
+        }
+        let out = out.max(self.last_out);
+        self.last_out = out;
+        self.queue.push_back((out, bytes.to_vec(), source));
+    }
+
+    /// The next datagram that has left the link by `now`, with when.
+    fn leave(&mut self, now: Instant) -> Option<(Instant, Vec<u8>, SocketAddr)> {
+        if self.queue.front().is_some_and(|(at, _, _)| *at <= now) {
+            let (at, bytes, source) = self.queue.pop_front()?;
+            self.queued_bytes -= bytes.len();
+            if let Some(rtp) = rtp_seen(&bytes) {
+                self.passed.push((at, rtp.ssrc, bytes.len()));
+            }
+            return Some((at, bytes, source));
+        }
+        None
+    }
+}
+
+/// Which of a publisher's three tracks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DlRole {
+    Main,
+    Middle,
+    Light,
+}
+
+/// One packet the subscriber of a downlink run was handed.
+#[derive(Clone, Copy)]
+struct DlGot {
+    at: Instant,
+    publisher: usize,
+    role: DlRole,
+    seq: u16,
+}
+
+/// One line of the timeline a downlink run prints: the SFU's own view of
+/// the subscriber's downlink at a moment.
+#[derive(Clone, Copy)]
+struct DlSample {
+    at: Instant,
+    snap: lakko_svc_sfu::media::DownlinkSnapshot,
+}
+
+/// What a downlink run is.
+#[derive(Clone, Copy)]
+struct DownlinkCase {
+    /// The subscriber's downlink rate, bits per second, from the start
+    /// until `lift_after`; `None` is an unlimited link throughout.
+    limit_bps: Option<u64>,
+    /// Bytes the limited link queues.
+    queue_limit: usize,
+    /// How long after the publishers start the limit is lifted.
+    lift_after: Duration,
+    /// The run ends this long after the publishers start, or as soon as
+    /// the subscriber has been given every main track again for
+    /// `DL_STABLE` after the lift.
+    run_for: Duration,
+    /// `LAKKO_SFU_DOWNLINK_CONTROL`.
+    downlink_control: bool,
+    /// One-way delay and jitter added on the subscriber's downlink.
+    delay: Duration,
+    jitter: Duration,
+    /// A dip on the subscriber's downlink: from this long after the
+    /// publishers start, for a second, only 30% of the media datagrams
+    /// arrive (ADR-0070's dip).
+    dip_after: Option<Duration>,
+    /// The first publisher's frames are withheld for [`DL_CLUMP`] from
+    /// this long after the publishers start, and then written together:
+    /// an uplink that stalled and delivered in a clump.
+    clump_at: Option<Duration>,
+    /// Every publisher's frames are withheld for [`DL_CLUMP`] from this
+    /// long after the publishers start (what a stall of this test's own
+    /// loop does, and three uplinks stalling at once).
+    clump_all_at: Option<Duration>,
+    /// And every publisher's once more this long after the limit is
+    /// lifted.
+    clump_after_lift: Option<Duration>,
+    /// The subscriber asks for a key frame (PLI) on every video track it
+    /// receives, five times a second for the whole run: a receiver that
+    /// cannot decode what it is sent. And it wants main of the first
+    /// publisher, middle of the second and light of the third, so that a
+    /// track of every role is being sent.
+    subscriber_keeps_asking: bool,
+    /// And stops asking this long after the publishers start (it has a
+    /// picture). `None`: it asks to the end.
+    asking_stops_after: Option<Duration>,
+    /// The publishers' packets carry no frame descriptor (Firefox
+    /// negotiates none): the SFU cannot see a key frame.
+    no_descriptor: bool,
+}
+
+/// What a downlink run observed.
+struct DownlinkRun {
+    /// When the publishers started.
+    t0: Instant,
+    /// When the limit was lifted, if it was.
+    lifted_at: Option<Instant>,
+    ended_at: Instant,
+    /// The publishers' peer ids, in the order they joined.
+    publishers: Vec<String>,
+    /// Every `video-given` frame the subscriber received: when, and the
+    /// set as (publisher index, quality).
+    given: Vec<(Instant, Vec<(usize, lakko_svc_sfu::protocol::VideoQuality)>)>,
+    /// The SFU's view, twice a second.
+    samples: Vec<DlSample>,
+    /// Everything the subscriber was handed.
+    got: Vec<DlGot>,
+    /// Media datagrams the limited link lost and passed, by track:
+    /// (when, publisher, role, is the retransmission stream).
+    link_dropped: Vec<(Instant, usize, DlRole, bool)>,
+    /// Bytes that left the link on retransmission streams, and of those
+    /// the bytes of padding-only packets ([`DL_PADDING_BELOW`]).
+    /// Every media datagram the SFU sent toward the subscriber, as it
+    /// reached the link: when, the kind of track, and whether it was on
+    /// a retransmission stream (a resent packet, a second copy of a
+    /// light packet, or probe padding).
+    link_entered: Vec<(Instant, DlRole, bool)>,
+    rtx_bytes: usize,
+    padding_bytes: usize,
+    media_bytes: usize,
+    /// Media datagrams lost in the dip.
+    dip_lost: usize,
+    /// The longest the test's own loop went without a pass.
+    worst_stall: Duration,
+    /// For every frame the publishers wrote: when it was due, and how
+    /// late the test's loop wrote it.
+    tick_late: Vec<(Instant, Duration)>,
+    /// When each withholding of the first publisher's frames began.
+    clumps: Vec<Instant>,
+    /// Key frame requests each publisher received on its main, middle
+    /// and light sender.
+    keyframe_requests: Vec<[usize; 3]>,
+    /// When each arrived: (publisher, 0 main / 1 middle / 2 light, time).
+    keyframe_request_times: Vec<(usize, usize, Instant)>,
+    /// The SFU's answer to each publisher's offer, and to the
+    /// subscriber's own; the SFU's offers to the subscriber.
+    publisher_answers: Vec<String>,
+    subscriber_answer: String,
+    sfu_offers: Vec<String>,
+}
+
+/// Packets per delta frame and payload bytes per packet of a main sender
+/// in a downlink run: 14 x 1100 bytes at 25 frames a second is 3.1 Mbit/s.
+const DL_MAIN_PACKETS: u64 = 14;
+const DL_MAIN_PAYLOAD: usize = FB_F_PAYLOAD;
+
+/// A datagram on a retransmission stream shorter than this is padding and
+/// nothing else: 255 bytes of padding, RTP header, header extensions and
+/// the SRTP tag come to less; the smallest media payload of a downlink
+/// run, 375 bytes, to more.
+const DL_PADDING_BELOW: usize = 340;
+
+/// How long after the lift every main track must have been given again
+/// without a break before a run ends early.
+const DL_STABLE: Duration = Duration::from_secs(3);
+
+/// A run in which the test's own loop stood still for longer than this is
+/// not a measurement of the SFU: the publishers, the link model and the
+/// subscriber all live in that loop, and a stall of it is a burst and a
+/// blackout the scenario does not have. It happens when the machine is
+/// loaded, as when this file's tests all run at once.
+///
+/// Chosen from what was seen: on an idle machine the loop's longest stall
+/// was 28 to 179 ms over some thirty runs (the long ones in the first second of a
+/// narrow link, while everything is being sent and asked for again);
+/// with all of this file's tests running at once it stood still for
+/// whole seconds.
+const DL_WORST_STALL: Duration = Duration::from_millis(250);
+/// How long a publisher's frames are withheld in a clump case.
+const DL_CLUMP: Duration = Duration::from_millis(200);
+/// How often a stalled run is repeated before the test gives up.
+const DL_ATTEMPTS: u32 = 3;
+
+/// One downlink run at a time in this process: each is three publishers,
+/// a link model and a subscriber in one loop beside the SFU's media
+/// task, and two of them at once make each other's publishers late.
+static DL_ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Ends the test process when a downlink test has not ended by itself:
+/// a thread on the wall clock, so that it also fires when the test's own
+/// runtime is stuck in a wait, or when the machine slept in the middle
+/// of a run (the monotonic clock every deadline inside the run uses does
+/// not move while it sleeps; one run was found "running" 2 h 13 min
+/// after it started).
+struct DlWatchdog(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl DlWatchdog {
+    #[allow(clippy::print_stderr)]
+    fn start(what: &str, limit: Duration) -> Self {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::clone(&done);
+        let what = what.to_owned();
+        let started = std::time::SystemTime::now();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(1));
+            if seen.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            if started.elapsed().is_ok_and(|elapsed| elapsed > limit) {
+                eprintln!(
+                    "{what}: the test did not end within {limit:?} by the wall clock; ending \
+                     the process"
+                );
+                std::process::abort();
+            }
+        });
+        Self(done)
+    }
+}
+
+impl Drop for DlWatchdog {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// [`run_downlink`], repeated while the test's own loop stalled
+/// ([`DL_WORST_STALL`]). Every attempt's timeline is printed. Panics
+/// when no attempt ran without a stall: nothing was measured.
+#[allow(clippy::print_stderr)]
+async fn run_downlink_measured(what: &str, case: DownlinkCase) -> DownlinkRun {
+    // One attempt ends by itself `run_for` after its publishers start,
+    // and gives up a minute after that at the latest; anything longer is
+    // a wait that will not end.
+    let attempt_limit = case.run_for + Duration::from_secs(90);
+    let _watchdog = DlWatchdog::start(what, attempt_limit * DL_ATTEMPTS);
+    for attempt in 1..=DL_ATTEMPTS {
+        let run = {
+            let _one = DL_ONE_AT_A_TIME.lock().await;
+            let ended = tokio::time::timeout(attempt_limit, Box::pin(run_downlink(case))).await;
+            assert!(
+                ended.is_ok(),
+                "{what}: attempt {attempt} did not end within {attempt_limit:?}: the run was \
+                 waiting on the SFU's media task or on a client and never got back to its own \
+                 loop"
+            );
+            ended.expect("just checked")
+        };
+        if run.worst_stall <= DL_WORST_STALL {
+            eprintln!(
+                "{what}: attempt {attempt} is the measurement ({} discarded before it)",
+                attempt - 1
+            );
+            return run;
+        }
+        print_downlink_timeline(what, &run);
+        eprintln!(
+            "{what}: attempt {attempt} is not a measurement: the test's own loop stood still \
+             for {} ms",
+            run.worst_stall.as_millis()
+        );
+    }
+    panic!("{what}: the machine was too loaded to measure in {DL_ATTEMPTS} attempts");
+}
+
+/// Three publishers, each with three declared senders (main 3.1 Mbit/s,
+/// middle 500 kbit/s, light 150 kbit/s, at 25 frames a second), and one
+/// subscriber that asks for the main picture of all three, through the
+/// production media task under server-side bitrate control. The
+/// subscriber's downlink is a [`RateLimitedLink`]. A publisher answers a
+/// keyframe request with a key frame on that sender, as an encoder does;
+/// it does not follow the SFU's REMB.
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+async fn run_downlink(case: DownlinkCase) -> DownlinkRun {
+    use lakko_svc_sfu::frame_descriptor::PacketDescriptor;
+    use lakko_svc_sfu::media::{LIGHT_STREAM_SUFFIX, MIDDLE_STREAM_SUFFIX};
+    use lakko_svc_sfu::protocol::{VideoQuality, VideoWant};
+
+    const PUBLISHERS: usize = 3;
+
+    struct Publisher {
+        client: SyntheticClient,
+        id: PeerId,
+        layers: [FbLayer; 3],
+        plis_handled: usize,
+        /// The next frame this publisher has not written yet.
+        next_tick: u64,
+    }
+
+    // `LAKKO_SFU_E2E_LOG=1` prints the SFU's own log lines of the run.
+    if std::env::var_os("LAKKO_SFU_E2E_LOG").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_timer(tracing_subscriber::fmt::time::uptime())
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
+    let call = "downlink-control-call";
+    let peers = PeerRegistry::new();
+    let mut registered = register_subscribers(&peers, call, 1).await;
+    let (b_id, mut b_rx) = registered.pop().expect("one registered");
+    let (media_task, sfu_addr) = spawn_media_task_with_bitrate_control(
+        "127.0.0.1:0".parse().unwrap(),
+        None,
+        peers,
+        MediaTaskOptions {
+            diagnostics: None,
+            video_fec: false,
+            uplink_fallback: false,
+            protection: LossProtection::default(),
+            downlink_control: case.downlink_control,
+        },
+        BitrateControl::Server(EstimatorConfig::default()),
+    )
+    .await
+    .expect("UDP bind on loopback:0 succeeds");
+
+    let rtp_client = || {
+        Rtc::builder().set_rtp_mode(true).set_extension(
+            GENERIC_FRAME_DESCRIPTOR_ID,
+            generic_frame_descriptor_extension(),
+        )
+    };
+    let mut b = SyntheticClient::build(rtp_client()).await;
+    let (b_offer, b_pending) = b.create_video_subscriber_offer();
+    let subscriber_answer = media_task
+        .accept_offer(b_id.clone(), call.to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's subscriber offer");
+    b.accept_answer(b_pending, &subscriber_answer)
+        .expect("B applies the SFU's answer");
+
+    let mut publishers: Vec<Publisher> = Vec::new();
+    let mut publisher_answers = Vec::new();
+    for _ in 0..PUBLISHERS {
+        let mut client = SyntheticClient::build(rtp_client()).await;
+        let id = PeerId::fresh();
+        let (offer, pending, main, light, middle) = client.create_three_sender_publisher_offer();
+        let answer = media_task
+            .accept_offer_with_copies(
+                id.clone(),
+                call.to_owned(),
+                offer,
+                vec![light.to_string()],
+                vec![middle.to_string()],
+            )
+            .await
+            .expect("SFU accepts a publisher's offer");
+        client
+            .accept_answer(pending, &answer)
+            .expect("the publisher applies the SFU's answer");
+        publisher_answers.push(answer);
+        let layer = |mid: Mid, tag: u8, packets: u64, payload: usize, first_seq: u64| FbLayer {
+            rid: None,
+            mid: Some(mid),
+            tag,
+            packets,
+            payload,
+            next_seq: first_seq,
+            frames: Vec::new(),
+            want_key: true,
+        };
+        publishers.push(Publisher {
+            client,
+            id,
+            layers: [
+                layer(main, b'f', DL_MAIN_PACKETS, DL_MAIN_PAYLOAD, FB_F_FIRST_SEQ),
+                layer(middle, b'm', 5, 500, 40_000),
+                layer(light, b'q', FB_Q_PACKETS, FB_Q_PAYLOAD, FB_Q_FIRST_SEQ),
+            ],
+            plis_handled: 0,
+            next_tick: 0,
+        });
+    }
+    let names: Vec<String> = publishers.iter().map(|p| p.id.to_string()).collect();
+    let index_of = |peer: &str| names.iter().position(|n| n == peer);
+
+    let mut link = RateLimitedLink::new(case.limit_bps, case.queue_limit);
+    link.delay = case.delay;
+    link.jitter = case.jitter;
+    let mut dip_lost = 0usize;
+    // B's datagrams are taken off its socket by a task of their own and
+    // stamped there: when a datagram reached the client is what its
+    // transport-wide feedback reports, and it must not depend on how busy
+    // this loop is.
+    let (arrived_tx, mut arrived) = mpsc::unbounded_channel::<(Instant, Vec<u8>, SocketAddr)>();
+    let b_socket = b.socket.clone();
+    let receiver = tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while let Ok((len, src)) = b_socket.recv_from(&mut buf).await {
+            if arrived_tx
+                .send((Instant::now(), buf[..len].to_vec(), src))
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let frame_every = Duration::from_micros(1_000_000 / DIP_FPS);
+    let give_up = Instant::now() + case.run_for + Duration::from_secs(60);
+    let mut offers: Vec<String> = Vec::new();
+    let mut tracks: Vec<(Mid, usize, DlRole)> = Vec::new();
+    let mut t0: Option<Instant> = None;
+    let mut ticks: u64 = 0;
+    let mut lifted_at: Option<Instant> = None;
+    let mut given: Vec<(Instant, Vec<(usize, VideoQuality)>)> = Vec::new();
+    let mut samples: Vec<DlSample> = Vec::new();
+    let mut next_sample = Instant::now();
+    let mut got: Vec<DlGot> = Vec::new();
+    let mut buf = [0u8; 2048];
+    let mut last_pass: Option<Instant> = None;
+    let mut worst_stall = Duration::ZERO;
+    let mut tick_late: Vec<(Instant, Duration)> = Vec::new();
+    let mut clumps: Vec<Instant> = Vec::new();
+    let mut next_pli = Instant::now();
+
+    loop {
+        let now = Instant::now();
+        // How long this loop (the publishers, the link and the subscriber
+        // all live in it) went without a pass, once the publishers run.
+        if t0.is_some_and(|start| now >= start) {
+            if let Some(last) = last_pass {
+                worst_stall = worst_stall.max(now.saturating_duration_since(last));
+            }
+            last_pass = Some(now);
+        }
+        assert!(
+            now < give_up,
+            "the run did not finish: ticks={ticks} b_connected={} offers={}",
+            b.is_connected(),
+            offers.len()
+        );
+        if let Some(start) = t0 {
+            if lifted_at.is_none() && case.limit_bps.is_some() && now >= start + case.lift_after {
+                link.rate_bps = None;
+                lifted_at = Some(now);
+            }
+            if now >= start + case.run_for {
+                break;
+            }
+            // Every main track given again and nothing else since: done.
+            if let (Some(lifted), Some((at, set))) = (lifted_at, given.last()) {
+                let all_main = set.len() == PUBLISHERS
+                    && set
+                        .iter()
+                        .all(|(_, quality)| *quality == VideoQuality::Main);
+                if all_main && now >= (*at).max(lifted) + DL_STABLE {
+                    break;
+                }
+            }
+        }
+
+        for publisher in &mut publishers {
+            let _ = publisher.client.drain().await;
+            let client = &publisher.client;
+            while publisher.plis_handled < client.keyframe_request_mids.len() {
+                let on = client.keyframe_request_mids[publisher.plis_handled];
+                publisher.plis_handled += 1;
+                for layer in &mut publisher.layers {
+                    if layer.mid == Some(on) {
+                        layer.want_key = true;
+                    }
+                }
+            }
+        }
+        let _ = b.drain().await;
+        // What B was handed since the last pass, kept small.
+        for ((packet, at), track) in b
+            .rtp_got
+            .drain(..)
+            .zip(b.rtp_got_at.drain(..))
+            .zip(b.rtp_got_track.drain(..))
+        {
+            let Some((_, publisher, role)) = tracks.iter().find(|(mid, _, _)| Some(*mid) == track)
+            else {
+                continue;
+            };
+            let tag = match role {
+                DlRole::Main => b'f',
+                DlRole::Middle => b'm',
+                DlRole::Light => b'q',
+            };
+            assert_eq!(
+                packet.payload.first(),
+                Some(&tag),
+                "a packet arrives on the track of its sender"
+            );
+            got.push(DlGot {
+                at,
+                publisher: *publisher,
+                role: *role,
+                seq: packet.seq,
+            });
+        }
+        b.rtp_got_playout.clear();
+        b.rtp_packets.clear();
+        b.rtp_in.clear();
+        dip_lost += b.dip_in_lost.len();
+        b.dip_in_lost.clear();
+
+        while let Ok(frame) = b_rx.try_recv() {
+            match frame {
+                ServerFrame::SdpOffer { sdp } => {
+                    let answer = b.answer_renegotiation(&sdp).expect("B answers");
+                    media_task
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .expect("the SFU takes B's answer");
+                    for (mid, stream) in video_msids(&sdp) {
+                        if tracks.iter().any(|(m, _, _)| *m == mid) {
+                            continue;
+                        }
+                        let (peer, role) =
+                            if let Some(peer) = stream.strip_suffix(MIDDLE_STREAM_SUFFIX) {
+                                (peer, DlRole::Middle)
+                            } else if let Some(peer) = stream.strip_suffix(LIGHT_STREAM_SUFFIX) {
+                                (peer, DlRole::Light)
+                            } else {
+                                (stream.as_str(), DlRole::Main)
+                            };
+                        if let Some(publisher) = index_of(peer) {
+                            tracks.push((mid, publisher, role));
+                        }
+                    }
+                    offers.push(sdp);
+                },
+                ServerFrame::VideoGiven { given: set } => {
+                    let set = set
+                        .iter()
+                        .map(|entry| {
+                            (
+                                index_of(&entry.peer).expect("a publisher of this call"),
+                                entry.quality,
+                            )
+                        })
+                        .collect();
+                    given.push((Instant::now(), set));
+                },
+                _ => {},
+            }
+        }
+
+        if t0.is_none() && b.is_connected() && tracks.len() == PUBLISHERS * 3 {
+            let ready = publishers.iter_mut().all(|publisher| {
+                let connected = publisher.client.is_connected();
+                let mut api = publisher.client.rtc.direct_api();
+                connected
+                    && publisher.layers.iter().all(|layer| {
+                        layer
+                            .mid
+                            .and_then(|mid| api.stream_tx_by_mid(mid, None))
+                            .is_some_and(|stream| stream.rtx().is_some())
+                    })
+            });
+            if ready {
+                // The subscriber shows the main picture of all three, the
+                // first publisher being the most important.
+                media_task
+                    .set_video_wants(
+                        b_id.clone(),
+                        names
+                            .iter()
+                            .enumerate()
+                            .map(|(index, peer)| VideoWant {
+                                peer: peer.clone(),
+                                quality: match (case.subscriber_keeps_asking, index) {
+                                    (true, 1) => VideoQuality::Middle,
+                                    (true, 2) => VideoQuality::Light,
+                                    _ => VideoQuality::Main,
+                                },
+                            })
+                            .collect(),
+                    )
+                    .expect("the media task takes the wants");
+                let start = Instant::now() + Duration::from_millis(50);
+                t0 = Some(start);
+                if let Some(after) = case.dip_after {
+                    b.dip_in = Some(DipLoss {
+                        from: start + after,
+                        until: start + after + Duration::from_secs(1),
+                        p: 0.7,
+                        rng: 0xd1b,
+                    });
+                }
+            }
+        }
+        if let Some(start) = t0 {
+            let due = start + frame_every * (ticks as u32);
+            if Instant::now() >= due {
+                tick_late.push((due, Instant::now().saturating_duration_since(due)));
+                // The first publisher's uplink stalls: its frames are
+                // withheld and then written together.
+                let withheld = [
+                    case.clump_at.map(|after| (start + after, false)),
+                    case.clump_all_at.map(|after| (start + after, true)),
+                    lifted_at
+                        .zip(case.clump_after_lift)
+                        .map(|(at, after)| (at + after, true)),
+                ]
+                .into_iter()
+                .flatten()
+                .find(|(from, _)| due >= *from && due < *from + DL_CLUMP);
+                if let Some((from, _)) = withheld {
+                    if !clumps.contains(&from) {
+                        clumps.push(from);
+                    }
+                }
+                for (index, publisher) in publishers.iter_mut().enumerate() {
+                    if withheld.is_some_and(|(_, all)| all || index == 0) {
+                        continue;
+                    }
+                    for tick in publisher.next_tick..=ticks {
+                        for layer in &mut publisher.layers {
+                            let frame = layer.frames.len() as u64;
+                            let key = std::mem::take(&mut layer.want_key);
+                            let n = if key {
+                                layer.packets * FB_KEY_FACTOR
+                            } else {
+                                layer.packets
+                            };
+                            let rtp_time = 90_000 + (tick * (90_000 / DIP_FPS)) as u32;
+                            let written = Instant::now();
+                            for i in 0..n {
+                                let mut ext = str0m::rtp::ExtensionValues::default();
+                                if !case.no_descriptor {
+                                    ext.user_values
+                                        .set(PacketDescriptor(fb_descriptor(frame, key, i, n)));
+                                }
+                                let seq = layer.next_seq;
+                                layer.next_seq += 1;
+                                let mut api = publisher.client.rtc.direct_api();
+                                let stream = api
+                                    .stream_tx_by_mid(layer.mid.expect("offered"), None)
+                                    .expect("send stream");
+                                stream
+                                    .write_rtp(
+                                        UPLINK_VP8_PT.into(),
+                                        seq.into(),
+                                        rtp_time,
+                                        written,
+                                        i + 1 == n,
+                                        ext,
+                                        true,
+                                        fb_payload(layer.tag, frame, i, layer.payload),
+                                    )
+                                    .expect("a publisher writes a packet");
+                            }
+                            // Only the count is used; the list would grow for
+                            // the whole run otherwise.
+                            if layer.frames.len() < 4 {
+                                layer.frames.push(FbFrame {
+                                    key,
+                                    n,
+                                    at: written,
+                                });
+                            }
+                        }
+                    }
+                    publisher.next_tick = ticks + 1;
+                    publisher.client.feed_timeout();
+                    let _ = publisher.client.drain().await;
+                    publisher.client.rtp_out.clear();
+                    publisher.client.wire_headers.clear();
+                }
+                ticks += 1;
+            }
+            let still_asking = case
+                .asking_stops_after
+                .map_or(true, |after| Instant::now() < start + after);
+            if case.subscriber_keeps_asking && still_asking && Instant::now() >= next_pli {
+                next_pli = Instant::now() + Duration::from_millis(200);
+                for (mid, _, _) in &tracks {
+                    let _ = b.send_pli(*mid);
+                }
+            }
+            if Instant::now() >= next_sample {
+                next_sample = Instant::now() + Duration::from_millis(500);
+                if let Some(snap) = media_task
+                    .downlink_snapshot(b_id.clone())
+                    .await
+                    .expect("the media task answers")
+                {
+                    samples.push(DlSample {
+                        at: Instant::now(),
+                        snap,
+                    });
+                }
+            }
+        }
+
+        // A client in RTP mode holds one received packet at a time: it is
+        // drained after every datagram.
+        for publisher in &mut publishers {
+            while let Ok((len, src)) = publisher.client.socket.try_recv_from(&mut buf) {
+                publisher.client.feed_receive(&buf[..len], src, sfu_addr);
+                let _ = publisher.client.drain().await;
+            }
+            publisher.client.feed_timeout();
+            let _ = publisher.client.drain().await;
+        }
+        while let Ok((at, bytes, src)) = arrived.try_recv() {
+            link.arrive(at, &bytes, src);
+        }
+        while let Some((at, bytes, src)) = link.leave(Instant::now()) {
+            b.feed_receive_at(&bytes, src, sfu_addr, at);
+            let _ = b.drain().await;
+        }
+        b.feed_timeout();
+        let _ = b.drain().await;
+
+        // Wake for B's socket, for the next datagram leaving the link, or
+        // within a millisecond for everything else.
+        let wait = link
+            .queue
+            .front()
+            .map_or(Duration::from_millis(1), |(at, _, _)| {
+                at.saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(1))
+            });
+        tokio::select! {
+            r = arrived.recv() => {
+                if let Some((at, bytes, src)) = r {
+                    link.arrive(at, &bytes, src);
+                }
+            }
+            () = tokio::time::sleep(wait) => {}
+        }
+    }
+    receiver.abort();
+
+    // Which SSRC is which track, main stream and retransmission stream.
+    let mut ssrcs: Vec<(u32, usize, DlRole, bool)> = Vec::new();
+    for (mid, publisher, role) in &tracks {
+        let mut api = b.rtc.direct_api();
+        if let Some(stream) = api.stream_rx_by_mid(*mid, None) {
+            ssrcs.push((*stream.ssrc(), *publisher, *role, false));
+            if let Some(rtx) = stream.rtx() {
+                ssrcs.push((*rtx, *publisher, *role, true));
+            }
+        }
+    }
+    let track_of = |ssrc: u32| ssrcs.iter().find(|(s, _, _, _)| *s == ssrc).copied();
+    let link_dropped = link
+        .dropped
+        .iter()
+        .filter_map(|(at, ssrc)| track_of(*ssrc).map(|(_, p, role, rtx)| (*at, p, role, rtx)))
+        .collect();
+    let link_entered = link
+        .entered
+        .iter()
+        .filter_map(|(at, ssrc)| track_of(*ssrc).map(|(_, _, role, rtx)| (*at, role, rtx)))
+        .collect();
+    let mut rtx_bytes = 0;
+    let mut padding_bytes = 0;
+    let mut media_bytes = 0;
+    for (_, ssrc, len) in &link.passed {
+        match track_of(*ssrc) {
+            Some((_, _, _, true)) => {
+                rtx_bytes += len;
+                // A padding-only packet carries at most 255 bytes; every
+                // media payload of this run is 375 bytes or more, so a
+                // datagram this small on a retransmission stream is one.
+                if *len < DL_PADDING_BELOW {
+                    padding_bytes += len;
+                }
+            },
+            Some(_) => media_bytes += len,
+            None => {},
+        }
+    }
+
+    let keyframe_requests = publishers
+        .iter()
+        .map(|publisher| {
+            let on = |layer: &FbLayer| {
+                publisher
+                    .client
+                    .keyframe_request_mids
+                    .iter()
+                    .filter(|mid| Some(**mid) == layer.mid)
+                    .count()
+            };
+            [
+                on(&publisher.layers[0]),
+                on(&publisher.layers[1]),
+                on(&publisher.layers[2]),
+            ]
+        })
+        .collect();
+
+    let mut keyframe_request_times = Vec::new();
+    for (index, publisher) in publishers.iter().enumerate() {
+        let client = &publisher.client;
+        for (mid, at) in client
+            .keyframe_request_mids
+            .iter()
+            .zip(&client.keyframe_request_at)
+        {
+            if let Some(track) = publisher.layers.iter().position(|l| l.mid == Some(*mid)) {
+                keyframe_request_times.push((index, track, *at));
+            }
+        }
+    }
+
+    DownlinkRun {
+        t0: t0.expect("the publishers streamed"),
+        lifted_at,
+        ended_at: Instant::now(),
+        publishers: names,
+        given,
+        samples,
+        got,
+        link_dropped,
+        link_entered,
+        rtx_bytes,
+        padding_bytes,
+        media_bytes,
+        dip_lost,
+        worst_stall,
+        tick_late,
+        clumps,
+        keyframe_requests,
+        keyframe_request_times,
+        publisher_answers,
+        subscriber_answer,
+        sfu_offers: offers,
+    }
+}
+
+/// The given set as letters, most important publisher first: `M` main,
+/// `m` middle, `l` light.
+fn dl_letters(set: &[(usize, lakko_svc_sfu::protocol::VideoQuality)]) -> String {
+    use lakko_svc_sfu::protocol::VideoQuality;
+    set.iter()
+        .map(|(_, quality)| match quality {
+            VideoQuality::Main => 'M',
+            VideoQuality::Middle => 'm',
+            VideoQuality::Light => 'l',
+        })
+        .collect()
+}
+
+/// Print a downlink run second by second: the SFU's view of the
+/// subscriber's downlink, what the subscriber was told it is given, what
+/// it was handed on each kind of track and what its link lost.
+#[allow(
+    clippy::print_stderr,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
+fn print_downlink_timeline(what: &str, run: &DownlinkRun) {
+    let secs = |at: Instant| at.saturating_duration_since(run.t0).as_secs_f64();
+    eprintln!(
+        "{what}: lifted at {:?} s, ended at {:.1} s",
+        run.lifted_at.map(|at| (secs(at) * 10.0).round() / 10.0),
+        secs(run.ended_at)
+    );
+    eprintln!(
+        "{what}: every video-given frame (s, set; M main, m middle, l light, first is most \
+         important): {:?}",
+        run.given
+            .iter()
+            .map(|(at, set)| format!("{:.2} {}", secs(*at), dl_letters(set)))
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "{what}:   s | budget carried sending demand probing kbit/s | given M/m/l | probes \
+         started/carried, padding kB, cuts, standing queue ms, detector | handed main/middle/light pkts | link lost \
+         main/middle/light/light-rtx/other-rtx | SFU sent main/middle/light first \
+         transmissions and retransmission-stream packets | the test's publishers: frames \
+         written, the latest by ms"
+    );
+    let whole = run.ended_at.saturating_duration_since(run.t0).as_secs();
+    for second in 0..=whole {
+        let from = run.t0 + Duration::from_secs(second);
+        let until = from + Duration::from_secs(1);
+        let within = |at: Instant| at >= from && at < until;
+        let sample = run.samples.iter().rfind(|sample| sample.at < until);
+        let kbps =
+            |bps: Option<u64>| bps.map_or_else(|| "-".to_owned(), |b| (b / 1000).to_string());
+        let handed = |role: DlRole| {
+            run.got
+                .iter()
+                .filter(|p| p.role == role && within(p.at))
+                .count()
+        };
+        let lost = |role: DlRole, rtx: bool| {
+            run.link_dropped
+                .iter()
+                .filter(|(at, _, r, x)| within(*at) && *r == role && *x == rtx)
+                .count()
+        };
+        let other_rtx = lost(DlRole::Main, true) + lost(DlRole::Middle, true);
+        let entered = |role: Option<DlRole>, rtx: bool| {
+            run.link_entered
+                .iter()
+                .filter(|(at, r, x)| {
+                    within(*at) && *x == rtx && role.map_or(true, |role| *r == role)
+                })
+                .count()
+        };
+        eprintln!(
+            "{what}: {second:>3} | {:>6} {:>7} {:>7} {:>6} {:>7} | {} | {} | {:>4}/{:>4}/{:>4} | \
+             {}/{}/{}/{}/{} | {}/{}/{} {} | {} {}",
+            sample.map_or_else(|| "-".to_owned(), |s| kbps(s.snap.budget_bps)),
+            sample.map_or_else(|| "-".to_owned(), |s| kbps(s.snap.carried_bps)),
+            sample.map_or_else(
+                || "-".to_owned(),
+                |s| (s.snap.sending_bps / 1000).to_string()
+            ),
+            sample.map_or_else(|| "-".to_owned(), |s| kbps(s.snap.demand_bps)),
+            sample.map_or_else(|| "-".to_owned(), |s| kbps(s.snap.probing_bps)),
+            sample.map_or_else(
+                || "-".to_owned(),
+                |s| format!("{}/{}/{}", s.snap.main, s.snap.middle, s.snap.light)
+            ),
+            sample.map_or_else(
+                || "-".to_owned(),
+                |s| format!(
+                    "{}/{} {:>5} {} q{} {}",
+                    s.snap.probes_started,
+                    s.snap.probes_carried,
+                    s.snap.padding_bytes / 1000,
+                    s.snap.cuts,
+                    s.snap
+                        .queue_ms
+                        .map_or_else(|| "-".to_owned(), |q| q.to_string()),
+                    s.snap.detector
+                )
+            ),
+            handed(DlRole::Main),
+            handed(DlRole::Middle),
+            handed(DlRole::Light),
+            lost(DlRole::Main, false),
+            lost(DlRole::Middle, false),
+            lost(DlRole::Light, false),
+            lost(DlRole::Light, true),
+            other_rtx,
+            entered(Some(DlRole::Main), false),
+            entered(Some(DlRole::Middle), false),
+            entered(Some(DlRole::Light), false),
+            entered(None, true),
+            // A frame is counted in the second it was written in.
+            run.tick_late
+                .iter()
+                .filter(|(due, late)| within(*due + *late))
+                .count(),
+            run.tick_late
+                .iter()
+                .filter(|(due, _)| within(*due))
+                .map(|(_, late)| late.as_millis())
+                .max()
+                .unwrap_or(0),
+        );
+    }
+    let total = (run.media_bytes + run.rtx_bytes).max(1);
+    eprintln!(
+        "{what}: bytes that left the link: media {} retransmission streams {} ({:.1}% of all), \
+         of which padding-only packets {} ({:.1}% of all)",
+        run.media_bytes,
+        run.rtx_bytes,
+        run.rtx_bytes as f64 * 100.0 / total as f64,
+        run.padding_bytes,
+        run.padding_bytes as f64 * 100.0 / total as f64,
+    );
+    eprintln!("{what}: media datagrams lost in the dip: {}", run.dip_lost);
+    eprintln!(
+        "{what}: the test's own loop never went longer than {} ms without a pass",
+        run.worst_stall.as_millis()
+    );
+}
+
+/// Sequence numbers a light track never handed the subscriber between
+/// `from` and `until`, over the three light tracks: holes between the
+/// packets it was handed in that time, after retransmission.
+fn dl_light_holes(run: &DownlinkRun, from: Instant, until: Instant) -> usize {
+    let mut holes = 0usize;
+    for publisher in 0..run.publishers.len() {
+        let mut seqs: Vec<u16> = run
+            .got
+            .iter()
+            .filter(|p| {
+                p.publisher == publisher && p.role == DlRole::Light && p.at >= from && p.at < until
+            })
+            .map(|p| p.seq)
+            .collect();
+        let Some(&first) = seqs.first() else {
+            continue;
+        };
+        // Offsets from the first, so a wrap of the 16-bit number is not
+        // a hole.
+        let mut offsets: Vec<u16> = seqs.drain(..).map(|s| s.wrapping_sub(first)).collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        let span = usize::from(*offsets.last().unwrap_or(&0)) + 1;
+        holes += span - offsets.len();
+    }
+    holes
+}
+
+/// The 7.5 Mbit/s link of the narrow-downlink tests, with a 150 ms
+/// drop-tail queue, lifted 40 s after the publishers start.
+const DL_NARROW_BPS: u64 = 7_500_000;
+/// The SFU has settled on one main and two middles this long after the
+/// publishers start, at the latest. (Observed on 2026-10-05: see the
+/// README's "Downlink control".)
+const DL_SETTLED_WITHIN: Duration = Duration::from_secs(10);
+/// All three are back on main this long after the limit is lifted, at
+/// the latest: the longest wait between two probes
+/// (`downlink_probe::PROBE_MAX_RETRY`, 10 s) and two probes of a second
+/// and a half each.
+const DL_BACK_WITHIN: Duration = Duration::from_secs(15);
+/// A link that carries two middle pictures and a light one (2.2 Mbit/s
+/// on the wire) and not three middles (2.5).
+const DL_VERY_NARROW_BPS: u64 = 2_350_000;
+/// A publisher's clump may take a picture from the subscriber for at most
+/// this long. Chosen: the bound the dip case has.
+const DL_CLUMP_BACK_WITHIN: Duration = Duration::from_secs(8);
+/// After this long the limited link must drop nothing more.
+const DL_NO_DROPS_AFTER: Duration = Duration::from_secs(2);
+
+fn dl_narrow_case(delay: Duration, jitter: Duration) -> DownlinkCase {
+    DownlinkCase {
+        limit_bps: Some(DL_NARROW_BPS),
+        queue_limit: (DL_NARROW_BPS / 8 * 150 / 1000) as usize,
+        lift_after: Duration::from_secs(40),
+        run_for: Duration::from_secs(40) + DL_BACK_WITHIN + Duration::from_secs(5),
+        downlink_control: true,
+        delay,
+        jitter,
+        dip_after: None,
+        clump_at: None,
+        clump_all_at: None,
+        clump_after_lift: None,
+        subscriber_keeps_asking: false,
+        asking_stops_after: None,
+        no_descriptor: false,
+    }
+}
+
+/// On a downlink that carries one main and two middle pictures, the SFU
+/// settles on exactly that, and the link drops nothing after its first
+/// two seconds; when the limit is lifted, all three publishers are back
+/// on their main picture. A publisher's own bitrate control is untouched.
+/// The acceptance test of ADR-0070 step 6.
+///
+/// The link: 7.5 Mbit/s with a 150 ms queue. What the three publishers
+/// cost, as the SFU measures it: light 3 x 2 x 0.155 (each light packet is
+/// sent twice) = 0.93 Mbit/s first; a main track 3.11 x 1.2 = 3.74; a
+/// middle track 0.51 x 1.2 = 0.61. One main and two middles need
+/// 5.89 Mbit/s and put 5.1 on the wire; two mains and a middle need 9.0
+/// and would put 7.7 on the wire, more than the link carries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[ignore = "ADR-0070 step 6 acceptance: about a minute; run by name with --ignored"]
+#[allow(clippy::print_stderr)]
+async fn a_narrow_downlink_gives_up_the_larger_pictures_and_gets_them_back() {
+    let what = "narrow downlink";
+    let run = run_downlink_measured(what, dl_narrow_case(Duration::ZERO, Duration::ZERO)).await;
+    check_narrow_downlink(what, &run);
+}
+
+/// The same on a path with 50 ms of one-way delay and up to 10 ms of
+/// jitter after the bottleneck: the estimator works on the growth of
+/// delay, and neither a fixed delay nor jitter of that size may read as
+/// a queue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[ignore = "ADR-0070 step 6 acceptance: about a minute; run by name with --ignored"]
+#[allow(clippy::print_stderr)]
+async fn a_narrow_downlink_with_delay_and_jitter_settles_the_same() {
+    let what = "narrow downlink, 50 ms delay, 10 ms jitter";
+    let run = run_downlink_measured(
+        what,
+        dl_narrow_case(Duration::from_millis(50), Duration::from_millis(10)),
+    )
+    .await;
+    check_narrow_downlink(what, &run);
+}
+
+/// ADR-0070's dip on a downlink that is otherwise unlimited: for one
+/// second only 30% of the media datagrams arrive. A burst of loss with no
+/// growth of delay is not a narrow path: the subscriber must not be left
+/// with less than it asked for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[allow(clippy::print_stderr)]
+async fn a_dip_on_an_unlimited_downlink_does_not_leave_the_subscriber_downgraded() {
+    use lakko_svc_sfu::protocol::VideoQuality::Main;
+
+    /// The longest the subscriber may be given less than it asked for,
+    /// in all, because of the dip.
+    const DOWNGRADED_AT_MOST: Duration = Duration::from_secs(8);
+    let what = "dip on an unlimited downlink";
+    let case = DownlinkCase {
+        limit_bps: None,
+        queue_limit: 0,
+        lift_after: Duration::ZERO,
+        run_for: Duration::from_secs(25),
+        downlink_control: true,
+        delay: Duration::ZERO,
+        jitter: Duration::ZERO,
+        dip_after: Some(Duration::from_secs(10)),
+        clump_at: None,
+        clump_all_at: None,
+        clump_after_lift: None,
+        subscriber_keeps_asking: false,
+        asking_stops_after: None,
+        no_descriptor: false,
+    };
+    let run = run_downlink_measured(what, case).await;
+    print_downlink_timeline(what, &run);
+    assert!(
+        run.dip_lost > 500,
+        "the dip lost {} datagrams",
+        run.dip_lost
+    );
+
+    // The time spent on less than three main pictures: from each frame
+    // that says so to the next frame.
+    let mut downgraded = Duration::ZERO;
+    for (i, (at, set)) in run.given.iter().enumerate() {
+        if set.len() == 3 && set.iter().any(|(_, quality)| *quality != Main) {
+            let until = run.given.get(i + 1).map_or(run.ended_at, |(next, _)| *next);
+            downgraded += until.saturating_duration_since(*at);
+        }
+    }
+    eprintln!(
+        "{what}: given less than three main pictures for {:.2} s in all",
+        downgraded.as_secs_f64()
+    );
+    assert!(
+        downgraded <= DOWNGRADED_AT_MOST,
+        "downgraded for {downgraded:?}"
+    );
+    assert_eq!(
+        run.given.last().map(|(_, set)| set),
+        Some(&vec![(0, Main), (1, Main), (2, Main)]),
+        "and it ends on three main pictures"
+    );
+}
+
+/// [`dl_narrow_case`] with the first publisher's uplink stalling for
+/// [`DL_CLUMP`] and delivering its frames together, once in the steady
+/// state and once just after the limit is lifted.
+fn dl_clump_case(delay: Duration, jitter: Duration) -> DownlinkCase {
+    DownlinkCase {
+        clump_at: Some(Duration::from_secs(20)),
+        clump_all_at: Some(Duration::from_secs(30)),
+        clump_after_lift: Some(Duration::from_millis(300)),
+        ..dl_narrow_case(delay, jitter)
+    }
+}
+
+/// A publisher whose frames arrive late in a clump does not cost a
+/// subscriber its pictures. The publisher of the main picture stalls for
+/// 200 ms and then sends its five frames at once, twenty seconds in: the
+/// SFU forwards as packets arrive, so the clump reaches the subscriber's
+/// narrow link as a burst and stands in its queue for a while. That is
+/// the publisher's path, not the subscriber's: one main and two middles
+/// stay, or are back within [`DL_CLUMP_BACK_WITHIN`]. The same again
+/// 300 ms after the limit is lifted: all three are on main within the
+/// time the plain case has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[ignore = "ADR-0070 step 6 acceptance: a 60 s run of a feature that is off by default; run by name"]
+#[allow(clippy::print_stderr)]
+async fn a_publishers_clump_does_not_cost_a_narrow_downlink_its_pictures() {
+    let what = "narrow downlink, publisher clump";
+    let run = run_downlink_measured(what, dl_clump_case(Duration::ZERO, Duration::ZERO)).await;
+    assert_eq!(run.clumps.len(), 3, "every clump happened");
+    check_narrow_downlink(what, &run);
+}
+
+/// The same on the path with 50 ms of delay and up to 10 ms of jitter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[ignore = "ADR-0070 step 6 acceptance: a 60 s run of a feature that is off by default; run by name"]
+#[allow(clippy::print_stderr)]
+async fn a_publishers_clump_on_a_downlink_with_delay_and_jitter_costs_no_pictures() {
+    let what = "narrow downlink with delay and jitter, publisher clump";
+    let run = run_downlink_measured(
+        what,
+        dl_clump_case(Duration::from_millis(50), Duration::from_millis(10)),
+    )
+    .await;
+    assert_eq!(run.clumps.len(), 3, "every clump happened");
+    check_narrow_downlink(what, &run);
+}
+
+/// A downlink that carries two middle pictures and a light one, lifted
+/// after twenty seconds: from little the SFU must find its way back to
+/// everything. No state may be one from which nothing probes, and a
+/// probe from a low rate must be able to pass (in a run of the second
+/// round a subscriber stood on two middles and a light for 28 s, 20 of
+/// them after the limit was gone, every probe ending short).
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[ignore = "ADR-0070 step 6 acceptance: a 40 s run of a feature that is off by default; run by name"]
+#[allow(clippy::print_stderr)]
+async fn a_very_narrow_downlink_gets_everything_back_when_it_is_lifted() {
+    use lakko_svc_sfu::protocol::VideoQuality::Main;
+
+    let what = "very narrow downlink";
+    let run = run_downlink_measured(
+        what,
+        DownlinkCase {
+            limit_bps: Some(DL_VERY_NARROW_BPS),
+            queue_limit: (DL_VERY_NARROW_BPS / 8 * 150 / 1000) as usize,
+            lift_after: Duration::from_secs(20),
+            run_for: Duration::from_secs(20) + DL_BACK_WITHIN + Duration::from_secs(5),
+            ..dl_narrow_case(Duration::ZERO, Duration::ZERO)
+        },
+    )
+    .await;
+    print_downlink_timeline(what, &run);
+    let lifted = run.lifted_at.expect("the limit was lifted");
+    let (_, before) = run
+        .given
+        .iter()
+        .rfind(|(at, _)| *at < lifted)
+        .expect("frames before the lift");
+    assert!(
+        before.iter().all(|(_, quality)| *quality != Main),
+        "the link carries no main picture: {}",
+        dl_letters(before)
+    );
+    let late_drops = run
+        .link_dropped
+        .iter()
+        .filter(|(at, _, _, _)| *at >= run.t0 + Duration::from_secs(8))
+        .count();
+    let all_main = vec![(0, Main), (1, Main), (2, Main)];
+    let (back_at, _) = run
+        .given
+        .iter()
+        .find(|(at, set)| *at >= lifted && set == &all_main)
+        .expect("all three are given main again after the lift");
+    let back_after = back_at.saturating_duration_since(lifted);
+    eprintln!(
+        "{what}: stood on {} before the lift; the link dropped {late_drops} datagrams after its \
+         first 8 s; all three back on main {:.1} s after the limit was lifted",
+        dl_letters(before),
+        back_after.as_secs_f64()
+    );
+    assert!(
+        back_after <= DL_BACK_WITHIN,
+        "back {back_after:?} after the lift"
+    );
+}
+
+/// The most key frame requests one publisher track may receive in the
+/// twenty seconds of [`run_keyframe_requests`]. A subscriber that asks
+/// five times a second is relayed after 0, 1, 3, 7 and 15 s (five), and
+/// the track's opening and starting ask a few times more; a track whose
+/// key frames the SFU cannot see is asked five times and then once in
+/// ten seconds. Without either bound a track was asked twice a second:
+/// forty times.
+const KF_MOST_REQUESTS: usize = 10;
+
+/// Three publishers of three senders each and a subscriber that asks for
+/// a key frame on every track it receives five times a second for twenty
+/// seconds, on an unlimited link without downlink control. Returns the
+/// requests each publisher received per sender.
+async fn run_keyframe_requests(what: &str, no_descriptor: bool) -> Vec<[usize; 3]> {
+    Box::pin(run_keyframe_requests_until(what, no_descriptor, None))
+        .await
+        .keyframe_requests
+}
+
+/// As [`run_keyframe_requests`], with the subscriber asking only for the
+/// first `asks_for` of the run when that is given.
+async fn run_keyframe_requests_until(
+    what: &str,
+    no_descriptor: bool,
+    asks_for: Option<Duration>,
+) -> DownlinkRun {
+    let _one = DL_ONE_AT_A_TIME.lock().await;
+    let _watchdog = DlWatchdog::start(what, Duration::from_secs(150));
+    Box::pin(run_downlink(DownlinkCase {
+        limit_bps: None,
+        queue_limit: usize::MAX,
+        lift_after: Duration::from_secs(600),
+        run_for: Duration::from_secs(20),
+        downlink_control: false,
+        subscriber_keeps_asking: true,
+        asking_stops_after: asks_for,
+        no_descriptor,
+        ..dl_narrow_case(Duration::ZERO, Duration::ZERO)
+    }))
+    .await
+}
+
+/// A subscriber of publishers without a frame descriptor that needs a key
+/// frame is asked for promptly, again after a second and after two more
+/// while it keeps needing one, and no more once it stops asking. The SFU
+/// cannot see a key frame arrive on such a stream; the subscriber's own
+/// asking is the only sign. On a live call (2026-10-07) a viewer of a
+/// Firefox publisher's main track had packets it could not decode for
+/// more than half a minute while its requests were let through once in
+/// ten seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[allow(clippy::print_stderr)]
+async fn a_subscriber_of_a_publisher_without_a_descriptor_is_asked_for_while_it_asks() {
+    /// The subscriber asks for this long, then has its picture.
+    const ASKS_FOR: Duration = Duration::from_secs(9);
+    let what = "key frame requests while a subscriber asks";
+    let run = run_keyframe_requests_until(what, true, Some(ASKS_FOR)).await;
+    // The tracks the subscriber is being sent: main and light of the
+    // first publisher, middle and light of the second, light of the third.
+    for (publisher, track) in [(0, 0), (0, 2), (1, 1), (1, 2), (2, 2)] {
+        let times: Vec<Duration> = run
+            .keyframe_request_times
+            .iter()
+            .filter(|(p, t, _)| (*p, *t) == (publisher, track))
+            .map(|(_, _, at)| at.saturating_duration_since(run.t0))
+            .collect();
+        eprintln!("{what}: publisher {publisher} track {track}: {times:?}");
+        let within = |until: Duration| times.iter().filter(|at| **at <= until).count();
+        assert!(
+            within(Duration::from_millis(1500)) >= 1,
+            "asked promptly: {times:?}"
+        );
+        assert!(
+            within(Duration::from_secs(5)) >= 3,
+            "asked again after one second and after two more: {times:?}"
+        );
+        assert!(
+            within(ASKS_FOR + Duration::from_secs(1)) >= 4,
+            "and again four seconds after that: {times:?}"
+        );
+        let last = times.iter().max().copied().unwrap_or_default();
+        assert!(
+            last <= ASKS_FOR + Duration::from_millis(1500),
+            "nothing once the subscriber has stopped asking: {times:?}"
+        );
+        assert!(times.len() <= KF_MOST_REQUESTS, "{times:?}");
+    }
+}
+
+/// The SFU does not ask a publisher for a key frame for ever because a
+/// subscriber does. On the first live call a receiver that could not
+/// decode what it was sent asked on every light and middle track without
+/// end, the SFU relayed two requests a second per track for the whole
+/// call (270 per track in four and a half minutes), and the browsers
+/// obliged with a key frame a second on a 150 kbit/s sender.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[allow(clippy::print_stderr)]
+async fn a_subscriber_that_keeps_asking_does_not_cost_a_key_frame_a_second() {
+    let what = "key frame requests";
+    let requests = run_keyframe_requests(what, false).await;
+    eprintln!("{what}: per publisher, on main / middle / light: {requests:?}");
+    assert_eq!(requests.len(), 3);
+    for (publisher, per_track) in requests.iter().enumerate() {
+        for (track, count) in per_track.iter().enumerate() {
+            assert!(
+                *count <= KF_MOST_REQUESTS,
+                "publisher {publisher} track {track} was asked {count} times in 20 s"
+            );
+        }
+    }
+    // The tracks that are being sent were asked at all: main of the
+    // first, middle of the second, light of every one.
+    assert!(requests[0][0] > 0 && requests[1][1] > 0);
+    assert!(requests.iter().all(|per_track| per_track[2] > 0));
+}
+
+/// The same with publishers whose packets carry no frame descriptor: the
+/// SFU never sees a key frame arrive, so no request is ever answered as
+/// far as it can tell, and it stops asking after a bounded number.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[allow(clippy::print_stderr)]
+async fn a_publisher_without_a_frame_descriptor_is_asked_a_bounded_number_of_times() {
+    let what = "key frame requests, no frame descriptor";
+    let requests = run_keyframe_requests(what, true).await;
+    eprintln!("{what}: per publisher, on main / middle / light: {requests:?}");
+    assert_eq!(requests.len(), 3);
+    for (publisher, per_track) in requests.iter().enumerate() {
+        for (track, count) in per_track.iter().enumerate() {
+            assert!(
+                *count <= KF_MOST_REQUESTS,
+                "publisher {publisher} track {track} was asked {count} times in 20 s"
+            );
+        }
+    }
+    assert!(requests.iter().all(|per_track| per_track[2] > 0));
+}
+
+/// What the narrow-downlink tests assert of a run of [`dl_narrow_case`].
+#[allow(clippy::print_stderr, clippy::too_many_lines)]
+fn check_narrow_downlink(what: &str, run: &DownlinkRun) {
+    use lakko_svc_sfu::protocol::VideoQuality::{Main, Middle};
+
+    print_downlink_timeline(what, run);
+
+    let lifted = run.lifted_at.expect("the limit was lifted");
+    let one_main_two_middles = vec![(0, Main), (1, Middle), (2, Middle)];
+    let all_main = vec![(0, Main), (1, Main), (2, Main)];
+
+    // The subscriber is told as its tracks open and after its
+    // `video-wants`, before anything is known of the path: everything it
+    // asked for.
+    let (_, first) = run
+        .given
+        .iter()
+        .find(|(_, set)| set.len() == 3)
+        .expect("a video-given frame naming all three arrived");
+    assert_eq!(first, &all_main, "an unknown budget gives what was asked");
+
+    // Settled: the last frame before the lift (before the first clump,
+    // when the run has one) says one main and two middles, and it came
+    // within the stated time.
+    let steady_until = run
+        .clumps
+        .iter()
+        .copied()
+        .filter(|at| *at < lifted)
+        .min()
+        .unwrap_or(lifted);
+    let (settled_at, settled) = run
+        .given
+        .iter()
+        .rfind(|(at, _)| *at < steady_until)
+        .expect("frames before the lift");
+    assert_eq!(
+        settled, &one_main_two_middles,
+        "the SFU settles on one main and two middles; the most important publisher keeps main"
+    );
+    // A clump of one publisher's frames does not cost the subscriber its
+    // pictures: whatever was taken is back within the stated time, and
+    // one main and two middles is what stands when the limit is lifted.
+    if steady_until < lifted {
+        let (last_at, last) = run
+            .given
+            .iter()
+            .rfind(|(at, _)| *at < lifted)
+            .expect("frames before the lift");
+        assert_eq!(
+            last, &one_main_two_middles,
+            "after a publisher's clump the subscriber is on one main and two middles again"
+        );
+        let changes = run
+            .given
+            .iter()
+            .filter(|(at, _)| *at >= steady_until && *at < lifted)
+            .count();
+        // Counted from the last clump that began before the change.
+        let clump_before = run
+            .clumps
+            .iter()
+            .copied()
+            .filter(|at| at <= last_at)
+            .max()
+            .unwrap_or(steady_until);
+        let back = last_at.saturating_duration_since(clump_before);
+        eprintln!(
+            "{what}: the clumps before the lift: {changes} video-given frames after the first, \
+             the last {:.2} s after the clump before it began",
+            if changes == 0 {
+                0.0
+            } else {
+                back.as_secs_f64()
+            }
+        );
+        assert!(
+            changes == 0 || back <= DL_CLUMP_BACK_WITHIN,
+            "the steady set was back {back:?} after the clump"
+        );
+    }
+    let settled_after = settled_at.saturating_duration_since(run.t0);
+    eprintln!(
+        "{what}: settled on one main and two middles {:.1} s after the start",
+        settled_after.as_secs_f64()
+    );
+    assert!(
+        settled_after <= DL_SETTLED_WITHIN,
+        "settled {settled_after:?} after the start"
+    );
+
+    // What was handed over agrees with what was said: from a second after
+    // the settling until the lift, publisher 0's main track and the other
+    // two's middle tracks carry packets, and their other heavy tracks
+    // none.
+    let quiet_from = *settled_at + Duration::from_secs(1);
+    let steady_until = steady_until.max(quiet_from);
+    let handed = |publisher: usize, role: DlRole, from: Instant, until: Instant| {
+        run.got
+            .iter()
+            .filter(|p| p.publisher == publisher && p.role == role && p.at >= from && p.at < until)
+            .count()
+    };
+    assert!(handed(0, DlRole::Main, quiet_from, steady_until) > 0);
+    assert_eq!(handed(0, DlRole::Middle, quiet_from, steady_until), 0);
+    for publisher in [1, 2] {
+        assert!(handed(publisher, DlRole::Middle, quiet_from, steady_until) > 0);
+        assert_eq!(handed(publisher, DlRole::Main, quiet_from, steady_until), 0);
+    }
+
+    // No sustained loss on the light tracks: once settled, the link
+    // loses none of their packets and the subscriber is handed every one.
+    let light_lost_settled = run
+        .link_dropped
+        .iter()
+        .filter(|(at, _, role, _)| *role == DlRole::Light && *at >= quiet_from && *at < lifted)
+        .count();
+    let light_lost_before = run
+        .link_dropped
+        .iter()
+        .filter(|(at, _, role, rtx)| *role == DlRole::Light && !*rtx && *at < quiet_from)
+        .count();
+    let holes_settled = dl_light_holes(run, quiet_from, lifted);
+    let holes_before = dl_light_holes(run, run.t0, quiet_from);
+    let light_handed: usize = (0..3)
+        .map(|p| handed(p, DlRole::Light, quiet_from, lifted))
+        .sum();
+    eprintln!(
+        "{what}: light tracks: before settling the link lost {light_lost_before} first \
+         transmissions and {holes_before} were never handed over; once settled the link lost \
+         {light_lost_settled} (retransmissions included) and {holes_settled} of {light_handed} \
+         were never handed over"
+    );
+    assert_eq!(
+        light_lost_settled, 0,
+        "once settled the link drops no light packet"
+    );
+    assert_eq!(
+        holes_settled, 0,
+        "once settled every light packet is handed over"
+    );
+
+    // The lesson: with the limit lifted the SFU finds out, though it is
+    // sending little, and gives all three their main picture back.
+    let (back_at, _) = run
+        .given
+        .iter()
+        .find(|(at, set)| *at >= lifted && set == &all_main)
+        .expect("all three are given main again after the lift");
+    let back_after = back_at.saturating_duration_since(lifted);
+    eprintln!(
+        "{what}: all three back on main {:.1} s after the limit was lifted",
+        back_after.as_secs_f64()
+    );
+    assert!(
+        back_after <= DL_BACK_WITHIN,
+        "back {back_after:?} after the lift"
+    );
+    assert_eq!(
+        run.given.last().map(|(_, set)| set),
+        Some(&all_main),
+        "and it stays there"
+    );
+    for publisher in 0..3 {
+        assert!(
+            handed(publisher, DlRole::Main, *back_at, run.ended_at) > 0,
+            "publisher {publisher}'s main track carries packets again"
+        );
+    }
+
+    // A publisher's own bitrate control is as before step 6: the answer
+    // to its offer negotiates no transport-wide congestion control on
+    // the lines it publishes on, and keeps REMB and abs-send-time.
+    for answer in run.publisher_answers.iter().chain([&run.subscriber_answer]) {
+        assert!(
+            !answer.contains("transport-cc") && !answer.contains("transport-wide-cc"),
+            "the answer to a peer's own offer names no transport-wide congestion control:\n\
+             {answer}"
+        );
+    }
+    for answer in &run.publisher_answers {
+        for section in video_sections(answer) {
+            assert!(section.contains("goog-remb") && section.contains("abs-send-time"));
+        }
+    }
+    // The lines the SFU sends on carry both.
+    assert!(!run.sfu_offers.is_empty());
+    let last_offer = run.sfu_offers.last().expect("an offer");
+    let sections = video_sections(last_offer);
+    // (The subscriber's own receive-only line is one the SFU could send
+    // on and never does: it opens a line of its own for every track.)
+    let sends_on =
+        |s: &&String| s.contains("a=sendonly") && !s.contains("frame-descriptor-subscriber");
+    for section in sections.iter().filter(sends_on) {
+        assert!(
+            section.contains("transport-wide-cc") && section.contains("transport-cc"),
+            "a line the SFU sends on negotiates transport-wide congestion control:\n{section}"
+        );
+    }
+    assert_eq!(sections.iter().filter(sends_on).count(), 9);
+
+    // The link drops nothing after its first two seconds, to the end.
+    let late_drops = run
+        .link_dropped
+        .iter()
+        .filter(|(at, _, _, _)| at.saturating_duration_since(run.t0) > DL_NO_DROPS_AFTER)
+        .count();
+    let early_drops = run.link_dropped.len() - late_drops;
+    eprintln!(
+        "{what}: the link dropped {early_drops} datagrams in its first two seconds and \
+         {late_drops} after"
+    );
+    assert_eq!(
+        late_drops, 0,
+        "no drops on the link after the first two seconds"
+    );
+}
+
+/// On a downlink with no limit nobody is ever given less than was asked
+/// for.
+///
+/// An acceptance test of ADR-0070 step 6: the estimate starts at its
+/// ceiling, nothing on a loopback link is a standing queue, and a probe
+/// is never needed because nobody is given less than was asked for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[allow(clippy::print_stderr)]
+async fn a_subscriber_on_an_unlimited_downlink_is_never_downgraded() {
+    use lakko_svc_sfu::protocol::VideoQuality::Main;
+
+    let what = "unlimited downlink";
+    let case = DownlinkCase {
+        limit_bps: None,
+        queue_limit: 0,
+        lift_after: Duration::ZERO,
+        run_for: Duration::from_secs(25),
+        downlink_control: true,
+        delay: Duration::ZERO,
+        jitter: Duration::ZERO,
+        dip_after: None,
+        clump_at: None,
+        clump_all_at: None,
+        clump_after_lift: None,
+        subscriber_keeps_asking: false,
+        asking_stops_after: None,
+        no_descriptor: false,
+    };
+    let run = run_downlink_measured(what, case).await;
+    print_downlink_timeline(what, &run);
+
+    assert!(!run.given.is_empty(), "the subscriber was told");
+    // (The first frames list the publishers as the subscriber's tracks of
+    // them open, so they can name fewer than three.)
+    for (at, set) in &run.given {
+        assert!(
+            set.iter().all(|(_, quality)| *quality == Main),
+            "{:?} after the start: {set:?}",
+            at.saturating_duration_since(run.t0)
+        );
+    }
+    assert_eq!(
+        run.given.last().map(|(_, set)| set),
+        Some(&vec![(0, Main), (1, Main), (2, Main)])
+    );
+    for sample in &run.samples {
+        assert_eq!(
+            (sample.snap.middle, sample.snap.light),
+            (0, 0),
+            "nobody is given less than main"
+        );
+    }
+    // Every main track flowed in every second of the run.
+    let whole = run.ended_at.saturating_duration_since(run.t0).as_secs();
+    for second in 1..whole {
+        let from = run.t0 + Duration::from_secs(second);
+        for publisher in 0..3 {
+            let handed = run
+                .got
+                .iter()
+                .filter(|p| {
+                    p.publisher == publisher
+                        && p.role == DlRole::Main
+                        && p.at >= from
+                        && p.at < from + Duration::from_secs(1)
+                })
+                .count();
+            assert!(
+                handed > 100,
+                "publisher {publisher}'s main track carried {handed} packets in second {second}"
+            );
+        }
+    }
+    assert!(run.link_dropped.is_empty());
+}
+
+/// `LAKKO_SFU_DOWNLINK_CONTROL` off: nothing of step 6. On the narrow link
+/// of the test above the subscriber is told nothing, everything goes on
+/// being sent into a link that does not carry it, and no SDP the SFU
+/// writes names transport-wide congestion control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[allow(clippy::print_stderr)]
+async fn downlink_control_switched_off_changes_nothing() {
+    const LIMIT_BPS: u64 = 7_500_000;
+    let _one = DL_ONE_AT_A_TIME.lock().await;
+    let _watchdog = DlWatchdog::start("downlink control off", Duration::from_secs(120));
+    let run = Box::pin(run_downlink(DownlinkCase {
+        limit_bps: Some(LIMIT_BPS),
+        queue_limit: (LIMIT_BPS / 8 * 150 / 1000) as usize,
+        lift_after: Duration::from_secs(600),
+        run_for: Duration::from_secs(12),
+        downlink_control: false,
+        delay: Duration::ZERO,
+        jitter: Duration::ZERO,
+        dip_after: None,
+        clump_at: None,
+        clump_all_at: None,
+        clump_after_lift: None,
+        subscriber_keeps_asking: false,
+        asking_stops_after: None,
+        no_descriptor: false,
+    }))
+    .await;
+    print_downlink_timeline("downlink control off", &run);
+
+    assert!(run.given.is_empty(), "no video-given frame");
+    assert!(run.samples.is_empty(), "no downlink state at all");
+    for sdp in run
+        .publisher_answers
+        .iter()
+        .chain([&run.subscriber_answer])
+        .chain(&run.sfu_offers)
+    {
+        assert!(
+            !sdp.contains("transport-cc") && !sdp.contains("transport-wide-cc"),
+            "no SDP names transport-wide congestion control:\n{sdp}"
+        );
+    }
+    // Everything goes on being sent, into a link that does not carry it:
+    // long after the first seconds the link is still losing packets of
+    // the main tracks and of the light tracks alike. (Not "in the last
+    // seconds": under this flood the test's own loop falls behind, by
+    // seconds at a time, and with it its publishers.)
+    let later = run.t0 + Duration::from_secs(4);
+    for role in [DlRole::Main, DlRole::Light] {
+        assert!(
+            run.link_dropped
+                .iter()
+                .any(|(at, _, r, _)| *r == role && *at >= later),
+            "the link is still losing {role:?} packets"
+        );
+    }
 }

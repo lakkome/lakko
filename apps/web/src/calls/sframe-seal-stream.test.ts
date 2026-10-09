@@ -10,7 +10,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import init, { CallKeyRing, unwrapSframeFrame } from "../../wasm/lakko_ffi_wasm";
+import init, { CallKeyRing, parseMediaFrame } from "../../wasm/lakko_ffi_wasm";
 import { sealFrame, sealingStream, type SealState } from "./sframe-seal-stream";
 
 const SEED = new Uint8Array(32).fill(0x42);
@@ -71,7 +71,7 @@ describe("sealing a simulcast sender's frames", () => {
     sealed.forEach((f, i) => expect(f).toBe(input[i]));
     expect(sealed.map((f) => f.rid)).toEqual(["q", "f", "q", "f", "f", "q"]);
 
-    const headers = sealed.map((f) => unwrapSframeFrame(new Uint8Array(f.data)));
+    const headers = sealed.map((f) => parseMediaFrame(new Uint8Array(f.data)));
     // One counter, consumed once per frame whichever layer it is of.
     // The counter is 64-bit, a bigint (ADR-0069); the key starts at a random
     // value below 2^62, so the first frame's counter is read, not assumed.
@@ -81,15 +81,17 @@ describe("sealing a simulcast sender's frames", () => {
     expect(counters).toEqual([0n, 1n, 2n, 3n, 4n, 5n].map((i) => start + i));
     expect(new Set(counters).size).toBe(input.length);
     // One key for both layers: the same KID on every frame.
-    const kid = (LEAF << 8) | VIDEO_STREAM;
-    expect(headers.map((h) => h.senderLeaf)).toEqual(Array(input.length).fill(kid));
+    const kid = BigInt((LEAF << 8) | VIDEO_STREAM);
+    expect(headers.map((h) => h.kid)).toEqual(Array(input.length).fill(kid));
+    // No codec was stated, so nothing is left in the clear.
+    expect(headers.map((h) => h.clearPrefixLen)).toEqual(Array(input.length).fill(0));
 
     // A viewer receives one layer only: rising counters with gaps, and each
     // frame opens on its own.
     const receiver = new CallKeyRing(SEED);
     const opened = sealed
       .filter((f) => f.rid === "q")
-      .map((f) => new TextDecoder().decode(receiver.openFramedWithOverlap(BigInt(kid), new Uint8Array(f.data))));
+      .map((f) => new TextDecoder().decode(receiver.openMediaFrameWithOverlap(new Uint8Array(f.data))));
     expect(opened).toEqual(["q0", "q1", "q2"]);
   });
 
@@ -102,7 +104,7 @@ describe("sealing a simulcast sender's frames", () => {
 
     const failing: SealState = {
       sealKey: {
-        sealFramed: () => {
+        sealMediaFrame: () => {
           throw new Error("counter exhausted");
         },
       },
@@ -119,8 +121,7 @@ describe("sealing a simulcast sender's frames", () => {
     state.sealKey = other.participantKey(LEAF, VIDEO_STREAM);
     const second = frame("f", "after");
     expect(sealFrame(state, second)).toBe(true);
-    const kid = BigInt((LEAF << 8) | VIDEO_STREAM);
-    expect(new TextDecoder().decode(other.openFramedWithOverlap(kid, new Uint8Array(second.data)))).toBe("after");
-    expect(() => other.openFramedWithOverlap(kid, new Uint8Array(first.data))).toThrow();
+    expect(new TextDecoder().decode(other.openMediaFrameWithOverlap(new Uint8Array(second.data)))).toBe("after");
+    expect(() => other.openMediaFrameWithOverlap(new Uint8Array(first.data))).toThrow();
   });
 });

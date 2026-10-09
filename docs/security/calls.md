@@ -194,6 +194,16 @@ At `u64::MAX` the seal path returns `Error::CounterExhausted`
 and seals nothing; from the highest possible start that is
 `3 * 2^62` frames away.
 
+[ADR-0071](../adr/0071-codec-header-in-the-clear.md) (Proposed;
+built in the core, the wasm FFI and the web client) changes
+where the header that carries this counter sits, not the
+counter: a sealed media frame is `clear_prefix ||
+ciphertext_and_tag || sframe_header || trailer`, and
+`ParticipantKey::seal_media_frame` consumes one counter value
+per frame exactly as `seal` does. The key and the nonce are as
+above. The AAD in that layout is the header, the clear prefix
+and the trailer (see C-55).
+
 Tests:
 [`sframe::tests::counter_increments_strictly`](../../crates/lakko-calls/src/sframe.rs)
 covers the monotonic increment;
@@ -2678,12 +2688,38 @@ round-trip remains, G-26.) This is the same `lakko_calls::sframe`
 `seal_framed` / `open_framed` core pinned by C-37 / C-38;
 C-55 records that all three SFU clients now reach it.
 
+**Layout amended for the web by
+[ADR-0071](../adr/0071-codec-header-in-the-clear.md) (Proposed,
+2026-10-07).** A receiver without the generic frame descriptor
+finds a key frame by reading the codec's own header at the
+start of the payload, where the SFrame header used to sit. The
+web client now seals and opens `clear_prefix ||
+ciphertext_and_tag || sframe_header || trailer`
+(`lakko_calls::media_frame`; `seal_media_frame` /
+`open_media_frame`): 10 bytes of a VP8 key frame or 3 of any
+other VP8 frame stay in the clear, nothing of audio or of any
+other codec does, the RFC 9605 header sits at the end before a
+3-byte trailer (`clear_prefix_len`, `sframe_header_len`,
+version), and the AAD is `sframe_header || clear_prefix ||
+trailer`, so every byte that is not ciphertext is
+authenticated and none of it is host RTP metadata. What the
+SFU newly sees is listed in the ADR (for VP8: the frame tag of
+every frame and the dimensions of key frames). The native
+bridges still call the header-first `seal_framed` /
+`open_framed`, and the two layouts do not open as each other
+(`media_frame::tests::the_header_first_layout_is_refused_by_the_new_open`,
+`the_new_layout_is_refused_by_the_header_first_open`): **until
+the native side moves (ADR-0071 phase 2) a web client and a
+native client drop each other's media**, and sub-invariant 1
+below describes the native half only. Not run in a browser.
+
 Four sub-invariants:
 
 1. **One framed core, three call sites.** The browser worker
    (`apps/web/src/calls/sframe-transform.ts` +
    `sframe-transform-worker.ts`, via wasm-bindgen
-   `sealFramed` / `openFramed`) and the native C++ bridge
+   `sealFramed` / `openFramed` until ADR-0071, now
+   `sealMediaFrame` / `openMediaFrameWithOverlap`) and the native C++ bridge
    (`apps/shared/sframe-bridge`, via the
    `lakko-sframe-native` C ABI `lakko_sframe_seal_framed` /
    `_open_framed`) call byte-for-byte the same Rust pipeline.

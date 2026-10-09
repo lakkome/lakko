@@ -29,7 +29,7 @@
 
 use lakko_sfu_proto::{
     decode_payload_b64, decode_server_frame, encode_client_frame, encode_payload_b64, ClientFrame,
-    RelayTarget, ServerFrame,
+    RelayTarget, ServerFrame, VideoQuality, VideoWant,
 };
 use wasm_bindgen::prelude::*;
 
@@ -40,7 +40,12 @@ fn to_err(e: lakko_sfu_proto::SfuProtoError) -> JsError {
 /// Validate an inbound server frame off the `lakko-sfu-v1`
 /// WebSocket and return its `kind` discriminator (kebab-case:
 /// `"welcome"`, `"peer-joined"`, `"peer-left"`, `"signal-relay"`,
-/// `"error"`, `"pong"`, `"sdp-answer"`, `"sdp-offer"`). Throws on a
+/// `"error"`, `"pong"`, `"sdp-answer"`, `"sdp-offer"`, `"video-given"`).
+/// A `video-given` frame (ADR-0070 step 6) carries `given`, a list of
+/// `{ peer, quality }` with `quality` one of `"main"`, `"middle"`,
+/// `"light"`: what this subscriber is being sent of each publisher's
+/// video, the whole set, validated here against the protocol's bounds.
+/// Throws on a
 /// malformed / unknown-kind / oversize frame. The web reads the
 /// frame's fields off the original JSON with a TypeScript type.
 #[wasm_bindgen(js_name = "validateSfuServerFrame")]
@@ -54,8 +59,35 @@ pub fn validate_sfu_server_frame(json: &str) -> Result<String, JsError> {
         ServerFrame::Pong { .. } => "pong",
         ServerFrame::SdpAnswer { .. } => "sdp-answer",
         ServerFrame::SdpOffer { .. } => "sdp-offer",
+        ServerFrame::VideoGiven { .. } => "video-given",
     };
     Ok(kind.to_string())
+}
+
+/// The `given` list of a `video-given` server frame (ADR-0070 step 6) as
+/// two parallel lists flattened into one: `[peer0, quality0, peer1,
+/// quality1, ...]`, each quality `"main"`, `"middle"` or `"light"`
+/// (`tileVideoQualityName`), in the frame's order (the subscriber's order
+/// of importance). Throws when the JSON is not a valid `video-given`
+/// frame.
+#[wasm_bindgen(js_name = "parseSfuVideoGiven")]
+pub fn parse_sfu_video_given(json: &str) -> Result<Vec<String>, JsError> {
+    video_given_pairs(json).map_err(|e| JsError::new(&e))
+}
+
+/// [`parse_sfu_video_given`] without the `JsError`, so a host test can run
+/// it.
+fn video_given_pairs(json: &str) -> Result<Vec<String>, String> {
+    match decode_server_frame(json).map_err(|e| e.to_string())? {
+        ServerFrame::VideoGiven { given } => Ok(given
+            .into_iter()
+            .flat_map(|entry| [entry.peer, entry.quality.as_str().to_owned()])
+            .collect()),
+        other => Err(format!(
+            "expected a video-given frame, got {}",
+            other.kind_str()
+        )),
+    }
 }
 
 /// Re-derive the per-call peer tag (ADR-0021) for a `(call_id,
@@ -96,12 +128,76 @@ pub fn compose_sfu_signal_relay_to_call(payload: &[u8]) -> Result<String, JsErro
 }
 
 /// Compose a client → SFU SDP offer.
+///
+/// `light_mids` (`string[]`) names the `mid`s of the offer's video
+/// m-lines that carry a light copy of the sender's camera (the same
+/// picture scaled down, on its own m-line beside the main one); the SFU
+/// forwards such a track as the sender's light companion. Pass `[]` for
+/// an offer without one. More than `lakko_sfu_proto::MAX_LIGHT_MIDS`
+/// entries, an empty entry or one longer than
+/// `lakko_sfu_proto::MAX_LIGHT_MID_BYTES` bytes throws.
 #[wasm_bindgen(js_name = "composeSfuSdpOffer")]
-pub fn compose_sfu_sdp_offer(sdp: &str) -> Result<String, JsError> {
+pub fn compose_sfu_sdp_offer(sdp: &str, light_mids: Vec<String>) -> Result<String, JsError> {
+    compose_sfu_sdp_offer_with_middle(sdp, light_mids, Vec::new())
+}
+
+/// Compose a client → SFU SDP offer that also names its middle track
+/// (ADR-0070 step 5).
+///
+/// `middle_mids` (`string[]`) names the `mid`s of the offer's video
+/// m-lines that carry the middle copy of the sender's camera (the same
+/// picture at half size, on its own m-line); the SFU forwards such a
+/// track only to a subscriber whose `video-wants` asks for it. The
+/// bounds are those of `light_mids`; outside them this throws. With an
+/// empty `middle_mids` the frame is exactly `composeSfuSdpOffer`'s.
+#[wasm_bindgen(js_name = "composeSfuSdpOfferWithMiddle")]
+pub fn compose_sfu_sdp_offer_with_middle(
+    sdp: &str,
+    light_mids: Vec<String>,
+    middle_mids: Vec<String>,
+) -> Result<String, JsError> {
     encode_client_frame(&ClientFrame::SdpOffer {
         sdp: sdp.to_string(),
+        light_mids,
+        middle_mids,
     })
     .map_err(to_err)
+}
+
+/// Compose a client → SFU `video-wants` frame (ADR-0070 step 5): which
+/// picture of each publisher this subscriber shows.
+///
+/// `peers` and `qualities` are parallel `string[]`s: `qualities[i]` is
+/// `"main"`, `"middle"` or `"light"` (`tileVideoQualityName`) for the
+/// publisher `peers[i]`. Each frame replaces the whole set; a publisher
+/// left out is `main`. Throws when the two lengths differ, a quality is
+/// none of the three, or the list is outside the protocol's bounds (more
+/// than `lakko_sfu_proto::MAX_VIDEO_WANTS` entries, an empty peer id or
+/// one longer than `lakko_sfu_proto::MAX_VIDEO_WANT_PEER_BYTES` bytes).
+#[wasm_bindgen(js_name = "composeSfuVideoWants")]
+pub fn compose_sfu_video_wants(
+    peers: Vec<String>,
+    qualities: Vec<String>,
+) -> Result<String, JsError> {
+    video_wants_json(peers, &qualities).map_err(|reason| JsError::new(&reason))
+}
+
+/// The body of [`compose_sfu_video_wants`], with its refusals as plain
+/// strings so they can be tested on a host target.
+fn video_wants_json(peers: Vec<String>, qualities: &[String]) -> Result<String, String> {
+    if peers.len() != qualities.len() {
+        return Err("peers and qualities differ in length".to_owned());
+    }
+    let wants = peers
+        .into_iter()
+        .zip(qualities)
+        .map(|(peer, quality)| {
+            VideoQuality::from_wire(quality)
+                .map(|quality| VideoWant { peer, quality })
+                .ok_or_else(|| "quality is none of main, middle, light".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    encode_client_frame(&ClientFrame::VideoWants { wants }).map_err(|e| e.to_string())
 }
 
 /// Compose a client → SFU SDP answer (responds to a SFU-initiated
@@ -152,6 +248,21 @@ mod tests {
         assert_eq!(validate_sfu_server_frame(json).expect("ok"), "welcome");
     }
 
+    #[test]
+    fn video_given_validates_and_flattens() {
+        let json = r#"{"kind":"video-given","given":[{"peer":"p1","quality":"main"},{"peer":"p2","quality":"light"}]}"#;
+        assert_eq!(validate_sfu_server_frame(json).expect("ok"), "video-given");
+        assert_eq!(
+            video_given_pairs(json).expect("ok"),
+            vec!["p1", "main", "p2", "light"]
+        );
+        assert!(video_given_pairs(r#"{"kind":"pong","nonce":1}"#).is_err());
+        assert!(video_given_pairs(
+            r#"{"kind":"video-given","given":[{"peer":"","quality":"main"}]}"#
+        )
+        .is_err());
+    }
+
     // The unknown-kind / malformed rejection path constructs a
     // `JsError`, which cannot be exercised on a non-wasm host target
     // (`cannot call wasm-bindgen imported functions on non-wasm
@@ -160,8 +271,70 @@ mod tests {
 
     #[test]
     fn compose_sdp_offer_kebab() {
-        let json = compose_sfu_sdp_offer("v=0\r\n").expect("compose");
+        let json = compose_sfu_sdp_offer("v=0\r\n", Vec::new()).expect("compose");
         assert!(json.contains("\"kind\":\"sdp-offer\""), "got {json}");
+        assert!(!json.contains("light_mids"), "got {json}");
+    }
+
+    // The out-of-bounds refusal constructs a `JsError` and so cannot run
+    // on a host target; `lakko_sfu_proto` covers it.
+    #[test]
+    fn compose_sdp_offer_carries_the_light_mids() {
+        let json = compose_sfu_sdp_offer("v=0\r\n", vec!["2".into()]).expect("compose");
+        match lakko_sfu_proto::decode_client_frame(&json).expect("decode") {
+            ClientFrame::SdpOffer {
+                sdp,
+                light_mids,
+                middle_mids,
+            } => {
+                assert_eq!(sdp, "v=0\r\n");
+                assert_eq!(light_mids, vec!["2".to_owned()]);
+                assert!(middle_mids.is_empty());
+            },
+            _ => panic!("expected SdpOffer"),
+        }
+        assert!(!json.contains("middle_mids"), "got {json}");
+    }
+
+    #[test]
+    fn compose_sdp_offer_carries_the_middle_mids() {
+        let json = compose_sfu_sdp_offer_with_middle("v=0\r\n", vec!["2".into()], vec!["3".into()])
+            .expect("compose");
+        match lakko_sfu_proto::decode_client_frame(&json).expect("decode") {
+            ClientFrame::SdpOffer {
+                light_mids,
+                middle_mids,
+                ..
+            } => {
+                assert_eq!(light_mids, vec!["2".to_owned()]);
+                assert_eq!(middle_mids, vec!["3".to_owned()]);
+            },
+            _ => panic!("expected SdpOffer"),
+        }
+    }
+
+    #[test]
+    fn compose_video_wants_round_trips_and_refuses_what_the_server_would() {
+        let json = video_wants_json(
+            vec!["p1".into(), "p2".into(), "p3".into()],
+            &["main".into(), "middle".into(), "light".into()],
+        )
+        .expect("compose");
+        assert_eq!(
+            json,
+            r#"{"kind":"video-wants","wants":[{"peer":"p1","quality":"main"},{"peer":"p2","quality":"middle"},{"peer":"p3","quality":"light"}]}"#
+        );
+        assert!(lakko_sfu_proto::decode_client_frame(&json).is_ok());
+        assert_eq!(
+            video_wants_json(Vec::new(), &[]).expect("empty set"),
+            r#"{"kind":"video-wants","wants":[]}"#
+        );
+        // Lengths differ, an unknown quality, an empty peer, too many.
+        assert!(video_wants_json(vec!["p1".into()], &[]).is_err());
+        assert!(video_wants_json(vec!["p1".into()], &["full".into()]).is_err());
+        assert!(video_wants_json(vec![String::new()], &["main".into()]).is_err());
+        let many = lakko_sfu_proto::MAX_VIDEO_WANTS + 1;
+        assert!(video_wants_json(vec!["p".into(); many], &vec!["main".to_owned(); many]).is_err());
     }
 
     #[test]

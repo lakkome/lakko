@@ -253,15 +253,42 @@ impl<'a> Router<'a> {
                     },
                 }
             },
-            ClientFrame::SdpOffer { sdp } => {
+            ClientFrame::SdpOffer {
+                sdp,
+                light_mids,
+                middle_mids,
+            } => {
                 let Some(media) = self.media else {
                     return Err(RouterError::MediaNotWired);
                 };
+                // `light_mids` and `middle_mids` are within the protocol's
+                // bounds: the frame would not have decoded otherwise.
                 let answer = media
-                    .accept_offer(sender.id.clone(), sender.call_id.clone(), sdp)
+                    .accept_offer_with_copies(
+                        sender.id.clone(),
+                        sender.call_id.clone(),
+                        sdp,
+                        light_mids,
+                        middle_mids,
+                    )
                     .await
                     .map_err(RouterError::from)?;
                 Ok(Some(ServerFrame::SdpAnswer { sdp: answer }))
+            },
+            ClientFrame::VideoWants { wants } => {
+                // Which picture of each publisher this peer shows
+                // (ADR-0070 step 5). `wants` is within the protocol's
+                // bounds. The media task takes the whole set; there is
+                // no reply on the wire. An SFU that relays signaling
+                // only has no track to pause: the frame means nothing
+                // there and is not an error.
+                let Some(media) = self.media else {
+                    return Ok(None);
+                };
+                media
+                    .set_video_wants(sender.id.clone(), wants)
+                    .map_err(RouterError::from)?;
+                Ok(None)
             },
             ClientFrame::IceCandidate { candidate_sdp } => {
                 let Some(media) = self.media else {
@@ -549,6 +576,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RouterError::UnknownPeer));
+    }
+
+    #[tokio::test]
+    async fn video_wants_without_a_media_task_are_taken_in_silence() {
+        let reg = PeerRegistry::new();
+        let (alice, mut alice_rx) = make_peer("p1", "call-a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        reg.register(alice.clone()).await;
+        let router = Router::new(&reg);
+        let frame = crate::protocol::ClientFrame::VideoWants {
+            wants: vec![crate::protocol::VideoWant {
+                peer: "p2".into(),
+                quality: crate::protocol::VideoQuality::Light,
+            }],
+        };
+        let reply = router
+            .handle_client_frame(&alice, frame)
+            .await
+            .expect("not an error");
+        assert_eq!(reply, None, "no reply on the wire");
+        assert!(alice_rx.try_recv().is_err());
     }
 
     #[tokio::test]

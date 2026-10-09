@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::media::{resolve_advertise_ip, AdvertiseError, BitrateControl};
+use crate::media::{resolve_advertise_ip, AdvertiseError, BitrateControl, LossProtection};
 use crate::uplink_estimate::{
     EstimatorConfig, DEFAULT_MAX_BPS, DEFAULT_START_BPS, MIN_ESTIMATE_BPS,
 };
@@ -167,6 +167,19 @@ pub struct Config {
     /// track instead ([`crate::media::TrackRole`]). A publisher
     /// without simulcast is not affected either way.
     pub uplink_fallback: bool,
+    /// What the SFU does to carry video through a burst of loss
+    /// (ADR-0070 steps 3 and 4), from three switches that are on unless
+    /// set to `0` (unset, empty or `1`: on; anything else refuses to
+    /// load): `LAKKO_SFU_LIGHT_DUPLICATE` (every packet of a light
+    /// companion track is sent to a subscriber twice),
+    /// `LAKKO_SFU_PLAYOUT_DELAY` (a minimum playout delay is stamped
+    /// on a subscriber's video after a burst; off, the header
+    /// extension is not negotiated at all) and
+    /// `LAKKO_SFU_BURST_KEYFRAME` (a publisher is asked for a key
+    /// frame when a burst on one of its video streams has ended
+    /// unrepaired). See [`crate::media::LossProtection`],
+    /// [`crate::playout_delay`] and [`crate::burst_keyframe`].
+    pub protection: LossProtection,
     /// Who decides a publisher's bitrate (`LAKKO_SFU_BITRATE_CONTROL`,
     /// ADR-0068): unset, empty or `client` is the client's own
     /// congestion controller, exactly the behaviour without the
@@ -184,6 +197,21 @@ pub struct Config {
     /// parsed and checked in either mode, so a typo is found before
     /// the switch is flipped.
     pub bitrate_control: BitrateControl,
+    /// Whether the SFU estimates each subscriber's downlink and gives up
+    /// the larger video tracks first when it is short
+    /// (`LAKKO_SFU_DOWNLINK_CONTROL`, ADR-0070 step 6). **Off unless set
+    /// to `1`** (unset, empty or `0`: off; anything else refuses to
+    /// load), and only when the SFU also decides publishers' bitrate
+    /// (`LAKKO_SFU_BITRATE_CONTROL=server`): with `client` it is `false`
+    /// whatever the switch says. Off, nothing of step 6 happens: no
+    /// transport-wide congestion control on the media lines the SFU
+    /// sends on, no allocation, no probe, no `video-given` frame.
+    ///
+    /// It is off by default because it has never been run against a
+    /// browser or a native client; its acceptance tests against synthetic
+    /// clients (`services/sfu/README.md`, "Downlink control") pass as of
+    /// the third round, after two builds that did not.
+    pub downlink_control: bool,
     /// How often the signaling socket sends a WebSocket
     /// protocol ping to each peer (`LAKKO_SFU_SIGNALING_PING_SECS`).
     /// Every client stack answers a protocol ping on its own
@@ -241,7 +269,18 @@ impl Config {
         let media_diagnostics = parse_optional_secs("LAKKO_SFU_MEDIA_DIAG_SECS")?;
         let video_fec = parse_switch("LAKKO_SFU_VIDEO_FEC")?;
         let uplink_fallback = parse_switch("LAKKO_SFU_UPLINK_FALLBACK")?;
+        let protection = LossProtection {
+            light_duplicate: parse_switch_default_on("LAKKO_SFU_LIGHT_DUPLICATE")?,
+            playout_delay: parse_switch_default_on("LAKKO_SFU_PLAYOUT_DELAY")?,
+            burst_keyframe: parse_switch_default_on("LAKKO_SFU_BURST_KEYFRAME")?,
+            ..LossProtection::default()
+        };
         let bitrate_control = parse_bitrate_control()?;
+        // Parsed in either mode, so a typo is found before the bitrate
+        // switch is flipped.
+        let downlink_switch = parse_switch("LAKKO_SFU_DOWNLINK_CONTROL")?;
+        let downlink_control =
+            downlink_switch && matches!(bitrate_control, BitrateControl::Server(_));
 
         Ok(Self {
             signaling_bind,
@@ -255,7 +294,9 @@ impl Config {
             media_diagnostics,
             video_fec,
             uplink_fallback,
+            protection,
             bitrate_control,
+            downlink_control,
             signaling_ping_interval,
             signaling_idle_timeout,
         })
@@ -401,6 +442,19 @@ fn parse_switch(name: &'static str) -> Result<bool, ConfigError> {
     }
 }
 
+/// A switch that is on unless switched off: unset, empty or `1` is on, `0`
+/// is off, anything else refuses to load.
+fn parse_switch_default_on(name: &'static str) -> Result<bool, ConfigError> {
+    match env::var(name).as_deref() {
+        Err(_) | Ok("" | "1") => Ok(true),
+        Ok("0") => Ok(false),
+        Ok(raw) => Err(ConfigError::Invalid {
+            name,
+            detail: format!("expected 0 or 1, got {raw:?}"),
+        }),
+    }
+}
+
 /// Env var choosing who decides a publisher's bitrate.
 const BITRATE_CONTROL: &str = "LAKKO_SFU_BITRATE_CONTROL";
 /// Env var: where the SFU's estimate starts, kbit/s.
@@ -510,6 +564,7 @@ mod tests {
             "LAKKO_SFU_BITRATE_CONTROL",
             "LAKKO_SFU_BITRATE_START_KBPS",
             "LAKKO_SFU_BITRATE_MAX_KBPS",
+            "LAKKO_SFU_DOWNLINK_CONTROL",
         ] {
             env::remove_var(key);
         }
@@ -545,6 +600,51 @@ mod tests {
     }
 
     #[test]
+    fn the_loss_protection_switches_are_on_unless_set_to_zero() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        with_env(&[jwks], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(cfg.light_duplicate && cfg.playout_delay);
+        });
+        with_env(
+            &[
+                jwks,
+                ("LAKKO_SFU_LIGHT_DUPLICATE", "1"),
+                ("LAKKO_SFU_PLAYOUT_DELAY", ""),
+            ],
+            || {
+                let cfg = Config::from_env().unwrap().protection;
+                assert!(cfg.light_duplicate && cfg.playout_delay);
+            },
+        );
+        with_env(&[jwks, ("LAKKO_SFU_LIGHT_DUPLICATE", "0")], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(!cfg.light_duplicate && cfg.playout_delay);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_PLAYOUT_DELAY", "0")], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(cfg.light_duplicate && !cfg.playout_delay);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_LIGHT_DUPLICATE", "off")], || {
+            assert!(Config::from_env().is_err());
+        });
+        with_env(&[jwks, ("LAKKO_SFU_PLAYOUT_DELAY", "yes")], || {
+            assert!(Config::from_env().is_err());
+        });
+        // The key frame at the end of a burst is a switch of its own.
+        with_env(&[jwks], || {
+            assert!(Config::from_env().unwrap().protection.burst_keyframe);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_BURST_KEYFRAME", "0")], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(!cfg.burst_keyframe && cfg.light_duplicate && cfg.playout_delay);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_BURST_KEYFRAME", "no")], || {
+            assert!(Config::from_env().is_err());
+        });
+    }
+
+    #[test]
     fn video_fec_is_off_unless_set_to_one() {
         let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
         with_env(&[jwks], || {
@@ -571,6 +671,56 @@ mod tests {
                     "{bad:?}"
                 );
             });
+        }
+    }
+
+    #[test]
+    fn downlink_control_is_off_unless_switched_on_under_server_bitrate_control() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        let server = ("LAKKO_SFU_BITRATE_CONTROL", "server");
+        // The client decides its bitrate: off, whatever the switch says.
+        with_env(&[jwks], || {
+            assert!(!Config::from_env().unwrap().downlink_control);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_DOWNLINK_CONTROL", "1")], || {
+            assert!(!Config::from_env().unwrap().downlink_control);
+        });
+        // The SFU decides: off unless switched on.
+        for off in [None, Some(""), Some("0")] {
+            let mut pairs = vec![jwks, server];
+            if let Some(value) = off {
+                pairs.push(("LAKKO_SFU_DOWNLINK_CONTROL", value));
+            }
+            with_env(&pairs, || {
+                assert!(!Config::from_env().unwrap().downlink_control, "{off:?}");
+            });
+        }
+        with_env(&[jwks, server, ("LAKKO_SFU_DOWNLINK_CONTROL", "1")], || {
+            assert!(Config::from_env().unwrap().downlink_control);
+        });
+        // Anything else refuses to load, in either mode.
+        for bad in ["off", "true", "2"] {
+            for mode in ["client", "server"] {
+                with_env(
+                    &[
+                        jwks,
+                        ("LAKKO_SFU_BITRATE_CONTROL", mode),
+                        ("LAKKO_SFU_DOWNLINK_CONTROL", bad),
+                    ],
+                    || {
+                        assert!(
+                            matches!(
+                                Config::from_env().unwrap_err(),
+                                ConfigError::Invalid {
+                                    name: "LAKKO_SFU_DOWNLINK_CONTROL",
+                                    ..
+                                }
+                            ),
+                            "{bad:?} {mode}"
+                        );
+                    },
+                );
+            }
         }
     }
 

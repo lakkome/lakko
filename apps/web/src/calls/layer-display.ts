@@ -9,7 +9,16 @@
  * for about a second and then plays the late second fast. The light layer
  * (180p, 150 kbit/s) is repaired in a fraction of that. So a viewer receives
  * both as two tracks (`light-stream.ts`), decodes both all the time, and the
- * tile shows the light one the moment the full one stands still.
+ * tile shows the light one once the full one has really stopped.
+ *
+ * "Really stopped" is why there are two thresholds. A full track that
+ * delivers its frames at a steady average rate but in clumps (a publisher on
+ * a congested uplink: 28 frames a second with three gaps of about 200 ms
+ * every two seconds, seen on a live call) is sharp and moving and is the one
+ * to show. Such gaps are counted as displayed stalls ({@link FULL_STALL_MS})
+ * but neither send the tile to the light copy nor keep it there
+ * ({@link FULL_STOPPED_MS}). While one threshold did both jobs, that tile
+ * showed the light copy for the rest of the call.
  *
  * The rule and its counters are written once, in Rust
  * (`crates/lakko-ui-rules`, `layer_display`), and reached here over wasm; iOS
@@ -27,11 +36,11 @@
  *
  *   * `full` is shown by default, and always while there is no light track.
  *   * `full` -> `light` when the full track has presented no frame for
- *     {@link FULL_STALL_MS} and the light track presented one within
+ *     {@link FULL_STOPPED_MS} and the light track presented one within
  *     {@link LIGHT_FRESH_MS}.
  *   * `light` -> `full` only once the full track has presented frames with no
- *     gap longer than {@link FULL_STALL_MS} for {@link FULL_STEADY_MS}. A gap
- *     inside that window starts it again. The window also hides the fast
+ *     gap longer than {@link FULL_STOPPED_MS} for {@link FULL_STEADY_MS}. A
+ *     longer gap inside that window starts it again. The window also hides the fast
  *     catch-up playback that follows a stall.
  *   * Before the full track's first frame, `light` is shown only when the
  *     full track has presented nothing for {@link FIRST_FRAME_GRACE_MS} while
@@ -45,7 +54,7 @@
  * became the shown one, when that is later) until its next frame or until it
  * stops being shown. A stall the switch to `light` cuts short is counted at
  * the length it had when the switch happened: with the tile's tick that is
- * between {@link FULL_STALL_MS} and that plus one tick, and it is what the
+ * between {@link FULL_STOPPED_MS} and that plus one tick, and it is what the
  * viewer saw.
  */
 
@@ -55,16 +64,31 @@ import { LayerDisplay as WasmLayerDisplay, ShownLayer } from "../../wasm/lakko_f
 export type LayerShown = "full" | "light";
 
 /**
- * The full track is standing still once it has presented no frame for this
- * long, milliseconds. Chosen, not measured: about four frame intervals at
- * 30 frames a second and two at 15, so ordinary jitter does not trip it.
+ * The shown track is counted as standing still (a displayed stall) once it
+ * has presented no frame for more than this, milliseconds. Chosen, not
+ * measured: about four frame intervals at 30 frames a second and two at 15,
+ * so ordinary jitter is not counted. It only counts; what is shown is decided
+ * by {@link FULL_STOPPED_MS}.
  *
- * This and the three constants below restate the shared rule's values
+ * This and the constants below restate the shared rule's values
  * (`layerFullStallMs()` and its neighbours over wasm) so they can be read
  * before the wasm module is loaded; `layer-display.test.ts` pins that they
  * are equal. The rule itself never reads these copies.
  */
 export const FULL_STALL_MS = 150;
+
+/**
+ * The full track has really stopped once it has presented no frame for this
+ * long, milliseconds: the tile then shows a playing light track, and a full
+ * track counts as playing again only while its gaps stay within this. Chosen,
+ * not measured: twice {@link FULL_STALL_MS}, so a track whose frames arrive
+ * in clumps with gaps of about 200 ms stays the shown one.
+ *
+ * The shared rule has no wasm getter for this one; `layer-display.test.ts`
+ * pins it against the rule's behaviour (the tick at which a stopped full
+ * track hands over) instead.
+ */
+export const FULL_STOPPED_MS = 300;
 
 /**
  * The light track is playing if it presented a frame within this,
@@ -76,7 +100,7 @@ export const LIGHT_FRESH_MS = 250;
 
 /**
  * How long the full track must present frames without a gap longer than
- * {@link FULL_STALL_MS} before the tile returns to it, milliseconds. Chosen,
+ * {@link FULL_STOPPED_MS} before the tile returns to it, milliseconds. Chosen,
  * not measured: the late second a recovered stream plays fast was about a
  * second long on the calls that prompted this.
  */
@@ -246,6 +270,124 @@ export class LayerDisplay {
   }
 }
 
+/** Whether a tile's heavy picture has shown a frame: `none` when the tile has
+ *  no heavy picture (the light one is shown alone), `never` when it has one
+ *  that has shown no frame since it was put there, `yes` otherwise. */
+export type HeavySeen = "none" | "never" | "yes";
+
+/**
+ * The frames a tile observed on its two elements, beside what the rule
+ * counted. The rule's counters cannot tell three different things apart that
+ * all read `light_switches=0` with `light_ms` the whole interval:
+ *
+ *   * the heavy picture has never produced a frame (a slow first key frame:
+ *     the tile is right to show the light copy): `heavy=never`;
+ *   * the heavy element's frames do not reach the rule (a binding fault):
+ *     `heavy=never`, or `heavy=yes` with `heavy_frames=0`, while the
+ *     receiver of that track reports decoded frames;
+ *   * the heavy picture produces frames and the rule keeps the light copy
+ *     (its thresholds): `heavy=yes` with `heavy_frames` near the receiver's
+ *     decoded count, and `heavy_gap_max_ms` saying how irregular they were.
+ */
+export interface TileFrameCounts {
+  readonly heavy: HeavySeen;
+  /** Frames observed on the heavy element. */
+  readonly heavyFrames: number;
+  /** The longest time without a heavy frame, milliseconds: between two
+   *  frames, or from the last one to the end of the interval. Zero before
+   *  the heavy picture's first frame. */
+  readonly heavyGapMaxMs: number;
+  /** Frames observed on the light element. */
+  readonly lightFrames: number;
+  /** What the tile showed when it last reported. */
+  readonly shownNow: LayerShown;
+}
+
+/** Frame counts with nothing observed. */
+export const NO_TILE_FRAME_COUNTS: TileFrameCounts = {
+  heavy: "none",
+  heavyFrames: 0,
+  heavyGapMaxMs: 0,
+  lightFrames: 0,
+  shownNow: "full",
+};
+
+const HEAVY_SEEN_RANK: Record<HeavySeen, number> = { none: 0, never: 1, yes: 2 };
+
+/** Two reports as one: `b` is the later. Sums, the longer gap, the most the
+ *  heavy picture was seen, and what was shown last. */
+export function addTileFrameCounts(a: TileFrameCounts, b: TileFrameCounts): TileFrameCounts {
+  return {
+    heavy: HEAVY_SEEN_RANK[b.heavy] >= HEAVY_SEEN_RANK[a.heavy] ? b.heavy : a.heavy,
+    heavyFrames: a.heavyFrames + b.heavyFrames,
+    heavyGapMaxMs: Math.max(a.heavyGapMaxMs, b.heavyGapMaxMs),
+    lightFrames: a.lightFrames + b.lightFrames,
+    shownNow: b.shownNow,
+  };
+}
+
+/**
+ * Counts the frames one tile observes on its two elements. No part of the
+ * rule: nothing here decides what is shown. Timestamps are the caller's, one
+ * clock, milliseconds.
+ */
+export class TileFrameTally {
+  private hasHeavy = false;
+  /** Whether the heavy picture now in place has shown a frame. */
+  private seen = false;
+  private lastHeavy: number | null = null;
+  private heavyFrames = 0;
+  private heavyGapMax = 0;
+  private lightFrames = 0;
+
+  /** The tile has a heavy picture, or has none (the light one alone). A new
+   *  heavy picture (`replaced`) has shown no frame yet. */
+  setHeavy(present: boolean, replaced = false): void {
+    if (!present || replaced || !this.hasHeavy) {
+      this.lastHeavy = null;
+      this.seen = false;
+    }
+    this.hasHeavy = present;
+  }
+
+  /** The heavy element showed a frame at `t`. */
+  heavyFrame(t: number): void {
+    this.hasHeavy = true;
+    this.seen = true;
+    if (this.lastHeavy !== null) this.heavyGapMax = Math.max(this.heavyGapMax, t - this.lastHeavy);
+    this.lastHeavy = t;
+    this.heavyFrames += 1;
+  }
+
+  /** The light element showed a frame. */
+  lightFrame(): void {
+    this.lightFrames += 1;
+  }
+
+  /** Frames could not be observed for a while (a hidden page): the time
+   *  since the last heavy frame is not a gap. */
+  unobserved(): void {
+    this.lastHeavy = null;
+  }
+
+  /** Everything observed since the last drain, as of `now`, and start a new
+   *  interval. */
+  drain(now: number, shownNow: LayerShown): TileFrameCounts {
+    const open = this.lastHeavy === null ? 0 : Math.max(0, now - this.lastHeavy);
+    const out: TileFrameCounts = {
+      heavy: !this.hasHeavy ? "none" : this.seen ? "yes" : "never",
+      heavyFrames: this.heavyFrames,
+      heavyGapMaxMs: Math.max(this.heavyGapMax, open),
+      lightFrames: this.lightFrames,
+      shownNow,
+    };
+    this.heavyFrames = 0;
+    this.heavyGapMax = 0;
+    this.lightFrames = 0;
+    return out;
+  }
+}
+
 /**
  * What every remote tile of a call counted, by peer.
  *
@@ -257,9 +399,18 @@ export class LayerDisplay {
 export class LayerDisplayLedger {
   private readonly totalByPeer = new Map<string, LayerDisplayCounters>();
   private readonly intervalByPeer = new Map<string, LayerDisplayCounters>();
+  private readonly framesByPeer = new Map<string, TileFrameCounts>();
 
-  /** A tile of `peerId` reports what it counted since its last report. */
-  add(peerId: string, counters: LayerDisplayCounters): void {
+  /** A tile of `peerId` reports what it counted since its last report, and,
+   *  when it has them, the frames it observed in that time. */
+  add(peerId: string, counters: LayerDisplayCounters, frames?: TileFrameCounts): void {
+    if (frames !== undefined) {
+      const before = this.framesByPeer.get(peerId);
+      this.framesByPeer.set(
+        peerId,
+        before === undefined ? frames : addTileFrameCounts(before, frames),
+      );
+    }
     this.totalByPeer.set(
       peerId,
       addLayerDisplayCounters(this.totalByPeer.get(peerId) ?? NO_LAYER_DISPLAY_COUNTERS, counters),
@@ -281,6 +432,14 @@ export class LayerDisplayLedger {
     return out;
   }
 
+  /** The frames the tiles of each peer observed since the last call, and
+   *  start a new interval. A peer no tile reported frames of is absent. */
+  takeFrames(): ReadonlyMap<string, TileFrameCounts> {
+    const out = new Map(this.framesByPeer);
+    this.framesByPeer.clear();
+    return out;
+  }
+
   /** Every peer a tile ever reported on, counted from the start. */
   totals(): ReadonlyMap<string, LayerDisplayCounters> {
     return new Map(this.totalByPeer);
@@ -290,6 +449,7 @@ export class LayerDisplayLedger {
   reset(): void {
     this.totalByPeer.clear();
     this.intervalByPeer.clear();
+    this.framesByPeer.clear();
   }
 }
 

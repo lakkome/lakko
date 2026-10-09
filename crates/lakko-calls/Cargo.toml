@@ -36,3 +36,7 @@ prost = "0.13"
 lakko-contacts.workspace = true
 thiserror.workspace = true
 zeroize = "1"
+
+[dev-dependencies]
+# Arbitrary-bytes properties of the sealed media frame parser (ADR-0071).
+proptest = "1"

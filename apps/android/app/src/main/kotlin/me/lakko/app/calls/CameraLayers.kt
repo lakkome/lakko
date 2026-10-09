@@ -50,7 +50,7 @@ internal const val CAMERA_LOW_MAX_BITRATE_BPS: Int = 150_000
  * Whether the camera is sent as two simulcast layers. The light layer costs a
  * publisher about 150 kbit/s.
  */
-internal const val CAMERA_SIMULCAST_ENABLED: Boolean = true
+internal const val CAMERA_SIMULCAST_ENABLED: Boolean = false
 
 /** The single send encoding sent when simulcast is refused or switched off. */
 internal fun cameraSendEncoding(): RtpParameters.Encoding =
