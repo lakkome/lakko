@@ -318,15 +318,30 @@ public enum CoPublisher {
                 // ADR-0060 — written with the `reply` grant its attribution
                 // carried; the mailbox is closed to anything else.
                 // ADR-0066 section 3.5a rule 1 — resolved before addressing.
-                let (current, auth) = await MainActor.run {
-                    (ReachCenter.shared.currentAccountKey(of: proposalRef),
-                     ReachCenter.shared.writeAuth(toAccountKey: proposalRef))
+                // Rule 6 — a refused Welcome re-checks the joiner's address
+                // once.
+                let resolve: () async throws -> MailboxWriteAttempt = {
+                    let (current, auth) = await MainActor.run {
+                        (ReachCenter.shared.currentAccountKey(of: proposalRef),
+                         ReachCenter.shared.writeAuth(toAccountKey: proposalRef))
+                    }
+                    return MailboxWriteAttempt(
+                        mailbox: try IdentityPseudonym.fromIdentity(pubkey: current).asBytes(), auth: auth)
                 }
-                let mailbox = try IdentityPseudonym.fromIdentity(pubkey: current).asBytes()
-                _ = try await ds.publishMailbox(
-                    pseudonym: mailbox,
-                    payload: wrapEnvelope(kind: .welcome, body: added.welcome),
-                    writeAuth: auth)
+                let payload = wrapEnvelope(kind: .welcome, body: added.welcome)
+                let first = try await resolve()
+                do {
+                    _ = try await ds.publishMailbox(
+                        pseudonym: first.mailbox, payload: payload, writeAuth: first.auth)
+                } catch let error where RefusedMailboxWrite.isRefusal(error) {
+                    await PersonAddressRecheck.recheck(accountKey: proposalRef)
+                    let second = try? await resolve()
+                    guard RefusedMailboxWrite.retries(first: first, rechecked: second), let second else {
+                        throw error
+                    }
+                    _ = try await ds.publishMailbox(
+                        pseudonym: second.mailbox, payload: payload, writeAuth: second.auth)
+                }
             }
         ).run()
         try await resealSubscribers(

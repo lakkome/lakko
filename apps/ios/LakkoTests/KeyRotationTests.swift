@@ -39,7 +39,7 @@ final class KeyRotationPlanTests: XCTestCase {
         XCTAssertEqual(KeyRotationPlan.remaining(record(.announced)), [])
         XCTAssertEqual(
             KeyRotationPlan.remaining(record(.committed)),
-            [.discovery, .keyPackage, .deviceGroupRoot, .journals, .channels, .reach, .profile, .backup])
+            [.discovery, .keyPackage, .deviceGroupRoot, .journals, .channels, .reach, .profile, .grants, .backup])
     }
 
     func testAStepThatLandedIsNotOwedAgain() {
@@ -896,7 +896,7 @@ final class KeyRotationRunnerTests: XCTestCase {
         XCTAssertFalse(world.events.contains("profile"), "a grant must name a key the mailbox already knows")
         XCTAssertEqual(
             KeyRotationPlan.remaining(try XCTUnwrap(store.load(accountIdB64: accountIdB64))),
-            [.reach, .profile])
+            [.reach, .profile, .grants])
 
         world.failing = []
         let before = world.events.count
@@ -913,6 +913,7 @@ final class KeyRotationRunnerTests: XCTestCase {
         record.journalsDone = true
         record.channelsDone = true
         record.reachDone = true
+        record.grantsDone = true
         record.backupDone = true
         var json = try XCTUnwrap(
             JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as? [String: Any])

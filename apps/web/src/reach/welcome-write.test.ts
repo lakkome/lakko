@@ -131,6 +131,46 @@ describe("the order grants are tried in", () => {
   });
 });
 
+describe("the own keys a committer delegation may name (ADR-0066 section 3.5a)", () => {
+  it("the current key first, then every own predecessor, newest first", async () => {
+    const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x51));
+    const oldest = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x52));
+    const between = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x53));
+    const session = await ReachSession.open("acc", account.ed25519Seed, account.signaturePublicKey, {
+      ds: {} as unknown as DsClient,
+    });
+    try {
+      expect(session.delegateKeys().map((k) => Array.from(k.accountKey))).toEqual([
+        Array.from(account.signaturePublicKey),
+      ]);
+      // Oldest first, as the chain is held.
+      session.setPredecessors([
+        { accountKey: oldest.signaturePublicKey, seed: oldest.ed25519Seed },
+        { accountKey: between.signaturePublicKey, seed: between.ed25519Seed },
+      ]);
+      const keys = session.delegateKeys();
+      expect(keys.map((k) => Array.from(k.accountKey))).toEqual([
+        Array.from(account.signaturePublicKey),
+        Array.from(between.signaturePublicKey),
+        Array.from(oldest.signaturePublicKey),
+      ]);
+      // Each one signs as exactly the key it names.
+      for (const k of keys) {
+        const signer = await k.signer();
+        expect(signer).toBeDefined();
+        signer.free();
+      }
+      session.setPredecessors([]);
+      expect(session.delegateKeys()).toHaveLength(1);
+    } finally {
+      session.stop();
+      account.free();
+      oldest.free();
+      between.free();
+    }
+  });
+});
+
 describe("an owed Welcome is retried when a grant arrives", () => {
   it("a change to the received grants notifies; an unchanged store does not", async () => {
     const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x44));

@@ -26,6 +26,10 @@ export function foldProfileGrants(
   store: ReceivedGrants,
   args: {
     readonly senderHex: string;
+    /** The account key the sender is ADDRESSED by now (resolved through the
+     *  proven-predecessor table); the sender's own key when omitted. ADR-0066
+     *  section 3.5a rule 6. */
+    readonly addressHex?: string;
     readonly ownHex: string;
     readonly scopeHex: string;
     readonly oneToOne: boolean;
@@ -48,10 +52,10 @@ export function foldProfileGrants(
     if (cls === null || !acceptReceivedGrant(cls, receipt)) continue;
     const held = { wireB64: g.wireB64, version: g.version, receivedAtMs: args.nowMs };
     if (cls === "contact") {
-      next = fileContactGrant(next, args.senderHex, held);
+      next = fileContactGrant(next, args.senderHex, held, args.addressHex ?? args.senderHex);
     } else if (cls === "group" || cls === "member") {
       present.add(cls);
-      next = fileScopedGrant(next, args.senderHex, args.scopeHex, cls, held);
+      next = fileScopedGrant(next, args.senderHex, args.scopeHex, cls, held, args.addressHex ?? args.senderHex);
     }
   }
   if (args.senderHex !== args.ownHex) {

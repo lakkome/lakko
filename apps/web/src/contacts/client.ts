@@ -72,9 +72,17 @@ import type {
 import type { IdentityFetchResponse } from "../discovery/wire";
 import type { ReceivedProfile } from "../profile/profile-envelope";
 import type { AccountPubkeyPin } from "./local-store";
-import { contactRequestGate, refusalIsRecordedReset } from "./keys-reset-send-gate";
+import {
+  contactRequestGate,
+  refusalIsRecordedReset,
+  requestTargetAfterFetch,
+} from "./keys-reset-send-gate";
+import { provenSuccessorWith } from "./proven-successor";
+import { pendingAfterArrival } from "./inbox-store";
+import { spentFailureOutcome, type SpentOutcome } from "./rotation-spent";
 import {
   readKeyReset,
+  accountIdB64OfKey,
   readPin,
   recordKeyReset,
   setPin,
@@ -133,7 +141,8 @@ import {
   accountKeyOfLeaf,
   accountMailboxOf,
   MailboxUnreachableError,
-  resolveWriteAuth,
+  mailboxOfExactKey,
+  writeToPerson,
   writeWelcome,
 } from "../reach/mailbox-write";
 import { forgetJoinReply, joinReplyFor, rememberJoinReply } from "../reach/join-replies";
@@ -896,7 +905,6 @@ function sweepPortsFor(
         const accountHex = journalHex(resolveAccountKey(accountKey));
         const done = welcomedAccounts.get(accountHex);
         if (done !== undefined) return done;
-        const pseudonym = await accountMailboxOf(accountKey);
         const explicit = joinReplyFor(leafKey);
         // ADR-0050 section 2.5a item 7 — never unsigned: every grant held for
         // the account is tried in order (next on 401); with none left nothing
@@ -905,10 +913,12 @@ function sweepPortsFor(
         // arrival.
         let id: number;
         try {
+          // ADR-0066 section 3.5a rule 6 - a refusal re-checks the address
+          // once; the mailbox is the one resolved for that attempt.
           id = await writeWelcome(
             accountKey,
             { scope: groupIdBytes, explicit },
-            async (auth) => (await ds.publishMailbox(pseudonym, bytes, auth)).id,
+            async (pseudonym, auth) => (await ds.publishMailbox(pseudonym, bytes, auth)).id,
           );
         } catch (err) {
           if (!(err instanceof MailboxUnreachableError)) throw err;
@@ -1599,24 +1609,23 @@ export class ContactsClient {
           // it was derived then; the account may have rotated (with a proof)
           // since, so it is derived again from the account key when the
           // entry carries one.
-          const pseudonym =
-            entry.secondArtifactAccountKeyB64 === undefined
-              ? base64Decode(entry.secondArtifactMailboxB64)
-              : await accountMailboxOf(base64Decode(entry.secondArtifactAccountKeyB64));
-          // ADR-0060 — signed with the key that reaches the account the
-          // mailbox is named after (unsigned when the entry predates it).
-          const write =
-            entry.secondArtifactAccountKeyB64 === undefined
-              ? null
-              : await resolveWriteAuth(base64Decode(entry.secondArtifactAccountKeyB64), {
-                  scope: groupIdBytes,
-                  allowMember: true,
-                });
-          try {
-            const pub2 = await this.ds.publishMailbox(pseudonym, secondBytes, write?.auth);
+          if (entry.secondArtifactAccountKeyB64 === undefined) {
+            // An entry that predates ADR-0060: unsigned, to the mailbox it
+            // recorded.
+            const pub2 = await this.ds.publishMailbox(
+              base64Decode(entry.secondArtifactMailboxB64),
+              secondBytes,
+            );
             secondMessageId = pub2.id;
-          } finally {
-            write?.release();
+          } else {
+            // ADR-0060 — signed with the key that reaches the account the
+            // mailbox is named after; rule 6: re-checked once on a refusal.
+            const pub2 = await writeToPerson(
+              base64Decode(entry.secondArtifactAccountKeyB64),
+              { scope: groupIdBytes, allowMember: true },
+              (pseudonym, auth) => this.ds.publishMailbox(pseudonym, secondBytes, auth),
+            );
+            secondMessageId = pub2.id;
           }
         }
         await this.ackCommitBestEffort(entry.id, commitPub.id, secondMessageId);
@@ -1814,12 +1823,190 @@ export class ContactsClient {
     if (verdict === "send") return;
     if (verdict === "keys-reset") throw new KeysResetUnverified(accountIdB64);
     await this.refuseUnlessIdentityCurrent(accountId);
-    if (contactRequestGate(readPin(accountIdB64), recipientKeyB64) !== "send") {
+    // ADR-0066 section 3.5a rule 1 - a key that is a PROVEN predecessor of
+    // the pin is the same person: the send re-fetches and seals to the
+    // current keys (`currentRequestTarget`). Any other key is refused.
+    const pinnedNow = readPin(accountIdB64);
+    const provenPredecessor =
+      pinnedNow !== undefined &&
+      pinnedNow.keyReset === undefined &&
+      base64Encode(resolveAccountKey(recipientSignaturePubkey)) === pinnedNow.pinnedSignaturePubkeyB64;
+    if (!provenPredecessor && contactRequestGate(pinnedNow, recipientKeyB64) !== "send") {
       throw new SupersessionRefused(
         "key-mismatch",
         accountIdB64,
         "the key this request would be sealed for is not the account's trusted key",
       );
+    }
+  }
+
+  /**
+   * ADR-0066 section 3.5a rule 1 - the keys a contact request to a bundle in
+   * hand actually goes out to.
+   *
+   * A bundle carried by a link or a search result may name a key its owner
+   * has since rotated away BY PROOF. The request is then sealed to the
+   * CURRENT signature and X25519 keys, which only the published bundle
+   * carries, and sent to the current mailbox. The fetch goes through the
+   * fail-closed gate; a failed fetch REFUSES the send, and the old key is
+   * never the fallback. A key that is neither the published one nor a
+   * proven predecessor of it is refused as a key mismatch.
+   *
+   * No fetch runs when the key in hand is already what this device trusts
+   * (no pin and no proven successor known, or the pin itself).
+   */
+  private async currentRequestTarget(
+    accountId: Uint8Array,
+    recipientSignaturePubkey: Uint8Array,
+    recipientX25519Pubkey: Uint8Array,
+  ): Promise<{ signaturePubkey: Uint8Array; x25519Pubkey: Uint8Array }> {
+    const accountIdB64 = base64Encode(accountId);
+    const suppliedKeyB64 = base64Encode(recipientSignaturePubkey);
+    const supplied = { signaturePubkey: recipientSignaturePubkey, x25519Pubkey: recipientX25519Pubkey };
+    const verdict = contactRequestGate(readPin(accountIdB64), suppliedKeyB64);
+    if (verdict === "keys-reset") throw new KeysResetUnverified(accountIdB64);
+    const resolvesToItself =
+      base64Encode(resolveAccountKey(recipientSignaturePubkey)) === suppliedKeyB64;
+    if (verdict === "send" && resolvesToItself) return supplied;
+    let bundle: IdentityFetchResponse | null;
+    try {
+      bundle = await this.discovery.identityFetch(accountId);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (bundle === null) throw ContactsError.noIdentityBundle(accountId);
+    await this.verifyBundleOrKeysReset(accountId, bundle);
+    const published = base64Decode(bundle.signature_pubkey);
+    const target = requestTargetAfterFetch({
+      suppliedKeyB64,
+      publishedKeyB64: bundle.signature_pubkey,
+      publishedIsProvenSuccessor: await provenSuccessorWith(
+        recipientSignaturePubkey,
+        published,
+        bundle,
+      ),
+    });
+    if (target === "as-supplied") return supplied;
+    if (target === "current") {
+      return { signaturePubkey: published, x25519Pubkey: base64Decode(bundle.x25519_pubkey) };
+    }
+    throw new SupersessionRefused(
+      "key-mismatch",
+      accountIdB64,
+      "the key this request would be sealed for is not the account's trusted key",
+    );
+  }
+
+  /**
+   * ADR-0066 section 3.5a rule 6 - re-check the address of the person
+   * `accountKey` names after a refused write: fetch their identity bundle
+   * and run it through the fail-closed gate, which records a proven
+   * predecessor (so the next resolution addresses the current mailbox).
+   *
+   * Only for a person a TRUSTED local record names (a pin, an accepted
+   * contact); a claimed account id is not followed. Never throws: a failed
+   * fetch or a refusal of the gate leaves the address as it was.
+   */
+  async recheckAddress(accountKey: Uint8Array): Promise<void> {
+    const accountIdB64 = accountIdB64OfKey(base64Encode(accountKey));
+    if (accountIdB64 === null) return;
+    try {
+      const accountId = base64Decode(accountIdB64);
+      const bundle = await this.discovery.identityFetch(accountId);
+      if (bundle === null) return;
+      await this.verifyBundleAccountKey(accountId, bundle);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.info(
+        "ContactsClient: address re-check changed nothing",
+        err instanceof Error ? err.name : "",
+      );
+    }
+  }
+
+  /**
+   * ADR-0066 section 3.5a rule 5 - send an unanswered contact request AGAIN
+   * after this account's keys were rotated: a fresh request from the new
+   * key, with a new `reply` grant, sealed to the recipient's published keys
+   * (fetched through the fail-closed gate). The intro text is not kept on
+   * this device, so the request carries the profile and no intro.
+   *
+   * Never throws: answers how it ended (`rotation-spent.ts`). Only a server
+   * that could not be reached is `unreachable`.
+   */
+  async resendContactRequestAfterRotation(
+    identity: IdentitySecrets | null,
+    recipientAccountId: Uint8Array,
+  ): Promise<SpentOutcome> {
+    try {
+      const bundle = await this.discovery.identityFetch(recipientAccountId);
+      if (bundle === null) return "skipped";
+      await this.verifyBundleOrKeysReset(recipientAccountId, bundle);
+      await this.composeAndPublishContactRequest(
+        identity,
+        base64Decode(bundle.signature_pubkey),
+        base64Decode(bundle.x25519_pubkey),
+        new Uint8Array(0),
+      );
+      return "done";
+    } catch (err) {
+      return spentFailureOutcome(err);
+    }
+  }
+
+  /**
+   * ADR-0066 section 3.5a rule 5 - one pending contact request per person.
+   *
+   * A person whose account keys were rotated re-sends their unanswered
+   * request from the new key. Given a request just received and the pending
+   * list, answer which pending requests it replaces and whether it should
+   * itself be dropped ({@link pendingAfterArrival}). Only requests naming
+   * the SAME account id are compared, and the account id alone decides
+   * nothing (it is the sender's claim): the new key must be the PROVEN
+   * successor of the old one, by the pin store's chain or by the proof the
+   * account's published bundle carries (`proven-successor.ts`).
+   *
+   * Never throws; a failed fetch replaces nothing (two rows, as before).
+   */
+  async pendingRequestsSupersededBy(
+    request: IncomingContactRequest,
+    pending: readonly IncomingContactRequest[],
+  ): Promise<{ readonly replaces: number[]; readonly dropIncoming: boolean }> {
+    const none = { replaces: [], dropIncoming: false };
+    const accountId = request.fromAccountId;
+    if (accountId === null) return none;
+    const incomingKeyB64 = base64Encode(request.fromPubkey);
+    const accountHex = journalHex(accountId);
+    const candidates = pending.filter(
+      (p) =>
+        p.fromAccountId !== null &&
+        journalHex(p.fromAccountId) === accountHex &&
+        base64Encode(p.fromPubkey) !== incomingKeyB64,
+    );
+    if (candidates.length === 0) return none;
+    try {
+      let bundle: IdentityFetchResponse | null = null;
+      try {
+        bundle = await this.discovery.identityFetch(accountId);
+      } catch {
+        bundle = null;
+      }
+      const successors = new Set<string>();
+      for (const p of candidates) {
+        const otherKeyB64 = base64Encode(p.fromPubkey);
+        if (await provenSuccessorWith(p.fromPubkey, request.fromPubkey, bundle)) {
+          successors.add(`${otherKeyB64}>${incomingKeyB64}`);
+        } else if (await provenSuccessorWith(request.fromPubkey, p.fromPubkey, bundle)) {
+          successors.add(`${incomingKeyB64}>${otherKeyB64}`);
+        }
+      }
+      return pendingAfterArrival(
+        candidates.map((p) => ({ messageId: p.messageId, keyB64: base64Encode(p.fromPubkey) })),
+        incomingKeyB64,
+        (oldKey, newKey) => successors.has(`${oldKey}>${newKey}`),
+      );
+    } catch {
+      return none;
     }
   }
 
@@ -2265,10 +2452,17 @@ export class ContactsClient {
     // the keys-reset rule is applied to the stored pin (a stranger has
     // none and passes).
     await this.refuseContactRequestToUnverifiedKeys(recipientAccountId, recipientSignaturePubkey);
-    const publish = await this.composeAndPublishContactRequest(
-      identity,
+    // ADR-0066 section 3.5a rule 1 - a key that is a proven predecessor is
+    // replaced by the account's current keys, fetched through the gate.
+    const target = await this.currentRequestTarget(
+      recipientAccountId,
       recipientSignaturePubkey,
       recipientX25519Pubkey,
+    );
+    const publish = await this.composeAndPublishContactRequest(
+      identity,
+      target.signaturePubkey,
+      target.x25519Pubkey,
       introMessage,
       options,
     );
@@ -2328,8 +2522,6 @@ export class ContactsClient {
         new Error("contact request: the recipient key was superseded by a proven key rotation"),
       );
     }
-    const recipientPseudonym = await accountMailboxOf(recipientSignaturePubkey);
-
     // Sender's `from_pseudonym` field. For a first cold contact
     // we use the sender's identity pseudonym (public, derivable
     // by anyone holding the sender's pubkey); the receiver
@@ -2397,16 +2589,26 @@ export class ContactsClient {
     // ContactRequest from a Welcome (1.16e3). ADR-0060: signed with the
     // grant that lets us reach the recipient (a link's, or a kept one).
     const envelope = wrapEnvelope(KIND_CONTACT_REQUEST, wireBytes);
-    const write = await resolveWriteAuth(recipientSignaturePubkey, {
-      explicit: options?.writeGrant ?? null,
-    });
+    // ADR-0066 section 3.5a rule 6 - a refused write re-checks the address
+    // once. The request is SEALED to the key in hand, so the re-check may
+    // only change which GRANT is offered: should the key turn out to be
+    // superseded, the write is not moved to another mailbox (the plan's
+    // mailbox is compared with the one the request was sealed for).
+    const sealedFor = journalHex(await mailboxOfExactKey(recipientSignaturePubkey));
     let publish;
     try {
-      publish = await this.ds.publishMailbox(recipientPseudonym, envelope, write.auth);
+      publish = await writeToPerson(
+        recipientSignaturePubkey,
+        { explicit: options?.writeGrant ?? null },
+        (mailbox, auth) => {
+          if (journalHex(mailbox) !== sealedFor) {
+            throw new Error("contact request: the recipient key was superseded by a proven key rotation");
+          }
+          return this.ds.publishMailbox(mailbox, envelope, auth);
+        },
+      );
     } catch (err) {
       throw ContactsError.wrap(err);
-    } finally {
-      write.release();
     }
     return { messageId: publish.id, createdAt: publish.createdAt };
   }
@@ -2456,8 +2658,6 @@ export class ContactsClient {
     // The original request's `fromPubkey` is the routing handle.
     // ADR-0066 section 3.5a rule 1 - resolved: an ack never goes to the
     // mailbox of a key a proven rotation superseded.
-    const senderMailbox = await accountMailboxOf(originalRequest.fromPubkey);
-
     const acceptedAtMs = BigInt(Date.now());
 
     let wireBytes: Uint8Array;
@@ -2475,16 +2675,16 @@ export class ContactsClient {
 
     const envelope = wrapEnvelope(KIND_CONTACT_ACK, wireBytes);
     // ADR-0060 section 6 — written with the requester's `reply` grant.
-    const write = await resolveWriteAuth(originalRequest.fromPubkey, {
-      explicit: originalRequest.replyGrantB64,
-    });
+    // Rule 6: a refusal re-checks the requester's address once.
     let publish;
     try {
-      publish = await this.ds.publishMailbox(senderMailbox, envelope, write.auth);
+      publish = await writeToPerson(
+        originalRequest.fromPubkey,
+        { explicit: originalRequest.replyGrantB64 },
+        (mailbox, auth) => this.ds.publishMailbox(mailbox, envelope, auth),
+      );
     } catch (err) {
       throw ContactsError.wrap(err);
-    } finally {
-      write.release();
     }
     return { messageId: publish.id, createdAt: publish.createdAt };
   }
@@ -2532,20 +2732,21 @@ export class ContactsClient {
     // reach that account.
     // ADR-0066 section 3.5a rule 1 - the CURRENT mailbox of that account
     // (the leaf may be bound to a proven predecessor; own account included).
-    const recipientPseudonym = await accountMailboxOf(recipientAccountKey);
+    // Rule 6: a refused write re-checks the address once and is retried.
     const envelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
-    const write = await resolveWriteAuth(recipientAccountKey, {
-      ...(options.groupId === undefined ? {} : { scope: options.groupId }),
-      explicit: options.explicitGrantB64 ?? null,
-      allowMember: true,
-    });
     let publish;
     try {
-      publish = await this.ds.publishMailbox(recipientPseudonym, envelope, write.auth);
+      publish = await writeToPerson(
+        recipientAccountKey,
+        {
+          ...(options.groupId === undefined ? {} : { scope: options.groupId }),
+          explicit: options.explicitGrantB64 ?? null,
+          allowMember: true,
+        },
+        (mailbox, auth) => this.ds.publishMailbox(mailbox, envelope, auth),
+      );
     } catch (err) {
       throw ContactsError.wrap(err);
-    } finally {
-      write.release();
     }
     return {
       messageId: publish.id,
@@ -2661,6 +2862,12 @@ export class ContactsClient {
     after: number,
     waitSecs = 0,
     signal?: AbortSignal,
+    options: {
+      /** ADR-0066 section 3.5a rules 4 and 5 - a PREDECESSOR mailbox
+       *  delivers Welcomes only: a request or an ack found there is neither
+       *  opened nor acted on (the cursor still advances). */
+      readonly welcomesOnly?: boolean;
+    } = {},
   ): Promise<PollResult> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveAccountIdentity(identity);
@@ -2710,6 +2917,7 @@ export class ContactsClient {
         });
         continue;
       }
+      if (options.welcomesOnly === true) continue;
       if (env.kind === KIND_CONTACT_ACK) {
         // Phase 1.9b1: signature is verified inside the WASM
         // surface; bad-signature / malformed-wire entries drop
@@ -3407,21 +3615,17 @@ export class ContactsClient {
 
     // 7. Publish artifact 2 — the Welcome to the new member's stranger inbox
     //    (the SAME bytes stored in the outbox entry).
+    //    Rule 6 of ADR-0066 section 3.5a: a refusal re-checks the address
+    //    once; the outbox entry above re-derives the mailbox on a replay.
     let welcomePublish;
-    const welcomeWrite = await resolveWriteAuth(welcomeAccountKey, {
-      scope: groupIdBytes,
-      allowMember: true,
-    });
     try {
-      welcomePublish = await this.ds.publishMailbox(
-        welcomePseudonym,
-        welcomeEnvelope,
-        welcomeWrite.auth,
+      welcomePublish = await writeToPerson(
+        welcomeAccountKey,
+        { scope: groupIdBytes, allowMember: true },
+        (mailbox, auth) => this.ds.publishMailbox(mailbox, welcomeEnvelope, auth),
       );
     } catch (err) {
       throw ContactsError.wrap(err);
-    } finally {
-      welcomeWrite.release();
     }
 
     // 8. Both artifacts durable on the wire -> ack (best-effort; a crash here

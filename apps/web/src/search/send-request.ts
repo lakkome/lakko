@@ -39,6 +39,9 @@ export interface SendDeps {
   identityFetch(
     accountId: Uint8Array,
   ): Promise<{ readonly signaturePub: Uint8Array; readonly x25519Pub: Uint8Array } | null>;
+  /** ADR-0066 section 3.5a - whether the key the account publishes now is
+   *  the PROVEN successor of `foundKey`. Absent: only an exact match sends. */
+  provenPredecessor?(foundKey: Uint8Array, accountId: Uint8Array): Promise<boolean>;
   sendByUsername(username: string, intro: Uint8Array, grantWireB64: string | null): Promise<void>;
   sendToBundle(
     accountId: Uint8Array,
@@ -83,8 +86,17 @@ export async function sendFoundRequest(
     const accountId = hexToBytes(person.accountIdHex);
     const bundle = await deps.identityFetch(accountId);
     // No bundle, or a bundle for another key: the person as found cannot be
-    // reached under this account id. Nothing is sent.
-    if (bundle === null || toHex(bundle.signaturePub) !== person.keyHex) return { kind: "refused" };
+    // reached under this account id. Nothing is sent. One exception
+    // (ADR-0066 section 3.5a): the person was found under a key their
+    // published key PROVABLY superseded. It is the same person, and the
+    // request goes to the published (current) keys, never to the old one.
+    if (bundle === null) return { kind: "refused" };
+    if (
+      toHex(bundle.signaturePub) !== person.keyHex &&
+      !((await deps.provenPredecessor?.(key, accountId)) ?? false)
+    ) {
+      return { kind: "refused" };
+    }
     await deps.sendToBundle(accountId, bundle.signaturePub, bundle.x25519Pub, intro, grant);
     return { kind: "sent" };
   } catch (err) {

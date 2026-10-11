@@ -243,4 +243,231 @@ class MailboxAddressingTest {
         down = false
         assertEquals(true to listOf("b"), run())
     }
+
+    // --- rule 6: a refused write re-checks the address once ------------------
+
+    private class Refused : IOException("401")
+
+    @Test
+    fun `a write that is taken never re-checks`() = runTest {
+        var rechecks = 0
+        val out = writeRecheckingAddress(write = { "stored" }, isRefusal = { it is Refused }) {
+            rechecks += 1
+            true
+        }
+        assertEquals("stored", out)
+        assertEquals(0, rechecks)
+    }
+
+    @Test
+    fun `a refused write re-checks once and is tried once more`() = runTest {
+        var writes = 0
+        var rechecks = 0
+        val out = writeRecheckingAddress(
+            write = {
+                writes += 1
+                if (writes == 1) throw Refused()
+                "stored"
+            },
+            isRefusal = { it is Refused },
+            recheck = {
+                rechecks += 1
+                true
+            },
+        )
+        assertEquals("stored", out)
+        assertEquals(2, writes)
+        assertEquals(1, rechecks)
+    }
+
+    @Test
+    fun `a second refusal propagates and never loops`() = runTest {
+        var writes = 0
+        var rechecks = 0
+        val thrown = runCatching {
+            writeRecheckingAddress<String>(
+                write = {
+                    writes += 1
+                    throw Refused()
+                },
+                isRefusal = { it is Refused },
+                recheck = {
+                    rechecks += 1
+                    true
+                },
+            )
+        }.exceptionOrNull()
+        assertTrue(thrown is Refused)
+        assertEquals(2, writes)
+        assertEquals(1, rechecks)
+    }
+
+    @Test
+    fun `a re-check that could not run leaves the first refusal standing`() = runTest {
+        for (recheck in listOf<suspend () -> Boolean>({ false }, { throw IOException("down") })) {
+            var writes = 0
+            val first = Refused()
+            val thrown = runCatching {
+                writeRecheckingAddress<String>(
+                    write = {
+                        writes += 1
+                        throw first
+                    },
+                    isRefusal = { it is Refused },
+                    recheck = recheck,
+                )
+            }.exceptionOrNull()
+            assertTrue(thrown === first)
+            assertEquals(1, writes)
+        }
+    }
+
+    @Test
+    fun `a failure that is not a refusal is never re-checked`() = runTest {
+        var rechecks = 0
+        val thrown = runCatching {
+            writeRecheckingAddress<String>(
+                write = { throw IOException("down") },
+                isRefusal = { it is Refused },
+                recheck = {
+                    rechecks += 1
+                    true
+                },
+            )
+        }.exceptionOrNull()
+        assertTrue(thrown is IOException && thrown !is Refused)
+        assertEquals(0, rechecks)
+    }
+
+    @Test
+    fun `the address is re-checked at most once per interval`() {
+        assertTrue(addressRecheckDue(null, 1_000L))
+        assertFalse(addressRecheckDue(1_000L, 1_000L + ADDRESS_RECHECK_INTERVAL_MS - 1))
+        assertTrue(addressRecheckDue(1_000L, 1_000L + ADDRESS_RECHECK_INTERVAL_MS))
+        // A clock that went backwards re-checks rather than waiting forever.
+        assertTrue(addressRecheckDue(5_000L, 4_000L))
+    }
+
+    @Test
+    fun `a grant that replaces another keeps the replaced one beside it`() {
+        val first = heldWithGrant(emptyList(), hex(1), "CONTACT", "", "aa")
+        assertEquals(listOf(StoredHeld(hex(1), "CONTACT", "", "aa")), first)
+        assertEquals(listOf("aa"), grantWiresOf(first.single()))
+        // The same grant again changes nothing (the same list).
+        assertTrue(heldWithGrant(first, hex(1), "CONTACT", "", "aa") === first)
+        // A newer one: tried first, the old one still a candidate after it.
+        val second = heldWithGrant(first, hex(1), "CONTACT", "", "bb")
+        assertEquals(listOf("bb", "aa"), grantWiresOf(second.single()))
+        // Only the grant just replaced is kept, never a growing tail.
+        val third = heldWithGrant(second, hex(1), "CONTACT", "", "cc")
+        assertEquals(listOf("cc", "bb"), grantWiresOf(third.single()))
+        // Another class, scope or person is another entry.
+        val more = heldWithGrant(heldWithGrant(third, hex(1), "GROUP", "g1", "dd"), hex(2), "CONTACT", "", "ee")
+        assertEquals(3, more.size)
+        assertEquals(listOf("cc", "bb"), grantWiresOf(more.first { it.kind == "CONTACT" && it.ownerKeyHex == hex(1) }))
+    }
+
+    @Test
+    fun `a known-current address drops the grants kept beside newer ones, for that person only`() {
+        val held = listOf(
+            StoredHeld(hex(1), "CONTACT", "", "bb", "aa"),
+            StoredHeld(hex(2), "CONTACT", "", "dd", "cc"),
+            StoredHeld(hex(3), "CONTACT", "", "ee"),
+        )
+        val after = withoutPreviousGrants(held, listOf(hex(1)))
+        assertEquals(listOf("bb"), grantWiresOf(after[0]))
+        assertEquals(listOf("dd", "cc"), grantWiresOf(after[1]))
+        // Nothing to drop: the same list.
+        assertTrue(withoutPreviousGrants(held, listOf(hex(3))) === held)
+        assertTrue(withoutPreviousGrants(after, listOf(hex(1))) === after)
+    }
+
+    @Test
+    fun `a peer that got the new grant first still reaches the old mailbox`() {
+        // The re-sent profile arrives before the proof is observed: the new
+        // grant is filed under the only key known, the old one kept beside.
+        val before = heldWithGrant(listOf(StoredHeld(hex(1), "CONTACT", "", "old")), hex(1), "CONTACT", "", "new")
+        assertEquals(listOf("new", "old"), heldForPerson(before, personKeysHex(hex(1), emptyList())).flatMap(::grantWiresOf))
+        // Once the step is proven both are still found under the person.
+        val links = proven(alice, 1, 2)
+        assertEquals(listOf("new", "old"), heldForPerson(before, personKeysHex(hex(2), links)).flatMap(::grantWiresOf))
+    }
+
+    // --- committer delegations naming an own predecessor --------------------
+
+    @Test
+    fun `a delegation naming any own key is found, the current key first`() {
+        val current = key(9)
+        val previous = key(8)
+        val earliest = key(7)
+        val keys = listOf(current, previous, earliest)
+        // Envelope "p" names the previous key, "c" the current one.
+        val names = mapOf("p" to previous, "c" to current, "x" to key(1))
+        val headerFor = { env: String, k: ByteArray -> if (names.getValue(env).contentEquals(k)) "hdr-$env" else null }
+        assertEquals("hdr-p" to 1, pickOwnDelegation(listOf("p"), keys, headerFor))
+        assertEquals("hdr-c" to 0, pickOwnDelegation(listOf("c", "p"), keys, headerFor))
+        // The first envelope that names an own key wins, whichever key.
+        assertEquals("hdr-p" to 1, pickOwnDelegation(listOf("x", "p", "c"), keys, headerFor))
+        // A delegation to somebody else's key authorises nothing here.
+        assertEquals(null, pickOwnDelegation(listOf("x"), keys, headerFor))
+        assertEquals(null, pickOwnDelegation(emptyList<String>(), keys, headerFor))
+        // A device that holds no predecessor seed finds only its current key.
+        assertEquals(null, pickOwnDelegation(listOf("p"), listOf(current), headerFor))
+    }
+
+    @Test
+    fun `a malformed delegation envelope authorises nothing and hides no other`() {
+        val keys = listOf(key(9), key(8))
+        val headerFor = { env: String, _: ByteArray ->
+            if (env == "bad") throw IllegalStateException("malformed") else "hdr-$env"
+        }
+        assertEquals("hdr-ok" to 0, pickOwnDelegation(listOf("bad", "ok"), keys, headerFor))
+        assertEquals(null, pickOwnDelegation(listOf("bad"), keys, headerFor))
+    }
+
+    // --- rule 5: what was granted before the rotation is spent ---------------
+
+    @Test
+    fun `every unanswered request is re-sent, replaced, dropped or kept owed`() = runTest {
+        val pending = listOf("sent", "gone", "down", "boom")
+        val out = resendPendingRequests(pending) { entry ->
+            when (entry) {
+                "sent" -> RequestResend.SENT to "sent-again"
+                "gone" -> RequestResend.GONE to null
+                "down" -> RequestResend.FAILED to null
+                else -> throw IOException("down")
+            }
+        }
+        // One failure does not stop the rest; a throw is "could not try".
+        assertEquals(listOf("sent-again", "down", "boom"), out.pending)
+        assertFalse(out.done)
+    }
+
+    @Test
+    fun `the re-send is done only when nothing failed`() = runTest {
+        val all = resendPendingRequests(listOf("a", "b")) { e ->
+            if (e == "a") RequestResend.SENT to "a2" else RequestResend.GONE to null
+        }
+        assertEquals(listOf("a2"), all.pending)
+        assertTrue(all.done)
+        val none = resendPendingRequests(emptyList<String>()) { RequestResend.FAILED to null }
+        assertTrue(none.done)
+        assertTrue(none.pending.isEmpty())
+    }
+
+    @Test
+    fun `the links live when the keys moved become the spent ones, each once`() {
+        val a = StoredLink("a1", null, "b1")
+        val b = StoredLink("a2", 5L)
+        val spent = spentLinksAfterMove(emptyList(), listOf(a, b))
+        assertEquals(listOf(a, b), spent)
+        // A second rotation adds to what is still to be revoked.
+        val c = StoredLink("a3", null, "b3")
+        assertEquals(listOf(a, b, c), spentLinksAfterMove(spent, listOf(c, a)))
+        // Bounded.
+        val many = (0 until MAX_SPENT_LINKS + 5).map { StoredLink("l$it") }
+        val kept = spentLinksAfterMove(emptyList(), many)
+        assertEquals(MAX_SPENT_LINKS, kept.size)
+        assertEquals("l${MAX_SPENT_LINKS + 4}", kept.last().linkIdHex)
+    }
 }

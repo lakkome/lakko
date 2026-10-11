@@ -16,7 +16,8 @@ import me.lakko.app.l10n.UiText
  *   username path resolves them at discovery).
  * - Anyone else goes by the identity bundle path with the key cross-checked
  *   here: the key the identity bundle publishes for the account id must be
- *   the key the person was found as, or nothing is sent.
+ *   the key the person was found as (or the key that one provably rotated
+ *   to), or nothing is sent.
  */
 
 /** How a send ended. */
@@ -36,6 +37,10 @@ public interface SendDeps {
 
     /** The identity bundle of an account, or `null`. */
     public suspend fun identityFetch(accountId: ByteArray): IdentityKeys?
+
+    /** ADR-0066 section 3.5a - whether [foundKey] is a PROVEN predecessor
+     *  of [publishedKey] ([PeopleSearchDeps.isProvenPredecessor]). */
+    public fun isProvenPredecessor(foundKey: ByteArray, publishedKey: ByteArray): Boolean = false
 
     public suspend fun sendByUsername(username: String, intro: ByteArray, grantWireB64: String?)
 
@@ -82,8 +87,12 @@ public suspend fun sendFoundRequest(person: PersonResult, intro: ByteArray, deps
         val accountId = hexToBytes(accountIdHex) ?: return SendOutcome.Refused
         val bundle = deps.identityFetch(accountId)
         // No bundle, or a bundle for another key: the person as found cannot
-        // be reached under this account id. Nothing is sent.
-        if (bundle == null || searchHex(bundle.signaturePub) != person.keyHex) return SendOutcome.Refused
+        // be reached under this account id. Nothing is sent. A bundle whose
+        // key the found key PROVABLY rotated to is the same person
+        // (ADR-0066 3.5a): the request is sealed to the bundle's keys.
+        if (bundle == null || !foundKeyIsPublished(key, bundle.signaturePub, deps::isProvenPredecessor)) {
+            return SendOutcome.Refused
+        }
         deps.sendToBundle(accountId, bundle.signaturePub, bundle.x25519Pub, intro, grant)
         SendOutcome.Sent
     } catch (cancel: CancellationException) {

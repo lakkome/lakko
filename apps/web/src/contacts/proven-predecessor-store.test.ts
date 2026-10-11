@@ -46,6 +46,7 @@ afterEach(() => {
 
 import {
   accountIdB64OfHex,
+  accountIdB64OfKey,
   accountKeysOf,
   bindContactsAccount,
   confirmKeyReset,
@@ -181,5 +182,20 @@ describe("an unproven change never gets predecessor treatment", () => {
     bindContactsAccount(null);
     bindContactsAccount(OWNER);
     expect(accountKeysOf(ANNA)).toEqual({ currentKeyB64: NEW, provenPredecessorsB64: [] });
+  });
+});
+
+describe("the account a key is known under (ADR-0066 section 3.5a rule 6)", () => {
+  it("a pinned key and its proven predecessors name the account; a stranger's key names none", () => {
+    setPin(ANNA, OLD, 0);
+    setPin(ANNA, NEW, 500, undefined, { proven: true });
+    expect(accountIdB64OfKey(NEW)).toBe(ANNA);
+    expect(accountIdB64OfKey(OLD)).toBe(ANNA);
+    expect(accountIdB64OfKey(NEWER)).toBeNull();
+  });
+
+  it("an accepted contact's row names the account when no pin does", () => {
+    upsertAccepted(annaRow());
+    expect(accountIdB64OfKey(OLD)).toBe(ANNA);
   });
 });

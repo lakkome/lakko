@@ -41,12 +41,23 @@ public struct LinkReach: Codable, Hashable {
     /// The discovery ledger id the link was uploaded under (base64), when it
     /// was — what a revoke names.
     public var blobIdB64: String?
+    /// Which ledger holds it: ``LinkReach/callKind`` for a `/c/` link, `nil`
+    /// for an `/i/` link (and for a record stored before the field existed).
+    /// A revoke goes to the ledger of its kind.
+    public var kind: String?
 
-    public init(linkIdB64: String, version: UInt32, expiresAtMs: UInt64, blobIdB64: String? = nil) {
+    /// ``kind`` of a `/c/` call link.
+    public static let callKind = "call"
+
+    public init(
+        linkIdB64: String, version: UInt32, expiresAtMs: UInt64, blobIdB64: String? = nil,
+        kind: String? = nil
+    ) {
         self.linkIdB64 = linkIdB64
         self.version = version
         self.expiresAtMs = expiresAtMs
         self.blobIdB64 = blobIdB64
+        self.kind = kind
     }
 }
 
@@ -75,6 +86,15 @@ public enum ReplyPurpose {
     public static func contact(_ accountId: Data) -> String { "contact:" + accountId.base64EncodedString() }
     /// A `/g/` join request to the group id given.
     public static func groupJoin(_ groupId: Data) -> String { "group:" + groupId.base64EncodedString() }
+
+    /// The recipient account id of a ``contact(_:)`` purpose, `nil` for any
+    /// other purpose.
+    public static func contactAccountId(of purpose: String) -> Data? {
+        guard purpose.hasPrefix("contact:") else { return nil }
+        guard let id = Data(base64Encoded: String(purpose.dropFirst("contact:".count))),
+              id.count == 16 else { return nil }
+        return id
+    }
 }
 
 public enum ReachRules {
@@ -370,6 +390,14 @@ public enum ReachRules {
         /// Hex group or channel id, `nil` for `contact` / `reply`.
         public let scopeHex: String?
         public let storedAtMs: UInt64
+        /// ADR-0066 section 3.5a rule 6 — `true` for the grant a newer one of
+        /// the same class, scope and VERSION displaced: the person's account
+        /// seed changed (a key rotation), so this one opens the mailbox of
+        /// their old key and the newer one the mailbox of their new key. Kept
+        /// beside the newer one, and tried after it, until this device knows
+        /// the person's current address. `nil` (not superseded) for a record
+        /// stored before the field existed.
+        public var superseded: Bool?
 
         public init(grant: FfiReachGrant, scopeHex: String?, storedAtMs: UInt64) {
             self.classRaw = ReachRules.className(grant.class)
@@ -378,6 +406,8 @@ public enum ReachRules {
             self.scopeHex = scopeHex
             self.storedAtMs = storedAtMs
         }
+
+        public var isSuperseded: Bool { superseded == true }
 
         public var reachClass: FfiReachClass? { ReachRules.reachClass(named: classRaw) }
         public var seed: Data? { Data(base64Encoded: seedB64) }
@@ -399,37 +429,105 @@ public enum ReachRules {
     /// on a `401` (ADR-0050 2.5a item 7): one key the owner rotated away must
     /// not cost a Welcome another key still opens.
     public static func writeSeeds(from held: [HeldGrant], groupIdHex: String?) -> [Data] {
-        func all(_ cls: FfiReachClass, scope: String?? = nil) -> [Data] {
-            held.filter { $0.reachClass == cls && (scope == nil || $0.scopeHex == scope!) }
-                .sorted { $0.storedAtMs > $1.storedAtMs }
-                .compactMap(\.seed)
+        func ordered(_ held: [HeldGrant]) -> [Data] {
+            func all(_ cls: FfiReachClass, scope: String?? = nil) -> [Data] {
+                held.filter { $0.reachClass == cls && (scope == nil || $0.scopeHex == scope!) }
+                    .sorted { $0.storedAtMs > $1.storedAtMs }
+                    .compactMap(\.seed)
+            }
+            var out: [Data] = all(.contact)
+            if let groupIdHex { out += all(.member, scope: .some(groupIdHex)) }
+            out += all(.member)
+            out += all(.group)
+            out += all(.channel)
+            out += all(.reply)
+            return out
         }
-        var ordered: [Data] = all(.contact)
-        if let groupIdHex { ordered += all(.member, scope: .some(groupIdHex)) }
-        ordered += all(.member)
-        ordered += all(.group)
-        ordered += all(.channel)
-        ordered += all(.reply)
+        // ADR-0066 section 3.5a rule 6 — a grant a rotation displaced comes
+        // after every current one: it opens only the old mailbox.
+        let ordered = ordered(held.filter { !$0.isSuperseded }) + ordered(held.filter(\.isSuperseded))
         var seen = Set<Data>()
         return ordered.filter { $0.count == 32 && seen.insert($0).inserted }
     }
 
     /// Replace the grants held for one person with `incoming` of the same
     /// class and scope — the newest wins — keeping every other.
+    ///
+    /// ADR-0066 section 3.5a rule 6 — one exception: a grant displaced by one
+    /// of the SAME version and another seed is kept beside it, marked
+    /// ``HeldGrant/superseded``. A reach key the owner rotated bumps the
+    /// version; the same version under another seed means the owner's account
+    /// seed changed (a key rotation), so the two open two mailboxes: the old
+    /// key's and the new key's. A device that received the re-sent profile
+    /// before it observed the proven key still addresses the old mailbox, and
+    /// the displaced grant is what opens it. At most one superseded grant per
+    /// class and scope; ``droppingSuperseded(_:)`` removes them once the
+    /// person's current address is known.
     public static func merging(_ incoming: HeldGrant, into held: [HeldGrant]) -> [HeldGrant] {
+        func sameSlot(_ g: HeldGrant) -> Bool {
+            g.classRaw == incoming.classRaw && g.scopeHex == incoming.scopeHex
+        }
         // A replayed older version never displaces a newer one of the same
         // class and scope (a re-sent profile carries whatever it carried).
-        if held.contains(where: {
-            $0.classRaw == incoming.classRaw && $0.scopeHex == incoming.scopeHex
-                && $0.version > incoming.version
-        }) {
+        if held.contains(where: { sameSlot($0) && !$0.isSuperseded && $0.version > incoming.version }) {
             return held
         }
-        var out = held.filter {
-            !($0.classRaw == incoming.classRaw && $0.scopeHex == incoming.scopeHex)
+        // The same grant again (a re-sent profile): nothing moves, and a
+        // superseded grant is never revived by a replay of itself.
+        if held.contains(where: { sameSlot($0) && $0.seedB64 == incoming.seedB64 }) {
+            return held
         }
-        out.append(incoming)
+        let displaced = held.first { sameSlot($0) && !$0.isSuperseded }
+        var out = held.filter { !sameSlot($0) }
+        if var displaced, displaced.version == incoming.version {
+            displaced.superseded = true
+            out.append(displaced)
+        } else if let kept = held.first(where: { sameSlot($0) && $0.isSuperseded }),
+                  displaced == nil {
+            out.append(kept)
+        }
+        var fresh = incoming
+        fresh.superseded = nil
+        out.append(fresh)
         return out
+    }
+
+    /// ADR-0066 section 3.5a rule 5 — what a key rotation spends: every live
+    /// link scope and every outstanding reply scope joins the spent lists
+    /// (once each), and none stays live.
+    public static func spending(
+        links: [LinkReach], replies: [ReplyReach], spentLinks: [LinkReach], spentReplies: [ReplyReach]
+    ) -> (links: [LinkReach], replies: [ReplyReach]) {
+        var outLinks = spentLinks
+        for link in links where !outLinks.contains(where: { $0.linkIdB64 == link.linkIdB64 }) {
+            outLinks.append(link)
+        }
+        var outReplies = spentReplies
+        for reply in replies where !outReplies.contains(where: { $0.scopeIdB64 == reply.scopeIdB64 }) {
+            outReplies.append(reply)
+        }
+        return (outLinks, outReplies)
+    }
+
+    /// The grants held for one person without the ones a rotation displaced:
+    /// what is held once the person's current address is known (the write
+    /// goes to the new mailbox, which the displaced grant never opens).
+    public static func droppingSuperseded(_ held: [HeldGrant]) -> [HeldGrant] {
+        held.filter { !$0.isSuperseded }
+    }
+
+    /// ADR-0066 section 3.5a, proposer / committer — which of this account's
+    /// own keys signs a delegated write: the first (current key first, then
+    /// its own proven predecessors) a delegation in the envelope names. A
+    /// proposer that has not observed this account's rotation names the old
+    /// key; the write is then signed with that key's seed.
+    public static func delegationSigner<Seed>(
+        ownKeys: [(key: Data, seed: Seed)], header: (Data) -> String?
+    ) -> (seed: Seed, header: String)? {
+        for own in ownKeys {
+            if let header = header(own.key) { return (own.seed, header) }
+        }
+        return nil
     }
 
     public static func className(_ c: FfiReachClass) -> String {

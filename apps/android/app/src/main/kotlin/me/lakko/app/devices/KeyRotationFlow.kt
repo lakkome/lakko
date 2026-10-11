@@ -40,7 +40,8 @@ import me.lakko.app.auth.recallFinishAnswerLost
  *      device's KeyPackage, the DeviceGroup journal's root, the journals of
  *      owned groups, owned channels, the mailbox and reach keys, the profile
  *      re-sent to every conversation with the grants for the new mailbox
- *      (section 3.5a rule 3), the backup;
+ *      (section 3.5a rule 3), the links and unanswered contact requests of
+ *      the old key spent (rule 5), the backup;
  *   8. the new 12 words, withheld while the publish is owed.
  *
  * A failure before step 5 changes nothing on the server: the device WAS
@@ -98,6 +99,9 @@ public class KeyRotationOwed(
     /** Section 3.5a rule 3: every conversation took the profile carrying
      *  the grants for the new mailbox. */
     public val profileResent: Boolean = false,
+    /** Section 3.5a rule 5: the links the old key issued were revoked and
+     *  the unanswered contact requests re-sent from the new key. */
+    public val oldGrantsSpent: Boolean = false,
 ) {
     @Suppress("LongParameterList")
     public fun with(
@@ -120,11 +124,12 @@ public class KeyRotationOwed(
         reachRekeyed: Boolean = this.reachRekeyed,
         backupSealed: Boolean = this.backupSealed,
         profileResent: Boolean = this.profileResent,
+        oldGrantsSpent: Boolean = this.oldGrantsSpent,
     ): KeyRotationOwed = KeyRotationOwed(
         deviceIdB64Url, startedAtMs, epochBeforeRemoval, removalWon, prepared, announced, announcedAtEpoch,
         commitSent, committed, attestationB64, keyGeneration, adopted, identityPublished, publishWithoutProof,
         keyPackagePublished, deviceGroupRootMoved, journalsMoved, channelsMoved, reachRekeyed, backupSealed,
-        profileResent,
+        profileResent, oldGrantsSpent,
     )
 }
 
@@ -142,6 +147,7 @@ public enum class RotationStep {
     MoveChannels,
     RekeyReach,
     ResendProfile,
+    SpendOldGrants,
     SealBackup,
     Done,
 }
@@ -160,9 +166,15 @@ public fun nextRotationStep(owed: KeyRotationOwed): RotationStep = when {
     !owed.channelsMoved -> RotationStep.MoveChannels
     !owed.reachRekeyed -> RotationStep.RekeyReach
     !owed.profileResent -> RotationStep.ResendProfile
+    !owed.oldGrantsSpent -> RotationStep.SpendOldGrants
     !owed.backupSealed -> RotationStep.SealBackup
     else -> RotationStep.Done
 }
+
+/** The tail steps that hand out something for the NEW mailbox and so wait
+ *  for the reach keys to be registered on it. */
+public fun rotationStepNeedsReach(step: RotationStep): Boolean =
+    step == RotationStep.ResendProfile || step == RotationStep.SpendOldGrants
 
 /** The three lines of the sheet's step list (UX 18.1). */
 public enum class RotationUiStep { RemovingDevice, ChangingKeys, UpdatingDevices }
@@ -451,6 +463,14 @@ public interface KeyRotationPorts : RotationAnnouncePort {
      */
     public suspend fun resendProfile(): Boolean
 
+    /**
+     * Section 3.5a rule 5: revoke the `/i/` and `/c/` links the old key
+     * issued and re-send every unanswered outgoing contact request from the
+     * new key. `true` only once nothing is left; `false` or a throw keeps
+     * the step owed.
+     */
+    public suspend fun spendOldGrants(): Boolean
+
     public suspend fun sealBackup(): Boolean
 
     /** The publish landed far enough for the words to be shown. */
@@ -731,12 +751,14 @@ public class KeyRotationRunner(
                 RotationStep.MoveChannels -> owed.channelsMoved
                 RotationStep.RekeyReach -> owed.reachRekeyed
                 RotationStep.ResendProfile -> owed.profileResent
+                RotationStep.SpendOldGrants -> owed.oldGrantsSpent
                 else -> owed.backupSealed
             }
             if (done) continue
             // The one dependency in the tail: the profile carries grants for
-            // the new mailbox, which exist only once the reach keys moved.
-            if (step == RotationStep.ResendProfile && !owed.reachRekeyed) {
+            // the new mailbox, and a re-sent contact request a reply grant
+            // for it; both exist only once the reach keys moved.
+            if (rotationStepNeedsReach(step) && !owed.reachRekeyed) {
                 if (firstPending == null) firstPending = step
                 continue
             }
@@ -751,6 +773,7 @@ public class KeyRotationRunner(
                     RotationStep.MoveChannels -> ports.moveOwnedChannels()
                     RotationStep.RekeyReach -> ports.rekeyReach()
                     RotationStep.ResendProfile -> ports.resendProfile()
+                    RotationStep.SpendOldGrants -> ports.spendOldGrants()
                     else -> ports.sealBackup()
                 }
             }
@@ -765,6 +788,7 @@ public class KeyRotationRunner(
                 RotationStep.MoveChannels -> owed.with(channelsMoved = true)
                 RotationStep.RekeyReach -> owed.with(reachRekeyed = true)
                 RotationStep.ResendProfile -> owed.with(profileResent = true)
+                RotationStep.SpendOldGrants -> owed.with(oldGrantsSpent = true)
                 else -> owed.with(backupSealed = true)
             }
             store.save(accountIdB64, owed)
@@ -829,6 +853,7 @@ public class KeyRotationRunner(
             RotationStep.MoveChannels,
             RotationStep.RekeyReach,
             RotationStep.ResendProfile,
+            RotationStep.SpendOldGrants,
             RotationStep.SealBackup,
         )
     }

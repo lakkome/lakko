@@ -4705,6 +4705,11 @@
       "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
       "security_critical": true
     },
+    "devices.rotate.effect_links": {
+      "text": "Invite links and call links you created before stop working. Create new ones.",
+      "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
+      "security_critical": true
+    },
     "devices.rotate.effect_phrase": {
       "text": "You get a new recovery phrase. The old one stops working.",
       "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",

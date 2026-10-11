@@ -91,11 +91,32 @@ public enum ContactsInboxMerge {
         public let kept: [IncomingContactRequest]
         /// The requests dropped, with the reason, for the debug log.
         public let dropped: [(request: IncomingContactRequest, reason: DropReason)]
+        /// ADR-0066 section 3.5a rule 5 — the `messageId`s of PENDING requests
+        /// a fetched one replaces: the same person asked again from the key
+        /// that superseded theirs by proof. One request per person.
+        public let replaced: [Int64]
+
+        public init(
+            kept: [IncomingContactRequest],
+            dropped: [(request: IncomingContactRequest, reason: DropReason)],
+            replaced: [Int64] = []
+        ) {
+            self.kept = kept
+            self.dropped = dropped
+            self.replaced = replaced
+        }
 
         public static func == (lhs: Result, rhs: Result) -> Bool {
             lhs.kept == rhs.kept
                 && lhs.dropped.map(\.request) == rhs.dropped.map(\.request)
                 && lhs.dropped.map(\.reason) == rhs.dropped.map(\.reason)
+                && lhs.replaced == rhs.replaced
+        }
+
+        /// `pending` after this batch: the replaced rows gone, the kept ones
+        /// appended.
+        public func applied(to pending: [IncomingContactRequest]) -> [IncomingContactRequest] {
+            pending.filter { !replaced.contains($0.messageId) } + kept
         }
     }
 
@@ -105,26 +126,79 @@ public enum ContactsInboxMerge {
     /// that was accepted on this device from reappearing under "Requests"
     /// when a poll re-reads it (a cursor rewind, or a request the sender
     /// re-sent after being accepted).
+    ///
+    /// ADR-0066 section 3.5a rule 5 — `currentKey` resolves an account key
+    /// across PROVEN rotations (the key itself otherwise). A fetched request
+    /// from the key that superseded a pending request's key replaces that row
+    /// (the requester rotated and asked again: its old request's reply grant
+    /// names a mailbox it left); one from a key a pending or kept request's
+    /// key superseded is dropped; and an accepted contact is recognised under
+    /// any of their keys. An unproven key change is two people here.
     public static func merge(
         fetched: [IncomingContactRequest],
         pending: [IncomingContactRequest],
-        accepted: [AcceptedContact]
+        accepted: [AcceptedContact],
+        currentKey: (Data) -> Data = { $0 }
     ) -> Result {
         var pendingIds = Set(pending.map(\.messageId))
-        let acceptedKeys = Set(accepted.map(\.request.fromPubkey))
+        let acceptedKeys = Set(accepted.map { currentKey($0.request.fromPubkey) })
+        // What is on the list as the batch is walked: the pending rows not
+        // replaced so far, then the kept ones.
+        var live = pending
         var kept: [IncomingContactRequest] = []
+        var replaced: [Int64] = []
         var dropped: [(request: IncomingContactRequest, reason: DropReason)] = []
         for request in fetched {
+            let person = currentKey(request.fromPubkey)
             if pendingIds.contains(request.messageId) {
                 dropped.append((request, .alreadyPending))
-            } else if acceptedKeys.contains(request.fromPubkey) {
+            } else if acceptedKeys.contains(person) {
                 dropped.append((request, .alreadyAccepted))
+            } else if person != request.fromPubkey,
+                      (live + kept).contains(where: { currentKey($0.fromPubkey) == person }) {
+                // Sent from a key the person has since left: the row already
+                // there (from this key or a later one) stands.
+                dropped.append((request, .alreadyPending))
             } else {
+                // From the person's current key: every row of theirs under an
+                // EARLIER key goes.
+                let stale: (IncomingContactRequest) -> Bool = {
+                    $0.fromPubkey != request.fromPubkey && currentKey($0.fromPubkey) == person
+                }
+                replaced += live.filter(stale).map(\.messageId)
+                live.removeAll(where: stale)
+                kept.removeAll(where: stale)
                 pendingIds.insert(request.messageId)
                 kept.append(request)
             }
         }
-        return Result(kept: kept, dropped: dropped)
+        return Result(kept: kept, dropped: dropped, replaced: replaced)
+    }
+
+    /// A fetched request and a pending one that name the SAME account id
+    /// under two different keys: the pairs worth asking the directory about
+    /// (did the pending key hand over to the fetched one by proof?). The
+    /// account id of a request is its sender's own claim, so a pair is only a
+    /// question, never an answer.
+    public struct RotationCandidate: Equatable {
+        public let accountId: Data
+        public let oldKey: Data
+        public let newKey: Data
+    }
+
+    public static func rotationCandidates(
+        fetched: [IncomingContactRequest], pending: [IncomingContactRequest]
+    ) -> [RotationCandidate] {
+        var out: [RotationCandidate] = []
+        for request in fetched {
+            guard let accountId = request.fromAccountId, accountId.count == 16 else { continue }
+            for row in pending where row.fromAccountId == accountId && row.fromPubkey != request.fromPubkey {
+                let candidate = RotationCandidate(
+                    accountId: accountId, oldKey: row.fromPubkey, newKey: request.fromPubkey)
+                if !out.contains(candidate) { out.append(candidate) }
+            }
+        }
+        return out
     }
 
     /// The cursor to persist after a batch. Never moves backwards: a poll

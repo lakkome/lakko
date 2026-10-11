@@ -623,6 +623,35 @@ public final class ContactsClient {
         AccountKeyResolver(proven: predecessors.load())
     }
 
+    /// ADR-0066 section 3.5a rule 5 — for each pair of keys a requester's
+    /// account id was seen under, learn whether the old key handed over to
+    /// the new one BY PROOF, and record it when it did. The identity bundle
+    /// goes through the fail-closed gate first (a pinned account's proven
+    /// rotation is recorded there); for an account this device never pinned,
+    /// the bundle's supersession proof is verified against the OLD key
+    /// itself, which is the same evidence: the old key signed that the new
+    /// one supersedes it, and the directory serves the new one for the
+    /// account. Anything short of that records nothing: the two requests stay
+    /// two people. Best effort, never throws.
+    func proveRequesterRotations(_ candidates: [ContactsInboxMerge.RotationCandidate]) async {
+        for candidate in candidates {
+            let oldB64 = base64Encode(candidate.oldKey)
+            let newB64 = base64Encode(candidate.newKey)
+            guard predecessors.load().current(of: oldB64) != newB64 else { continue }
+            guard let bundle = try? await discovery.identityFetch(accountId: candidate.accountId),
+                  bundle.signaturePubkey == newB64,
+                  (try? await verifyBundleAccountKey(accountId: candidate.accountId, bundle: bundle)) != nil
+            else { continue }
+            guard predecessors.load().current(of: oldB64) != newB64 else { continue }
+            guard let proofB64 = bundle.supersessionProof, let proof = base64Decode(proofB64),
+                  let authorised = try? verifySupersession(
+                    proofBytes: proof, trustedOldPubkey: candidate.oldKey,
+                    nowUnixSecs: Int64(Date().timeIntervalSince1970)),
+                  authorised == candidate.newKey else { continue }
+            predecessors.record(oldKeyB64: oldB64, newKeyB64: newB64, evidence: .verifiedProof)
+        }
+    }
+
     // MARK: - Send
 
     /// Send a `ContactRequest` envelope to `@recipientUsername`,

@@ -247,6 +247,7 @@ import {
   deleteKeyRotationState,
   getKeyRotationState,
   updateKeyRotationState,
+  predecessorSeeds,
   withPredecessorSeed,
   type KeyRotationState,
   type PreparedRotation,
@@ -274,6 +275,7 @@ import { awaitKeyRotationPort } from "../devices/sync/key-rotation-port";
 import { rootEndorsementFor } from "../devices/lifecycle";
 import { transferRoot, transferRootWithAttestation } from "../ds/ownership";
 import { DsClient } from "../ds/client";
+import { journalHex } from "../ds/access";
 import { clearRestored, markRestored } from "./restore-marker";
 import {
   openPasskeyVault,
@@ -1722,12 +1724,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // under the OLDEST proven predecessor it holds the seed of; `canonical`
     // (the new key) is the directory identity.
     let conversationSeedBytes: Uint8Array | null = null;
+    // ADR-0066 section 3.5a - own predecessors are a chain: the seeds of the
+    // keys held between the conversation key and the current one.
+    let intermediateSeeds: Uint8Array[] = [];
     let bindingAccount: WasmIdentity = canonical;
     try {
       const deviceKey = await getDeviceKey(accountIdB64);
       if (deviceKey !== null) {
         try {
-          conversationSeedBytes = conversationSeed(await getKeyRotationState(accountIdB64, deviceKey));
+          const rotationState = await getKeyRotationState(accountIdB64, deviceKey);
+          conversationSeedBytes = conversationSeed(rotationState);
+          intermediateSeeds = predecessorSeeds(rotationState).slice(1);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("key-rotation state unreadable; treating the account as never rotated", err);
@@ -1741,8 +1748,25 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           } else {
             chats.setPredecessorAccountIdentity(predecessor);
             bindingAccount = predecessor;
+            const intermediates: WasmIdentity[] = [];
+            const seen = new Set<string>([
+              base64Encode(predecessor.signaturePublicKey),
+              base64Encode(canonical.signaturePublicKey),
+            ]);
+            for (const seed of intermediateSeeds) {
+              const between = wasm.Identity.fromSeed(seed);
+              const keyB64 = base64Encode(between.signaturePublicKey);
+              if (seen.has(keyB64)) {
+                between.free();
+                continue;
+              }
+              seen.add(keyB64);
+              intermediates.push(between);
+            }
+            chats.setIntermediatePredecessorIdentities(intermediates);
           }
         }
+        for (const seed of intermediateSeeds) seed.fill(0);
         if (conversationSeedBytes === null) chats.setPredecessorAccountIdentity(null);
         const seed = await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
         const stored = await getDeviceBinding(accountIdB64);
@@ -3423,9 +3447,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }));
     await putAccountIdentitySeed(ctx.accountIdB64, seed, ctx.deviceKey);
     await storeDevicePhrase(ctx.accountIdB64, phrase, ctx.deviceKey, "key-rotation");
-    // ADR-0066 section 3.5a rule 4: the predecessor mailbox is read for 30
-    // days from now, then left.
-    stampPredecessorAdoption(ctx.accountIdB64, Date.now(), true);
+    // ADR-0066 section 3.5a rule 4: the mailbox of the key just left is read
+    // for 30 days from now, then left. Its own window: an earlier
+    // predecessor's is not started again.
+    stampPredecessorAdoption(
+      ctx.accountIdB64,
+      journalHex(publicKeyOfSeed(wasm, ctx.oldSeed)),
+      Date.now(),
+    );
     return { phrase, seed, conversationSeed: conversationSeed(next) ?? ctx.oldSeed };
   }
 

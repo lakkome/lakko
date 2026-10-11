@@ -132,6 +132,13 @@ export function conversationSeed(state: KeyRotationState): Uint8Array | null {
   return first === undefined ? null : base64Decode(first);
 }
 
+/** Every predecessor seed this device holds, OLDEST first (ADR-0066 section
+ *  3.5a: own predecessors are a chain). The first is the conversation key;
+ *  each later one is a key the account held between two rotations. */
+export function predecessorSeeds(state: KeyRotationState): Uint8Array[] {
+  return state.predecessorSeedsB64.map((b64) => base64Decode(b64));
+}
+
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") {

@@ -80,6 +80,23 @@ export function inviteLinkSecretFor(
   return read(storage, accountKey)[blobIdSlug] ?? null;
 }
 
+/** Forget the fragment of one link (it was revoked). Best effort. */
+export function forgetInviteLinkSecret(
+  accountKey: string,
+  blobIdSlug: string,
+  storage: SecretStorage | null = defaultStorage(),
+): void {
+  if (storage === null) return;
+  const map = read(storage, accountKey);
+  if (!(blobIdSlug in map)) return;
+  delete map[blobIdSlug];
+  try {
+    storage.setItem(PREFIX + accountKey, JSON.stringify(map));
+  } catch {
+    /* storage blocked: the ledger row is gone either way */
+  }
+}
+
 /** Drop every link secret this device keeps for the account (Forget device,
  *  Delete account). Best effort. */
 export function clearInviteLinkSecrets(

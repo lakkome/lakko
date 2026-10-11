@@ -138,9 +138,9 @@ export function reachRebind(boundKeyHex: string, registeredForKeyHex: string | u
  * apply). A reach key and the mailbox it is registered on both derive from
  * the account seed, so after a rotation the recorded registrations describe
  * the OLD mailbox: they are dropped (with the `open` flag), and the next
- * sync registers every wanted key on the new one. The version counters, the
- * links and the open requests are kept. Returns the same object when nothing
- * changes.
+ * sync registers every wanted key on the new one. The version counters are
+ * kept; the links and the open requests are dropped (section 3.5a rule 5:
+ * they are spent). Returns the same object when nothing changes.
  */
 export function bindReachBook(book: ReachBook, boundKeyHex: string): ReachBook {
   switch (reachRebind(boundKeyHex, book.registeredForKeyHex)) {
@@ -149,7 +149,18 @@ export function bindReachBook(book: ReachBook, boundKeyHex: string): ReachBook {
     case "stamp":
       return { ...book, registeredForKeyHex: boundKeyHex };
     case "move":
-      return { ...book, registered: {}, open: null, registeredForKeyHex: boundKeyHex };
+      // ADR-0066 section 3.5a rule 5: what was granted before the rotation
+      // is spent. A link or an open request recorded here names a key
+      // derived from the OLD seed; registering "the same" scope on the new
+      // mailbox would register a key nobody holds.
+      return {
+        ...book,
+        registered: {},
+        open: null,
+        links: [],
+        replies: [],
+        registeredForKeyHex: boundKeyHex,
+      };
   }
 }
 

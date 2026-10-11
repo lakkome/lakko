@@ -72,6 +72,9 @@ enum RotateDeviceCopy {
     static let effectPhrase = "devices.rotate.effect_phrase"
     static let effectPasskeys = "devices.rotate.effect_passkeys"
     static let effectContacts = "devices.rotate.effect_contacts"
+    /// ADR-0066 section 3.5a rule 5 — the links and the unanswered requests
+    /// made before the rotation stop working.
+    static let effectLinks = "devices.rotate.effect_links"
     static let confirm = "devices.rotate.confirm"
     static let stepRemove = "devices.rotate.step_remove"
     static let stepKeys = "devices.rotate.step_keys"
@@ -85,14 +88,16 @@ enum RotateDeviceCopy {
     /// The words are withheld while the publish is owed (UX 15.4's copy).
     static let publishOwed = "recovery_phrase.fresh.publish_owed"
 
-    static let effects: [String] = [effectDevices, effectPhrase, effectPasskeys, effectContacts]
+    static let effects: [String] = [
+        effectDevices, effectPhrase, effectPasskeys, effectContacts, effectLinks,
+    ]
     static let steps: [(stage: KeyRotationPlan.Stage, key: String)] = [
         (.removingDevice, stepRemove), (.changingKeys, stepKeys), (.updatingDevices, stepDevices),
     ]
 
     static let all: [String] = [
         reasonUnused, reasonStolen, title, lede, effectDevices, effectPhrase, effectPasskeys,
-        effectContacts, confirm, stepRemove, stepKeys, stepDevices, done, notStarted, retry, notNow,
+        effectContacts, effectLinks, confirm, stepRemove, stepKeys, stepDevices, done, notStarted, retry, notNow,
         phraseTitle, publishOwed,
     ]
 }

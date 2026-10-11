@@ -13,7 +13,12 @@ import { base64Encode } from "../auth/account-id";
 import { AnonTokenQuotaExhaustedError } from "../tokens/anon-token-pool";
 import type { IntroductionProbe, OpenedIntroduction } from "./introductions";
 import { toHex } from "./people";
-import { searchPeople, type KnownPerson, type PeopleSearchDeps } from "./people-search";
+import {
+  boundToPublishedKey,
+  searchPeople,
+  type KnownPerson,
+  type PeopleSearchDeps,
+} from "./people-search";
 
 const ANNA_KEY = new Uint8Array(32).fill(0xa1);
 const ANNA_ACC = new Uint8Array(16).fill(0xa2);
@@ -356,5 +361,31 @@ describe("searchPeople: a contact nothing names", () => {
       }),
     );
     expect(out.people[0]).toMatchObject({ name: "Bo", reach: "contact" });
+  });
+});
+
+describe("a found key against the published one (ADR-0066 section 3.5a)", () => {
+  const FOUND = new Uint8Array(32).fill(0x11);
+  const PUBLISHED = new Uint8Array(32).fill(0x22);
+  const ACCOUNT = new Uint8Array(16).fill(0x33);
+
+  it("the published key itself is the account's, with no further question", async () => {
+    const provenPredecessor = vi.fn(async () => false);
+    expect(await boundToPublishedKey({ provenPredecessor }, FOUND, ACCOUNT, FOUND)).toBe(true);
+    expect(provenPredecessor).not.toHaveBeenCalled();
+  });
+
+  it("a proven predecessor of the published key is the same person", async () => {
+    const provenPredecessor = vi.fn(async () => true);
+    expect(await boundToPublishedKey({ provenPredecessor }, FOUND, ACCOUNT, PUBLISHED)).toBe(true);
+    expect(provenPredecessor).toHaveBeenCalledWith(FOUND, ACCOUNT);
+  });
+
+  it("an unproven mismatch, no bundle, or no way to prove it is refused", async () => {
+    expect(
+      await boundToPublishedKey({ provenPredecessor: async () => false }, FOUND, ACCOUNT, PUBLISHED),
+    ).toBe(false);
+    expect(await boundToPublishedKey({ provenPredecessor: async () => true }, FOUND, ACCOUNT, null)).toBe(false);
+    expect(await boundToPublishedKey({}, FOUND, ACCOUNT, PUBLISHED)).toBe(false);
   });
 });

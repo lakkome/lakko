@@ -194,8 +194,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   // whose owner key moved.
   writeRotation(local, acct, newRotation("C".repeat(43), 1));
   markRotatedNotice(local, acct);
-  put(`lakko.contacts.predecessor-mailbox.v1.${acct}`, "7");
-  put(`lakko.contacts.predecessor-mailbox-adopted.v1.${acct}`, "1700000000000");
+  put(`lakko.contacts.predecessor-mailbox.v2.${acct}`, "7");
+  put(`lakko.contacts.predecessor-mailbox-adopted.v2.${acct}`, "1700000000000");
   markOwnerMoved(acct, "c0ffee", local);
   put(`lakko.pending-requests.v1.${acct}.${G}`, "{}");
   put(`lakko.unapplied-requests.v1.${acct}.${G}`, "[]");
@@ -517,8 +517,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:device-removal-owed:": "account",
   "lakko:key-rotation-owed:": "account",
   "lakko:key-rotation-notice:": "account",
-  "lakko.contacts.predecessor-mailbox.v1.": "account",
-  "lakko.contacts.predecessor-mailbox-adopted.v1.": "account",
+  "lakko.contacts.predecessor-mailbox.v2.": "account",
+  "lakko.contacts.predecessor-mailbox-adopted.v2.": "account",
   "lakko:channel-owner-moved:": "account",
   "lakko.pending-requests.v1": "account",
   "lakko.unapplied-requests.v1": "account",

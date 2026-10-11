@@ -628,7 +628,8 @@ internal class MultiJoinerLinkCallPort(
             val discovery = me.lakko.app.discovery.DiscoveryClient()
             discovery.setSessionToken(identity.sessionToken)
             discovery.use { client ->
-                CallInviteComposer(client).composeAndUpload(
+                var mintedLinkId: ByteArray? = null
+                val composed = CallInviteComposer(client).composeAndUpload(
                     ownerSigningSeed = own.ed25519Seed(),
                     ownerAccountId = identity.accountId,
                     identity = own,
@@ -638,9 +639,19 @@ internal class MultiJoinerLinkCallPort(
                     linkGrantFor = { linkId, expiryMs ->
                         val reach = me.lakko.app.reach.ReachManager.peek()
                             ?: throw IllegalStateException("no session")
+                        mintedLinkId = linkId
                         reach.mintLink(linkId, expiryMs.takeIf { it != 0L })
                     },
-                ).url
+                )
+                // ADR-0066 section 3.5a rule 5 - the ledger id is kept with
+                // the link's key, so a rotation of the account keys can
+                // revoke the link at the ledger.
+                val linkId = mintedLinkId
+                val blobId = composed.blobId
+                if (linkId != null && blobId != null) {
+                    me.lakko.app.reach.ReachManager.peek()?.noteLinkBlob(linkId, blobId)
+                }
+                composed.url
             }
         }
 }

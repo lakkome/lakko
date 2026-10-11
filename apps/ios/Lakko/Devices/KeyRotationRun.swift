@@ -78,6 +78,9 @@ public struct KeyRotationRecord: Codable, Equatable {
     /// ADR-0066 section 3.5a rule 3 — the profile re-send. Optional so a
     /// record written before the step existed still decodes (as owed).
     public var profileDone: Bool?
+    /// ADR-0066 section 3.5a rule 5 — the links revoked and the unanswered
+    /// contact requests re-sent. Optional for the same reason.
+    public var grantsDone: Bool?
     public var backupDone = false
     /// The person saw and confirmed the new words.
     public var phraseAcknowledged = false
@@ -104,6 +107,7 @@ public struct KeyRotationRecord: Codable, Equatable {
         case channelsDone = "channels_done"
         case reachDone = "reach_done"
         case profileDone = "profile_done"
+        case grantsDone = "grants_done"
         case backupDone = "backup_done"
         case phraseAcknowledged = "phrase_acknowledged"
     }
@@ -130,6 +134,13 @@ public enum KeyRotationPlan {
         /// one-to-one and group (section 3.5a rule 3). Runs only after
         /// ``reach``: a grant must name a key the mailbox already knows.
         case profile
+        /// What was granted before the rotation is spent (section 3.5a rule
+        /// 5): this account's own `/i/` and `/c/` links are revoked at their
+        /// ledger and its unanswered contact requests are sent again from the
+        /// new key. Runs only after ``discovery`` (the list of links is
+        /// signed by the published key) and ``reach`` (a re-sent request
+        /// carries a reply grant for the new mailbox).
+        case grants
         /// The backup, re-sealed under the new phrase.
         case backup
     }
@@ -144,6 +155,7 @@ public enum KeyRotationPlan {
         if !record.channelsDone { steps.append(.channels) }
         if !record.reachDone { steps.append(.reach) }
         if record.profileDone != true { steps.append(.profile) }
+        if record.grantsDone != true { steps.append(.grants) }
         if !record.backupDone { steps.append(.backup) }
         return steps
     }
@@ -158,6 +170,7 @@ public enum KeyRotationPlan {
         case .channels: next.channelsDone = true
         case .reach: next.reachDone = true
         case .profile: next.profileDone = true
+        case .grants: next.grantsDone = true
         case .backup: next.backupDone = true
         }
         return next
@@ -568,6 +581,10 @@ public final class KeyRotationRunner: ObservableObject {
         /// Section 3.5a rule 3: re-send the profile to every conversation.
         /// Throws while any send has not landed.
         public var resendProfile: @MainActor () async throws -> Void
+        /// Section 3.5a rule 5: revoke this account's own links and re-send
+        /// its unanswered contact requests from the new key. Throws while
+        /// anything is still owed.
+        public var spendOldGrants: @MainActor () async throws -> Void = {}
         public var resealBackup: @MainActor () async throws -> Void
         /// The new words for the screen, read from this device's own store.
         public var devicePhrase: @MainActor (_ accountIdB64: String) -> String?
@@ -869,6 +886,10 @@ public final class KeyRotationRunner: ObservableObject {
                     guard record.reachDone else { continue }
                     try await ports.resendProfile()
                     landed = true
+                case .grants:
+                    guard record.discoveryDone, record.reachDone else { continue }
+                    try await ports.spendOldGrants()
+                    landed = true
                 case .backup:
                     try await ports.resealBackup()
                     landed = true
@@ -924,6 +945,7 @@ extension KeyRotationRunner.Ports {
     static func live(
         auth: AuthRepository,
         chat: ChatRepository,
+        contacts: ContactsRepository,
         sync: DeviceGroupSyncRepository,
         removal: DeviceRemovalRunner
     ) -> KeyRotationRunner.Ports {
@@ -1029,7 +1051,19 @@ extension KeyRotationRunner.Ports {
             },
             resendProfile: { [weak chat] in
                 guard let chat else { throw SessionNotReady() }
+                // The marker is written when the keys move; a step that runs
+                // without one (the chat layer was not up at that moment)
+                // writes it now, so the step can never pass without sending.
+                chat.markProfileResendOwed()
                 try await chat.resendProfileAfterKeyRotation()
+            },
+            spendOldGrants: { [weak auth, weak contacts] in
+                guard let auth, let contacts, let secrets = auth.identitySecrets else {
+                    throw SessionNotReady()
+                }
+                try await contacts.spendGrantsAfterKeyRotation(
+                    predecessorSeeds: auth.ownPredecessorSeeds(
+                        accountIdB64: base64Encode(secrets.accountId)))
             },
             resealBackup: { [weak auth, weak chat] in
                 guard let auth else { throw SessionNotReady() }

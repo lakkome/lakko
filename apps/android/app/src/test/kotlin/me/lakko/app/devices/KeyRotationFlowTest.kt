@@ -69,6 +69,7 @@ class KeyRotationFlowTest {
         var channels: () -> Boolean = { true }
         var reach: () -> Boolean = { true }
         var profile: () -> Boolean = { true }
+        var spent: () -> Boolean = { true }
         var backup: () -> Boolean = { true }
         var preparedCount = 0
         var discarded = 0
@@ -165,6 +166,11 @@ class KeyRotationFlowTest {
             return profile()
         }
 
+        override suspend fun spendOldGrants(): Boolean {
+            calls += "spent"
+            return spent()
+        }
+
         override suspend fun sealBackup(): Boolean {
             calls += "backup"
             return backup()
@@ -223,6 +229,7 @@ class KeyRotationFlowTest {
         step(owed.with(channelsMoved = true))
         step(owed.with(reachRekeyed = true))
         step(owed.with(profileResent = true))
+        step(owed.with(oldGrantsSpent = true))
         step(owed.with(backupSealed = true))
         seen += nextRotationStep(owed)
         assertEquals(RotationStep.entries.toList(), seen)
@@ -238,7 +245,7 @@ class KeyRotationFlowTest {
         assertEquals(
             listOf(
                 "remove", "prepare", "seal", "announce", "commit", "adopt", "identity",
-                "keypackage", "dg-root", "journals", "channels", "reach", "profile", "backup",
+                "keypackage", "dg-root", "journals", "channels", "reach", "profile", "spent", "backup",
             ),
             ports.calls,
         )
@@ -570,7 +577,7 @@ class KeyRotationFlowTest {
         ports.identity = { _, _ -> IdentityPublish.Landed }
         assertEquals(RotationResult.Done, r.resume())
         // Nothing before the commit is repeated: no second rotation.
-        assertEquals(listOf("identity", "keypackage", "dg-root", "journals", "channels", "reach", "profile", "backup"), ports.calls)
+        assertEquals(listOf("identity", "keypackage", "dg-root", "journals", "channels", "reach", "profile", "spent", "backup"), ports.calls)
         assertTrue(ports.phraseReleased >= 1)
     }
 
@@ -654,6 +661,7 @@ class KeyRotationFlowTest {
         RotationStep.MoveChannels to "channels",
         RotationStep.RekeyReach to "reach",
         RotationStep.ResendProfile to "profile",
+        RotationStep.SpendOldGrants to "spent",
         RotationStep.SealBackup to "backup",
     )
 
@@ -663,6 +671,7 @@ class KeyRotationFlowTest {
             RotationStep.MoveChannels -> channels = answer
             RotationStep.RekeyReach -> reach = answer
             RotationStep.ResendProfile -> profile = answer
+            RotationStep.SpendOldGrants -> spent = answer
             else -> backup = answer
         }
     }
@@ -672,6 +681,7 @@ class KeyRotationFlowTest {
         RotationStep.MoveChannels -> channelsMoved
         RotationStep.RekeyReach -> reachRekeyed
         RotationStep.ResendProfile -> profileResent
+        RotationStep.SpendOldGrants -> oldGrantsSpent
         else -> backupSealed
     }
 
@@ -690,7 +700,11 @@ class KeyRotationFlowTest {
             // Every other step ran and was recorded - except the profile
             // re-send while the reach keys have not moved (section 3.5a
             // rule 3: its grants would open the old mailbox).
-            val held = if (step == RotationStep.RekeyReach) setOf(RotationStep.ResendProfile) else emptySet()
+            val held = if (step == RotationStep.RekeyReach) {
+                listOf(RotationStep.ResendProfile, RotationStep.SpendOldGrants)
+            } else {
+                emptyList()
+            }
             for ((other, _) in seedSteps) {
                 if (other == step) continue
                 assertEquals("$other", other !in held, owed.done(other))
@@ -700,7 +714,7 @@ class KeyRotationFlowTest {
             ports.calls.clear()
             ports.set(step) { true }
             assertEquals(RotationResult.Done, r.resume())
-            assertEquals(listOf(call) + held.map { "profile" }, ports.calls)
+            assertEquals(listOf(call) + held.map { h -> seedSteps.first { it.first == h }.second }, ports.calls)
             assertNull(r.owed())
         }
     }
@@ -733,6 +747,7 @@ class KeyRotationFlowTest {
             RotationStep.MoveChannels,
             RotationStep.RekeyReach,
             RotationStep.ResendProfile,
+            RotationStep.SpendOldGrants,
             RotationStep.SealBackup,
         )
         for ((index, pair) in seedSteps.withIndex()) {
@@ -764,7 +779,49 @@ class KeyRotationFlowTest {
         ports.calls.clear()
         ports.reach = { true }
         assertEquals(RotationResult.Done, r.resume())
-        assertEquals(listOf("reach", "profile"), ports.calls)
+        assertEquals(listOf("reach", "profile", "spent"), ports.calls)
+    }
+
+    // --- ADR section 3.5a rule 5: what the old key granted is spent ----------
+
+    @Test
+    fun `the old key's grants are spent only after the reach keys moved`() = runTest {
+        val ports = FakePorts()
+        ports.reach = { false }
+        val r = runner(ports, MapStorage())
+        assertEquals(RotationStep.RekeyReach, (r.rotate(device) as RotationResult.Pending).step)
+        // A re-sent request carries a reply grant for the NEW mailbox.
+        assertFalse("spent" in ports.calls)
+        assertFalse(r.owed()!!.oldGrantsSpent)
+        assertTrue(rotationStepNeedsReach(RotationStep.SpendOldGrants))
+        assertTrue(rotationStepNeedsReach(RotationStep.ResendProfile))
+        assertFalse(rotationStepNeedsReach(RotationStep.SealBackup))
+    }
+
+    @Test
+    fun `spending the old grants is an owed step that survives a restart`() = runTest {
+        val ports = FakePorts()
+        val storage = MapStorage()
+        ports.spent = { false }
+        val r = runner(ports, storage)
+        assertEquals(RotationStep.SpendOldGrants, (r.rotate(device) as RotationResult.Pending).step)
+        val owed = r.owed()!!
+        assertTrue(owed.profileResent)
+        assertTrue(owed.backupSealed)
+        assertFalse(owed.oldGrantsSpent)
+        assertEquals(RotationStep.SpendOldGrants, nextRotationStep(owed))
+        assertEquals(RotationUiStep.UpdatingDevices, rotationUiStep(RotationStep.SpendOldGrants))
+        assertFalse(rotationWithholdsPhrase(owed))
+        val second = FakePorts()
+        second.spent = { throw IOException("down") }
+        val again = runner(second, storage)
+        assertEquals(RotationStep.SpendOldGrants, (again.resume() as RotationResult.Pending).step)
+        assertEquals(listOf("spent"), second.calls)
+        second.calls.clear()
+        second.spent = { true }
+        assertEquals(RotationResult.Done, again.resume())
+        assertEquals(listOf("spent"), second.calls)
+        assertNull(again.owed())
     }
 
     @Test

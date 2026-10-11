@@ -333,7 +333,8 @@ struct LakkoApp: App {
             feedRefresh: feedRefresh,
             deviceRemoval: deviceRemoval,
             keyRotation: KeyRotationRunner(
-                ports: .live(auth: auth, chat: chat, sync: sync, removal: deviceRemoval))
+                ports: .live(
+                    auth: auth, chat: chat, contacts: contacts, sync: sync, removal: deviceRemoval))
         )
         self.services = services
         // ADR-0066 section 3.3 — a kept device: the account's own
@@ -354,12 +355,15 @@ struct LakkoApp: App {
         // journal roots the chat repository derives); every conversation, the
         // device identity and its binding stay.
         let keyRotation = services.keyRotation
-        auth.onAccountKeysRotated = { [weak auth, weak chat] secrets, predecessorSeed in
+        auth.onAccountKeysRotated = { [weak auth, weak chat, weak contacts] secrets, predecessorSeed in
             let accountIdB64 = base64Encode(secrets.accountId)
             if let rotated = try? Identity.fromSeed(seed: secrets.accountIdentitySeed) {
                 ReachCenter.shared.rekey(accountIdB64: accountIdB64, accountIdentity: rotated)
             }
             chat?.adoptRotatedAccount(secrets: secrets, predecessorSeed: predecessorSeed)
+            // Rule 5 — the links this session generated name the old mailbox:
+            // they leave the list at once, on the rotating and a kept device.
+            contacts?.dropSpentLinksFromList()
             ReachCenter.shared.sync()
             // The rotating device publishes in its own order (the directory
             // upload deletes every KeyPackage row first). A KEPT device has
@@ -379,9 +383,12 @@ struct LakkoApp: App {
                 // ADR-0066 section 3.5a rule 3 — once the reach keys are on
                 // the new mailbox, the profile (with grants for it) goes out
                 // again through the throttled publisher.
-                if await ReachCenter.shared.syncNow() {
-                    chat?.resendProfileAfterAdoptingKeyRotation()
-                }
+                // Durable: what does not land now is retried at each
+                // session start until every conversation took it.
+                await chat?.resendProfileAfterAdoptingKeyRotation()
+                // Rule 5 — what this device granted before the rotation is
+                // spent too: its own links and unanswered requests.
+                await contacts?.spendGrantsAfterAdoptingKeyRotation()
                 NotificationCenter.default.post(name: .lakkoAccountKeysRotated, object: nil)
             }
         }
@@ -1502,6 +1509,13 @@ private struct SessionRoot: View, Equatable {
                     await removal.resumeOwed()
                     rotation.reload()
                     await rotation.resumeOwed()
+                    // ADR-0066 section 3.5a rules 3 and 5 — what a key change
+                    // left owed on this device (a kept device, or any device
+                    // after a restart) is retried at each session start.
+                    await services.chatRepository.retryOwedProfileResend()
+                    if rotation.resume == .nothing {
+                        await services.contactsRepository.spendGrantsAfterAdoptingKeyRotation()
+                    }
                 }
             }
         }

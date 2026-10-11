@@ -61,6 +61,9 @@ internal data class StoredHeld(
     val scopeHex: String,
     /** The 37-byte grant wire (`encodeReachGrant`), hex. */
     val grantHex: String,
+    /** ADR-0066 section 3.5a rule 6 - the grant [grantHex] replaced, kept
+     *  beside it until the person's address is known current. */
+    val previousGrantHex: String? = null,
 )
 
 /** A committer delegation envelope received in a group (ADR-0060 §6). */
@@ -95,6 +98,11 @@ internal data class ReachDoc(
     val registered: List<StoredRegistered> = emptyList(),
     val links: List<StoredLink> = emptyList(),
     val replies: List<StoredReply> = emptyList(),
+    /** ADR-0066 section 3.5a rule 5 - the links this device minted before
+     *  the account's keys moved: their keys name the old mailbox and are not
+     *  registered on the new one; the rotating device revokes those with a
+     *  ledger row and then forgets them. */
+    val spentLinks: List<StoredLink> = emptyList(),
     val held: List<StoredHeld> = emptyList(),
     val delegations: List<StoredDelegation> = emptyList(),
     /** The visibility setting envelope (`composeVisibilityEnvelope`), hex. */

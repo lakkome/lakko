@@ -1052,7 +1052,15 @@ public class ChatRepository(
             val mailbox = welcomeMailboxFor(account)
             if (!writtenMailboxes.add(DsClient.pseudonymHex(mailbox))) continue
             try {
-                publishWelcomeToMailbox(mailbox, created.welcomeEnvelope, createdHex, explicit)
+                publishWelcomeToMailbox(
+                    mailbox,
+                    created.welcomeEnvelope,
+                    createdHex,
+                    explicit,
+                    accountIdHint = recipientAccountId.takeIf {
+                        mailboxAccountKeyOf(account).contentEquals(recipientCurrent)
+                    },
+                )
             } catch (e: Throwable) {
                 throw ChatError(dsErrorMessage(e, "DS publishMailbox (Welcome) failed"), e)
             }
@@ -1170,6 +1178,68 @@ public class ChatRepository(
         groupIdHex: String?,
         explicit: DsReachAuth? = null,
         requireGrant: Boolean = false,
+        /** The added person's account id when the caller holds it (rule 6). */
+        accountIdHint: ByteArray? = null,
+    ): PublishResult {
+        // ADR-0066 section 3.5a rule 6 - a refused write re-checks the
+        // person's address once: their identity bundle through the gate
+        // (which records a proven predecessor), then the mailbox and the
+        // grants are resolved again and the write is tried once more.
+        val person = welcomeTargetAccounts[DsClient.pseudonymHex(mailbox)]
+        var target = mailbox
+        return me.lakko.app.reach.writeRecheckingAddress(
+            write = { publishWelcomeOnce(target, bytes, groupIdHex, explicit, requireGrant) },
+            isRefusal = { it is me.lakko.app.ds.DsReachRefusedError || it is WelcomeUndeliverable },
+            recheck = recheck@{
+                val account = person ?: return@recheck false
+                val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+                if (account.contentEquals(reach.ownAccountKey() ?: ByteArray(0))) return@recheck false
+                val accountHex = DsClient.pseudonymHex(account)
+                val nowMs = System.currentTimeMillis()
+                val due = me.lakko.app.reach.addressRecheckDue(addressRecheckedAtMs[accountHex], nowMs)
+                val checked = if (due) {
+                    addressRecheckedAtMs[accountHex] = nowMs
+                    addressRecheck?.invoke(account, accountIdHint) == true
+                } else {
+                    false
+                }
+                val next = welcomeMailboxFor(account)
+                val moved = !next.contentEquals(target)
+                target = next
+                checked || moved
+            },
+        )
+    }
+
+    /** When the address of an account (key hex) was last re-checked after a
+     *  refused write, so an owed Welcome retried at every poll does not fetch
+     *  the person's bundle at every poll. In memory. */
+    private val addressRecheckedAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * ADR-0066 section 3.5a rule 6 - fetch the identity bundle of the person
+     * known by an account key through the fail-closed gate; `true` when it
+     * passed. Set by the contacts repository at construction; `null` runs
+     * no check (tests).
+     */
+    @Volatile
+    public var addressRecheck: (suspend (accountKey: ByteArray, accountIdHint: ByteArray?) -> Boolean)? = null
+
+    /**
+     * Rule 5 - the rotating device's owed step: revoke the links of the
+     * previous key and re-send the unanswered contact requests. Set by the
+     * contacts repository at construction; `null` leaves the step owed.
+     */
+    @Volatile
+    public var spendPreRotationGrants: (suspend () -> Boolean)? = null
+
+    /** One attempt of [publishWelcomeToMailbox]. */
+    private suspend fun publishWelcomeOnce(
+        mailbox: ByteArray,
+        bytes: ByteArray,
+        groupIdHex: String?,
+        explicit: DsReachAuth?,
+        requireGrant: Boolean,
     ): PublishResult {
         if (explicit != null) return dsClient.publishMailbox(mailbox, bytes, reach = explicit)
         val account = welcomeTargetAccounts[DsClient.pseudonymHex(mailbox)]
@@ -2673,7 +2743,7 @@ public class ChatRepository(
                     }
                     chatClient.markOwnPublishedCommit(groupIdHex, commitPublish.id)
                     val welcomePublish = try {
-                        publishWelcomeToMailbox(recipientPseudonym, welcomeEnvelope, groupIdHex)
+                        publishWelcomeToMailbox(recipientPseudonym, welcomeEnvelope, groupIdHex, accountIdHint = accountId)
                     } catch (e: Throwable) {
                         throw ChatError(dsErrorMessage(e, "DS publishMailbox (Welcome) failed"), e)
                     }

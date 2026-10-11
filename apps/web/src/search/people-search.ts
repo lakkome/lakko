@@ -106,6 +106,11 @@ export interface PeopleSearchDeps {
   openPublicRecord(record: Uint8Array, oprfOutput: Uint8Array): OpenedPublicRecord | null;
   /** The account key the identity bundle publishes, `null` for none. */
   identityKeyOf(accountId: Uint8Array): Promise<Uint8Array | null>;
+  /** ADR-0066 section 3.5a - whether the key the account's identity bundle
+   *  publishes is the PROVEN successor of `foundKey` (the old key signed the
+   *  new one): the same person, found under the key of before a rotation.
+   *  Absent: only an exact match is accepted. */
+  provenPredecessor?(foundKey: Uint8Array, accountId: Uint8Array): Promise<boolean>;
   /** What this device knows about a person. */
   known(keyB64: string): KnownPerson;
   /** Open the kept introduction records with these probes. */
@@ -305,7 +310,7 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
       let bound: boolean;
       try {
         const published = await deps.identityKeyOf(intro.accountId);
-        bound = published !== null && toHex(published) === toHex(intro.identityPk);
+        bound = await boundToPublishedKey(deps, intro.identityPk, intro.accountId, published);
       } catch {
         introFailed = true;
         continue;
@@ -367,6 +372,24 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
   if (checkFailed || introFailed) legs.push("failed");
   const found = people.length + (channel === null ? 0 : 1);
   return { people, channel, state: foldSearch(found, legs) };
+}
+
+/**
+ * Whether a key found for an account is the account's: the key its identity
+ * bundle publishes, or a PROVEN predecessor of it (ADR-0066 section 3.5a:
+ * the same person, found through a record made before a key rotation). An
+ * unproven mismatch is refused.
+ */
+export async function boundToPublishedKey(
+  deps: Pick<PeopleSearchDeps, "provenPredecessor">,
+  foundKey: Uint8Array,
+  accountId: Uint8Array,
+  published: Uint8Array | null,
+): Promise<boolean> {
+  if (published === null) return false;
+  if (toHex(published) === toHex(foundKey)) return true;
+  if (deps.provenPredecessor === undefined) return false;
+  return deps.provenPredecessor(foundKey, accountId);
 }
 
 async function identityKeyB64(

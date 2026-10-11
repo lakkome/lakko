@@ -35,7 +35,12 @@
  *                          mailbox, re-sent to every one-to-one and group
  *                          (ADR-0066 section 3.5a rule 3). Owed until every
  *                          conversation has it.
- *  11. `backup`            the backup re-sealed under the new phrase.
+ *  11. `links`             the invite links minted before the rotation,
+ *                          revoked at the ledger and forgotten locally
+ *                          (section 3.5a rule 5: they are spent).
+ *  12. `requests`          the unanswered outgoing contact requests, sent
+ *                          again from the new key with a new reply grant.
+ *  13. `backup`            the backup re-sealed under the new phrase.
  *
  * A failure before `commit` changes nothing on the server: the device WAS
  * removed and the keys are unchanged. A failure after it resumes from the
@@ -61,6 +66,8 @@ export const ROTATION_STEPS = [
   "channels",
   "reach",
   "profile",
+  "links",
+  "requests",
   "backup",
 ] as const;
 export type RotationStep = (typeof ROTATION_STEPS)[number];
@@ -280,6 +287,18 @@ export type CommitProbe =
   | { readonly kind: "not-landed" }
   | { readonly kind: "unknown" };
 
+/** The steps after the directory upload, each answered done or later. */
+export type PublishStep =
+  | "key-package"
+  | "device-group-root"
+  | "journals"
+  | "channels"
+  | "reach"
+  | "profile"
+  | "links"
+  | "requests"
+  | "backup";
+
 export interface RotationPorts {
   /** Step 1. `grant` is needed until the revoke has its answer. */
   readonly remove: (deviceIdB64: string, grant: string | null) => Promise<RemoveStepResult>;
@@ -313,7 +332,7 @@ export interface RotationPorts {
   /** The remaining steps: each answers done or later and never throws for a
    *  refusal (a throw reads as later). */
   readonly publish: (
-    step: "key-package" | "device-group-root" | "journals" | "channels" | "reach" | "profile" | "backup",
+    step: PublishStep,
     record: RotationOwed,
   ) => Promise<PublishVerdict>;
   /** The session is of a superseded generation. */

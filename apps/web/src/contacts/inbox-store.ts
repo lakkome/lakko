@@ -181,6 +181,40 @@ export function fromStoredRow(row: StoredMailboxRow): MailboxRow {
 export interface FetchedRequest {
   readonly request: IncomingContactRequest;
   readonly row: MailboxRow;
+  /** ADR-0066 section 3.5a rule 5 - the pending requests this one REPLACES:
+   *  the same person's, sent from a key this request's key provably
+   *  superseded. Removed in the same write, so the list shows one request
+   *  per person and never a second row. */
+  readonly replaces?: readonly number[];
+}
+
+/** One pending request as the one-per-person rule reads it. */
+export interface PendingKey {
+  readonly messageId: number;
+  readonly keyB64: string;
+}
+
+/**
+ * ADR-0066 section 3.5a rule 5 - what a request arriving from `incomingKeyB64`
+ * does to the pending list: it REPLACES every pending request whose key it
+ * provably superseded, and is itself DROPPED when a pending request already
+ * comes from a key that superseded its own (a stale request never puts the
+ * old key back). `isSuccessor(old, new)` answers whether `new` is the proven
+ * successor of `old`. Pure.
+ */
+export function pendingAfterArrival(
+  pending: readonly PendingKey[],
+  incomingKeyB64: string,
+  isSuccessor: (oldKeyB64: string, newKeyB64: string) => boolean,
+): { readonly replaces: number[]; readonly dropIncoming: boolean } {
+  const replaces: number[] = [];
+  let dropIncoming = false;
+  for (const p of pending) {
+    if (p.keyB64 === incomingKeyB64) continue;
+    if (isSuccessor(p.keyB64, incomingKeyB64)) replaces.push(p.messageId);
+    else if (isSuccessor(incomingKeyB64, p.keyB64)) dropIncoming = true;
+  }
+  return dropIncoming ? { replaces: [], dropIncoming } : { replaces, dropIncoming };
 }
 
 export interface PendingInboxDeps {
@@ -257,9 +291,18 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
         added.push(f);
       }
       if (added.length === 0) return;
-      const nextRows = [...rows, ...added.map((f) => toStoredRow(f.row))];
+      // Rule 5: a request from the proven successor of a pending request's
+      // key replaces it, in this same write.
+      const replaced = new Set<number>();
+      for (const f of added) for (const id of f.replaces ?? []) replaced.add(id);
+      for (const f of added) replaced.delete(f.request.messageId);
+      const nextRows = [
+        ...rows.filter((r) => !replaced.has(r.messageId)),
+        ...added.map((f) => toStoredRow(f.row)),
+      ];
       write(cursor, nextRows);
       rows = nextRows;
+      for (const id of replaced) decoded.delete(id);
       for (const f of added) decoded.set(f.request.messageId, f.request);
       deps.onChange();
     },

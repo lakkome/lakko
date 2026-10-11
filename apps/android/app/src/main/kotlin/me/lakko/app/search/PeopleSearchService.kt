@@ -180,7 +180,11 @@ public class PeopleSearchService(
         }
 
         override suspend fun identityKeyOf(accountId: ByteArray): ByteArray? =
-            discovery.identityFetch(accountId)?.signature_pubkey?.let { Base64.getDecoder().decode(it) }
+            discovery.identityFetch(accountId)?.also(::noteServedProof)
+                ?.signature_pubkey?.let { Base64.getDecoder().decode(it) }
+
+        override fun isProvenPredecessor(foundKey: ByteArray, publishedKey: ByteArray): Boolean =
+            this@PeopleSearchService.isProvenPredecessor(foundKey, publishedKey)
 
         override fun known(keyB64: String): KnownPerson = this@PeopleSearchService.known(keyB64)
 
@@ -216,6 +220,39 @@ public class PeopleSearchService(
             if (me.lakko.app.anon.isAnonTokenQuotaExhausted(error)) LegOutcome.ALLOWANCE_USED else LegOutcome.FAILED
 
         override val ownKeyHex: String? = this@PeopleSearchService.ownKeyHex()
+    }
+
+    /** The supersession proof each served bundle carried, by the key it
+     *  serves (standard base64): public material, kept for this process. */
+    private val servedProofs = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
+    private fun noteServedProof(bundle: me.lakko.app.discovery.IdentityFetchResponse) {
+        val proof = bundle.supersession_proof?.takeIf { it.isNotEmpty() } ?: return
+        try {
+            servedProofs[bundle.signature_pubkey] = Base64.getDecoder().decode(proof)
+        } catch (_: IllegalArgumentException) {
+            // A malformed proof proves nothing.
+        }
+    }
+
+    /**
+     * ADR-0066 section 3.5a - [foundKey] is a proven predecessor of
+     * [publishedKey]: a step the gate recorded, or the proof the directory
+     * served with [publishedKey] verifies as signed by [foundKey] over
+     * exactly that key. Nothing is pinned or recorded here (a search is a
+     * read); an unproven change is two people.
+     */
+    private fun isProvenPredecessor(foundKey: ByteArray, publishedKey: ByteArray): Boolean {
+        val foundB64 = Base64.getEncoder().encodeToString(foundKey)
+        val publishedB64 = Base64.getEncoder().encodeToString(publishedKey)
+        if (contacts.isProvenPredecessor(foundB64, publishedB64)) return true
+        val proof = servedProofs[publishedB64] ?: return false
+        return try {
+            uniffi.lakko_ffi_uniffi.verifySupersession(proof, foundKey, System.currentTimeMillis() / 1000L)
+                .contentEquals(publishedKey)
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     /** The DS reach check of a person's account mailbox with a grant wire. */
@@ -257,8 +294,11 @@ public class PeopleSearchService(
         override suspend fun reachCheck(identityPk: ByteArray, grantWireB64: String): Boolean =
             reachCheckWith(identityPk, grantWireB64)
 
+        override fun isProvenPredecessor(foundKey: ByteArray, publishedKey: ByteArray): Boolean =
+            this@PeopleSearchService.isProvenPredecessor(foundKey, publishedKey)
+
         override suspend fun identityFetch(accountId: ByteArray): IdentityKeys? =
-            DiscoveryClient().use { it.identityFetch(accountId) }?.let {
+            DiscoveryClient().use { it.identityFetch(accountId) }?.also(::noteServedProof)?.let {
                 IdentityKeys(Base64.getDecoder().decode(it.signature_pubkey), Base64.getDecoder().decode(it.x25519_pubkey))
             }
 

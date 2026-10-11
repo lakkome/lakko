@@ -100,46 +100,111 @@ export function predecessorMailboxReadable(adoptedAtMs: number | null, nowMs: nu
 }
 
 // ---------------------------------------------------------------------------
-// The adoption time (rule 4), per account
+// The adoption time (rule 4), per account and per predecessor key
 // ---------------------------------------------------------------------------
 
+/**
+ * One row per account: `{ <predecessor key hex>: <ms> }`. Each predecessor
+ * has its OWN 30-day window, counted from the moment that key was left: after
+ * a second rotation the first predecessor's window is not started again, and
+ * the key just left gets a window of its own.
+ */
 function adoptionKey(accountIdB64: string): string {
-  return `lakko.contacts.predecessor-mailbox-adopted.v1.${accountIdB64}`;
+  return `lakko.contacts.predecessor-mailbox-adopted.v2.${accountIdB64}`;
 }
 
-/** When this device adopted the rotated keys, or `null` when not stored. */
-export function readPredecessorAdoptedAtMs(accountIdB64: string): number | null {
+/** The storage key of the per-predecessor mailbox cursors of an account
+ *  (`{ <predecessor key hex>: <cursor> }`), named here so the wipe and the
+ *  poller agree on it. */
+export function predecessorCursorStorageKey(accountIdB64: string): string {
+  return `lakko.contacts.predecessor-mailbox.v2.${accountIdB64}`;
+}
+
+/** The storage key of the adoption times of an account. */
+export function predecessorAdoptionStorageKey(accountIdB64: string): string {
+  return adoptionKey(accountIdB64);
+}
+
+/** Decode a `{ key hex: positive number }` row; anything else reads as
+ *  empty. Pure. */
+export function decodeNumberByKey(raw: string | null | undefined): Record<string, number> {
+  if (raw === null || raw === undefined) return {};
   try {
-    const raw = globalThis.localStorage?.getItem(adoptionKey(accountIdB64)) ?? null;
-    if (raw === null) return null;
-    const n = Number.parseInt(raw, 10);
-    return Number.isFinite(n) && n > 0 ? n : null;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) out[k] = v;
+    }
+    return out;
   } catch {
-    return null;
+    return {};
   }
 }
 
-/**
- * Record the adoption time. With `restart` (a NEW adoption: the keys were
- * just rotated or adopted) the window starts again; without it an existing
- * time is kept, so a page load never extends the window. Never throws.
- */
-export function stampPredecessorAdoption(accountIdB64: string, nowMs: number, restart: boolean): void {
+function readAdoptions(accountIdB64: string): Record<string, number> {
   try {
-    if (!restart && readPredecessorAdoptedAtMs(accountIdB64) !== null) return;
-    globalThis.localStorage?.setItem(adoptionKey(accountIdB64), String(Math.floor(nowMs)));
+    return decodeNumberByKey(globalThis.localStorage?.getItem(adoptionKey(accountIdB64)));
+  } catch {
+    return {};
+  }
+}
+
+/** When this device left the predecessor key `keyHex` (adopted the keys
+ *  that superseded it), or `null` when not stored. */
+export function readPredecessorAdoptedAtMs(accountIdB64: string, keyHex: string): number | null {
+  return readAdoptions(accountIdB64)[keyHex] ?? null;
+}
+
+/**
+ * Record when the predecessor key `keyHex` was left. A key is left once: an
+ * existing time is kept, so neither a page load nor a LATER rotation extends
+ * the window of an earlier predecessor. Never throws.
+ */
+export function stampPredecessorAdoption(accountIdB64: string, keyHex: string, nowMs: number): void {
+  try {
+    const held = readAdoptions(accountIdB64);
+    if (held[keyHex] !== undefined) return;
+    held[keyHex] = Math.floor(nowMs);
+    globalThis.localStorage?.setItem(adoptionKey(accountIdB64), JSON.stringify(held));
   } catch {
     /* storage blocked: the mailbox is read for this session */
   }
 }
 
-/** Forget the adoption time (both wipes). */
+/** Forget the adoption times (both wipes). */
 export function clearPredecessorAdoption(accountIdB64: string): void {
   try {
     globalThis.localStorage?.removeItem(adoptionKey(accountIdB64));
   } catch {
     /* nothing was stored either */
   }
+}
+
+/**
+ * The predecessor mailboxes still to be read (rule 4, over the whole chain):
+ * every own predecessor key whose own window is open. `adoptedAtMs` answers
+ * a key's stored time (`null` when none: read, and the caller stamps it).
+ * Pure.
+ */
+export function readablePredecessorKeys(
+  predecessorKeysHex: readonly string[],
+  adoptedAtMs: (keyHex: string) => number | null,
+  nowMs: number,
+): string[] {
+  return predecessorKeysHex.filter((k) => predecessorMailboxReadable(adoptedAtMs(k), nowMs));
+}
+
+/**
+ * What a PREDECESSOR mailbox may deliver (rules 4 and 5): Welcomes only. A
+ * contact request or an ack that reaches a mailbox the account left is not
+ * acted on: what it was sealed to, and the reply grant it carries or
+ * answers, name keys the holder of the old seed has as well. Pure.
+ */
+export function predecessorMailboxEvents<E extends { readonly kind: string }>(
+  events: readonly E[],
+): E[] {
+  return events.filter((e) => e.kind === "welcome");
 }
 
 // ---------------------------------------------------------------------------

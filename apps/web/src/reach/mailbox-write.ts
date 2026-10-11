@@ -225,54 +225,152 @@ export async function writeThroughCandidates<T>(
   throw new MailboxUnreachableError(tried);
 }
 
+// ----------------------------------------------------------------------------
+// A refused write re-checks the address once (ADR-0066 section 3.5a rule 6)
+// ----------------------------------------------------------------------------
+
+/** Where a write goes and what it may be signed with, as resolved NOW. */
+export interface WritePlan {
+  /** The mailbox pseudonym of the person's current key, as this device
+   *  knows it. */
+  readonly mailbox: Uint8Array;
+  readonly candidates: readonly WriteCandidate[];
+}
+
 /**
- * A Welcome write to `targetAccountKey`'s account mailbox that is never sent
- * unsigned (ADR-0050 section 2.5a item 7):
+ * Write through a plan, re-checking the address ONCE when the mailbox
+ * refuses (rule 6).
  *
- *   - this account's own mailbox and an explicit grant: exactly as
- *     {@link resolveWriteAuth} does them, one attempt;
- *   - otherwise every kept grant for that account in {@link resolveWriteAuth}'s
- *     order (contact, the scopes' `group`, their `channel`, then this group's
- *     `member`), then a committer delegation naming this account, moving to
- *     the next on `401`;
- *   - with nothing left, {@link MailboxUnreachableError} and no write.
+ * A `401` means "this key does not open this mailbox". Either the grant is
+ * dead, or the ADDRESS is: the person rotated their account keys, their
+ * re-sent profile reached this device before the proven change did, and the
+ * new grant is being offered to the mailbox that was left. So on the first
+ * refusal `recheck` runs (it fetches the person's identity bundle through
+ * the fail-closed gate, which records a proven predecessor), the plan is
+ * resolved AGAIN (a new address, the same grants in a new order) and every
+ * candidate of that plan is tried, moving on only on `401`.
  *
- * The web client cannot tell whether a person's mailbox is open (Everyone):
- * the DS answers an unsigned write to an open and to a closed mailbox alike.
- * So a Welcome for an account this device holds no grant for waits, owed,
- * until one arrives; it is never written unsigned.
+ *   - any failure other than `401` is thrown as is, at once;
+ *   - `recheck` runs at most once per write, and a failing one is ignored
+ *     (the second plan is then the first one, minus nothing);
+ *   - with `recheck` `null` the candidates are simply tried in order;
+ *   - with nothing left: the last refusal, or {@link MailboxUnreachableError}
+ *     when `unreachable` is asked for (a Welcome, which then stays owed).
+ *
+ * Each signer is released after its attempt.
  */
-export async function writeWelcome<T>(
+export async function writeWithAddressRecheck<T>(
+  plan: () => Promise<WritePlan>,
+  write: (mailbox: Uint8Array, auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
+  options: {
+    readonly recheck: (() => Promise<void>) | null;
+    /** Throw {@link MailboxUnreachableError} rather than the refusal. */
+    readonly unreachable?: boolean;
+  },
+): Promise<T> {
+  let rechecked = options.recheck === null;
+  let current = await plan();
+  for (;;) {
+    let refusal: unknown = null;
+    let tried = 0;
+    let again = false;
+    for (const candidate of current.candidates) {
+      const resolved = await candidate.resolve();
+      tried += 1;
+      try {
+        return await write(current.mailbox, resolved.auth, resolved.kind);
+      } catch (err) {
+        if (!isWriteRefusal(err)) throw err;
+        refusal = err;
+      } finally {
+        resolved.release();
+      }
+      if (!rechecked) {
+        rechecked = true;
+        try {
+          await options.recheck?.();
+        } catch {
+          /* the address could not be re-checked: the plan stands */
+        }
+        current = await plan();
+        again = true;
+        break;
+      }
+    }
+    if (again) continue;
+    if (options.unreachable === true || refusal === null) throw new MailboxUnreachableError(tried);
+    throw refusal;
+  }
+}
+
+/**
+ * The plan for a write to the person `targetAccountKey` names: their CURRENT
+ * mailbox (rule 1) and, in order,
+ *
+ *   - this account's own mailbox: its own `contact` key, alone;
+ *   - an explicit grant for exactly this write, alone;
+ *   - otherwise every grant kept for the person under any key they have had
+ *     (rule 2), the ones of before a rotation last and only while the old
+ *     address stands (rule 6), then a committer delegation;
+ *   - and, with none of those and unless `neverUnsigned`, the unsigned write
+ *     (which only an Everyone mailbox stores).
+ */
+export async function planWriteToPerson(
   targetAccountKey: Uint8Array,
   options: {
-    readonly scope: Uint8Array;
+    readonly scope?: Uint8Array;
     readonly explicit?: WasmReachGrant | string | null;
-  },
-  write: (auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
-): Promise<T> {
+    readonly allowMember?: boolean;
+    readonly neverUnsigned?: boolean;
+  } = {},
+): Promise<WritePlan> {
   const session = reachSession();
-  // ADR-0066 section 3.5a: resolved exactly as `resolveWriteAuth` does.
+  const mailbox = await accountMailboxOf(targetAccountKey);
   const personHexes = personKeysHex(journalHex(targetAccountKey));
   const targetHex = personHexes[0] ?? journalHex(targetAccountKey);
   const isOwnAccount = session !== null && session.accountKeyHex === targetHex;
-  const hasExplicit = options.explicit !== undefined && options.explicit !== null;
-  if (isOwnAccount || hasExplicit) {
-    const resolved = await resolveWriteAuth(targetAccountKey, {
-      scope: options.scope,
-      explicit: options.explicit ?? null,
-      allowMember: true,
-    });
-    try {
-      return await write(resolved.auth, resolved.kind);
-    } finally {
-      resolved.release();
-    }
+  const explicit = options.explicit ?? null;
+  if (isOwnAccount) {
+    return {
+      mailbox,
+      candidates: [
+        {
+          kind: "own",
+          resolve: async () => {
+            const grant = session.grant("contact");
+            try {
+              return released("own", await reachSignerForGrant(grant), null);
+            } finally {
+              grant.free();
+            }
+          },
+        },
+      ],
+    };
+  }
+  if (explicit !== null) {
+    return {
+      mailbox,
+      candidates: [
+        {
+          kind: "explicit",
+          resolve: async () =>
+            released(
+              "explicit",
+              typeof explicit === "string"
+                ? await reachSignerForGrantWire(explicit)
+                : await reachSignerForGrant(explicit),
+              null,
+            ),
+        },
+      ],
+    };
   }
   const candidates: WriteCandidate[] = [];
   if (session !== null) {
     for (const held of grantsInOrderForPerson(session.receivedGrants(), personHexes, {
-      scopeHex: journalHex(options.scope),
-      allowMember: true,
+      ...(options.scope === undefined ? {} : { scopeHex: journalHex(options.scope) }),
+      allowMember: options.allowMember === true,
     })) {
       candidates.push({
         kind: "kept",
@@ -287,7 +385,90 @@ export async function writeWelcome<T>(
       });
     }
   }
-  return writeThroughCandidates(candidates, write);
+  if (candidates.length === 0 && options.neverUnsigned !== true) {
+    candidates.push({ kind: "none", resolve: () => Promise.resolve(released("none", null, null)) });
+  }
+  return { mailbox, candidates };
+}
+
+/** Re-checks the address of the person a key names (rule 6): fetch their
+ *  identity bundle through the fail-closed gate. Never throws for a refusal
+ *  the caller cannot act on. */
+export type AddressRecheck = (accountKey: Uint8Array) => Promise<void>;
+
+let installedRecheck: AddressRecheck | null = null;
+
+/** Install the app's address re-check (the mailbox provider's, which holds
+ *  the directory client and the gate); `null` removes it. Every write to a
+ *  person's mailbox that does not name its own uses this one. */
+export function installAddressRecheck(recheck: AddressRecheck | null): void {
+  installedRecheck = recheck;
+}
+
+/**
+ * A write to a person's account mailbox: resolved (rule 1), authorised with
+ * what is held for the person (rule 2), and re-checked once on a refusal
+ * (rule 6). `write` receives the mailbox to write to.
+ */
+export async function writeToPerson<T>(
+  targetAccountKey: Uint8Array,
+  options: {
+    readonly scope?: Uint8Array;
+    readonly explicit?: WasmReachGrant | string | null;
+    readonly allowMember?: boolean;
+    /** A Welcome: never written unsigned, and an exhausted write throws
+     *  {@link MailboxUnreachableError} so the caller keeps it owed. */
+    readonly neverUnsigned?: boolean;
+    readonly recheck?: AddressRecheck | null;
+  },
+  write: (mailbox: Uint8Array, auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
+): Promise<T> {
+  const recheck = options.recheck === undefined ? installedRecheck : options.recheck;
+  return writeWithAddressRecheck(() => planWriteToPerson(targetAccountKey, options), write, {
+    recheck: recheck === null ? null : () => recheck(targetAccountKey),
+    unreachable: options.neverUnsigned === true,
+  });
+}
+
+/**
+ * A Welcome write to `targetAccountKey`'s account mailbox that is never sent
+ * unsigned (ADR-0050 section 2.5a item 7):
+ *
+ *   - this account's own mailbox and an explicit grant: one candidate;
+ *   - otherwise every kept grant for that account in {@link resolveWriteAuth}'s
+ *     order (contact, the scopes' `group`, their `channel`, then this group's
+ *     `member`), then a committer delegation naming this account, moving to
+ *     the next on `401`;
+ *   - with nothing left, {@link MailboxUnreachableError} and no write.
+ *
+ * The web client cannot tell whether a person's mailbox is open (Everyone):
+ * the DS answers an unsigned write to an open and to a closed mailbox alike.
+ * So a Welcome for an account this device holds no grant for waits, owed,
+ * until one arrives; it is never written unsigned.
+ *
+ * ADR-0066 section 3.5a rule 6: with `recheck`, the first refusal re-checks
+ * the person's address once. `write` receives the mailbox to write to.
+ */
+export async function writeWelcome<T>(
+  targetAccountKey: Uint8Array,
+  options: {
+    readonly scope: Uint8Array;
+    readonly explicit?: WasmReachGrant | string | null;
+    readonly recheck?: AddressRecheck | null;
+  },
+  write: (mailbox: Uint8Array, auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
+): Promise<T> {
+  return writeToPerson(
+    targetAccountKey,
+    {
+      scope: options.scope,
+      explicit: options.explicit ?? null,
+      allowMember: true,
+      neverUnsigned: true,
+      recheck: options.recheck ?? null,
+    },
+    write,
+  );
 }
 
 /**

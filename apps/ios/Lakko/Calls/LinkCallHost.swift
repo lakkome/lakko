@@ -496,17 +496,27 @@ extension LinkCallHost {
                 } catch {
                     throw LinkCallHostError.identityUnavailable
                 }
-                return try await CallInviteComposer.composeAndUpload(
+                var mintedLinkId: Data?
+                let composed = try await CallInviteComposer.composeAndUpload(
                     callId: callId,
                     ownerSigningSeed: identity.ed25519Seed(),
                     ownerAccountId: secrets.accountId,
                     identity: identity,
                     discoveryClient: DiscoveryClient(sessionToken: secrets.sessionToken),
                     linkGrant: { linkId, expiresAtMs in
-                        try await ReachCenter.shared.newLinkGrant(
+                        mintedLinkId = linkId
+                        return try await ReachCenter.shared.newLinkGrant(
                             linkId: linkId, expiresAtMs: expiresAtMs)
                     }
-                ).url
+                )
+                // ADR-0066 section 3.5a rule 5 — the ledger id is kept with
+                // the link's reach scope, so a key rotation can revoke the
+                // link at the call-invite ledger (an inline link has no row).
+                if let mintedLinkId, let blobId = composed.blobId {
+                    ReachCenter.shared.attachBlob(
+                        linkId: mintedLinkId, blobId: blobId, kind: LinkReach.callKind)
+                }
+                return composed.url
             }
         ))
     }

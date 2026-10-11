@@ -151,6 +151,16 @@ internal object KeyRotationDevice {
                 return chats.resendProfileAfterKeyChange()
             }
 
+            override suspend fun spendOldGrants(): Boolean {
+                // ADR section 3.5a rule 5: the links the old key issued are
+                // revoked at the ledger and the unanswered contact requests
+                // re-sent from the new key, through the contacts layer. No
+                // contacts layer leaves the step owed.
+                val chats = chatRepository ?: return false
+                val spend = chats.spendPreRotationGrants ?: return false
+                return spend()
+            }
+
             override suspend fun sealBackup(): Boolean {
                 // ADR section 3.5, "Backup": re-sealed under the new phrase
                 // and uploaded, awaited. A chat layer that is not ready

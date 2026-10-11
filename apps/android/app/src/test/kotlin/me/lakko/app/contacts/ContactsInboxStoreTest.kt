@@ -3,6 +3,7 @@
 
 package me.lakko.app.contacts
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -263,5 +264,84 @@ class ContactsInboxStoreTest {
         val applied = applyContactAcks(listOf(accepted(1)), listOf(sentTo(2)), emptyList())
         assertEquals(false, applied.acceptedChanged)
         assertEquals(listOf(sentTo(2)), applied.sent)
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0066 section 3.5a rule 5 - one request per person across a
+    // proven rotation
+    // -----------------------------------------------------------------
+
+    /** Key byte 2 is the proven successor of key byte 1 (and 3 of 2). */
+    private val rotated: (ByteArray, ByteArray) -> Boolean = { newKey, oldKey ->
+        newKey[0] > oldKey[0] && newKey[0] <= 3 && oldKey[0] >= 1
+    }
+
+    @Test
+    fun a_request_from_the_proven_successor_replaces_the_pending_row_in_place() {
+        val pending = listOf(request(10, 9), request(11, 1), request(12, 8))
+        val again = request(20, 2)
+        val merge = mergeFetchedRequests(pending, emptyList(), listOf(again), rotated)
+        assertEquals(listOf(10L, 20L, 12L), merge.pending.map { it.messageId })
+        assertTrue(merge.dropped.isEmpty())
+    }
+
+    @Test
+    fun an_unproven_key_change_is_two_people_and_two_rows() {
+        val pending = listOf(request(11, 1))
+        val merge = mergeFetchedRequests(pending, emptyList(), listOf(request(20, 2)))
+        assertEquals(listOf(11L, 20L), merge.pending.map { it.messageId })
+    }
+
+    @Test
+    fun a_request_from_a_key_the_person_already_left_is_dropped() {
+        // A re-poll of the old row after the successor's request landed.
+        val pending = listOf(request(20, 2))
+        val merge = mergeFetchedRequests(pending, emptyList(), listOf(request(11, 1)), rotated)
+        assertEquals(listOf(20L), merge.pending.map { it.messageId })
+        assertEquals(listOf(11L), merge.dropped.map { it.messageId })
+    }
+
+    @Test
+    fun both_requests_in_one_batch_leave_one_row_whatever_the_order() {
+        val forward = mergeFetchedRequests(emptyList(), emptyList(), listOf(request(11, 1), request(20, 2)), rotated)
+        assertEquals(listOf(20L), forward.pending.map { it.messageId })
+        val backward = mergeFetchedRequests(emptyList(), emptyList(), listOf(request(20, 2), request(11, 1)), rotated)
+        assertEquals(listOf(20L), backward.pending.map { it.messageId })
+    }
+
+    @Test
+    fun a_second_rotation_collapses_every_earlier_row_of_the_person() {
+        val pending = listOf(request(11, 1), request(15, 9), request(12, 2))
+        val merge = mergeFetchedRequests(pending, emptyList(), listOf(request(30, 3)), rotated)
+        assertEquals(listOf(30L, 15L), merge.pending.map { it.messageId })
+    }
+
+    @Test
+    fun a_request_from_the_successor_of_an_accepted_contact_is_not_a_request() {
+        val merge = mergeFetchedRequests(emptyList(), listOf(accepted(1)), listOf(request(20, 2)), rotated)
+        assertTrue(merge.pending.isEmpty())
+        assertEquals(listOf(20L), merge.dropped.map { it.messageId })
+    }
+
+    @Test
+    fun only_a_claimed_same_account_under_another_key_is_put_to_a_proof() {
+        val accountId = ByteArray(16) { 7 }
+        val pending = listOf(request(11, 1, accountId = accountId), request(12, 8))
+        val fetched = listOf(
+            request(20, 2, accountId = accountId),
+            // The same key again: nothing to prove.
+            request(21, 1, accountId = accountId),
+            // Another account, and a legacy request without an id.
+            request(22, 5),
+            request(23, 6, accountId = null),
+        )
+        val candidates = successorCandidates(pending, fetched)
+        assertEquals(1, candidates.size)
+        val (id, newKey, oldKey) = candidates.single()
+        assertArrayEquals(accountId, id)
+        assertEquals(2, newKey[0].toInt())
+        assertEquals(1, oldKey[0].toInt())
+        // The claim alone replaces nothing: without a proof it is two rows.
+        assertEquals(5, mergeFetchedRequests(pending, emptyList(), fetched.take(1) + fetched.drop(2)).pending.size)
     }
 }

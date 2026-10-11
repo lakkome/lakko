@@ -56,3 +56,28 @@ export function contactRequestGate(
 export function refusalIsRecordedReset(loggedReset: boolean | null, recorded: boolean): boolean {
   return loggedReset === true && recorded;
 }
+
+/** Which keys a contact request goes out to once the recipient's published
+ *  identity has passed the fail-closed gate (ADR-0066 section 3.5a rule 1). */
+export type RequestTarget =
+  /** The keys in hand are the published ones. */
+  | "as-supplied"
+  /** The key in hand is a PROVEN predecessor of the published one: seal to
+   *  the published keys and send to the current mailbox. Never to the old
+   *  key. */
+  | "current"
+  /** The key in hand is neither: nothing is sent. Old keys do not come
+   *  back, and an unproven other key is not this person. */
+  | "refuse";
+
+/** Pure. */
+export function requestTargetAfterFetch(facts: {
+  readonly suppliedKeyB64: string;
+  readonly publishedKeyB64: string;
+  /** Whether the published key is the proven successor of the supplied one
+   *  (`proven-successor.ts`). */
+  readonly publishedIsProvenSuccessor: boolean;
+}): RequestTarget {
+  if (facts.suppliedKeyB64 === facts.publishedKeyB64) return "as-supplied";
+  return facts.publishedIsProvenSuccessor ? "current" : "refuse";
+}

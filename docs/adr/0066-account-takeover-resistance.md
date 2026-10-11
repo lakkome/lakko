@@ -921,6 +921,17 @@ holder rewrite that mailbox's reach-key set.
    polling each predecessor mailbox for 30 days after adopting (the DS journal retention; chosen)
    so nothing already sent is lost, then stop. No new reach key is registered there.
 
+5. **What was granted before the rotation is spent (decided 2026-10-11).** The rotating account's
+   `/i/` and `/c/` links and the `reply` grants of its unanswered contact requests named the old
+   mailbox and are not honoured through it: the holder of the old seed knows the same links. The
+   rotating device revokes its own links at the ledger where a revoke exists, drops them from its
+   lists, says so on the rotate sheet (`devices.rotate.effect_links`), and re-sends its unanswered
+   contact requests from the new key as an owed step; the receiver shows one request per person.
+   A contact request or ack that arrives in a predecessor mailbox is not acted on.
+6. **A refused write re-checks the address once.** When a write to a person's mailbox is refused,
+   the sender fetches that person's identity bundle through the fail-closed gate, re-resolves and
+   retries once; a grant found under a predecessor key is kept beside the newer one until then.
+
 Until a sender has observed the proven change (it fetches the bundle on its next lookup of that
 account) it still addresses the old mailbox with an old grant; that write is accepted and is read
 under rule 4, which is the window the 30 days cover.
@@ -1948,7 +1959,43 @@ Differences and gaps:
 - **Proposer and committer may disagree** about a person's (or the committer's) current key until
   both observed the proof; the delegation then names the other mailbox and the Welcome stays owed.
 
-Consequences of the rule itself, open for the maintainer:
+### Second pass (2026-10-11): rules 5 and 6, and one behaviour on the three clients
+
+Unit-tested only (web vitest 4381, iOS `LakkoTests` 3030 with 0 failures, Android 3422 on the host
+JVM without the native core); nothing walked on a device or against a server. It supersedes the
+"Differences and gaps" list above where the two disagree.
+
+Now the same on all three: a contact request to a proven-predecessor key re-fetches the bundle
+through the gate and is sealed to the current keys; a kept device's profile re-send is durable; own
+predecessors are a chain, each mailbox with its own cursor and 30-day window; a refused write
+re-checks the person's bundle once and retries once, with the displaced grant kept beside the newer
+one until the address is known current; people search accepts a proven predecessor; a committer
+finds a delegation naming any of its own keys; a predecessor mailbox delivers Welcomes only (web and
+iOS had been taking contact requests from it); the rotating device revokes its `/i/` links under the
+predecessor key, drops them locally, re-sends its unanswered contact requests from the new key as an
+owed step and shows `devices.rotate.effect_links`; an incoming request from the proven successor of
+a pending request's key replaces that row.
+
+Still different, or not built:
+
+- **`/c/` call links**: iOS and Android record the ledger id from this build on and revoke those;
+  links minted earlier, and every web call link (web keeps no id), are spent but stay in the ledger.
+- **The spend round on a kept device**: iOS runs it there too (over that device's own links and
+  requests); web and Android run it on the rotating device only.
+- **Sent requests**: re-sent without the intro text on web and iOS (never stored); Android's sent
+  list is in memory, so a process death before the step leaves nothing to re-send and the step
+  completes.
+- **The address re-check needs the person's account id**: a group member who is not a contact is not
+  re-checked on web, and only re-resolved from recorded links on Android. The re-check is throttled
+  per person (iOS 5 minutes, Android 10; chosen, not measured).
+- **iOS `ContactsClient.proveRequesterRotations`** records a proven edge for a requester this device
+  never pinned, from the bundle's supersession proof verified against the pending request's key:
+  the first write to the proven-predecessor store outside the ADR-0016 gate. Same evidence, another
+  path; to be looked at in the security pass.
+- A delegation naming the added person's old mailbox still leaves the Welcome owed until both sides
+  observed the change. Spent `/g/` join reply scopes are dropped, not re-knocked (iOS).
+
+Consequences of the rule as first built (1 decided as rule 5, 2 and 3 closed by the second pass):
 
 1. **Everything granted before a rotation stops opening the mailbox once the sender has observed
    the change**: the rotating account's old `/i/` and `/c/` links and the `reply` grant of its

@@ -250,27 +250,75 @@ public final class ContactsRepository: ObservableObject {
         }
         let client = clientFactory()
         let bundle = try await client.resolveVerifiedBundle(accountId: accountId)
-        guard bundle.signaturePubkey == person.accountKey else {
+        // ADR-0066 section 3.5a — the search may have found the person under
+        // a key they have since rotated away BY PROOF (the gate above just
+        // recorded it): the same person. An unproven mismatch is refused.
+        ReachCenter.shared.reloadKeyResolver()
+        guard PeopleSearch.acceptsPublishedKey(
+            found: person.accountKey, published: bundle.signaturePubkey,
+            currentOfFound: ReachCenter.shared.currentAccountKey(of: person.accountKey)
+        ) else {
             throw ContactsError.requestRefused
         }
-        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
-        let result = try await client.sendContactRequestToBundle(
-            senderSigningSeed: identity.ed25519Seed(),
-            senderAccountId: secrets.accountId,
-            senderSignaturePubkey: identity.signaturePublicKey(),
+        let result = try await sendRequestToBundle(
+            client: client, secrets: secrets,
             recipientAccountId: accountId,
             recipientSignaturePubkey: bundle.signaturePubkey,
             recipientX25519Pubkey: bundle.x25519Pubkey,
-            profile: ProfileDirectory.shared.ownProfileForRequest(),
             introMessage: Data(introMessage.utf8),
-            reach: person.writeSeed.map { Self.requestReach(linkSeed: $0) } ?? Self.requestReach()
-        )
+            linkSeed: person.writeSeed)
         state = state.with(sent: state.sent + [SentContactRequest(
             recipientUsername: person.username ?? "",
             recipientAccountIdB64: base64Encode(accountId),
             messageId: result.messageId,
             createdAt: result.createdAt)])
         return result
+    }
+
+    /// A contact request against a bundle in hand, with rule 6 of ADR-0066
+    /// section 3.5a: when the recipient's mailbox refuses the write, their
+    /// identity bundle is fetched through the fail-closed gate once, and when
+    /// that PROVED the key in hand a predecessor the request is sealed again
+    /// to the current keys and sent to the current mailbox, written with
+    /// whatever grant this device holds for the person (a link's own grant
+    /// opened the old mailbox only and is spent, rule 5). A re-check that
+    /// proves nothing leaves the refusal as it was.
+    func sendRequestToBundle(
+        client: ContactsClient,
+        secrets: IdentitySecrets,
+        recipientAccountId: Data,
+        recipientSignaturePubkey: Data,
+        recipientX25519Pubkey: Data,
+        introMessage: Data,
+        linkSeed: Data?
+    ) async throws -> SendResult {
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        func send(reach: ContactRequestReach) async throws -> SendResult {
+            try await client.sendContactRequestToBundle(
+                senderSigningSeed: identity.ed25519Seed(),
+                senderAccountId: secrets.accountId,
+                senderSignaturePubkey: identity.signaturePublicKey(),
+                recipientAccountId: recipientAccountId,
+                recipientSignaturePubkey: recipientSignaturePubkey,
+                recipientX25519Pubkey: recipientX25519Pubkey,
+                profile: ProfileDirectory.shared.ownProfileForRequest(),
+                introMessage: introMessage,
+                reach: reach)
+        }
+        do {
+            return try await send(reach: Self.requestReach(linkSeed: linkSeed))
+        } catch ContactsError.requestRefused {
+            await PersonAddressRecheck.recheck(
+                accountKey: recipientSignaturePubkey, accountIdHint: recipientAccountId)
+            guard ReachCenter.shared.currentAccountKey(of: recipientSignaturePubkey)
+                    != recipientSignaturePubkey else {
+                throw ContactsError.requestRefused
+            }
+            // The first attempt's reply grant was registered and never
+            // delivered: it goes before the retry mints its own.
+            ReachCenter.shared.retireReplies(purpose: ReplyPurpose.contact(recipientAccountId))
+            return try await send(reach: Self.requestReach())
+        }
     }
 
     /// The production lookups a people search makes.
@@ -293,6 +341,14 @@ public final class ContactsRepository: ObservableObject {
             verifyCertificate: { cert, lookupKey, accountId in
                 await ProfileDirectory.shared.verifyCertificate(
                     certificate: cert, lookupKey: lookupKey, accountId: accountId)
+            })
+            .with(currentKey: { key in
+                // ADR-0066 section 3.5a — read after the gated fetch, from
+                // the store the gate writes (the resolver reloads from it).
+                await MainActor.run {
+                    ReachCenter.shared.reloadKeyResolver()
+                    return ReachCenter.shared.currentAccountKey(of: key)
+                }
             })
     }
 
@@ -518,8 +574,20 @@ public final class ContactsRepository: ObservableObject {
             // Dedupe against the CURRENT state (an accept / decline may have
             // landed during the awaits above): a request already pending, or
             // from a sender already accepted, is not re-added.
+            //
+            // ADR-0066 section 3.5a rule 5 — one request per person: a
+            // request from the key that superseded a pending request's key BY
+            // PROOF replaces that row, silently.
+            await client.proveRequesterRotations(
+                ContactsInboxMerge.rotationCandidates(fetched: newPending, pending: state.pending))
+            guard boundAccountIdB64 == pollAccountIdB64 else {
+                state = state.with(refreshing: false, lastError: carriedJoinFailure)
+                return
+            }
+            let resolver = client.mailboxResolver()
             let merged = ContactsInboxMerge.merge(
-                fetched: newPending, pending: state.pending, accepted: state.accepted)
+                fetched: newPending, pending: state.pending, accepted: state.accepted,
+                currentKey: resolver.current(of:))
             #if DEBUG
             for (request, reason) in merged.dropped {
                 NSLog(
@@ -528,7 +596,7 @@ public final class ContactsRepository: ObservableObject {
             }
             #endif
             state = state.with(
-                pending: state.pending + merged.kept,
+                pending: merged.applied(to: state.pending),
                 cursor: ContactsInboxMerge.advancedCursor(
                     current: state.cursor, polled: pollResult.cursor),
                 refreshing: false,
@@ -562,8 +630,10 @@ public final class ContactsRepository: ObservableObject {
     private var lastPredecessorPollMs: Int64 = 0
 
     /// ADR-0066 section 3.5a rule 4 — read the mailbox of each of this
-    /// account's own PREDECESSOR keys: the Welcomes and contact requests of
-    /// people who have not yet seen the new key. Read only (the claim a first
+    /// account's own PREDECESSOR keys, for the Welcomes of people who have
+    /// not yet seen the new key (a contact request or an ack found there is
+    /// not acted on, rule 5). Each key of the chain has its own cursor and
+    /// its own 30-day window. Read only (the claim a first
     /// read may make registers the access key, never a reach key), and only
     /// for ``PredecessorMailbox/readWindowMs`` after this device adopted the
     /// rotation that retired the key; after that the mailbox is left. A
@@ -593,7 +663,6 @@ public final class ContactsRepository: ObservableObject {
                     mailboxSigner: dsMailboxSigner(identity: identity)
                 )
                 guard boundAccountIdB64 == accountIdB64 else { return }
-                var requests: [IncomingContactRequest] = []
                 for event in result.events {
                     switch event {
                     case .welcome(_, let welcomeBytes, _):
@@ -602,34 +671,17 @@ public final class ContactsRepository: ObservableObject {
                         } catch {
                             NSLog("contacts inbox: a predecessor-mailbox Welcome did not open as a chat: \(error)")
                         }
-                    case .contactRequest(let request, let replyGrant):
-                        requests.append(request)
-                        if let replyGrant {
-                            ReachCenter.shared.keep(
-                                replyGrant, carrier: .request,
-                                fromAccountKeyB64: base64Encode(request.fromPubkey), scopeHex: nil)
-                        }
-                        if let profile = request.profile {
-                            ProfileDirectory.shared.acceptReceived(
-                                profile, signatureKeyB64: base64Encode(request.fromPubkey))
-                        }
-                    case .contactAck:
-                        // An ack answers a request this account sent under
-                        // its OLD key; the Welcome that follows it creates the
-                        // chat, and the sent row is retired when it does.
+                    case .contactRequest, .contactAck:
+                        // Rule 5 — a predecessor mailbox carries Welcomes
+                        // only. A request sent here was sealed to the old
+                        // key and its sender still addresses the old
+                        // mailbox; an ack answers a request whose reply
+                        // grant is spent (the rotating device re-sent it
+                        // from the new key). Neither is acted on.
                         continue
                     }
                 }
                 guard boundAccountIdB64 == accountIdB64 else { return }
-                if !requests.isEmpty {
-                    let merged = ContactsInboxMerge.merge(
-                        fetched: requests, pending: state.pending, accepted: state.accepted)
-                    if !merged.kept.isEmpty {
-                        // `with` clears `lastError` unless it is passed.
-                        state = state.with(
-                            pending: state.pending + merged.kept, lastError: state.lastError)
-                    }
-                }
                 cursors.advance(accountIdB64: accountIdB64, keyB64: keyB64, to: result.cursor)
             } catch {
                 NSLog("contacts inbox: a predecessor mailbox could not be read: \(type(of: error))")
@@ -906,13 +958,33 @@ public final class ContactsRepository: ObservableObject {
         }
         let client = clientFactory()
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
-        return try await client.sendContactAck(
-            accepterSigningSeed: identity.ed25519Seed(),
-            accepterAccountId: secrets.accountId,
-            accepterX25519Pubkey: identity.x25519PublicKey(),
-            originalRequest: request,
-            writeAuth: ReachCenter.shared.writeAuth(toAccountKey: request.fromPubkey)
-        )
+        // ADR-0066 section 3.5a rule 6 — a refused ack re-checks the
+        // requester's address once (the client derives the mailbox from the
+        // same proven-predecessor store the re-check writes).
+        return try await RefusedMailboxWrite.write(
+            resolve: {
+                AckAttempt(
+                    accountKey: ReachCenter.shared.currentAccountKey(of: request.fromPubkey),
+                    auth: ReachCenter.shared.writeAuth(toAccountKey: request.fromPubkey))
+            },
+            recheck: {
+                await PersonAddressRecheck.recheck(
+                    accountKey: request.fromPubkey, accountIdHint: request.fromAccountId)
+            },
+            publish: { attempt in
+                try await client.sendContactAck(
+                    accepterSigningSeed: identity.ed25519Seed(),
+                    accepterAccountId: secrets.accountId,
+                    accepterX25519Pubkey: identity.x25519PublicKey(),
+                    originalRequest: request,
+                    writeAuth: attempt.auth)
+            })
+    }
+
+    /// One attempt at an ack: who it is addressed to and how it is signed.
+    private struct AckAttempt: Equatable {
+        let accountKey: Data
+        let auth: DsMailboxWriteAuth?
     }
 
     /// Compute the Signal-style safety number (Phase 1.9b3 —
@@ -1089,6 +1161,159 @@ public final class ContactsRepository: ObservableObject {
         InviteLinkSecretStore.shared.remove(
             accountIdB64: base64Encode(secrets.accountId), slug: base64UrlEncodeNoPad(blobId))
         return result
+    }
+
+    // MARK: - Spent by a key rotation (ADR-0066 section 3.5a rule 5)
+
+    /// The account's keys moved: every link this session generated names the
+    /// old mailbox. They leave the list at once, so the UI never offers a
+    /// dead link; the ledger rows are revoked by
+    /// ``spendGrantsAfterKeyRotation(predecessorSeeds:)``.
+    public func dropSpentLinksFromList() {
+        guard !state.outstandingInvites.isEmpty else { return }
+        state = state.with(outstandingInvites: [])
+    }
+
+    /// One spend round is enough at a time (the rotation's owed step and the
+    /// session-start retry both come through here).
+    private var spendingGrants = false
+
+    /// ADR-0066 section 3.5a rule 5 — what this account granted before its
+    /// keys were rotated is spent:
+    ///
+    ///   * its own `/i/` and `/c/` links are revoked at their ledger, signed
+    ///     by the key that issued them (a predecessor), and removed from this
+    ///     device's lists and stores;
+    ///   * each unanswered contact request is sent again from the new key
+    ///     (the recipient's bundle through the fail-closed gate, a fresh
+    ///     reply grant for the new mailbox) and the stored entry replaced. A
+    ///     request that can no longer be sent is dropped rather than shown as
+    ///     pending. The intro text of the original is not kept anywhere on
+    ///     this device, so the re-sent request carries none.
+    ///
+    /// Throws while any revoke or re-send got no verdict, so the rotation
+    /// keeps the step owed; what did land is not repeated by the retry.
+    public func spendGrantsAfterKeyRotation(predecessorSeeds: [Data]) async throws {
+        guard let secrets = authRepository.identitySecrets else { throw SessionNotReady() }
+        guard !spendingGrants else { throw SessionNotReady() }
+        spendingGrants = true
+        defer { spendingGrants = false }
+        let accountIdB64 = base64Encode(secrets.accountId)
+        let reach = ReachCenter.shared
+        var owed = 0
+
+        // The keys that may have issued a link: this account's old ones,
+        // newest first.
+        let issuers = predecessorSeeds.reversed().compactMap {
+            try? Identity.fromSeed(seed: $0).ed25519Seed()
+        }
+        // Links.
+        var listed: [Data] = []
+        if !issuers.isEmpty {
+            do {
+                // Signed by the CURRENT key: the directory verifies the list
+                // query against the published identity.
+                if case .list(let rows) = try await listActiveInvites() {
+                    listed = rows.compactMap { base64UrlDecodeNoPad($0.blobIdSlug) }
+                }
+            } catch {
+                owed += 1
+            }
+        }
+        let discovery = authenticatedDiscoveryClient()
+        for link in SpentGrants.linksToRevoke(spent: reach.spentLinks, listedInviteBlobIds: listed) {
+            var answers: [SpentGrants.RevokeAnswer] = []
+            for issuer in issuers {
+                do {
+                    let result = link.call
+                        ? try await discovery.revokeCallInvite(blobId: link.blobId, signingSeed: issuer)
+                        : try await discovery.revokeInvite(blobId: link.blobId, signingSeed: issuer)
+                    answers.append(result == .revoked ? .revoked : .notFoundOrNotOwner)
+                    if result == .revoked { break }
+                } catch {
+                    answers.append(.failed)
+                }
+            }
+            guard boundAccountIdB64 == accountIdB64 else { throw SessionNotReady() }
+            let verdict = SpentGrants.linkVerdict(answers)
+            if verdict == .owed { owed += 1 }
+            guard SpentGrants.dropsLocally(verdict, mintedHere: link.linkIdB64 != nil) else { continue }
+            if let linkIdB64 = link.linkIdB64 { reach.forgetSpentLink(linkIdB64: linkIdB64) }
+            if !link.call {
+                InviteLinkSecretStore.shared.remove(
+                    accountIdB64: accountIdB64, slug: base64UrlEncodeNoPad(link.blobId))
+            }
+            if state.outstandingInvites.contains(where: { $0.blobId == link.blobId }) {
+                state = state.with(
+                    outstandingInvites: state.outstandingInvites.filter { $0.blobId != link.blobId })
+            }
+        }
+        // A scope with no ledger row (an inline link) has nothing to revoke.
+        for link in reach.spentLinks where link.blobIdB64 == nil {
+            reach.forgetSpentLink(linkIdB64: link.linkIdB64)
+        }
+
+        // Unanswered contact requests.
+        let recipients = SpentGrants.requestsToResend(
+            spentReplies: reach.spentReplies,
+            acceptedAccountIds: state.accepted.compactMap(\.request.fromAccountId))
+        let client = clientFactory()
+        for recipient in recipients {
+            var failure: Error?
+            var replacement: SentContactRequest?
+            do {
+                let bundle = try await client.resolveVerifiedBundle(accountId: recipient)
+                let result = try await sendRequestToBundle(
+                    client: client, secrets: secrets,
+                    recipientAccountId: recipient,
+                    recipientSignaturePubkey: bundle.signaturePubkey,
+                    recipientX25519Pubkey: bundle.x25519Pubkey,
+                    introMessage: Data(), linkSeed: nil)
+                replacement = SentContactRequest(
+                    recipientUsername: "", recipientAccountIdB64: base64Encode(recipient),
+                    messageId: result.messageId, createdAt: result.createdAt)
+            } catch {
+                failure = error
+            }
+            guard boundAccountIdB64 == accountIdB64 else { throw SessionNotReady() }
+            let verdict = SpentGrants.resendVerdict(failure)
+            if verdict == .owed {
+                owed += 1
+                continue
+            }
+            reach.forgetSpentReplies(purpose: ReplyPurpose.contact(recipient))
+            let next = SpentGrants.sentList(
+                state.sent, recipientAccountIdB64: base64Encode(recipient),
+                verdict: verdict, replacement: replacement)
+            if next != state.sent { state = state.with(sent: next) }
+        }
+        // Every other spent reply scope (a request already answered, a `/g/`
+        // join) has nothing to re-send here: it is dropped.
+        for reply in reach.spentReplies
+        where !recipients.contains(where: { ReplyPurpose.contact($0) == reply.purpose }) {
+            reach.forgetSpentReplies(purpose: reply.purpose)
+        }
+        guard owed == 0 else {
+            throw ContactsError.wrap(ContactsError.simple(
+                "\(owed) link(s) or request(s) granted before the key rotation are still owed"))
+        }
+    }
+
+    /// Rule 5 on a device that did not run the rotation (a kept device, or
+    /// any device after a restart): the same round over what THIS device
+    /// granted, best effort. What does not land stays in the reach record
+    /// and is retried at the next session start.
+    public func spendGrantsAfterAdoptingKeyRotation() async {
+        guard let secrets = authRepository.identitySecrets else { return }
+        let reach = ReachCenter.shared
+        guard !reach.spentLinks.isEmpty || !reach.spentReplies.isEmpty else { return }
+        do {
+            try await spendGrantsAfterKeyRotation(
+                predecessorSeeds: authRepository.ownPredecessorSeeds(
+                    accountIdB64: base64Encode(secrets.accountId)))
+        } catch {
+            NSLog("ADR-0066 3.5a: links or requests granted before the key rotation are still owed")
+        }
     }
 
     /// The signed-in account's id (base64), the key the per-account invite
@@ -1283,21 +1508,15 @@ public final class ContactsRepository: ObservableObject {
         // round-trip needed.
         let sendResult: SendResult
         do {
-            let client = clientFactory()
-            let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
-            sendResult = try await client.sendContactRequestToBundle(
-                senderSigningSeed: identity.ed25519Seed(),
-                senderAccountId: secrets.accountId,
-                senderSignaturePubkey: identity.signaturePublicKey(),
+            // ADR-0060 section 6 — written with the link's grant, used for
+            // this flow only and never kept.
+            sendResult = try await sendRequestToBundle(
+                client: clientFactory(), secrets: secrets,
                 recipientAccountId: inviterAccountId,
                 recipientSignaturePubkey: inviterSigPubkey,
                 recipientX25519Pubkey: inviterX25519Pubkey,
-                profile: ProfileDirectory.shared.ownProfileForRequest(),
                 introMessage: Data(),
-                // ADR-0060 section 6 — written with the link's grant, used for
-                // this flow only and never kept.
-                reach: Self.requestReach(linkSeed: capability.linkGrant().seed)
-            )
+                linkSeed: capability.linkGrant().seed)
         } catch {
             return .failed(
                 message: (error as? LocalizedError)?.errorDescription

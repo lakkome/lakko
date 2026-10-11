@@ -37,6 +37,8 @@ export const ROTATE_COPY = {
     t("devices.rotate.effect_phrase"),
     t("devices.rotate.effect_passkeys"),
     t("devices.rotate.effect_contacts"),
+    // ADR-0066 section 3.5a rule 5: what was granted before is spent.
+    t("devices.rotate.effect_links"),
   ],
   confirm: (): string => t("devices.rotate.confirm"),
   stepRemove: (): string => t("devices.rotate.step_remove"),

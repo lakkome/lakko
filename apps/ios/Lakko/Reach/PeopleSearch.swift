@@ -141,6 +141,11 @@ public struct PeopleSearchPorts {
     /// Verify a username certificate for `(certificate, lookupKey, accountId)`
     /// — the certificate binds the LOOKUP KEY, never the output.
     public var verifyCertificate: (Data, Data, Data) async -> Bool
+    /// ADR-0066 section 3.5a — the current account key of the person a key
+    /// belongs to, across PROVEN rotations only (the key itself otherwise).
+    /// Read after ``identityKey`` ran, so a rotation that fetch proved is
+    /// already in the map. Defaults to "no rotation known".
+    public var currentKey: (Data) async -> Data = { $0 }
 
     public init(
         lookupUsername: @escaping (Data) async throws -> PublicAccountHit?,
@@ -158,6 +163,13 @@ public struct PeopleSearchPorts {
         self.identityKey = identityKey
         self.reachCheck = reachCheck
         self.verifyCertificate = verifyCertificate
+    }
+
+    /// These ports with the proven-predecessor resolver given.
+    public func with(currentKey: @escaping (Data) async -> Data) -> PeopleSearchPorts {
+        var next = self
+        next.currentKey = currentKey
+        return next
     }
 }
 
@@ -333,9 +345,9 @@ public enum PeopleSearch {
                    let key = try await ports.identityKey(hit.accountId), key.count == 32 {
                     // The public record's name counts only when it names the
                     // account and the key the verified identity bundle serves.
-                    let published = hit.publicRecord.flatMap {
-                        Self.openPublic($0, output: oprf.output, accountId: hit.accountId, identityKey: key)
-                    }?.displayName
+                    let published = await Self.openPublic(
+                        hit.publicRecord, output: oprf.output, accountId: hit.accountId,
+                        identityKey: key, ports: ports)?.displayName
                     // Discovery itself resolved this username to this account:
                     // that is the binding a certificate would prove.
                     if let r = result(
@@ -366,9 +378,9 @@ public enum PeopleSearch {
                     guard let key = try await ports.identityKey(hit.accountId), key.count == 32 else {
                         continue
                     }
-                    let published = hit.publicRecord.flatMap {
-                        Self.openPublic($0, output: oprf.output, accountId: hit.accountId, identityKey: key)
-                    }?.displayName
+                    let published = await Self.openPublic(
+                        hit.publicRecord, output: oprf.output, accountId: hit.accountId,
+                        identityKey: key, ports: ports)?.displayName
                     let k = known(key)
                     guard let name = k.name ?? published ?? k.fallbackName,
                           nameMatchesQuery(displayName: name, query: query),
@@ -395,9 +407,18 @@ public enum PeopleSearch {
             // must be the account the identity bundle publishes this key for,
             // or a record could pair its author's key with someone else's
             // account id — and that account's username certificate.
+            // ADR-0066 section 3.5a — a record written before its owner
+            // rotated names the key they held then: the same person when that
+            // key is a PROVEN predecessor of the published one. The result is
+            // then the person under their current key.
+            let personKey: Data
             do {
-                guard let published = try await ports.identityKey(payload.accountId),
-                      published == payload.identityPk else { continue }
+                guard let published = try await ports.identityKey(payload.accountId) else { continue }
+                let currentOfClaimed = await ports.currentKey(payload.identityPk)
+                guard Self.acceptsPublishedKey(
+                    found: payload.identityPk, published: published, currentOfFound: currentOfClaimed
+                ) else { continue }
+                personKey = published
             } catch {
                 failed = true
                 continue
@@ -416,9 +437,9 @@ public enum PeopleSearch {
                 }
             }
             let name = payload.displayName ?? verified.map { "@\($0)" }
-                ?? displayFingerprint(payload.identityPk)
+                ?? displayFingerprint(personKey)
             if let r = result(
-                key: payload.identityPk, accountId: payload.accountId, known: known(payload.identityPk),
+                key: personKey, accountId: payload.accountId, known: known(personKey),
                 foundReach: .grant, foundName: name, foundUsername: verified, seed: fof.seed) {
                 byIntroduction.append(r)
             }
@@ -447,12 +468,44 @@ public enum PeopleSearch {
     /// `output` of the searched term; `nil` when it does not open, names
     /// another account, or carries another identity key than `identityKey`,
     /// the key the verified identity bundle serves for that account.
+    ///
+    /// ADR-0066 section 3.5a — `currentKey` resolves the record's key across
+    /// PROVEN rotations: a record published before its owner rotated still
+    /// names the same person.
     static func openPublic(
-        _ record: Data, output: Data, accountId: Data, identityKey: Data
+        _ record: Data, output: Data, accountId: Data, identityKey: Data,
+        currentKey: (Data) -> Data = { $0 }
     ) -> FfiIntroductionPayload? {
         guard let payload = try? openPublicRecord(record: record, oprfOutput: output),
-              payload.accountId == accountId, payload.identityPk == identityKey else { return nil }
+              payload.accountId == accountId,
+              acceptsPublishedKey(
+                found: payload.identityPk, published: identityKey,
+                currentOfFound: currentKey(payload.identityPk)) else { return nil }
         return payload
+    }
+
+    /// ``openPublic(_:output:accountId:identityKey:currentKey:)`` with the
+    /// record's key resolved through the ports' proven-predecessor resolver.
+    static func openPublic(
+        _ record: Data?, output: Data, accountId: Data, identityKey: Data, ports: PeopleSearchPorts
+    ) async -> FfiIntroductionPayload? {
+        guard let record, let claimed = try? openPublicRecord(record: record, oprfOutput: output) else {
+            return nil
+        }
+        let current = await ports.currentKey(claimed.identityPk)
+        return openPublic(
+            record, output: output, accountId: accountId, identityKey: identityKey,
+            currentKey: { _ in current })
+    }
+
+    /// ADR-0066 section 3.5a — whether a hit that names the key `found` is
+    /// the person the verified identity bundle publishes `published` for: the
+    /// same key, or a key whose PROVEN current key (`currentOfFound`, from the
+    /// proven-predecessor resolver) is the published one. An unproven
+    /// mismatch is refused: an unproven change is in no map, so its
+    /// `currentOfFound` is `found` itself.
+    public static func acceptsPublishedKey(found: Data, published: Data, currentOfFound: Data) -> Bool {
+        found == published || currentOfFound == published
     }
 
     /// Found people win; then a used-up allowance; then ANY network failure is

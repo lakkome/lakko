@@ -460,19 +460,124 @@ public class ContactsClient(
          *  on this device; see [gateBundleRecipient]. */
         resetUnverified: Boolean = false,
     ): SendResult {
+        // ADR-0066 section 3.5a rule 1 - resolve before addressing. A bundle
+        // carried by a link or a search result may name a key its owner has
+        // since rotated away BY PROOF. The request then goes to the CURRENT
+        // key's mailbox, sealed to the current X25519 key, which only the
+        // directory bundle carries: it is fetched through the fail-closed
+        // gate. A failed fetch refuses the send; nothing is ever sealed to
+        // the old key and the old mailbox is never the fallback.
+        var toSignaturePub = recipientSignaturePubkey
+        var toX25519Pub = recipientX25519Pubkey
+        if (staleRecipientKey(toSignaturePub, mailboxKeyOf(toSignaturePub))) {
+            val current = resolveVerifiedBundle(recipientAccountId)
+            toSignaturePub = current.first
+            toX25519Pub = current.second
+        }
         // Before anything is composed: these keys did not come through the
-        // fetch gate.
-        gateBundleRecipient(recipientAccountId, recipientSignaturePubkey, resetUnverified)
+        // fetch gate (or just did, and then this is the unchanged-pin case).
+        gateBundleRecipient(recipientAccountId, toSignaturePub, resetUnverified)
         val publish = composeAndPublishContactRequest(
             senderSigningSeed = senderSigningSeed,
             senderAccountId = senderAccountId,
             senderSignaturePubkey = senderSignaturePubkey,
-            recipientSignaturePubkey = recipientSignaturePubkey,
-            recipientX25519Pubkey = recipientX25519Pubkey,
+            recipientSignaturePubkey = toSignaturePub,
+            recipientX25519Pubkey = toX25519Pub,
             introMessage = introMessage,
             senderProfile = senderProfile,
             replyGrant = replyGrant,
             reach = reach,
+        )
+        return SendResult(
+            recipientUsername = "",
+            recipientAccountId = recipientAccountId,
+            messageId = publish.messageId,
+            createdAt = publish.createdAt,
+        )
+    }
+
+    /**
+     * The identity bundle of [accountId] through the SAME fail-closed gate
+     * [sendContactRequest] runs (the supersession / pin verify, then the
+     * additive log check): `(signaturePubkey, x25519Pubkey)`. Throws
+     * [SupersessionRefused] on an unproven changed key and [ContactsError]
+     * when there is no bundle or the directory cannot be reached - the
+     * caller then sends nothing.
+     */
+    public suspend fun resolveVerifiedBundle(accountId: ByteArray): Pair<ByteArray, ByteArray> {
+        val bundle = try {
+            discovery.identityFetch(accountId)
+        } catch (e: DiscoveryHttpError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DiscoveryNetworkError) {
+            throw ContactsError.wrap(e)
+        } ?: throw ContactsError.noIdentityBundle(accountId)
+        val oldPin = pinStore.readPin(base64Encode(accountId))
+        try {
+            verifyBundleAccountKey(accountId, bundle)
+        } catch (refused: SupersessionRefused) {
+            throw enrichRefusal(refused, accountId, bundle, oldPin)
+        }
+        checkTransparencyLog(
+            accountId,
+            base64Decode(bundle.signature_pubkey),
+            oldPin,
+            bundle.supersession_proof,
+        )
+        return Pair(base64Decode(bundle.signature_pubkey), base64Decode(bundle.x25519_pubkey))
+    }
+
+    /**
+     * ADR-0066 section 3.5a rule 5 - whether the directory PROVES [newKey]
+     * the successor of [oldKey] for [accountId]: its bundle serves exactly
+     * [newKey] with a supersession proof that verifies as signed by
+     * [oldKey] over that key. A read: nothing is pinned and no step is
+     * recorded (the account id is the requester's own claim). Any failure
+     * is "not proven".
+     */
+    public suspend fun provesSuccessor(accountId: ByteArray, oldKey: ByteArray, newKey: ByteArray): Boolean =
+        try {
+            val bundle = discovery.identityFetch(accountId)
+            val proof = bundle?.supersession_proof?.takeIf { it.isNotEmpty() }
+            if (bundle == null || proof == null || bundle.signature_pubkey != base64Encode(newKey)) {
+                false
+            } else {
+                verifySupersession(base64Decode(proof), oldKey, System.currentTimeMillis() / 1000L)
+                    .contentEquals(newKey)
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            false
+        }
+
+    /**
+     * A contact request to the account known by id alone: its CURRENT keys
+     * come from [resolveVerifiedBundle]. ADR-0066 section 3.5a rule 5 uses
+     * it to send an unanswered request again from a rotated account key;
+     * [mintReply] and [reachFor] are as in [sendContactRequest].
+     */
+    public suspend fun sendContactRequestToAccount(
+        senderSigningSeed: ByteArray,
+        senderAccountId: ByteArray,
+        senderSignaturePubkey: ByteArray,
+        recipientAccountId: ByteArray,
+        introMessage: ByteArray,
+        senderProfile: FfiProfile? = null,
+        mintReply: (suspend (recipientSignaturePubkey: ByteArray) -> FfiReachGrant?)? = null,
+        reachFor: ((recipientSignaturePubkey: ByteArray) -> DsReachAuth?)? = null,
+    ): SendResult {
+        val (signaturePub, x25519Pub) = resolveVerifiedBundle(recipientAccountId)
+        val publish = composeAndPublishContactRequest(
+            senderSigningSeed = senderSigningSeed,
+            senderAccountId = senderAccountId,
+            senderSignaturePubkey = senderSignaturePubkey,
+            recipientSignaturePubkey = signaturePub,
+            recipientX25519Pubkey = x25519Pub,
+            introMessage = introMessage,
+            senderProfile = senderProfile,
+            replyGrant = mintReply?.invoke(signaturePub),
+            reach = reachFor?.invoke(signaturePub),
         )
         return SendResult(
             recipientUsername = "",
@@ -1008,7 +1113,9 @@ public class ContactsClient(
         // request can only go to the mailbox of the key it is sealed for.
         // When that key is a proven predecessor the keys in hand are stale:
         // nothing is sent (never to the old mailbox, never unopenable to the
-        // new one); the caller fetches the current bundle and sends again.
+        // new one). Every caller hands in the current keys - a bundle the
+        // gate just verified, or one [sendContactRequestToBundle] re-resolved -
+        // so this is the last line of defence, not a path.
         if (staleRecipientKey(recipientSignaturePubkey, mailboxKeyOf(recipientSignaturePubkey))) {
             throw ContactsError.wrap(
                 IllegalStateException("the recipient's account keys were rotated; fetch their current keys"),

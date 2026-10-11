@@ -939,6 +939,9 @@ public final class ChatRepository: ObservableObject {
             predecessorAccountIdentity = old
         }
         accountIdentity = rotated
+        // ADR-0066 section 3.5a rule 3 — from now the profile re-send is
+        // owed, durably, on this device (rotating or kept).
+        markProfileResendOwed()
         // The new mailbox (its pseudonym follows the new key).
         claimOwnMailboxes()
     }
@@ -1108,12 +1111,31 @@ public final class ChatRepository: ObservableObject {
         }
         for target in targets {
             do {
-                let pseudonym = try resolvedMailbox(ofAccountKey: target.accountKey)
-                _ = try await dsClient.publishMailbox(
-                    pseudonym: pseudonym,
-                    payload: welcomeEnvelope,
-                    writeAuth: target.auth
-                )
+                // ADR-0066 section 3.5a rule 6 — a refused Welcome re-checks
+                // the person's address once. After the re-check a grant held
+                // for the person goes first: one the caller handed in (a
+                // link's) opened the mailbox it was issued for only.
+                var rechecked = false
+                _ = try await RefusedMailboxWrite.write(
+                    resolve: { [self] in
+                        let held = ReachCenter.shared.writeAuth(toAccountKey: target.accountKey)
+                        return MailboxWriteAttempt(
+                            mailbox: try resolvedMailbox(ofAccountKey: target.accountKey),
+                            auth: rechecked ? (held ?? target.auth) : target.auth)
+                    },
+                    recheck: { [self] in
+                        rechecked = true
+                        await PersonAddressRecheck.recheck(
+                            accountKey: target.accountKey,
+                            accountIdHint: memberAccountIdHints[target.accountKey])
+                    },
+                    publish: { [self] attempt in
+                        try await dsClient.publishMailbox(
+                            pseudonym: attempt.mailbox,
+                            payload: welcomeEnvelope,
+                            writeAuth: attempt.auth
+                        )
+                    })
             } catch {
                 throw ChatError.wrapped(
                     "DS publishMailbox (Welcome) failed",
@@ -2181,42 +2203,84 @@ public final class ChatRepository: ObservableObject {
         await profilePublisher.publishToAll(groupIdHexes: Array(groups.keys).sorted())
     }
 
-    /// The groups the rotation's profile re-send already reached in this
-    /// process, so a retry of the owed step sends only what is still missing.
-    private var rotationProfileResent: Set<String> = []
+    /// The durable marker of the profile re-send a key change owes.
+    private let profileResendOwed = ProfileResendOwed.Store()
+    /// One re-send round at a time: the rotation's owed step, a kept device's
+    /// adoption and the session-start retry all come through here.
+    private var profileResendRunning = false
 
-    /// ADR-0066 section 3.5a rule 3 — the ROTATING device's step: the account
-    /// moved to the new mailbox, and the grants every peer holds open only
-    /// the old one. Re-send the own profile, which carries this
-    /// conversation's grants derived from the NEW seed, into every one-to-one
-    /// and group. Throws while any send has not landed (or the chat layer is
-    /// not up), so the rotation keeps the step owed and retries it; a group
-    /// that was reached is not sent to again by the retry.
-    ///
-    /// Call after the reach keys were registered on the new mailbox: a grant
-    /// handed out before that names a key the mailbox does not know yet.
+    /// ADR-0066 section 3.5a rule 3 — the account's keys moved on this
+    /// device (it rotated them, or it adopted a rotation): the profile
+    /// re-send is owed from now until every conversation took the envelope.
+    public func markProfileResendOwed() {
+        guard let accountIdB64 = currentAccountIdB64,
+              let key = accountIdentity?.signaturePublicKey() else { return }
+        profileResendOwed.put(
+            ProfileResendOwed.marking(
+                profileResendOwed.load(accountIdB64: accountIdB64), accountKeyB64: base64Encode(key)),
+            accountIdB64: accountIdB64)
+    }
+
+    /// Whether a profile re-send is still owed on this device.
+    public var profileResendIsOwed: Bool {
+        currentAccountIdB64.flatMap { profileResendOwed.load(accountIdB64: $0) } != nil
+    }
+
+    /// ADR-0066 section 3.5a rule 3 — the account moved to the new mailbox,
+    /// and the grants every peer holds open only the old one. Re-send the own
+    /// profile, which carries this conversation's grants derived from the NEW
+    /// seed, into every one-to-one and group. Throws while any send has not
+    /// landed (or the chat layer is not up, or the reach keys are not on the
+    /// new mailbox yet), so the caller keeps it owed; a conversation that was
+    /// reached is recorded in the durable marker and is not sent to again by
+    /// a retry, in this process or the next. Nothing owed returns at once.
     public func resendProfileAfterKeyRotation() async throws {
-        guard state.bootstrapped else {
+        guard state.bootstrapped, let accountIdB64 = currentAccountIdB64 else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
-        let owed = Array(groups.keys).sorted().filter { !rotationProfileResent.contains($0) }
+        guard let record = profileResendOwed.load(accountIdB64: accountIdB64) else { return }
+        guard !profileResendRunning else {
+            throw ChatError.argument("profile re-send after key rotation: a round is already running")
+        }
+        profileResendRunning = true
+        defer { profileResendRunning = false }
+        // A grant handed out before its key is registered names a key the
+        // mailbox does not know yet.
+        guard await ReachCenter.shared.syncNow() else {
+            throw ChatError.argument("profile re-send after key rotation: the reach keys are not registered yet")
+        }
+        let owed = ProfileResendOwed.targets(groups: Array(groups.keys), record: record)
         let failed = await profilePublisher.publishToAllReporting(groupIdHexes: owed)
-        rotationProfileResent.formUnion(Set(owed).subtracting(failed))
+        guard currentAccountIdB64 == accountIdB64 else { return }
+        profileResendOwed.put(
+            ProfileResendOwed.after(record, attempted: owed, failed: failed), accountIdB64: accountIdB64)
         guard failed.isEmpty else {
             throw ChatError.argument("profile re-send after key rotation: \(failed.count) conversation(s) still owed")
         }
-        rotationProfileResent = []
         // The `fof` grant of the introduction records moved with the seed too.
         await sendIntroductions()
     }
 
     /// ADR-0066 section 3.5a rule 3 — a KEPT device adopted the rotation: it
-    /// re-sends the profile too, through the throttled, jittered path (the
-    /// account's devices all adopt within moments of each other, and the
-    /// rotating device's own re-send is the one that is owed). Best effort.
-    public func resendProfileAfterAdoptingKeyRotation() {
-        for groupIdHex in Array(groups.keys).sorted() {
-            profilePublisher.noteGrowth(groupIdHex: groupIdHex)
+    /// owes the re-send too. The account's devices all adopt within moments
+    /// of each other, so this one waits a random moment first; what does not
+    /// land stays in the durable marker and is retried at the next session
+    /// start (``retryOwedProfileResend()``).
+    public func resendProfileAfterAdoptingKeyRotation() async {
+        markProfileResendOwed()
+        try? await Task.sleep(
+            nanoseconds: UInt64.random(in: 0...UInt64(ProfilePublisher.maxJitterMs)) * 1_000_000)
+        await retryOwedProfileResend()
+    }
+
+    /// Retry an owed profile re-send (a session start). Best effort: what
+    /// does not land stays owed.
+    public func retryOwedProfileResend() async {
+        guard profileResendIsOwed else { return }
+        do {
+            try await resendProfileAfterKeyRotation()
+        } catch {
+            NSLog("ADR-0066 3.5a: the profile re-send is still owed: \(type(of: error))")
         }
     }
 
@@ -3099,13 +3163,9 @@ public final class ChatRepository: ObservableObject {
                 // grant that reaches them (ADR-0060).
                 let welcomePublish: PublishResult
                 do {
-                    let mailbox = ReachCenter.shared.currentMailbox(for: prepared.recipientPseudonym)
-                    welcomePublish = try await dsClient.publishMailbox(
-                        pseudonym: mailbox,
-                        payload: prepared.welcomeEnvelope,
-                        writeAuth: ReachCenter.shared.writeAuth(
-                            toMailbox: mailbox, groupIdHex: groupIdHex)
-                    )
+                    welcomePublish = try await publishWelcomeRecheckingOnce(
+                        recorded: prepared.recipientPseudonym,
+                        payload: prepared.welcomeEnvelope, groupIdHex: groupIdHex)
                 } catch {
                     throw ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: error)
                 }
@@ -7884,27 +7944,80 @@ public final class ChatRepository: ObservableObject {
         // ADR-0066 section 3.5a rule 1 — a leaf resolved through the roster
         // names the key it is BOUND under; a mailbox recorded earlier may be a
         // predecessor's. Either way the write goes to the current key's.
-        var pseudonym = ReachCenter.shared.currentMailbox(for: target)
-        if let members = try? record.group.members(),
-           let hit = members.first(where: { $0.signaturePublicKey == target }) {
-            pseudonym = try resolvedMailbox(ofAccountKey: hit.accountKey)
+        let memberAccountKey = (try? record.group.members())?
+            .first(where: { $0.signaturePublicKey == target })?.accountKey
+        func resolve() throws -> SweepWelcomeAttempt {
+            var pseudonym = ReachCenter.shared.currentMailbox(for: target)
+            if let memberAccountKey { pseudonym = try resolvedMailbox(ofAccountKey: memberAccountKey) }
+            return SweepWelcomeAttempt(
+                mailbox: pseudonym,
+                candidates: ReachCenter.shared.writeAuthCandidates(
+                    toMailbox: pseudonym, groupIdHex: groupIdHex))
         }
-        let dedupe = base64Encode(Data(SHA256.hash(data: bytes))) + "|" + base64Encode(pseudonym)
+        let digest = base64Encode(Data(SHA256.hash(data: bytes)))
+        let dedupe = digest + "|" + base64Encode(try resolve().mailbox)
         guard sweepWelcomeWrites.insert(dedupe).inserted else { return 0 }
         do {
             let client = dsClient
-            return try await deliverSweepWelcome(
-                candidates: ReachCenter.shared.writeAuthCandidates(
-                    toMailbox: pseudonym, groupIdHex: groupIdHex),
-                publish: { auth in
-                    try await client.publishMailbox(
-                        pseudonym: pseudonym, payload: bytes, writeAuth: auth
-                    ).id
+            var delivered: Data?
+            // ADR-0066 section 3.5a rule 6 — when every key held was refused,
+            // the person's address is re-checked once (throttled per person:
+            // an owed Welcome is retried on every poll) and the Welcome goes
+            // again when the mailbox or the keys moved.
+            let id = try await RefusedMailboxWrite.write(
+                resolve: resolve,
+                refused: { ($0 as? SweepWelcomeUndeliverable).map { $0.triedKeys > 0 } ?? false },
+                recheck: { [self] in
+                    if let memberAccountKey {
+                        await PersonAddressRecheck.recheck(
+                            accountKey: memberAccountKey,
+                            accountIdHint: memberAccountIdHints[memberAccountKey])
+                    } else if let mailbox = try? resolve().mailbox {
+                        await PersonAddressRecheck.recheck(mailbox: mailbox)
+                    }
+                },
+                publish: { attempt in
+                    let id = try await deliverSweepWelcome(
+                        candidates: attempt.candidates,
+                        publish: { auth in
+                            try await client.publishMailbox(
+                                pseudonym: attempt.mailbox, payload: bytes, writeAuth: auth
+                            ).id
+                        })
+                    delivered = attempt.mailbox
+                    return id
                 })
+            // Delivered to the re-checked mailbox: a later sweep resolving
+            // that mailbox must not send the same Welcome there again.
+            if let delivered { sweepWelcomeWrites.insert(digest + "|" + base64Encode(delivered)) }
+            return id
         } catch {
             sweepWelcomeWrites.remove(dedupe)
             throw error
         }
+    }
+
+    /// ADR-0066 section 3.5a rule 6 — publish a Welcome addressed by a
+    /// mailbox recorded earlier (the ADR-0040 outbox): to the current mailbox
+    /// of whoever it names, and after a refusal once more when a gated fetch
+    /// of that person's identity moved the mailbox or the grant.
+    private func publishWelcomeRecheckingOnce(
+        recorded: Data, payload: Data, groupIdHex: String
+    ) async throws -> PublishResult {
+        let client = dsClient
+        func resolve() -> MailboxWriteAttempt {
+            let mailbox = ReachCenter.shared.currentMailbox(for: recorded)
+            return MailboxWriteAttempt(
+                mailbox: mailbox,
+                auth: ReachCenter.shared.writeAuth(toMailbox: mailbox, groupIdHex: groupIdHex))
+        }
+        return try await RefusedMailboxWrite.write(
+            resolve: resolve,
+            recheck: { await PersonAddressRecheck.recheck(mailbox: resolve().mailbox) },
+            publish: { attempt in
+                try await client.publishMailbox(
+                    pseudonym: attempt.mailbox, payload: payload, writeAuth: attempt.auth)
+            })
     }
 
     /// ADR-0050 2.5a item 7 — a grant (or a committer delegation) was just kept
@@ -8465,15 +8578,11 @@ public final class ChatRepository: ObservableObject {
                let recorded = base64Decode(mailboxB64) {
                 // ADR-0066 section 3.5a rule 1 — the entry may have been
                 // recorded before the addressee's rotation was observed.
-                let pseudonym = ReachCenter.shared.currentMailbox(for: recorded)
                 // Welcome -> the new member's mailbox (NOT this device's group
                 // journal), so no echo re-arm — the committer never re-fetches
                 // it.
-                secondId = try await dsClient.publishMailbox(
-                    pseudonym: pseudonym,
-                    payload: secondBytes,
-                    writeAuth: ReachCenter.shared.writeAuth(
-                        toMailbox: pseudonym, groupIdHex: groupIdHex)
+                secondId = try await publishWelcomeRecheckingOnce(
+                    recorded: recorded, payload: secondBytes, groupIdHex: groupIdHex
                 ).id
             }
             ackCommitBestEffort(

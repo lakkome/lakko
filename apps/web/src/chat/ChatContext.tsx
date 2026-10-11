@@ -70,7 +70,11 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { loadWasm } from "../wasm";
 import { dsAccess } from "../ds/access";
-import { clearDsAccess, installMailboxAccess } from "../ds/session-access";
+import {
+  clearDsAccess,
+  installMailboxAccess,
+  installPredecessorChainAccess,
+} from "../ds/session-access";
 import {
   loadMlsSnapshot,
   saveMlsSnapshot,
@@ -116,6 +120,15 @@ export interface ChatApi {
    *  predecessor this device holds); `null` when the account never rotated.
    *  Its mailbox is where peers address this account's leaves. */
   readonly predecessorAccountIdentity: Accessor<WasmIdentity | null>;
+  /** ADR-0066 section 3.5a - own predecessors are a CHAIN. After a second
+   *  rotation the account has held keys between the conversation key above
+   *  and the current one; these are their identities, older first. Each
+   *  one's mailbox is read inside its own 30-day window, and a committer
+   *  delegation may still name any of them. Empty until a second rotation. */
+  readonly intermediatePredecessorIdentities: Accessor<readonly WasmIdentity[]>;
+  /** Every own predecessor identity, OLDEST first: the conversation key,
+   *  then the intermediate ones. */
+  readonly ownPredecessorIdentities: Accessor<readonly WasmIdentity[]>;
   /** The account identity for everything that is about this account INSIDE a
    *  conversation (the role table, the journal ownership, an envelope sealed
    *  to the member): the predecessor while one is held, else the account
@@ -141,11 +154,16 @@ export interface ChatApi {
   setAccountIdentity(identity: WasmIdentity | null): void;
   /** Replace the predecessor identity (ADR-0066). Frees the previous one. */
   setPredecessorAccountIdentity(identity: WasmIdentity | null): void;
+  /** Replace the intermediate predecessor identities (ADR-0066 section
+   *  3.5a). Frees the ones no longer listed. */
+  setIntermediatePredecessorIdentities(identities: readonly WasmIdentity[]): void;
   /** ADR-0066 section 3.5 — a proven key rotation in a LIVE session: `next`
    *  becomes the account identity. When no predecessor is held yet, the
    *  identity that was the account's becomes the predecessor AS THE SAME
    *  OBJECT (never freed, never rebuilt): its MLS provider holds the
-   *  account's PublisherGroups, which must survive the rotation. */
+   *  account's PublisherGroups, which must survive the rotation. When one is
+   *  held already (a second rotation), the identity that was the account's
+   *  joins the intermediate predecessors instead of being freed. */
   rotateAccountIdentity(next: WasmIdentity): void;
   /** Capture the canonical Identity's provider storage, encrypt
    *  under the device root key for `accountIdB64`, and write
@@ -252,6 +270,25 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     installMailboxAccess("predecessor", next);
   }
 
+  const [intermediateIdentities, setIntermediateIdentitiesSig] = createSignal<
+    readonly WasmIdentity[]
+  >([]);
+
+  function replaceIntermediateIdentities(next: readonly WasmIdentity[]): void {
+    for (const prev of intermediateIdentities()) {
+      if (next.includes(prev)) continue;
+      try {
+        prev.free();
+      } catch {
+        // eslint-disable-next-line no-console
+        console.warn("ChatProvider: free() on a stale intermediate predecessor Identity threw");
+      }
+    }
+    setIntermediateIdentitiesSig([...next]);
+    // ADR-0066 section 3.5a rule 4 — each one's mailbox is still read.
+    installPredecessorChainAccess(next);
+  }
+
   function replaceIdentity(next: WasmIdentity | null): void {
     const prev = identity();
     // Free the prior allocation when it's actually different —
@@ -299,8 +336,18 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     },
     predecessorAccountIdentity: predecessorIdentity,
     conversationAccountIdentity: () => predecessorIdentity() ?? accountIdentity(),
+    intermediatePredecessorIdentities: intermediateIdentities,
+    ownPredecessorIdentities: () => {
+      const oldest = predecessorIdentity();
+      return oldest === null ? [] : [oldest, ...intermediateIdentities()];
+    },
     setPredecessorAccountIdentity(next) {
       replacePredecessorIdentity(next);
+      // Without a conversation key there is no chain either.
+      if (next === null) replaceIntermediateIdentities([]);
+    },
+    setIntermediatePredecessorIdentities(next) {
+      replaceIntermediateIdentities(next);
     },
     rotateAccountIdentity(next) {
       const previous = accountIdentity();
@@ -311,6 +358,15 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         installMailboxAccess("predecessor", previous);
         setAccountIdentitySig(next);
         installMailboxAccess("account", next);
+        return;
+      }
+      if (predecessorIdentity() !== null && previous !== null && previous !== next) {
+        // A second rotation: the key that was current is now an
+        // intermediate predecessor. Kept, not freed (its mailbox is read
+        // for 30 days and a delegation may still name it).
+        setAccountIdentitySig(next);
+        installMailboxAccess("account", next);
+        replaceIntermediateIdentities([...intermediateIdentities(), previous]);
         return;
       }
       replaceAccountIdentity(next);
@@ -500,6 +556,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       replaceIdentity(null);
       replaceAccountIdentity(null);
       replacePredecessorIdentity(null);
+      replaceIntermediateIdentities([]);
       clearDsAccess();
     },
   };

@@ -149,22 +149,85 @@ public data class FetchedRequestsMerge(
  * user already accepted; surfacing that is a later design choice, for now it
  * is not a request). Order is preserved: existing rows first, then the kept
  * fetched rows in arrival order.
+ *
+ * ADR-0066 section 3.5a rule 5 - one request per person across a PROVEN
+ * rotation of their account keys ([supersedes]: the first key is the proven
+ * successor of the second). A fetched request from the successor of a
+ * pending row's key REPLACES that row in place, silently (the old request's
+ * reply grant names a mailbox its sender left); a fetched request from a
+ * key some pending row's key already superseded is dropped; and a request
+ * from the successor of an accepted contact's key is that contact's. An
+ * unproven key change is two people and two rows.
  */
 public fun mergeFetchedRequests(
     pending: List<IncomingContactRequest>,
     accepted: List<AcceptedContact>,
     fetched: List<IncomingContactRequest>,
+    supersedes: (newKey: ByteArray, oldKey: ByteArray) -> Boolean = { _, _ -> false },
 ): FetchedRequestsMerge {
     val seenIds = pending.mapTo(HashSet()) { it.messageId }
-    val acceptedKeys = accepted.mapTo(HashSet()) { it.request.fromPubkey.toList() }
-    val kept = ArrayList<IncomingContactRequest>()
+    val acceptedKeys = accepted.map { it.request.fromPubkey }
+    val rows = ArrayList(pending)
     val dropped = ArrayList<IncomingContactRequest>()
+    var changed = false
     for (req in fetched) {
         val duplicateRow = !seenIds.add(req.messageId)
-        val alreadyAccepted = req.fromPubkey.toList() in acceptedKeys
-        if (duplicateRow || alreadyAccepted) dropped.add(req) else kept.add(req)
+        val alreadyAccepted = acceptedKeys.any {
+            it.contentEquals(req.fromPubkey) || supersedes(req.fromPubkey, it)
+        }
+        if (duplicateRow || alreadyAccepted) {
+            dropped.add(req)
+            continue
+        }
+        if (rows.any { !it.fromPubkey.contentEquals(req.fromPubkey) && supersedes(it.fromPubkey, req.fromPubkey) }) {
+            // The person already asked from a later key.
+            dropped.add(req)
+            continue
+        }
+        val replaced = rows.indexOfFirst {
+            !it.fromPubkey.contentEquals(req.fromPubkey) && supersedes(req.fromPubkey, it.fromPubkey)
+        }
+        if (replaced >= 0) {
+            rows[replaced] = req
+            // Any further row of the same earlier keys is the same person's.
+            for (i in rows.indices.reversed()) {
+                if (i != replaced && !rows[i].fromPubkey.contentEquals(req.fromPubkey) &&
+                    supersedes(req.fromPubkey, rows[i].fromPubkey)
+                ) {
+                    rows.removeAt(i)
+                }
+            }
+        } else {
+            rows.add(req)
+        }
+        changed = true
     }
-    return FetchedRequestsMerge(pending = if (kept.isEmpty()) pending else pending + kept, dropped = dropped)
+    return FetchedRequestsMerge(pending = if (changed) rows else pending, dropped = dropped)
+}
+
+/**
+ * ADR-0066 section 3.5a rule 5 - the fetched requests that may be a
+ * person's request sent again from a rotated key: one whose CLAIMED account
+ * id is that of a pending row under ANOTHER key. Each pair
+ * `(fetched key, pending key)` is put to a proof before anything is
+ * replaced; the claim alone replaces nothing.
+ */
+public fun successorCandidates(
+    pending: List<IncomingContactRequest>,
+    fetched: List<IncomingContactRequest>,
+): List<Triple<ByteArray, ByteArray, ByteArray>> {
+    val out = ArrayList<Triple<ByteArray, ByteArray, ByteArray>>()
+    for (req in fetched) {
+        val accountId = req.fromAccountId ?: continue
+        for (row in pending) {
+            if (row.fromAccountId?.contentEquals(accountId) != true) continue
+            if (row.fromPubkey.contentEquals(req.fromPubkey)) continue
+            if (out.none { it.second.contentEquals(req.fromPubkey) && it.third.contentEquals(row.fromPubkey) }) {
+                out += Triple(accountId, req.fromPubkey, row.fromPubkey)
+            }
+        }
+    }
+    return out
 }
 
 /** Drop the pending rows whose sender is in [accepted] — one row per person,

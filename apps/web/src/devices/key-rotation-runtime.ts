@@ -24,6 +24,11 @@ import { useChats } from "../chat/ChatContext";
 import { DiscoveryHttpError } from "../discovery/client";
 import { journalHex } from "../ds/access";
 import { takeOverOwnedJournals } from "../ds/rotation-takeover";
+import {
+  resendRequestsAfterRotation,
+  revokeLinksAfterRotation,
+  rotatedAtMsOf,
+} from "../contacts/rotation-spent";
 import { resendProfileAfterRotation } from "../profile/rotation-resend";
 import { reachSession } from "../reach/reach-service";
 import { channelsState } from "../state/channels-state";
@@ -35,6 +40,7 @@ import {
   rotationResumesByItself,
   runRotation,
   writeRotation,
+  type PublishStep,
   type PublishVerdict,
   type RemoveStepResult,
   type RotationOutcome,
@@ -109,7 +115,7 @@ export function useKeyRotation(): KeyRotationRuntime {
   ): { ports: RotationPorts; error: () => unknown } {
     let error: unknown = null;
     const publish = async (
-      step: "key-package" | "device-group-root" | "journals" | "channels" | "reach" | "profile" | "backup",
+      step: PublishStep,
       current: RotationOwed,
     ): Promise<PublishVerdict> => {
       switch (step) {
@@ -186,6 +192,14 @@ export function useKeyRotation(): KeyRotationRuntime {
           // ADR-0066 section 3.5a rule 3 - the grants for the new mailbox,
           // to every one-to-one and group. Owed until all of them landed.
           return resendProfileAfterRotation();
+        case "links":
+          // Section 3.5a rule 5 - the links minted before the rotation are
+          // spent: revoked at the ledger and dropped from the local list.
+          return revokeLinksAfterRotation(rotatedAtMsOf(current));
+        case "requests":
+          // Rule 5 - the unanswered contact requests, again from the new
+          // key with a new reply grant.
+          return resendRequestsAfterRotation(rotatedAtMsOf(current));
         case "backup":
           // Re-sealed under the new phrase and uploaded with a new head by
           // the automatic backup at its next tick.

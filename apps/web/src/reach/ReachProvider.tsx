@@ -44,7 +44,7 @@ export function ReachProvider(props: { children: JSX.Element }): JSX.Element {
   createEffect(() => {
     const account = accountId();
     const identity = chats.accountIdentity();
-    const predecessor = chats.predecessorAccountIdentity();
+    const predecessors = chats.ownPredecessorIdentities();
     reachSessionSignal();
     untrack(() => {
       if (account === null || identity === null) {
@@ -52,22 +52,20 @@ export function ReachProvider(props: { children: JSX.Element }): JSX.Element {
         return;
       }
       const currentKey = identity.signaturePublicKey;
-      const predecessorKey = predecessor === null ? null : predecessor.signaturePublicKey;
+      // The whole chain, oldest first (section 3.5a: every earlier own key
+      // maps to the current one).
+      const chain = predecessors.map((p) => ({ identity: p, accountKey: p.signaturePublicKey }));
       setOwnAccountKeys({
         currentKeyB64: base64Encode(currentKey),
-        provenPredecessorsB64: predecessorKey === null ? [] : [base64Encode(predecessorKey)],
+        provenPredecessorsB64: chain.map((p) => base64Encode(p.accountKey)),
       });
       const session = reachSession();
       if (session === null || session.accountKeyHex !== journalHex(currentKey)) return;
-      if (predecessor === null || predecessorKey === null) {
-        session.setPredecessor(null);
-        return;
-      }
-      const seed = predecessor.ed25519Seed;
+      const withSeeds = chain.map((p) => ({ accountKey: p.accountKey, seed: p.identity.ed25519Seed }));
       try {
-        session.setPredecessor({ accountKey: predecessorKey, seed });
+        session.setPredecessors(withSeeds);
       } finally {
-        seed.fill(0);
+        for (const p of withSeeds) p.seed.fill(0);
       }
     });
   });

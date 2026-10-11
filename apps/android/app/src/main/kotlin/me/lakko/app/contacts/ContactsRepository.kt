@@ -333,6 +333,204 @@ public class ContactsRepository(
     }
 
     /**
+     * ADR-0066 section 3.5a rule 6 - a write into the mailbox of the person
+     * known by [accountKey] was refused: fetch their identity bundle through
+     * the fail-closed gate (a proven rotation re-pins there and records the
+     * predecessor, which is what moves the address), then tell the reach
+     * manager the address is known current. `true` when the bundle passed
+     * the gate, so the caller re-resolves and retries once; `false` when the
+     * account id is not known here, the gate refused, or the fetch failed
+     * (the refusal then stands).
+     *
+     * [accountIdHint] is the account id the caller already holds for the
+     * person; without one it is read off the contact row or a pending
+     * request of that person.
+     */
+    public suspend fun recheckAddress(accountKey: ByteArray, accountIdHint: ByteArray? = null): Boolean {
+        val secrets = authRepo.identitySecrets.value ?: return false
+        val accountId = accountIdHint ?: accountIdOfPerson(accountKey) ?: return false
+        if (accountId.contentEquals(secrets.accountId)) return false
+        val served = try {
+            useClientWith(secrets) { client, _ -> client.checkPeerIdentity(accountId) }
+        } catch (_: SupersessionRefused) {
+            // Recorded by [useClientWith]; an unproven change moves nothing.
+            return false
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            Log.w(TAG, "ADR-0066 3.5a: address re-check failed: ${cause.javaClass.simpleName}")
+            return false
+        } ?: return false
+        // The bundle must be this person's: the key in hand, or one its
+        // proven steps lead to. Anything else is another account's answer.
+        if (!samePerson(base64Encode(accountKey), base64Encode(served), provenLinks())) return false
+        reach()?.addressKnownCurrent(accountKey)
+        return true
+    }
+
+    /** The account id held for the person behind [accountKey] (any key of
+     *  their proven chain): the contact row's, else a pending request's. */
+    private fun accountIdOfPerson(accountKey: ByteArray): ByteArray? {
+        val keyB64 = base64Encode(accountKey)
+        val links = provenLinks()
+        val state = mutableState.value
+        return (state.accepted.asSequence().map { it.request } + state.pending.asSequence())
+            .firstOrNull { it.fromAccountId != null && samePerson(base64Encode(it.fromPubkey), keyB64, links) }
+            ?.fromAccountId
+    }
+
+    /**
+     * ADR-0066 section 3.5a rule 5 - on the device that rotated the account
+     * keys: what was granted before the rotation is spent.
+     *
+     *  - the `/i/` and `/c/` links this account minted under a previous key
+     *    are revoked at the ledger (the revoke is signed by the key that
+     *    issued the link, so only links of a PREVIOUS key can be), and leave
+     *    this device's lists;
+     *  - every unanswered outgoing contact request is sent again from the
+     *    new key, with a fresh reply grant for the new mailbox, and replaces
+     *    the entry it re-sends.
+     *
+     * `true` only when nothing is left to do; `false` keeps the rotation's
+     * step owed (the ledger or a recipient could not be reached). The
+     * outgoing requests live in memory on this client, so a process that
+     * died since the rotation has none to re-send.
+     */
+    public suspend fun spendPreRotationGrants(): Boolean {
+        val secrets = authRepo.identitySecrets.value ?: return false
+        bindAccountIfSignedIn()
+        val predecessors = try {
+            authRepo.ownPredecessors()
+        } catch (_: Throwable) {
+            return false
+        }
+        if (predecessors.isEmpty()) return false
+        val adoptedAtMs = predecessors.maxOf { it.supersededAtMs }
+        val linksDone = try {
+            withContext(Dispatchers.IO) { revokeSpentLinks(secrets, predecessors) }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            Log.w(TAG, "ADR-0066 3.5a: spent links not revoked: ${cause.javaClass.simpleName}")
+            false
+        } finally {
+            predecessors.forEach { it.zero() }
+        }
+        // The lists this device shows never offer a link of a previous key,
+        // whether or not the ledger answered.
+        mutableState.update { state ->
+            state.copy(outstandingInvites = state.outstandingInvites.filterNot { it.createdAtMs < adoptedAtMs })
+        }
+        val requestsDone = withContext(Dispatchers.IO) { resendUnansweredRequests(secrets, adoptedAtMs) }
+        return linksDone && requestsDone
+    }
+
+    /** Revoke every ledger row a previous key of this account issued. */
+    private suspend fun revokeSpentLinks(
+        secrets: IdentitySecrets,
+        predecessors: List<me.lakko.app.auth.OwnPredecessor>,
+    ): Boolean {
+        val manager = reach()
+        val accountB64 = base64Encode(secrets.accountId)
+        // The contact links the directory lists for this account (every
+        // device's), and the ledger ids this device recorded for the links
+        // it minted itself (call links included).
+        val listed = when (val list = listActiveInvites()) {
+            is me.lakko.app.discovery.ListInvitesResult.List -> list.invites.map { it.blobIdSlug }
+            me.lakko.app.discovery.ListInvitesResult.NotFoundOrNotOwner -> return false
+        }
+        val recorded = manager?.spentLinkBlobsHex().orEmpty().mapNotNull { hex ->
+            me.lakko.app.reach.reachUnhex(hex)?.let(::base64UrlEncodeNoPad)
+        }
+        val seeds = predecessors.asReversed().map { row ->
+            Identity.fromSeed(row.phraseSeed).use { it.ed25519Seed() }
+        }
+        try {
+            authenticatedDiscoveryClient().use { discovery ->
+                for (slug in spentLinkSlugs(listed, recorded)) {
+                    val blobId = try {
+                        me.lakko.app.auth.base64UrlDecodeNoPad(slug)
+                    } catch (_: IllegalArgumentException) {
+                        continue
+                    }
+                    // A link the CURRENT key issued answers "not the owner"
+                    // to every previous key and stays live.
+                    val revoked = try {
+                        seeds.any { seed ->
+                            discovery.revokeInvite(blobId, seed) is me.lakko.app.discovery.RevokeInviteResult.Revoked ||
+                                discovery.revokeCallInvite(blobId, seed) is
+                                me.lakko.app.discovery.RevokeInviteResult.Revoked
+                        }
+                    } catch (_: me.lakko.app.discovery.DiscoveryClientArgError) {
+                        // Not a ledger id this client can name: nothing to revoke.
+                        false
+                    }
+                    if (revoked) {
+                        inviteSecretStore.remove(accountB64, slug)
+                        mutableState.update { state ->
+                            state.copy(outstandingInvites = state.outstandingInvites.filterNot { it.blobIdSlug == slug })
+                        }
+                    }
+                }
+            }
+        } finally {
+            seeds.forEach { it.fill(0) }
+        }
+        manager?.spentLinksDone()
+        return true
+    }
+
+    /** Re-send the unanswered outgoing requests sent before [adoptedAtMs]. */
+    private suspend fun resendUnansweredRequests(secrets: IdentitySecrets, adoptedAtMs: Long): Boolean {
+        val before = mutableState.value.sent
+        val spent = before.filter { it.sentAtMs < adoptedAtMs }
+        if (spent.isEmpty()) return true
+        val outcome = me.lakko.app.reach.resendPendingRequests(spent) { entry -> resendRequest(secrets, entry) }
+        mutableState.update { state ->
+            // Entries added while the pass ran stay; the spent ones are
+            // replaced by what the pass left of them.
+            state.copy(sent = state.sent.filterNot { it in spent } + outcome.pending)
+        }
+        return outcome.done
+    }
+
+    private suspend fun resendRequest(
+        secrets: IdentitySecrets,
+        entry: SentContactRequest,
+    ): Pair<me.lakko.app.reach.RequestResend, SentContactRequest?> {
+        val accountId = try {
+            me.lakko.app.auth.base64Decode(entry.recipientAccountIdB64)
+        } catch (_: IllegalArgumentException) {
+            return me.lakko.app.reach.RequestResend.GONE to null
+        }
+        return try {
+            val result = useClientWith(secrets) { client, sender ->
+                client.sendContactRequestToAccount(
+                    senderSigningSeed = sender.signingSeed,
+                    senderAccountId = secrets.accountId,
+                    senderSignaturePubkey = sender.signaturePubkey,
+                    recipientAccountId = accountId,
+                    introMessage = entry.introMessage,
+                    senderProfile = ownProfileForWire(secrets.accountId),
+                    mintReply = { key -> reach()?.mintReply(key) },
+                    reachFor = { key ->
+                        reach()?.reachAuthFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
+                    },
+                )
+            }
+            me.lakko.app.reach.RequestResend.SENT to entry.copy(
+                messageId = result.messageId,
+                createdAt = result.createdAt,
+                sentAtMs = System.currentTimeMillis(),
+            )
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            requestResendOutcome(cause) to null
+        }
+    }
+
+    /**
      * The contact a route key names (base64url of a signature key): by the
      * row's current key, else through a reset record carrying that key as its
      * previous or pending one — so a screen opened on the old key still finds
@@ -413,6 +611,11 @@ public class ContactsRepository(
      */
     public fun sameProvenPerson(aKeyB64: String, bKeyB64: String): Boolean =
         samePerson(aKeyB64, bKeyB64, provenLinks())
+
+    /** ADR-0066 section 3.5a - whether [foundKeyB64] is a proven
+     *  predecessor of [publishedKeyB64] by the steps recorded here. */
+    public fun isProvenPredecessor(foundKeyB64: String, publishedKeyB64: String): Boolean =
+        keyPrecedes(foundKeyB64, publishedKeyB64, provenLinks())
 
     /** The key conversation leaves and the contact row of the person behind
      *  [keyB64] are under: the earliest key of its proven chain. */
@@ -665,6 +868,11 @@ public class ContactsRepository(
         // checks a contact's published identity through this repository's
         // fail-closed gate, which is what records a logged reset.
         chatRepo?.contactIdentityCheck = { accountId -> checkContactIdentity(accountId) }
+        // ADR-0066 section 3.5a rule 6 - a refused mailbox write re-checks
+        // the person's address through the same gate, once.
+        chatRepo?.addressRecheck = { accountKey, accountId -> recheckAddress(accountKey, accountId) }
+        // Rule 5 - the rotating device's owed step.
+        chatRepo?.spendPreRotationGrants = { spendPreRotationGrants() }
         // A session already live at construction (a cold-start restore lands
         // before the repository is built): its contacts are the ones shown.
         // Placed after [profileDirectory] so the renames reach the directory.
@@ -829,6 +1037,7 @@ public class ContactsRepository(
                         recipientAccountIdB64 = base64Encode(result.recipientAccountId),
                         messageId = result.messageId,
                         createdAt = result.createdAt,
+                        introMessage = introMessage.toByteArray(Charsets.UTF_8),
                     ),
                 )
             }
@@ -864,7 +1073,7 @@ public class ContactsRepository(
                     explicit ?: reach()?.reachAuthFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
                 },
             )
-            recordSent(result.recipientUsername, result)
+            recordSent(result.recipientUsername, result, introMessage)
             result
         }
     }
@@ -908,12 +1117,12 @@ public class ContactsRepository(
             )
             // The Sent list shows `@username`; a person found by name alone
             // has none to show there.
-            shownUsername?.let { recordSent(it, result) }
+            shownUsername?.let { recordSent(it, result, introMessage) }
             result
         }
     }
 
-    private fun recordSent(username: String, result: SendResult) {
+    private fun recordSent(username: String, result: SendResult, introMessage: ByteArray) {
         mutableState.update { state ->
             state.copy(
                 sent = state.sent + SentContactRequest(
@@ -921,6 +1130,7 @@ public class ContactsRepository(
                     recipientAccountIdB64 = base64Encode(result.recipientAccountId),
                     messageId = result.messageId,
                     createdAt = result.createdAt,
+                    introMessage = introMessage,
                 ),
             )
         }
@@ -1115,6 +1325,18 @@ public class ContactsRepository(
                         inboxMailboxStore?.advance(accountB64, currentKeyB64, result.cursor)
                     }
 
+                    // ADR-0066 3.5a rule 5 - a request sent again from a
+                    // rotated key replaces the row it re-sends: by the steps
+                    // the gate recorded, or by the proof the directory serves
+                    // with the new key (checked here, off the state update).
+                    val links = provenLinks()
+                    val provenNow = successorCandidates(mutableState.value.pending, newIncoming)
+                        .filterNot { (_, newKey, oldKey) -> keyPrecedes(base64Encode(oldKey), base64Encode(newKey), links) }
+                        .filter { (accountId, newKey, oldKey) -> client.provesSuccessor(accountId, oldKey, newKey) }
+                    val supersedes: (ByteArray, ByteArray) -> Boolean = { newKey, oldKey ->
+                        keyPrecedes(base64Encode(oldKey), base64Encode(newKey), links) ||
+                            provenNow.any { it.second.contentEquals(newKey) && it.third.contentEquals(oldKey) }
+                    }
                     var dropped: List<IncomingContactRequest> = emptyList()
                     var acceptedChanged = false
                     mutableState.update { state ->
@@ -1128,6 +1350,7 @@ public class ContactsRepository(
                             pending = state.pending,
                             accepted = applied.accepted,
                             fetched = newIncoming,
+                            supersedes = supersedes,
                         )
                         dropped = merged.dropped
                         state.copy(
@@ -1270,13 +1493,41 @@ public class ContactsRepository(
             )
 
         return useClientWith(secrets) { client, sender ->
-            client.sendContactAck(
-                accepterSigningSeed = sender.signingSeed,
-                accepterAccountId = secrets.accountId,
-                accepterX25519Pubkey = sender.x25519Pubkey,
-                originalRequest = request,
-                // ADR-0060 §6 — the requester's reply key opens their mailbox.
-                reach = reach()?.reachAuthFor(request.fromPubkey, me.lakko.app.reach.WritePurpose.REPLY),
+            // ADR-0066 3.5a rule 6 - a refused ack re-checks the requester's
+            // address once. Each attempt re-resolves the mailbox (inside the
+            // client) and tries every grant held for the person in turn: the
+            // reply key first, and one kept beside a newer grant.
+            me.lakko.app.reach.writeRecheckingAddress(
+                write = {
+                    val candidates = reach()
+                        ?.reachAuthCandidates(request.fromPubkey, me.lakko.app.reach.WritePurpose.REPLY)
+                        .orEmpty()
+                    val send: suspend (me.lakko.app.ds.DsReachAuth?) -> PublishedAck = { auth ->
+                        client.sendContactAck(
+                            accepterSigningSeed = sender.signingSeed,
+                            accepterAccountId = secrets.accountId,
+                            accepterX25519Pubkey = sender.x25519Pubkey,
+                            originalRequest = request,
+                            // ADR-0060 §6 — the requester's reply key opens their mailbox.
+                            reach = auth,
+                        )
+                    }
+                    when (
+                        val outcome = me.lakko.app.reach.firstAcceptedWrite(
+                            candidates,
+                            { auth: me.lakko.app.ds.DsReachAuth -> send(auth) },
+                            ::isMailboxRefusal,
+                        )
+                    ) {
+                        is me.lakko.app.reach.SignedWriteOutcome.Written -> outcome.result
+                        is me.lakko.app.reach.SignedWriteOutcome.Exhausted ->
+                            // Every grant refused: that refusal. None held:
+                            // unsigned, which an open mailbox takes.
+                            outcome.lastRefusal?.let { throw it } ?: send(null)
+                    }
+                },
+                isRefusal = ::isMailboxRefusal,
+                recheck = { recheckAddress(request.fromPubkey, request.fromAccountId) },
             )
         }
     }
@@ -2254,4 +2505,54 @@ public data class SentContactRequest(
     val recipientAccountIdB64: String,
     val messageId: Long,
     val createdAt: String,
-)
+    /** The intro the request carried, kept (in memory, like the entry) so
+     *  the request can be sent again from a rotated account key (ADR-0066
+     *  section 3.5a rule 5). */
+    val introMessage: ByteArray = ByteArray(0),
+    /** When this device sent it (unix ms). Not part of the entry's
+     *  identity: the Delivery Service row id is. */
+    val sentAtMs: Long = System.currentTimeMillis(),
+) {
+    override fun equals(other: Any?): Boolean =
+        other is SentContactRequest &&
+            recipientUsername == other.recipientUsername &&
+            recipientAccountIdB64 == other.recipientAccountIdB64 &&
+            messageId == other.messageId &&
+            createdAt == other.createdAt &&
+            introMessage.contentEquals(other.introMessage)
+
+    override fun hashCode(): Int = 31 * recipientAccountIdB64.hashCode() + messageId.hashCode()
+}
+
+/**
+ * ADR-0066 section 3.5a rule 5 - what a failed re-send of an unanswered
+ * request means: the person's mailbox refused the write, their username or
+ * bundle is gone, or their keys changed without a proof - the spent entry is
+ * dropped; anything else (the network) keeps it and the step owed.
+ */
+internal fun requestResendOutcome(cause: Throwable): me.lakko.app.reach.RequestResend = when {
+    cause is SupersessionRefused -> me.lakko.app.reach.RequestResend.GONE
+    cause is ContactsError && cause.variant !is ContactsError.Variant.Wrapped -> me.lakko.app.reach.RequestResend.GONE
+    isMailboxRefusal(cause) -> me.lakko.app.reach.RequestResend.GONE
+    else -> me.lakko.app.reach.RequestResend.FAILED
+}
+
+/** Whether [cause] is the Delivery Service's `401` to a mailbox write
+ *  (ADR-0060 section 2), bare or wrapped by the contacts client. */
+internal fun isMailboxRefusal(cause: Throwable): Boolean = when (cause) {
+    is me.lakko.app.ds.DsReachRefusedError -> true
+    is ContactsError -> when (val variant = cause.variant) {
+        ContactsError.Variant.ReachRefused -> true
+        is ContactsError.Variant.Wrapped -> variant.cause is me.lakko.app.ds.DsReachRefusedError
+        else -> false
+    }
+    else -> false
+}
+
+/**
+ * ADR-0066 section 3.5a rule 5 - the ledger ids (base64url slugs) the
+ * rotating device tries to revoke: what the directory lists for the account,
+ * then what this device recorded for links it minted, each once.
+ */
+internal fun spentLinkSlugs(listed: List<String>, recorded: List<String>): List<String> =
+    (listed + recorded).distinct()

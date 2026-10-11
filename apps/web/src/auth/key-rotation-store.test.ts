@@ -7,6 +7,7 @@ import {
   conversationSeed,
   decodeKeyRotationState,
   encodeKeyRotationState,
+  predecessorSeeds,
   withPredecessorSeed,
 } from "./key-rotation-store";
 import { base64Encode } from "./account-id";
@@ -51,5 +52,15 @@ describe("the sealed key-rotation state (ADR-0066 part 3)", () => {
     expect(decoded).toEqual({ predecessorSeedsB64: [good], pending: [], prepared: null });
     expect(decodeKeyRotationState("{")).toEqual(EMPTY_KEY_ROTATION_STATE);
     expect(decodeKeyRotationState("null")).toEqual(EMPTY_KEY_ROTATION_STATE);
+  });
+});
+
+describe("own predecessors are a chain (ADR-0066 section 3.5a)", () => {
+  it("every held seed, oldest first: the conversation key, then the keys held in between", () => {
+    const one = new Uint8Array(64).fill(1);
+    const two = new Uint8Array(64).fill(2);
+    const state = withPredecessorSeed(withPredecessorSeed(EMPTY_KEY_ROTATION_STATE, one), two);
+    expect(predecessorSeeds(state)).toEqual([one, two]);
+    expect(predecessorSeeds(EMPTY_KEY_ROTATION_STATE)).toEqual([]);
   });
 });

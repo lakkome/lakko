@@ -4558,6 +4558,10 @@
       "text": "Tus llaves de acceso siguen sirviendo para iniciar sesión. «Restaurar claves con esta llave de acceso» queda desactivado hasta que lo vuelvas a activar.",
       "status": "machine"
     },
+    "devices.rotate.effect_links": {
+      "text": "Los enlaces de invitación y de llamada que creaste antes dejarán de funcionar. Crea otros nuevos.",
+      "status": "machine"
+    },
     "devices.rotate.effect_phrase": {
       "text": "Recibes una nueva frase de recuperación. La anterior deja de funcionar.",
       "status": "machine"

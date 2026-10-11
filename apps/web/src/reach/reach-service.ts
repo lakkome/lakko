@@ -136,7 +136,7 @@ export class ReachSession {
   private scopes: () => ReachScopes = () => ({ groupIdsHex: [], channels: [] });
   private setting: () => WasmVisibilitySetting | null = () => null;
   private stopped = false;
-  private predecessor: { readonly accountKey: Uint8Array; readonly seed: Uint8Array } | null = null;
+  private predecessors: { readonly accountKey: Uint8Array; readonly seed: Uint8Array }[] = [];
 
   private constructor(
     readonly accountIdB64: string,
@@ -198,8 +198,8 @@ export class ReachSession {
   stop(): void {
     this.stopped = true;
     this.accountSeed.fill(0);
-    this.predecessor?.seed.fill(0);
-    this.predecessor = null;
+    for (const p of this.predecessors) p.seed.fill(0);
+    this.predecessors = [];
   }
 
   /** Where the sync reads the account's groups and channels from. */
@@ -244,28 +244,32 @@ export class ReachSession {
   }
 
   /**
-   * ADR-0066 section 3.5a - the account key the conversation leaves are
-   * still bound to after a proven rotation (the oldest predecessor this
-   * device holds), with a copy of its Ed25519 seed. A proposer that has not
-   * observed the rotation names THIS key in a committer delegation, so the
-   * committer must be able to sign as it. `null` forgets it. Nothing is ever
-   * registered or derived for a mailbox from this seed.
+   * ADR-0066 section 3.5a - every own predecessor key this device holds
+   * (the conversation key first, then the keys held between two rotations),
+   * each with a copy of its Ed25519 seed. A proposer names the committer's
+   * account key as IT knows it: the key the role table carries, or any key
+   * it last observed. So the committer must be able to sign as each of them.
+   * An empty list forgets them. Nothing is ever registered or derived for a
+   * mailbox from these seeds.
    */
-  setPredecessor(predecessor: { readonly accountKey: Uint8Array; readonly seed: Uint8Array } | null): void {
-    this.predecessor?.seed.fill(0);
-    this.predecessor =
-      predecessor === null
-        ? null
-        : { accountKey: predecessor.accountKey.slice(), seed: predecessor.seed.slice() };
+  setPredecessors(
+    predecessors: readonly { readonly accountKey: Uint8Array; readonly seed: Uint8Array }[],
+  ): void {
+    for (const p of this.predecessors) p.seed.fill(0);
+    this.predecessors = predecessors.map((p) => ({
+      accountKey: p.accountKey.slice(),
+      seed: p.seed.slice(),
+    }));
   }
 
   /** The own account keys a committer delegation may name, the current one
-   *  first, each with the reach signer of exactly that key. The caller frees
-   *  a signer it takes. */
+   *  first, then the predecessors newest first, each with the reach signer
+   *  of exactly that key. The caller frees a signer it takes. */
   delegateKeys(): { readonly accountKey: Uint8Array; signer(): Promise<import("../ds/access").ProofSigner> }[] {
     const out = [{ accountKey: this.accountKey, signer: () => this.accountReachSigner() }];
-    const predecessor = this.predecessor;
-    if (predecessor !== null) {
+    for (let i = this.predecessors.length - 1; i >= 0; i--) {
+      const predecessor = this.predecessors[i];
+      if (predecessor === undefined) continue;
       out.push({
         accountKey: predecessor.accountKey,
         signer: () => Promise.resolve(this.wasm.DsProofSigner.forReach(predecessor.seed)),

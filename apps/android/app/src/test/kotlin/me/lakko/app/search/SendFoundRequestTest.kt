@@ -89,4 +89,62 @@ class SendFoundRequestTest {
         assertEquals(SendOutcome.Refused, sendFoundRequest(person(PersonReach.CONTACT), ByteArray(0), fake))
         assertTrue(fake.sent.isEmpty())
     }
+
+    // --- ADR-0066 section 3.5a: a hit under a proven predecessor key --------
+
+    @Test
+    fun `a person found under a key they provably rotated away from is sent to their current keys`() = runTest {
+        val current = ByteArray(32) { 0xB2.toByte() }
+        var asked: Pair<ByteArray, ByteArray>? = null
+        val fake = object : SendDeps by Fake(bundleKey = current) {
+            val sentTo = mutableListOf<ByteArray>()
+            override fun isProvenPredecessor(foundKey: ByteArray, publishedKey: ByteArray): Boolean {
+                asked = foundKey to publishedKey
+                return true
+            }
+
+            override suspend fun sendToBundle(
+                accountId: ByteArray,
+                signaturePub: ByteArray,
+                x25519Pub: ByteArray,
+                intro: ByteArray,
+                grantWireB64: String?,
+            ) {
+                sentTo += signaturePub
+            }
+        }
+        assertEquals(SendOutcome.Sent, sendFoundRequest(person(PersonReach.OPEN), ByteArray(0), fake))
+        // Sealed to the bundle's keys, never to the key the hit carried.
+        assertTrue(fake.sentTo.single().contentEquals(current))
+        assertTrue(asked!!.first.contentEquals(key) && asked!!.second.contentEquals(current))
+    }
+
+    @Test
+    fun `a bundle for a key nothing proved related is still refused`() = runTest {
+        val fake = Fake(bundleKey = ByteArray(32) { 0xB2.toByte() })
+        assertEquals(SendOutcome.Refused, sendFoundRequest(person(PersonReach.OPEN), ByteArray(0), fake))
+        assertTrue(fake.sent.isEmpty())
+    }
+
+    @Test
+    fun `the found key is the published person only when equal or proven`() {
+        val other = ByteArray(32) { 0xB2.toByte() }
+        assertTrue(foundKeyIsPublished(key, key.copyOf()) { _, _ -> false })
+        assertTrue(foundKeyIsPublished(key, other) { _, _ -> true })
+        assertEquals(false, foundKeyIsPublished(key, other) { _, _ -> false })
+        // A check that fails proves nothing.
+        assertEquals(false, foundKeyIsPublished(key, other) { _, _ -> throw IllegalStateException("bad proof") })
+    }
+
+    @Test
+    fun `a public record sealed under a proven predecessor key still names the hit`() {
+        val accountId = ByteArray(16) { 4 }
+        val current = ByteArray(32) { 0xB2.toByte() }
+        val hit = LookupHit(accountId, ByteArray(8))
+        val open = { _: ByteArray, _: ByteArray -> OpenedPublicRecord(key, accountId, " Anna ") }
+        assertEquals(null, acceptPublicRecord(open, hit, ByteArray(64), current))
+        assertEquals("Anna", acceptPublicRecord(open, hit, ByteArray(64), current) { found, published ->
+            found.contentEquals(key) && published.contentEquals(current)
+        })
+    }
 }

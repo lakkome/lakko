@@ -122,6 +122,17 @@ public final class ReachCenter: ObservableObject {
             ownPredecessorKeys: OwnAccountKeys.predecessorPublicKeys(accountIdB64: accountIdB64))
     }
     private var predecessorObserver: NSObjectProtocol?
+    /// This account's own predecessor keys with the Ed25519 seed of each
+    /// (newest first): what signs a delegated write a proposer addressed to
+    /// an old key of this account. The default reads the predecessor slot;
+    /// tests inject their own.
+    var ownPredecessorSigningSeeds: @MainActor (_ accountIdB64: String) -> [(key: Data, seed: Data)] = {
+        accountIdB64 in
+        KeychainOwnPredecessorStore().load(accountIdB64: accountIdB64).reversed().compactMap { seed in
+            guard let identity = try? Identity.fromSeed(seed: seed) else { return nil }
+            return (identity.signaturePublicKey(), identity.ed25519Seed())
+        }
+    }
 
     init(persistence: ReachPersistence = KeychainReachPersistence(), ds: ReachDsTransport = DsClient()) {
         self.persistence = persistence
@@ -184,15 +195,34 @@ public final class ReachCenter: ObservableObject {
     private func heldForPerson(_ accountKey: Data) -> [ReachRules.HeldGrant] {
         let keys = keyResolver.allKeys(of: accountKey).map { $0.base64EncodedString() }
         if keys.count == 1 { return record.held[keys[0]] ?? [] }
+        // Rule 6 — the person's current address is known (a proven rotation
+        // was observed), so a grant their rotation displaced opens nothing
+        // this device will write to: only the current ones count.
         // Oldest first, so the newest of a class and scope is merged last; at
         // an equal stamp the grant filed under the nearer key (the current
         // one last) is the newer.
         let ranked = keys.reversed().enumerated().flatMap { rank, key in
-            (record.held[key] ?? []).map { (rank: rank, grant: $0) }
+            ReachRules.droppingSuperseded(record.held[key] ?? []).map { (rank: rank, grant: $0) }
         }.sorted { ($0.grant.storedAtMs, $0.rank) < ($1.grant.storedAtMs, $1.rank) }
-        return ranked.reduce(into: [ReachRules.HeldGrant]()) { out, entry in
+        return ReachRules.droppingSuperseded(ranked.reduce(into: [ReachRules.HeldGrant]()) { out, entry in
             out = ReachRules.merging(entry.grant, into: out)
+        })
+    }
+
+    /// The account key (current) of the person whose mailbox `pseudonym` is,
+    /// among the people this device holds a grant or a committer delegation
+    /// for, under any of their keys. `nil` for this account's own mailbox and
+    /// for a mailbox nothing here names. What a refused write addressed by
+    /// its mailbox alone re-checks (rule 6).
+    public func accountKey(forMailbox pseudonym: Data) -> Data? {
+        var candidates = heldPeople()
+        candidates += delegations.values.map { keyResolver.current(of: $0.addedAccountKey) }
+        for person in candidates {
+            for key in keyResolver.allKeys(of: person) where Self.mailbox(of: key) == pseudonym {
+                return keyResolver.isOwn(person) ? nil : person
+            }
         }
+        return nil
     }
 
     /// The distinct people grants are held for, by current account key.
@@ -272,6 +302,17 @@ public final class ReachCenter: ObservableObject {
         mailboxPseudonym = signer.mailboxPseudonym()
         record.registeredB64 = []
         record.registeredOpen = nil
+        // Section 3.5a rule 5 — the links and the reply grants handed out so
+        // far were derived from the old seed and name the old mailbox: spent.
+        // Nothing is registered for them on the new mailbox; they are kept
+        // only so the rotation's owed step can revoke and re-send.
+        let spent = ReachRules.spending(links: record.links, replies: record.replies,
+                                        spentLinks: record.spentLinks ?? [],
+                                        spentReplies: record.spentReplies ?? [])
+        record.links = []
+        record.replies = []
+        record.spentLinks = spent.links
+        record.spentReplies = spent.replies
         persist()
         // The old key is this account's own predecessor from now on.
         reloadKeyResolver()
@@ -785,10 +826,33 @@ public final class ReachCenter: ObservableObject {
 
     /// Record the ledger id a link was uploaded under, so a revoke by that id
     /// can unregister its key.
-    public func attachBlob(linkId: Data, blobId: Data) {
+    public func attachBlob(linkId: Data, blobId: Data, kind: String? = nil) {
         let b64 = linkId.base64EncodedString()
         guard let index = record.links.firstIndex(where: { $0.linkIdB64 == b64 }) else { return }
         record.links[index].blobIdB64 = blobId.base64EncodedString()
+        record.links[index].kind = kind
+        persist()
+    }
+
+    // MARK: - Spent by a key rotation (ADR-0066 section 3.5a rule 5)
+
+    /// The link scopes that were live when the account's keys were rotated.
+    public var spentLinks: [LinkReach] { record.spentLinks ?? [] }
+
+    /// The reply scopes that were outstanding when the keys were rotated.
+    public var spentReplies: [ReplyReach] { record.spentReplies ?? [] }
+
+    /// A spent link was revoked at its ledger (or is gone there).
+    public func forgetSpentLink(linkIdB64: String) {
+        guard let links = record.spentLinks, links.contains(where: { $0.linkIdB64 == linkIdB64 }) else { return }
+        record.spentLinks = links.filter { $0.linkIdB64 != linkIdB64 }
+        persist()
+    }
+
+    /// The request a spent reply belonged to was re-sent, or cannot be.
+    public func forgetSpentReplies(purpose: String) {
+        guard let replies = record.spentReplies, replies.contains(where: { $0.purpose == purpose }) else { return }
+        record.spentReplies = replies.filter { $0.purpose != purpose }
         persist()
     }
 
@@ -968,11 +1032,19 @@ public final class ReachCenter: ObservableObject {
     /// The delegated write authorisation for a Welcome to `pseudonym`: a kept
     /// envelope for the account whose mailbox it is that names this account,
     /// signed with this account's own seed (the key the delegation names).
+    ///
+    /// ADR-0066 section 3.5a — a proposer that has not observed this
+    /// account's own rotation names the OLD account key: the delegation is
+    /// then found under that key and the write signed with its seed
+    /// (``ReachRules/delegationSigner(ownKeys:header:)``).
     private func delegatedAuth(toMailbox pseudonym: Data) -> DsMailboxWriteAuth? {
-        guard let own = ownAccountKey, let seed = accountSeed else { return nil }
+        guard let own = ownAccountKey, let seed = accountSeed, let accountIdB64 else { return nil }
+        let ownKeys = [(key: own, seed: seed)] + ownPredecessorSigningSeeds(accountIdB64)
         for envelope in delegations.values where mailbox(forAccountKey: envelope.addedAccountKey) == pseudonym {
-            if let header = try? committerDelegationFor(envelope: envelope, ownAccountKey: own) {
-                return DsMailboxWriteAuth(reachSeed: seed, delegationHeader: header)
+            if let signer = ReachRules.delegationSigner(ownKeys: ownKeys, header: { key in
+                try? committerDelegationFor(envelope: envelope, ownAccountKey: key)
+            }) {
+                return DsMailboxWriteAuth(reachSeed: signer.seed, delegationHeader: signer.header)
             }
         }
         return nil

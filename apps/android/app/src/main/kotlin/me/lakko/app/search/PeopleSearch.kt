@@ -118,6 +118,14 @@ public interface PeopleSearchDeps {
     /** The account key the identity bundle publishes, `null` for none. */
     public suspend fun identityKeyOf(accountId: ByteArray): ByteArray?
 
+    /**
+     * ADR-0066 section 3.5a - whether [foundKey] is a PROVEN predecessor of
+     * [publishedKey] (a recorded proven step, or a supersession proof by
+     * [foundKey] over [publishedKey] that verifies): the same person after a
+     * rotation of their account keys. An unproven change is never one.
+     */
+    public fun isProvenPredecessor(foundKey: ByteArray, publishedKey: ByteArray): Boolean = false
+
     /** What this device knows about a person. */
     public fun known(keyB64: String): KnownPerson
 
@@ -162,6 +170,9 @@ public fun acceptPublicRecord(
     hit: LookupHit,
     oprfOutput: ByteArray,
     bundleKey: ByteArray,
+    /** ADR-0066 3.5a - a record sealed under a proven predecessor of the
+     *  bundle's key is the same person's. */
+    provenPredecessor: (foundKey: ByteArray, publishedKey: ByteArray) -> Boolean = { _, _ -> false },
 ): String? {
     val record = hit.publicRecord ?: return null
     val opened = try {
@@ -170,7 +181,7 @@ public fun acceptPublicRecord(
         null
     } ?: return null
     if (!opened.accountId.contentEquals(hit.accountId)) return null
-    if (!opened.identityPk.contentEquals(bundleKey)) return null
+    if (!foundKeyIsPublished(opened.identityPk, bundleKey, provenPredecessor)) return null
     return opened.displayName?.trim()?.takeIf { it.isNotEmpty() }
 }
 
@@ -197,6 +208,25 @@ private fun resultFor(
         reach = reach,
         grantWireB64 = if (reach == PersonReach.GRANT) grantWireB64 else null,
     )
+}
+
+/**
+ * ADR-0066 section 3.5a - whether the key a person was FOUND as is the
+ * person the identity bundle publishes: the published key itself, or a
+ * proven predecessor of it ([provenPredecessor]; a throw is "no"). Two keys
+ * nothing proved related are two people, whatever account id they claim.
+ */
+public fun foundKeyIsPublished(
+    foundKey: ByteArray,
+    publishedKey: ByteArray,
+    provenPredecessor: (foundKey: ByteArray, publishedKey: ByteArray) -> Boolean,
+): Boolean {
+    if (foundKey.contentEquals(publishedKey)) return true
+    return try {
+        provenPredecessor(foundKey, publishedKey)
+    } catch (_: Throwable) {
+        false
+    }
 }
 
 private class BundleKey(val b64: String, val hex: String, val bytes: ByteArray)
@@ -249,7 +279,8 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
             val key = identityKey(deps, hit.accountId)
             legs += LegOutcome.ANSWERED
             if (key == null) return@async emptyList()
-            val published = acceptPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes)
+            val published =
+                acceptPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes, deps::isProvenPredecessor)
             // Discovery itself resolved this username to this account: that
             // is the binding a certificate would prove, so the username shows.
             listOfNotNull(
@@ -278,7 +309,8 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
                 // A name this device holds, else the one the person published
                 // (also for a contact held only by fingerprint); an unnamed
                 // hit is dropped.
-                val published = acceptPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes)
+                val published =
+                    acceptPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes, deps::isProvenPredecessor)
                 val name = deps.known(key.b64).name ?: published ?: continue
                 if (!deps.nameMatches(name, query)) continue
                 resultFor(
@@ -325,7 +357,7 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
             // account id - and that account's username certificate.
             val bound = try {
                 val published = deps.identityKeyOf(intro.accountId)
-                published != null && published.contentEquals(intro.identityPk)
+                published != null && foundKeyIsPublished(intro.identityPk, published, deps::isProvenPredecessor)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (_: Throwable) {

@@ -117,6 +117,8 @@ describe("the rotation's order (ADR-0066 section 3.2)", () => {
       "channels",
       "reach",
       "profile",
+      "links",
+      "requests",
       "backup",
     ]);
     expect(last(h.saved)).toBeNull();
@@ -241,7 +243,7 @@ describe("the rotation's order (ADR-0066 section 3.2)", () => {
   it("after the commit a failure is a retry of exactly the steps that did not land", async () => {
     const h = harness({ later: ["journals"] });
     const out = await runRotation(newRotation(DEVICE, 1), h.ports, { grant: "g" });
-    expect(out).toEqual({ kind: "publishing", owed: ["journals", "channels", "reach", "profile", "backup"] });
+    expect(out).toEqual({ kind: "publishing", owed: ["journals", "channels", "reach", "profile", "links", "requests", "backup"] });
     const record = last(h.saved) as RotationOwed;
     expect(record.attestationB64Url).toBe("ATT");
     expect(record.keyGeneration).toBe("3");
@@ -249,7 +251,23 @@ describe("the rotation's order (ADR-0066 section 3.2)", () => {
     expect(rotationWithholdsPhrase(record)).toBe(true);
     const again = harness();
     expect(await runRotation(record, again.ports, { grant: null })).toEqual({ kind: "complete" });
-    expect(again.calls).toEqual(["journals", "channels", "reach", "profile", "backup"]);
+    expect(again.calls).toEqual(["journals", "channels", "reach", "profile", "links", "requests", "backup"]);
+  });
+
+  it("what was granted before is spent: the links and the unanswered requests are owed steps (3.5a rule 5)", async () => {
+    const h = harness({ later: ["requests"] });
+    const out = await runRotation(newRotation(DEVICE, 1), h.ports, { grant: "g" });
+    // After the profile (the reach keys are on the new mailbox by then),
+    // links before requests, both before the backup.
+    expect(h.calls.indexOf("links")).toBe(h.calls.indexOf("profile") + 1);
+    expect(h.calls.indexOf("requests")).toBe(h.calls.indexOf("links") + 1);
+    expect(out).toEqual({ kind: "publishing", owed: ["requests", "backup"] });
+    const record = last(h.saved) as RotationOwed;
+    expect(record.done).toContain("links");
+    expect(rotationWithholdsPhrase(record)).toBe(true);
+    const again = harness();
+    expect(await runRotation(record, again.ports, { grant: null })).toEqual({ kind: "complete" });
+    expect(again.calls).toEqual(["requests", "backup"]);
   });
 
   it("the profile re-send is a step: owed while a conversation has not got it, then retried (3.5a rule 3)", async () => {
@@ -257,7 +275,7 @@ describe("the rotation's order (ADR-0066 section 3.2)", () => {
     const out = await runRotation(newRotation(DEVICE, 1), h.ports, { grant: "g" });
     // It runs after the reach keys are on the new mailbox and never before.
     expect(h.calls.indexOf("profile")).toBe(h.calls.indexOf("reach") + 1);
-    expect(out).toEqual({ kind: "publishing", owed: ["profile", "backup"] });
+    expect(out).toEqual({ kind: "publishing", owed: ["profile", "links", "requests", "backup"] });
     const record = last(h.saved) as RotationOwed;
     expect(record.done).not.toContain("profile");
     // The words stay withheld and the record resumes by itself.
@@ -265,7 +283,7 @@ describe("the rotation's order (ADR-0066 section 3.2)", () => {
     expect(rotationResumesByItself(record)).toBe(true);
     const again = harness();
     expect(await runRotation(record, again.ports, { grant: null })).toEqual({ kind: "complete" });
-    expect(again.calls).toEqual(["profile", "backup"]);
+    expect(again.calls).toEqual(["profile", "links", "requests", "backup"]);
   });
 
   it("the directory: a proof the row no longer accepts is sent again WITHOUT the proof", async () => {

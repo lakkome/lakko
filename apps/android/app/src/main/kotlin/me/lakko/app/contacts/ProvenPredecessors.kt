@@ -146,6 +146,19 @@ public fun samePerson(aKeyB64: String, bKeyB64: String, links: List<ProvenLink>)
     aKeyB64 == bKeyB64 || currentKeyOf(aKeyB64, links) == currentKeyOf(bKeyB64, links)
 
 /**
+ * Whether [earlierKeyB64] is a proven PREDECESSOR of [laterKeyB64]: a
+ * different key whose proven steps lead to it. Never true across an
+ * unproven change, and never for the key itself.
+ */
+public fun keyPrecedes(earlierKeyB64: String, laterKeyB64: String, links: List<ProvenLink>): Boolean {
+    if (earlierKeyB64 == laterKeyB64) return false
+    val chain = keysOfPerson(earlierKeyB64, links)
+    val earlier = chain.indexOf(earlierKeyB64)
+    val later = chain.indexOf(laterKeyB64)
+    return earlier >= 0 && later > earlier
+}
+
+/**
  * Whether a device binding under [boundKeyB64] is one of the account whose
  * key is [accountKeyB64] now (section 3.5 "Kept devices' directory rows"):
  * the pinned key, or a proven predecessor of it.

@@ -59,6 +59,28 @@ describe("sendFoundRequest", () => {
     expect(d.sendToBundle).not.toHaveBeenCalled();
   });
 
+  it("a person found under a PROVEN predecessor key gets the request at their current keys (ADR-0066 3.5a)", async () => {
+    const CURRENT = new Uint8Array(32).fill(0xb7);
+    const provenPredecessor = vi.fn(async () => true);
+    const d = deps({
+      identityFetch: vi.fn(async () => ({ signaturePub: CURRENT, x25519Pub: X25519 })),
+      provenPredecessor,
+    });
+    expect(await sendFoundRequest(found(), INTRO, d)).toEqual({ kind: "sent" });
+    expect(provenPredecessor).toHaveBeenCalledWith(KEY, ACC);
+    // Sealed to the published key, never to the key the hit was found under.
+    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, CURRENT, X25519, INTRO, "GRANT");
+  });
+
+  it("an UNPROVEN mismatch is still refused", async () => {
+    const d = deps({
+      identityFetch: vi.fn(async () => ({ signaturePub: new Uint8Array(32).fill(0xb7), x25519Pub: X25519 })),
+      provenPredecessor: vi.fn(async () => false),
+    });
+    expect(await sendFoundRequest(found(), INTRO, d)).toEqual({ kind: "refused" });
+    expect(d.sendToBundle).not.toHaveBeenCalled();
+  });
+
   it("sends to a person in Everyone by their verified username, with no check", async () => {
     const d = deps();
     const person = found({ reach: "open", username: "anna", grantWireB64: null });

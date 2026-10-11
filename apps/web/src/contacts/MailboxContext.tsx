@@ -50,6 +50,25 @@ import { useChats } from "../chat/ChatContext";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { groupIdHex } from "../devices/sync/state";
 import { isDsNetworkFailure } from "../ds/client";
+import { journalHex } from "../ds/access";
+import { installAddressRecheck } from "../reach/mailbox-write";
+import { reachSession } from "../reach/reach-service";
+import { DiscoveryClient } from "../discovery/client";
+import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { waitingSentRequests } from "./contact-list-model";
+import { forgetInviteLinkSecret } from "./invite-link-secrets";
+import { forgetMintedLink, mintedLinkFor } from "./minted-links";
+import { loadSentRequests, recordSentRequest } from "./sent-requests";
+import {
+  installSpentRunners,
+  linkRevokeOutcome,
+  requestsToResend,
+  revocationSeedOrder,
+  spentFailureOutcome,
+  type RevokeAttempt,
+  type SpentOutcome,
+} from "./rotation-spent";
+import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import {
   createWakeLatch,
   LONG_POLL_WAIT_SECS,
@@ -68,7 +87,10 @@ import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { loadAccepted, upsertAccepted, type AcceptedContact } from "./local-store";
 import {
-  predecessorMailboxReadable,
+  decodeNumberByKey,
+  predecessorCursorStorageKey,
+  predecessorMailboxEvents,
+  readablePredecessorKeys,
   readPredecessorAdoptedAtMs,
   stampPredecessorAdoption,
 } from "./address-resolver";
@@ -101,33 +123,43 @@ export interface MailboxApi {
   removePending(messageId: number): void;
 }
 
-function predecessorCursorKey(accountIdB64: string): string {
-  return `lakko.contacts.predecessor-mailbox.v1.${accountIdB64}`;
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }
 
-function readPredecessorMailboxCursor(accountIdB64: string): number {
+function readPredecessorMailboxCursor(accountIdB64: string, keyHex: string): number {
   try {
-    const raw = globalThis.localStorage?.getItem(predecessorCursorKey(accountIdB64)) ?? null;
-    const n = raw === null ? 0 : Number.parseInt(raw, 10);
-    return Number.isFinite(n) && n > 0 ? n : 0;
+    const raw = globalThis.localStorage?.getItem(predecessorCursorStorageKey(accountIdB64)) ?? null;
+    return decodeNumberByKey(raw)[keyHex] ?? 0;
   } catch {
     return 0;
   }
 }
 
-function writePredecessorMailboxCursor(accountIdB64: string, cursor: number): void {
+function writePredecessorMailboxCursor(accountIdB64: string, keyHex: string, cursor: number): void {
   // A failed write throws, which holds the cursor: the rows come back.
-  globalThis.localStorage?.setItem(predecessorCursorKey(accountIdB64), String(cursor));
+  const storage = globalThis.localStorage;
+  if (storage === undefined) return;
+  const held = decodeNumberByKey(storage.getItem(predecessorCursorStorageKey(accountIdB64)));
+  held[keyHex] = cursor;
+  storage.setItem(predecessorCursorStorageKey(accountIdB64), JSON.stringify(held));
 }
 
-/** Whether the predecessor mailbox of `accountIdB64` is still read (ADR-0066
- *  section 3.5a rule 4). A device that holds a predecessor with no adoption
- *  time stored (it adopted before the time was kept) starts its window now. */
-function predecessorMailboxStillRead(accountIdB64: string): boolean {
+/** The own predecessor keys whose mailbox is still read (ADR-0066 section
+ *  3.5a rule 4), each inside its OWN 30-day window. A key with no time
+ *  stored (this device adopted before the time was kept) starts its window
+ *  now. */
+function predecessorKeysStillRead(accountIdB64: string, keysHex: readonly string[]): string[] {
   const now = Date.now();
-  const adoptedAtMs = readPredecessorAdoptedAtMs(accountIdB64);
-  if (adoptedAtMs === null) stampPredecessorAdoption(accountIdB64, now, false);
-  return predecessorMailboxReadable(adoptedAtMs, now);
+  const readable = readablePredecessorKeys(
+    keysHex,
+    (keyHex) => readPredecessorAdoptedAtMs(accountIdB64, keyHex),
+    now,
+  );
+  for (const keyHex of readable) stampPredecessorAdoption(accountIdB64, keyHex, now);
+  return readable;
 }
 
 const MailboxContext = createContext<MailboxApi>();
@@ -150,6 +182,105 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
     onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
   });
+
+  // ADR-0066 section 3.5a rule 6 - every write to a person's mailbox that is
+  // refused re-checks that person's address once, through this client's
+  // directory fetch and fail-closed gate.
+  installAddressRecheck((accountKey) => client.recheckAddress(accountKey));
+  onCleanup(() => installAddressRecheck(null));
+
+  // ADR-0066 section 3.5a rule 5 - what was granted before a rotation of
+  // this account's keys is spent. The two owed steps of the rotation record
+  // (`devices/key-rotation.ts`: `links`, `requests`) run here, where the
+  // directory client and the contacts client are.
+  const spentDiscovery = new DiscoveryClient();
+  installSpentRunners({
+    links: async () => {
+      const secrets = auth.identitySecrets();
+      const current = chats.accountIdentity();
+      const predecessors = chats.ownPredecessorIdentities();
+      if (secrets === null || current === null || predecessors.length === 0) return null;
+      const accountIdB64 = base64Encode(secrets.accountId);
+      // The owner list is answered to the key the directory publishes NOW.
+      const currentSeed = current.ed25519Seed;
+      let listed;
+      try {
+        listed = await spentDiscovery.listInvitesByOwner(secrets.accountId, currentSeed);
+      } catch (err) {
+        return [spentFailureOutcome(err)];
+      } finally {
+        currentSeed.fill(0);
+      }
+      if (listed.kind !== "list") return [];
+      // A link is signed by the account key of the moment it was minted: a
+      // predecessor's. The current seed is never tried, so a link minted
+      // after the rotation is not this step's to revoke.
+      const seeds = revocationSeedOrder(predecessors.map((p) => p.ed25519Seed));
+      const outcomes: SpentOutcome[] = [];
+      try {
+        for (const invite of listed.invites) {
+          const blobId = base64UrlDecodeNoPad(invite.blobIdSlug);
+          const attempts: RevokeAttempt[] = [];
+          for (const seed of seeds) {
+            try {
+              const result = await spentDiscovery.revokeInvite(blobId, seed);
+              attempts.push(result.kind === "revoked" ? "revoked" : "not-owner");
+            } catch (err) {
+              attempts.push(spentFailureOutcome(err) === "unreachable" ? "unreachable" : "not-owner");
+            }
+            const last = attempts[attempts.length - 1];
+            if (last === "revoked" || last === "unreachable") break;
+          }
+          const outcome = linkRevokeOutcome(attempts);
+          outcomes.push(outcome);
+          if (outcome !== "done") continue;
+          // Out of every local list of own links: the link's reach key, the
+          // kept secret and the kept link id.
+          const local = await mintedLinkFor(accountIdB64, "contact", invite.blobIdSlug);
+          if (local !== null) await reachSession()?.revokeLink(local.linkId).catch(() => undefined);
+          await forgetMintedLink(accountIdB64, "contact", invite.blobIdSlug);
+          forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), invite.blobIdSlug);
+        }
+      } finally {
+        for (const seed of seeds) seed.fill(0);
+      }
+      return outcomes;
+    },
+    requests: async (rotatedAtMs) => {
+      const secrets = auth.identitySecrets();
+      if (secrets === null || chats.accountIdentity() === null) return null;
+      // A reply grant is registered on the mailbox of the session's key: the
+      // reach session of the NEW key must be the one running.
+      const session = reachSession();
+      const own = chats.accountIdentity();
+      if (session === null || own === null) return null;
+      if (session.accountKeyHex !== journalHex(own.signaturePublicKey)) return null;
+      const accountIdB64 = base64Encode(secrets.accountId);
+      const accepted = new Set(
+        loadAccepted(accountIdB64)
+          .map((c) => c.accountIdHex)
+          .filter((hex): hex is string => hex !== undefined),
+      );
+      const waiting = waitingSentRequests(loadSentRequests(accountIdB64), accepted);
+      const outcomes: SpentOutcome[] = [];
+      for (const record of requestsToResend(waiting, rotatedAtMs)) {
+        let outcome: SpentOutcome;
+        try {
+          outcome = await client.resendContactRequestAfterRotation(
+            secrets,
+            hexToBytes(record.recipientAccountIdHex),
+          );
+        } catch (err) {
+          outcome = spentFailureOutcome(err);
+        }
+        outcomes.push(outcome);
+        // The stored entry is replaced: it now stands for the new request.
+        if (outcome === "done") recordSentRequest(accountIdB64, { ...record, sentAtMs: Date.now() });
+      }
+      return outcomes;
+    },
+  });
+  onCleanup(() => installSpentRunners(null));
 
   const [pending, setPending] = createSignal<readonly IncomingContactRequest[]>([]);
   const [busy, setBusy] = createSignal(false);
@@ -190,7 +321,17 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           if (ev.request.profile !== null) {
             profiles.ingest(base64Encode(ev.request.fromPubkey), ev.request.profile);
           }
-          fresh.push({ request: ev.request, row: ev.row });
+          // ADR-0066 section 3.5a rule 5 - one request per person: a request
+          // from the proven successor of a pending request's key replaces
+          // it, silently; a stale one from a superseded key is dropped.
+          const known = [...target.pending(), ...fresh.map((f) => f.request)];
+          const verdict = await client.pendingRequestsSupersededBy(ev.request, known);
+          if (verdict.dropIncoming) continue;
+          const replaced = new Set(verdict.replaces);
+          for (let i = fresh.length - 1; i >= 0; i--) {
+            if (replaced.has(fresh[i]?.request.messageId ?? -1)) fresh.splice(i, 1);
+          }
+          fresh.push({ request: ev.request, row: ev.row, replaces: verdict.replaces });
         } else if (ev.kind === "welcome") {
           if (joinedWelcomeIds.has(ev.welcome.messageId)) continue;
           welcomeAttempted = true;
@@ -284,15 +425,21 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
 
   // ADR-0066 section 3.5 (Stage A) — after a proven key rotation the
   // conversation leaves stay bound to the account key of before it, and a
-  // Welcome is addressed to the mailbox the leaf's binding names: the
-  // PREDECESSOR's. So that mailbox is read too, under the predecessor
-  // identity, for as long as the device holds one. Requests that reach it
-  // (a peer that has not seen the rotation yet) are opened with its key. Its
-  // cursor is its own row; the rows go through the same dispatch, one poll
-  // after the other, never concurrently.
+  // peer that has not observed the rotation addresses the mailbox of the
+  // key it knows: a PREDECESSOR's. So those mailboxes are read too, each
+  // under its own identity and with its own cursor, one poll after the
+  // other, never concurrently.
+  //
+  // Section 3.5a: own predecessors are a CHAIN (after a second rotation the
+  // key held in between has a mailbox as well), each read inside its own
+  // 30-day window; and a predecessor mailbox carries WELCOMES ONLY. A
+  // contact request or an ack that reaches one is not acted on: its reply
+  // grant and its seal name keys the holder of the old seed has too (rule
+  // 5), and the sender re-sends from, or to, the current key.
+  let polledPredecessor: WasmIdentity | null = null;
   const predecessorClient = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
-    accountIdentityProvider: () => chats.predecessorAccountIdentity(),
+    accountIdentityProvider: () => polledPredecessor,
     onPersist: async () => {
       const s = auth.state();
       if (s.kind !== "session") return;
@@ -301,16 +448,48 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
     onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
   });
-  const predecessorPoller: MailboxPoller = createMailboxPoller<IncomingMailboxEvent>({
-    readCursor: () => (activeAccount === null ? 0 : readPredecessorMailboxCursor(activeAccount)),
-    writeCursor: (next) => {
-      if (activeAccount === null) throw new Error("predecessor mailbox cursor write without an account");
-      writePredecessorMailboxCursor(activeAccount, next);
-    },
-    fetch: async (after, waitSecs, signal) =>
-      predecessorClient.pollMailbox(auth.identitySecrets(), after, waitSecs, signal),
-    dispatch,
-  });
+  const predecessorPollers = new Map<string, MailboxPoller>();
+  function predecessorPollerFor(keyHex: string): MailboxPoller {
+    const held = predecessorPollers.get(keyHex);
+    if (held !== undefined) return held;
+    const made: MailboxPoller = createMailboxPoller<IncomingMailboxEvent>({
+      readCursor: () =>
+        activeAccount === null ? 0 : readPredecessorMailboxCursor(activeAccount, keyHex),
+      writeCursor: (next) => {
+        if (activeAccount === null) throw new Error("predecessor mailbox cursor write without an account");
+        writePredecessorMailboxCursor(activeAccount, keyHex, next);
+      },
+      fetch: async (after, waitSecs, signal) =>
+        predecessorClient.pollMailbox(auth.identitySecrets(), after, waitSecs, signal, {
+          welcomesOnly: true,
+        }),
+      dispatch: (events) => dispatch(predecessorMailboxEvents(events)),
+    });
+    predecessorPollers.set(keyHex, made);
+    return made;
+  }
+
+  /** Read every own predecessor mailbox whose window is open, once each. */
+  async function pollPredecessorMailboxes(accountIdB64: string, signal: AbortSignal): Promise<void> {
+    const identities = chats.ownPredecessorIdentities();
+    if (identities.length === 0) return;
+    const byHex = new Map<string, WasmIdentity>();
+    for (const identity of identities) byHex.set(journalHex(identity.signaturePublicKey), identity);
+    for (const keyHex of predecessorKeysStillRead(accountIdB64, [...byHex.keys()])) {
+      const identity = byHex.get(keyHex);
+      if (identity === undefined) continue;
+      polledPredecessor = identity;
+      try {
+        await predecessorPollerFor(keyHex).poll(0, signal);
+      } catch (err) {
+        // Never costs the account mailbox, or the next predecessor, its poll.
+        // eslint-disable-next-line no-console
+        console.warn("predecessor mailbox poll failed", err);
+      } finally {
+        polledPredecessor = null;
+      }
+    }
+  }
 
   // ADR-0060 section 6 — one inbound mailbox per person: every Welcome is
   // addressed to the ACCOUNT mailbox (the device mailbox is claimed and
@@ -353,15 +532,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         // (ADR-0066 section 3.5); then the long poll of the account's.
         // Rule 4 of section 3.5a: read only, for 30 days from the adoption,
         // then left. Nothing is registered or written there.
-        if (chats.predecessorAccountIdentity() !== null && predecessorMailboxStillRead(accountIdB64)) {
-          try {
-            await predecessorPoller.poll(0, signal);
-          } catch (err) {
-            // Never costs the account mailbox its poll.
-            // eslint-disable-next-line no-console
-            console.warn("predecessor mailbox poll failed", err);
-          }
-        }
+        await pollPredecessorMailboxes(accountIdB64, signal);
         await poller.poll(LONG_POLL_WAIT_SECS, signal);
         return 0;
       },

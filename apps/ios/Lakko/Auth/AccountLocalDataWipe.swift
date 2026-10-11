@@ -140,6 +140,7 @@ enum AccountLocalDataWipe {
         step("key-rotation-pending") { KeychainKeyRotationPendingStore().clear(accountIdB64: accountIdB64) }
         step("own-predecessor-seed") { KeychainOwnPredecessorStore().clear(accountIdB64: accountIdB64) }
         step("keys-rotated-notice") { KeysRotatedNoticeStore().clear(accountIdB64: accountIdB64) }
+        step("profile-resend-owed") { ProfileResendOwed.Store().clear(accountIdB64: accountIdB64) }
         step("predecessor-inbox-cursor") {
             PredecessorMailbox.CursorStore().clear(accountIdB64: accountIdB64)
             PredecessorMailbox.AdoptionStore().clear(accountIdB64: accountIdB64)

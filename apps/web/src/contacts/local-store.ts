@@ -898,6 +898,34 @@ export function accountKeysOf(accountIdB64: string, owner?: string): AccountKeys
   };
 }
 
+/**
+ * The account id (standard base64) this device knows the key `keyB64` under:
+ * a pin whose current key or proven predecessor it is, else an accepted
+ * contact's row. `null` for a key no trusted local record names. Used to
+ * re-check a person's address (ADR-0066 section 3.5a rule 6); a claimed
+ * account id (a profile's) is deliberately not consulted.
+ */
+export function accountIdB64OfKey(keyB64: string, owner?: string): string | null {
+  const record = load(ownerOf(owner));
+  for (const [accountIdB64, pin] of Object.entries(record.pins)) {
+    if (
+      pin.pinnedSignaturePubkeyB64 === keyB64 ||
+      (pin.provenPredecessorsB64 ?? []).includes(keyB64)
+    ) {
+      return accountIdB64;
+    }
+  }
+  for (const contact of record.accepted) {
+    if (
+      contact.signaturePubkeyB64 === keyB64 ||
+      (contact.previousSignaturePubkeysB64 ?? []).includes(keyB64)
+    ) {
+      return accountIdB64OfHex(contact.accountIdHex);
+    }
+  }
+  return null;
+}
+
 /** Every pinned account's keys (the predecessor table's input). */
 export function loadAccountKeys(owner?: string): AccountKeys[] {
   const record = load(ownerOf(owner));

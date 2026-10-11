@@ -51,6 +51,10 @@ import { clearKnownGroupIds } from "../devices/state-bundle";
 import { clearDeviceLinkAnswers } from "../devices/device-link";
 import { clearAddedNotice } from "../devices/added-notice";
 import { clearAccountContacts } from "../contacts/local-store";
+import {
+  predecessorAdoptionStorageKey,
+  predecessorCursorStorageKey,
+} from "../contacts/address-resolver";
 import { clearInboxForAccount } from "../contacts/inbox-store";
 import { clearSentRequests } from "../contacts/sent-requests";
 import { clearInviteLinkSecrets } from "../contacts/invite-link-secrets";
@@ -251,11 +255,11 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "key-rotation-state", run: () => deleteKeyRotationState(accountIdB64) },
     {
       name: "predecessor-mailbox-cursor",
-      run: () => removeLocal(`lakko.contacts.predecessor-mailbox.v1.${accountIdB64}`),
+      run: () => removeLocal(predecessorCursorStorageKey(accountIdB64)),
     },
     {
       name: "predecessor-mailbox-adopted",
-      run: () => removeLocal(`lakko.contacts.predecessor-mailbox-adopted.v1.${accountIdB64}`),
+      run: () => removeLocal(predecessorAdoptionStorageKey(accountIdB64)),
     },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },

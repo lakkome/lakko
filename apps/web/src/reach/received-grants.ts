@@ -24,11 +24,32 @@ export interface HeldGrant {
 /** The scoped classes a profile or a member card can carry. */
 export type ScopedGrantClass = "group" | "member" | "channel";
 
+/**
+ * A grant that a newer one of the same class replaced after a ROTATION of
+ * the sender's account keys (ADR-0066 section 3.5a rule 6), kept beside it.
+ *
+ * The re-sent profile can reach this device before it has observed the
+ * proven key change. It then holds the NEW grant and still addresses the
+ * OLD mailbox, which only the old grant opens. So the old one is kept, with
+ * the address it was good for, until the address is known to have moved.
+ */
+export interface PreviousGrant extends HeldGrant {
+  /** The account key hex this device addressed the sender by when the
+   *  newer grant arrived. The grant is offered only while the sender still
+   *  resolves to this key. */
+  readonly addressHex: string;
+}
+
 /** Everything kept about one person. */
 export interface PersonGrants {
   readonly contact?: HeldGrant;
   /** Scope id hex -> the scoped grants received in that scope. */
   readonly scopes: Readonly<Record<string, Partial<Record<ScopedGrantClass, HeldGrant>>>>;
+  /** The grants of before a rotation, per class ({@link PreviousGrant}). */
+  readonly previous?: {
+    readonly contact?: PreviousGrant;
+    readonly scopes?: Readonly<Record<string, Partial<Record<ScopedGrantClass, PreviousGrant>>>>;
+  };
 }
 
 /** A committer-delegation envelope kept for a pending add. */
@@ -47,27 +68,101 @@ export interface ReceivedGrants {
 
 export const EMPTY_RECEIVED_GRANTS: ReceivedGrants = { people: {}, delegations: {} };
 
-function newer(incoming: HeldGrant, stored: HeldGrant | undefined): boolean {
-  // A higher version replaces; the same version re-sent (a growth re-send)
-  // changes nothing; a lower one is a stale replay and is ignored.
-  if (stored === undefined || incoming.version > stored.version) return true;
-  // ADR-0066 section 3.5a: the version counters survive a rotation of the
-  // account keys, but every reach key is derived from the account seed, so
-  // the profile re-sent after a rotation carries the SAME version with
-  // another key. That grant is the one the new mailbox accepts; the stored
-  // one opens only the mailbox that was left.
-  return incoming.version === stored.version && incoming.wireB64 !== stored.wireB64;
+/** What an incoming grant does to the stored one of its class. */
+export type GrantFiling =
+  /** Nothing: a re-send of what is held, a stale replay, or the grant of
+   *  before a rotation coming back. */
+  | "ignore"
+  /** A higher version: the sender re-keyed. The stored one is dead. */
+  | "replace"
+  /** The same version under another key: the sender's ACCOUNT keys were
+   *  rotated (every reach key derives from the account seed, and the version
+   *  counters survive a rotation). The incoming grant opens the new mailbox;
+   *  the stored one is kept beside it for the mailbox that was left. */
+  | "replace-keep-previous";
+
+/** The filing decision. Pure. */
+export function grantFiling(
+  incoming: HeldGrant,
+  stored: HeldGrant | undefined,
+  previous: PreviousGrant | undefined,
+): GrantFiling {
+  if (stored === undefined || incoming.version > stored.version) return "replace";
+  if (incoming.version < stored.version) return "ignore";
+  if (incoming.wireB64 === stored.wireB64) return "ignore";
+  // The grant this one already replaced, replayed (an old profile row read
+  // again): it must not put the old key back in front.
+  if (previous !== undefined && previous.wireB64 === incoming.wireB64) return "ignore";
+  return "replace-keep-previous";
 }
 
-/** File a `contact` grant from `senderHex`. */
+function previousOf(stored: HeldGrant, addressHex: string): PreviousGrant {
+  return {
+    wireB64: stored.wireB64,
+    version: stored.version,
+    receivedAtMs: stored.receivedAtMs,
+    addressHex,
+  };
+}
+
+/**
+ * File a `contact` grant from `senderHex`.
+ *
+ * @param addressHex the account key this device addresses the sender by NOW
+ *   (the sender's key resolved through the proven-predecessor table); the
+ *   sender's own key when omitted. Recorded with a grant kept as the
+ *   previous one.
+ */
 export function fileContactGrant(
   store: ReceivedGrants,
   senderHex: string,
   grant: HeldGrant,
+  addressHex: string = senderHex,
 ): ReceivedGrants {
   const person = store.people[senderHex] ?? { scopes: {} };
-  if (!newer(grant, person.contact)) return store;
-  return { ...store, people: { ...store.people, [senderHex]: { ...person, contact: grant } } };
+  const filing = grantFiling(grant, person.contact, person.previous?.contact);
+  if (filing === "ignore") return store;
+  const previous = { ...(person.previous ?? {}) };
+  if (filing === "replace-keep-previous" && person.contact !== undefined) {
+    previous.contact = previousOf(person.contact, addressHex);
+  } else {
+    delete previous.contact;
+  }
+  return {
+    ...store,
+    people: { ...store.people, [senderHex]: withPrevious({ ...person, contact: grant }, previous) },
+  };
+}
+
+function withPrevious(person: PersonGrants, previous: NonNullable<PersonGrants["previous"]>): PersonGrants {
+  const scopes: Record<string, Partial<Record<ScopedGrantClass, PreviousGrant>>> = {};
+  for (const [scopeHex, held] of Object.entries(previous.scopes ?? {})) {
+    if (Object.keys(held).length > 0) scopes[scopeHex] = held;
+  }
+  const next: { contact?: PreviousGrant; scopes?: typeof scopes } = {};
+  if (previous.contact !== undefined) next.contact = previous.contact;
+  if (Object.keys(scopes).length > 0) next.scopes = scopes;
+  const { previous: _dropped, ...rest } = person;
+  return Object.keys(next).length === 0 ? rest : { ...rest, previous: next };
+}
+
+function withoutPreviousScoped(
+  person: PersonGrants,
+  scopeHex: string,
+  classes: readonly ScopedGrantClass[] | null,
+): PersonGrants {
+  const held = person.previous?.scopes?.[scopeHex];
+  if (held === undefined) return person;
+  const kept: Partial<Record<ScopedGrantClass, PreviousGrant>> = {};
+  if (classes !== null) {
+    for (const [cls, g] of Object.entries(held) as [ScopedGrantClass, PreviousGrant][]) {
+      if (!classes.includes(cls)) kept[cls] = g;
+    }
+  }
+  return withPrevious(person, {
+    ...(person.previous ?? {}),
+    scopes: { ...(person.previous?.scopes ?? {}), [scopeHex]: kept },
+  });
 }
 
 /** File a scoped grant (`group`, `member`, `channel`) from `senderHex`
@@ -78,18 +173,28 @@ export function fileScopedGrant(
   scopeHex: string,
   cls: ScopedGrantClass,
   grant: HeldGrant,
+  addressHex: string = senderHex,
 ): ReceivedGrants {
   const person = store.people[senderHex] ?? { scopes: {} };
   const scope = person.scopes[scopeHex] ?? {};
-  if (!newer(grant, scope[cls])) return store;
+  const stored = scope[cls];
+  const filing = grantFiling(grant, stored, person.previous?.scopes?.[scopeHex]?.[cls]);
+  if (filing === "ignore") return store;
   const nextScope = { ...scope, [cls]: grant };
-  return {
-    ...store,
-    people: {
-      ...store.people,
-      [senderHex]: { ...person, scopes: { ...person.scopes, [scopeHex]: nextScope } },
+  const previousScope = { ...(person.previous?.scopes?.[scopeHex] ?? {}) };
+  if (filing === "replace-keep-previous" && stored !== undefined) {
+    previousScope[cls] = previousOf(stored, addressHex);
+  } else {
+    delete previousScope[cls];
+  }
+  const next = withPrevious(
+    { ...person, scopes: { ...person.scopes, [scopeHex]: nextScope } },
+    {
+      ...(person.previous ?? {}),
+      scopes: { ...(person.previous?.scopes ?? {}), [scopeHex]: previousScope },
     },
-  };
+  );
+  return { ...store, people: { ...store.people, [senderHex]: next } };
 }
 
 /**
@@ -113,10 +218,14 @@ export function withdrawMissingScopedGrants(
     else changed = true;
   }
   if (!changed) return store;
-  return {
-    ...store,
-    people: { ...store.people, [senderHex]: { ...person, scopes: { ...person.scopes, [scopeHex]: kept } } },
-  };
+  // A withdrawn class takes its kept previous grant with it.
+  const withdrawn = (Object.keys(scope) as ScopedGrantClass[]).filter((cls) => !present.has(cls));
+  const next = withoutPreviousScoped(
+    { ...person, scopes: { ...person.scopes, [scopeHex]: kept } },
+    scopeHex,
+    withdrawn,
+  );
+  return { ...store, people: { ...store.people, [senderHex]: next } };
 }
 
 /** Forget every grant received in a scope (this account left the group). */
@@ -127,7 +236,7 @@ export function dropScope(store: ReceivedGrants, scopeHex: string): ReceivedGran
     if (scopeHex in p.scopes) {
       const scopes = { ...p.scopes };
       delete scopes[scopeHex];
-      people[k] = { ...p, scopes };
+      people[k] = withoutPreviousScoped({ ...p, scopes }, scopeHex, null);
       changed = true;
     } else {
       people[k] = p;
@@ -141,7 +250,9 @@ export function dropContactGrant(store: ReceivedGrants, senderHex: string): Rece
   const person = store.people[senderHex];
   if (person?.contact === undefined) return store;
   const { contact: _dropped, ...rest } = person;
-  return { ...store, people: { ...store.people, [senderHex]: rest } };
+  const previous = { ...(rest.previous ?? {}) };
+  delete previous.contact;
+  return { ...store, people: { ...store.people, [senderHex]: withPrevious(rest, previous) } };
 }
 
 /** Which classes this account holds for `accountHex` (in `scopeHex` when
@@ -236,6 +347,55 @@ export function grantsInOrderForPerson(
       seen.add(g.wireB64);
       out.push(g);
     }
+  }
+  // Rule 6: the grants of before a rotation come LAST, and only while the
+  // person is still addressed by the key they were good for. Once the proven
+  // change is observed the address moves (`keysHex[0]` changes) and they are
+  // no longer offered.
+  const addressHex = keysHex[0];
+  if (addressHex !== undefined) {
+    for (const hex of keysHex) {
+      for (const g of previousGrantsInOrder(store, hex, addressHex, options)) {
+        if (seen.has(g.wireB64)) continue;
+        seen.add(g.wireB64);
+        out.push(g);
+      }
+    }
+  }
+  return out;
+}
+
+/** The kept previous grants filed under `accountHex` that are still good for
+ *  `addressHex`, in the class order of {@link grantsInOrder}. */
+export function previousGrantsInOrder(
+  store: ReceivedGrants,
+  accountHex: string,
+  addressHex: string,
+  options: { readonly scopeHex?: string; readonly allowMember?: boolean } = {},
+): HeldGrant[] {
+  const previous = store.people[accountHex]?.previous;
+  if (previous === undefined) return [];
+  const out: HeldGrant[] = [];
+  const live = (g: PreviousGrant | undefined): g is PreviousGrant =>
+    g !== undefined && g.addressHex === addressHex;
+  if (live(previous.contact)) out.push(previous.contact);
+  const scopes = previous.scopes ?? {};
+  const scopeIds = Object.keys(scopes);
+  const ordered =
+    options.scopeHex !== undefined
+      ? [options.scopeHex, ...scopeIds.filter((s) => s !== options.scopeHex)]
+      : scopeIds;
+  for (const s of ordered) {
+    const g = scopes[s]?.group;
+    if (live(g)) out.push(g);
+  }
+  for (const s of ordered) {
+    const g = scopes[s]?.channel;
+    if (live(g)) out.push(g);
+  }
+  if (options.allowMember === true && options.scopeHex !== undefined) {
+    const g = scopes[options.scopeHex]?.member;
+    if (live(g)) out.push(g);
   }
   return out;
 }

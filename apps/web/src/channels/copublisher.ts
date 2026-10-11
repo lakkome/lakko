@@ -97,7 +97,7 @@ import {
 } from "../contacts/invite-link";
 import { parseGroupInviteSlug, splitGroupInviteLink } from "../contacts/group-invite";
 import { reachSession } from "../reach/reach-service";
-import { accountMailboxOf, mailboxOfExactKey, resolveWriteAuth } from "../reach/mailbox-write";
+import { accountMailboxOf, mailboxOfExactKey, writeToPerson } from "../reach/mailbox-write";
 import { forgetJoinReply, joinReplyFor, rememberJoinReply } from "../reach/join-replies";
 import { journalHex } from "../ds/access";
 import { KeyedError } from "../l10n/keyed-error";
@@ -414,13 +414,13 @@ export async function approveCoPublisher(
       // `reply` grant the joiner's attribution carried (kept by the poll).
       // ADR-0066 section 3.5a rule 1 - resolved to the joiner's CURRENT
       // mailbox when the key named is a proven predecessor.
-      const mailbox = await accountMailboxOf(proposalRef);
-      const write = await resolveWriteAuth(proposalRef, { explicit: joinReplyFor(proposalRef) });
-      try {
-        await ds.publishMailbox(mailbox, wrapEnvelope(KIND_WELCOME, added.welcome), write.auth);
-      } finally {
-        write.release();
-      }
+      // Rule 6: a refused write re-checks the address once.
+      const welcome = wrapEnvelope(KIND_WELCOME, added.welcome);
+      await writeToPerson(
+        proposalRef,
+        { explicit: joinReplyFor(proposalRef) },
+        (mailbox, auth) => ds.publishMailbox(mailbox, welcome, auth),
+      );
       forgetJoinReply(proposalRef);
     } finally {
       signerN?.free();

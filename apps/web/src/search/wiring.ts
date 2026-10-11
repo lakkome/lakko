@@ -21,6 +21,7 @@ import { DiscoveryClient } from "../discovery/client";
 import { DsClient } from "../ds/client";
 import { bytesToHex } from "../channels/composer";
 import { accountMailboxOf } from "../reach/mailbox-write";
+import { provenSuccessorWith } from "../contacts/proven-successor";
 import { bestGrantForPerson } from "../reach/received-grants";
 import { personKeysHex } from "../contacts/address-resolver";
 import { reachSession, reachSignerForGrantWire } from "../reach/reach-service";
@@ -170,6 +171,26 @@ async function reachCheckWith(identityPk: Uint8Array, grantWireB64: string): Pro
   }
 }
 
+/**
+ * ADR-0066 section 3.5a - whether the key `accountId` publishes now is the
+ * proven successor of `foundKey`: the pin store's proven chain, or the
+ * supersession proof the published bundle carries, verified under the found
+ * key. A failed fetch proves nothing.
+ */
+async function provenPredecessorOf(
+  discovery: DiscoveryClient,
+  foundKey: Uint8Array,
+  accountId: Uint8Array,
+): Promise<boolean> {
+  try {
+    const bundle = await discovery.identityFetch(accountId);
+    if (bundle === null) return false;
+    return await provenSuccessorWith(foundKey, base64Decode(bundle.signature_pubkey), bundle);
+  } catch {
+    return false;
+  }
+}
+
 /** The network search, answered from the running app. */
 export function peopleSearchDeps(args: {
   readonly wasm: Wasm;
@@ -208,6 +229,7 @@ export function peopleSearchDeps(args: {
       const bundle = await discovery.identityFetch(accountId);
       return bundle === null ? null : base64Decode(bundle.signature_pubkey);
     },
+    provenPredecessor: (foundKey, accountId) => provenPredecessorOf(discovery, foundKey, accountId),
     known: (keyB64) => knownPerson(profiles, keyB64),
     openIntroductions: async (probes) => {
       const session = reachSession();
@@ -262,6 +284,7 @@ export function sendDeps(args: {
         x25519Pub: base64Decode(bundle.x25519_pubkey),
       };
     },
+    provenPredecessor: (foundKey, accountId) => provenPredecessorOf(discovery, foundKey, accountId),
     sendByUsername: async (username, intro, grantWireB64) => {
       await withGrant(grantWireB64, (writeGrant) =>
         client.sendContactRequest(args.identity(), username, intro, { writeGrant }),

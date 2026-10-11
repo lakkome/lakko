@@ -75,6 +75,12 @@ public class ReachManager internal constructor(
      *  (its contacts' and its own), by the signed-in account id (standard
      *  base64). Only a PROVEN step is ever in it. */
     private val provenLinks: (ownerAccountIdB64: String) -> List<me.lakko.app.contacts.ProvenLink> = { emptyList() },
+    /** ADR-0066 section 3.5a - this account's own previous account keys
+     *  this device still holds the seed of, newest first, each as
+     *  `(signature public key, 32-byte Ed25519 seed)`. A committer
+     *  delegation may name any of them. SECRET; the caller of the provider
+     *  wipes the seeds. */
+    private val ownPredecessorKeys: (ownerAccountIdB64: String) -> List<Pair<ByteArray, ByteArray>> = { emptyList() },
 ) {
     /** The own-profile store (ADR-0048 section 4a), keyed by the raw account
      *  id: the own name travels between the account's devices beside the
@@ -193,11 +199,19 @@ public class ReachManager internal constructor(
                 // Section 3.5a rule 3: the grants every conversation holds
                 // for this account open the OLD mailbox, so the profile is
                 // owed to all of them again, under this key.
+                // Rule 5: every `link` and `reply` key this device minted
+                // derives from the OLD seed and named the old mailbox. None
+                // of them is registered on the new one: the links are kept
+                // aside for the rotating device to revoke at the ledger,
+                // the reply keys are dropped.
                 doc.copy(
                     registered = emptyList(),
                     registeredOpen = null,
                     registeredForKeyHex = boundKeyHex,
                     profileResendOwedForKeyHex = boundKeyHex,
+                    links = emptyList(),
+                    replies = emptyList(),
+                    spentLinks = spentLinksAfterMove(doc.spentLinks, doc.links),
                 )
             } else {
                 doc.copy(registeredForKeyHex = boundKeyHex)
@@ -274,6 +288,39 @@ public class ReachManager internal constructor(
         lock.withLock {
             if (binding.get() !== b || doc.profileResendOwedForKeyHex == null) return@withLock
             doc = doc.copy(profileResendOwedForKeyHex = null)
+            store.save(b.accountIdB64, doc)
+        }
+    }
+
+    /** Rule 5 - the ledger ids (hex) of the links this device minted
+     *  before the account's keys moved, still to be revoked. */
+    public fun spentLinkBlobsHex(): List<String> = doc.spentLinks.mapNotNull { it.blobIdHex }
+
+    /** Whether any link minted before the keys moved is still recorded. */
+    public fun hasSpentLinks(): Boolean = doc.spentLinks.isNotEmpty()
+
+    /** Rule 5 - the spent links were dealt with (revoked where a ledger row
+     *  existed): forget them. */
+    public suspend fun spentLinksDone() {
+        val b = binding.get() ?: return
+        lock.withLock {
+            if (binding.get() !== b || doc.spentLinks.isEmpty()) return@withLock
+            doc = doc.copy(spentLinks = emptyList())
+            store.save(b.accountIdB64, doc)
+        }
+    }
+
+    /** Rule 6 - the address of the person known by [ownerKey] is known
+     *  current (their identity bundle just passed the gate): a grant kept
+     *  beside a newer one of the same class is dropped. */
+    public suspend fun addressKnownCurrent(ownerKey: ByteArray) {
+        val b = binding.get() ?: return
+        val keys = personKeys(ownerKey)
+        lock.withLock {
+            if (binding.get() !== b) return@withLock
+            val next = withoutPreviousGrants(doc.held, keys)
+            if (next === doc.held) return@withLock
+            doc = doc.copy(held = next)
             store.save(b.accountIdB64, doc)
         }
     }
@@ -1014,11 +1061,9 @@ public class ReachManager internal constructor(
                 }.getOrNull()
                 if (old != null && old.version > grant.version) return@withLock false
             }
-            doc = doc.copy(
-                held = doc.held.filterNot {
-                    it.ownerKeyHex == ownerHex && it.kind == kind.name && it.scopeHex == scopeKey
-                } + StoredHeld(ownerHex, kind.name, scopeKey, reachHex(wire)),
-            )
+            // Rule 6: a grant this one replaces is kept beside it until the
+            // person's address is known current.
+            doc = doc.copy(held = heldWithGrant(doc.held, ownerHex, kind.name, scopeKey, reachHex(wire)))
             store.save(b.accountIdB64, doc)
             true
         }
@@ -1085,11 +1130,15 @@ public class ReachManager internal constructor(
      * for the new mailbox is tried before an older one of the same class.
      */
     public fun heldFor(ownerKey: ByteArray): List<Pair<HeldGrantRef, FfiReachGrant>> {
-        return heldForPerson(doc.held, personKeys(ownerKey)).mapNotNull { h ->
-            val kind = runCatching { ReachKind.valueOf(h.kind) }.getOrNull() ?: return@mapNotNull null
-            val grant = runCatching { uniffi.lakko_ffi_uniffi.decodeReachGrant(reachUnhex(h.grantHex)!!) }
-                .getOrNull() ?: return@mapNotNull null
-            HeldGrantRef(kind, h.scopeHex) to grant
+        return heldForPerson(doc.held, personKeys(ownerKey)).flatMap { h ->
+            val kind = runCatching { ReachKind.valueOf(h.kind) }.getOrNull() ?: return@flatMap emptyList()
+            // Rule 6: the grant an entry replaced is still a candidate,
+            // after the newer one.
+            grantWiresOf(h).mapNotNull { wireHex ->
+                val grant = runCatching { uniffi.lakko_ffi_uniffi.decodeReachGrant(reachUnhex(wireHex)!!) }
+                    .getOrNull() ?: return@mapNotNull null
+                HeldGrantRef(kind, h.scopeHex) to grant
+            }
         }
     }
 
@@ -1145,8 +1194,10 @@ public class ReachManager internal constructor(
         }
         if (purpose == WritePurpose.WELCOME && groupHex != null) {
             out += {
-                delegationFor(groupHex, ownerKey)?.let { header ->
-                    DsReachAuth(reachSigner(b.accountSeed.copyOf()), delegationHeader = header)
+                // The write is signed with the own key the delegation
+                // NAMES: the current one, or an own predecessor.
+                delegationFor(groupHex, ownerKey)?.let { picked ->
+                    DsReachAuth(reachSigner(picked.signerSeed), delegationHeader = picked.header)
                 }
             }
         }
@@ -1319,25 +1370,49 @@ public class ReachManager internal constructor(
         }
     }
 
-    /** The delegation header naming this account for a Welcome to
-     *  [addedAccountKey] in [groupHex], or `null`. */
-    public fun delegationFor(groupHex: String, addedAccountKey: ByteArray): String? {
+    /** A delegation this device may use: its header and the 32-byte
+     *  Ed25519 seed of the own account key it names. SECRET. */
+    public class OwnDelegation(public val header: String, public val signerSeed: ByteArray)
+
+    /**
+     * The delegation naming this account for a Welcome to [addedAccountKey]
+     * in [groupHex], or `null`.
+     *
+     * ADR-0066 3.5a: a proposer names the committer by the account key IT
+     * knows. One that observed this account's proven rotation names the
+     * current key; one that has not names the key the role table carries,
+     * a predecessor. So every own key this device holds the seed of is
+     * tried ([pickOwnDelegation], the current one first) and the write is
+     * signed with the key that was named.
+     */
+    public fun delegationFor(groupHex: String, addedAccountKey: ByteArray): OwnDelegation? {
         val b = binding.get() ?: return null
-        // ADR-0066 3.5a: a delegation names the added person by whichever of
-        // their keys the proposer knew; the current key's first.
+        // A delegation names the added person by whichever of their keys
+        // the proposer knew; the current key's first.
         val addedKeys = personKeys(addedAccountKey)
-        val forPerson = addedKeys.flatMap { key ->
+        val envelopes = addedKeys.flatMap { key ->
             doc.delegations.filter { it.groupHex == groupHex.lowercase() && it.addedAccountKeyHex == key }
-        }
-        for (d in forPerson) {
-            val env = runCatching {
+        }.mapNotNull { d ->
+            runCatching {
                 uniffi.lakko_ffi_uniffi.decodeCommitterDelegationEnvelope(reachUnhex(d.envelopeHex)!!)
-            }.getOrNull() ?: continue
-            val header = runCatching { uniffi.lakko_ffi_uniffi.committerDelegationFor(env, b.accountKey) }
-                .getOrNull()
-            if (header != null) return header
+            }.getOrNull()
         }
-        return null
+        if (envelopes.isEmpty()) return null
+        val previous = try {
+            ownPredecessorKeys(b.accountIdB64).filterNot { it.first.contentEquals(b.accountKey) }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        try {
+            val keys = listOf(b.accountKey) + previous.map { it.first }
+            val (header, index) = pickOwnDelegation(envelopes, keys) { env, key ->
+                uniffi.lakko_ffi_uniffi.committerDelegationFor(env, key)
+            } ?: return null
+            val seed = if (index == 0) b.accountSeed.copyOf() else previous[index - 1].second.copyOf()
+            return OwnDelegation(header, seed)
+        } finally {
+            previous.forEach { it.second.fill(0) }
+        }
     }
 
     /**
@@ -1423,6 +1498,7 @@ public class ReachManager internal constructor(
                     store = EncryptedReachDocStore(context),
                     ownProfiles = ContextOwnProfileAccess(context.applicationContext),
                     provenLinks = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context.applicationContext)::load,
+                    ownPredecessorKeys = { accountIdB64 -> ownPredecessorKeysOnDevice(context.applicationContext, accountIdB64) },
                 ).also { instance = it }
             }
 
@@ -1465,4 +1541,22 @@ public fun FfiReachClass.toKind(): ReachKind = when (this) {
     FfiReachClass.MEMBER -> ReachKind.MEMBER
     FfiReachClass.CHANNEL -> ReachKind.CHANNEL
     FfiReachClass.FOF -> ReachKind.FOF
+}
+
+/** This account's own previous account keys on this device, NEWEST first,
+ *  each with its 32-byte Ed25519 seed (ADR-0066 3.5a). The caller wipes the
+ *  seeds. */
+private fun ownPredecessorKeysOnDevice(context: Context, accountIdB64: String): List<Pair<ByteArray, ByteArray>> {
+    val rows = me.lakko.app.auth.OwnPredecessorStore.onDevice(context).load(accountIdB64)
+    try {
+        return rows.asReversed().mapNotNull { row ->
+            try {
+                Identity.fromSeed(row.phraseSeed).use { it.signaturePublicKey() to it.ed25519Seed() }
+            } catch (_: Throwable) {
+                null
+            }
+        }
+    } finally {
+        rows.forEach { it.zero() }
+    }
 }

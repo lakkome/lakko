@@ -4558,6 +4558,10 @@
       "text": "Suas chaves de acesso continuam permitindo entrar. \"Restaurar chaves com esta chave de acesso\" fica desativado até você ativar de novo.",
       "status": "machine"
     },
+    "devices.rotate.effect_links": {
+      "text": "Os links de convite e de chamada que você criou antes deixam de funcionar. Crie novos.",
+      "status": "machine"
+    },
     "devices.rotate.effect_phrase": {
       "text": "Você recebe uma nova frase de recuperação. A antiga deixa de funcionar.",
       "status": "machine"

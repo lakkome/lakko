@@ -34,6 +34,19 @@ const SLOTS: readonly Slot[] = ["account", "device", "predecessor"];
 const installed: Record<Slot, string | null> = { account: null, device: null, predecessor: null };
 const generation: Record<Slot, number> = { account: 0, device: 0, predecessor: 0 };
 
+/** ADR-0066 section 3.5a - the mailboxes of the INTERMEDIATE own
+ *  predecessors (the keys held between two rotations), read inside their own
+ *  30-day windows. A list, not a slot: there is one per earlier rotation. */
+let chainInstalled: string[] = [];
+let chainGeneration = 0;
+
+function stillUsed(hex: string, exceptSlot: Slot | null): boolean {
+  return (
+    SLOTS.some((other) => other !== exceptSlot && installed[other] === hex) ||
+    chainInstalled.includes(hex)
+  );
+}
+
 function dropSlot(slot: Slot): void {
   const hex = installed[slot];
   installed[slot] = null;
@@ -41,7 +54,7 @@ function dropSlot(slot: Slot): void {
   // The device identity falls back to a second instance of the account seed
   // when no device key exists, so both slots can name one mailbox: keep the
   // signer while the other slot still uses it.
-  if (SLOTS.some((other) => other !== slot && installed[other] === hex)) return;
+  if (stillUsed(hex, slot)) return;
   dsAccess.dropMailbox(hex);
 }
 
@@ -74,8 +87,48 @@ export function installMailboxAccess(slot: Slot, identity: WasmIdentity | null):
   })();
 }
 
+/**
+ * Install the mailbox signers of the intermediate own predecessors (ADR-0066
+ * section 3.5a rule 4), replacing the previous list. The mailboxes are READ
+ * only; the claim is the idempotent one this key already made when it was
+ * the account's. Never throws.
+ */
+export function installPredecessorChainAccess(identities: readonly WasmIdentity[]): void {
+  chainGeneration += 1;
+  const mine = chainGeneration;
+  const previous = chainInstalled;
+  chainInstalled = [];
+  for (const hex of previous) {
+    if (!stillUsed(hex, null)) dsAccess.dropMailbox(hex);
+  }
+  if (identities.length === 0) return;
+  void (async (): Promise<void> => {
+    try {
+      const wasm = await loadWasm();
+      for (const identity of identities) {
+        if (chainGeneration !== mine) return;
+        const signer = wasm.dsMailboxSigner(identity);
+        chainInstalled.push(dsAccess.setMailboxSigner(signer));
+        const held = dsAccess.mailboxSigner(signer.mailboxPseudonym());
+        if (held === null) continue;
+        try {
+          await new DsClient().claimMailbox(held);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("ds: predecessor mailbox claim failed; retried on the next refused read", err);
+        }
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ds: predecessor mailbox signers not installed", err);
+    }
+  })();
+}
+
 /** Sign-out: forget every mailbox and group signer. */
 export function clearDsAccess(): void {
+  chainGeneration += 1;
+  chainInstalled = [];
   for (const slot of SLOTS) {
     generation[slot] += 1;
     installed[slot] = null;

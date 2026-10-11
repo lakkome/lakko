@@ -73,6 +73,25 @@ describe("grant lookup across a proven rotation", () => {
 });
 
 describe("the reach book follows the account key (section 3.5, Reach)", () => {
+  it("what was granted before the rotation is spent: links and open requests leave the book (3.5a rule 5)", () => {
+    const book = {
+      ...EMPTY_REACH_BOOK,
+      registeredForKeyHex: K0,
+      links: [{ linkIdHex: "aa", expiresAtMs: null }],
+      replies: [{ scopeHex: "bb", expiresAtMs: 9e15, purpose: "contact-request" as const, peerHex: "cc" }],
+      versions: { "contact:": 2 },
+    };
+    const moved = bindReachBook(book, K1);
+    // Their keys derive from the old seed; "the same" scope on the new
+    // mailbox would be a key nobody holds.
+    expect(moved.links).toEqual([]);
+    expect(moved.replies).toEqual([]);
+    expect(moved.versions).toEqual({ "contact:": 2 });
+    // Without a key change nothing is dropped.
+    expect(bindReachBook(book, K0).links).toHaveLength(1);
+    expect(bindReachBook(book, K0).replies).toHaveLength(1);
+  });
+
   const registered = { ...EMPTY_REACH_BOOK, registered: { pk: null }, open: true, versions: { "contact:": 4 } };
 
   it("the decision", () => {

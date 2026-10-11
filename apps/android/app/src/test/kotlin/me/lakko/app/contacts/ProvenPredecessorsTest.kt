@@ -144,4 +144,56 @@ class ProvenPredecessorsTest {
         // sealed for a mailbox nobody is addressed at any more.
         assertTrue(staleRecipientKey(old, current))
     }
+
+    // --- ADR-0066 section 3.5a rule 5 / people search: which key came first --
+
+    @Test
+    fun `a key precedes only the keys its own proven steps lead to`() {
+        val links = withProvenLink(listOf(proven(alice, "K1", "K2")), proven(alice, "K2", "K3"))
+        assertTrue(keyPrecedes("K1", "K2", links))
+        assertTrue(keyPrecedes("K1", "K3", links))
+        assertTrue(keyPrecedes("K2", "K3", links))
+        // Never backwards, never itself.
+        assertFalse(keyPrecedes("K3", "K1", links))
+        assertFalse(keyPrecedes("K2", "K2", links))
+        // Never across what nothing proved, and never to another account.
+        assertFalse(keyPrecedes("K1", "K9", links))
+        assertFalse(keyPrecedes("K1", "K2", emptyList()))
+        val withBob = withProvenLink(links, proven(bob, "B1", "B2"))
+        assertFalse(keyPrecedes("K1", "B2", withBob))
+    }
+
+    @Test
+    fun `a refused mailbox write is recognised bare or wrapped, and nothing else is`() {
+        val refusal = me.lakko.app.ds.DsReachRefusedError("/ds/mailbox", "")
+        assertTrue(isMailboxRefusal(refusal))
+        assertTrue(isMailboxRefusal(ContactsError.wrap(refusal)))
+        assertTrue(isMailboxRefusal(ContactsError.reachRefused(refusal)))
+        assertFalse(isMailboxRefusal(ContactsError.wrap(java.io.IOException("down"))))
+        assertFalse(isMailboxRefusal(ContactsError.usernameUnknown("anna")))
+        assertFalse(isMailboxRefusal(java.io.IOException("down")))
+    }
+
+    @Test
+    fun `a request that cannot be sent again is dropped only when the person is gone`() {
+        val refusal = me.lakko.app.ds.DsReachRefusedError("/ds/mailbox", "")
+        val gone = me.lakko.app.reach.RequestResend.GONE
+        val failed = me.lakko.app.reach.RequestResend.FAILED
+        assertEquals(gone, requestResendOutcome(ContactsError.wrap(refusal)))
+        assertEquals(gone, requestResendOutcome(ContactsError.reachRefused(refusal)))
+        assertEquals(gone, requestResendOutcome(ContactsError.noIdentityBundle(ByteArray(16))))
+        assertEquals(
+            gone,
+            requestResendOutcome(SupersessionRefused(SupersessionRefusedReason.ProofAbsent, "acct", "refused")),
+        )
+        // The network: the entry stays and the rotation's step stays owed.
+        assertEquals(failed, requestResendOutcome(ContactsError.wrap(java.io.IOException("down"))))
+        assertEquals(failed, requestResendOutcome(IllegalStateException("no session")))
+    }
+
+    @Test
+    fun `the ledger rows to revoke are the listed and the recorded ones, each once`() {
+        assertEquals(listOf("a", "b", "c"), spentLinkSlugs(listOf("a", "b"), listOf("b", "c")))
+        assertTrue(spentLinkSlugs(emptyList(), emptyList()).isEmpty())
+    }
 }

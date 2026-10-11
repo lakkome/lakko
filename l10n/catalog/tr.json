@@ -4558,6 +4558,10 @@
       "text": "Geçiş anahtarlarınız giriş yapmanızı sağlamaya devam eder. \"Anahtarları bu geçiş anahtarıyla geri yükle\" seçeneği, siz yeniden açana kadar kapalıdır.",
       "status": "machine"
     },
+    "devices.rotate.effect_links": {
+      "text": "Daha önce oluşturduğunuz davet ve arama bağlantıları artık çalışmaz. Yenilerini oluşturun.",
+      "status": "machine"
+    },
     "devices.rotate.effect_phrase": {
       "text": "Yeni bir kurtarma ifadesi alırsınız. Eskisi artık çalışmaz.",
       "status": "machine"
