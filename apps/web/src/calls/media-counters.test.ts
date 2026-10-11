@@ -30,6 +30,8 @@ const video = (over: Record<string, unknown> = {}): Record<string, unknown> => (
   framesDropped: 3,
   jitterBufferDelay: 15,
   jitterBufferEmittedCount: 300,
+  jitterBufferTargetDelay: 30,
+  jitterBufferMinimumDelay: 6,
   ...over,
 });
 
@@ -259,10 +261,10 @@ describe("which layer a video receiver carries", () => {
       new Set(["track-light"]),
     );
     expect(describeDeltas("call media interval", deltaOf(null, r))).toEqual([
-      "call media interval video#1 pkts=1000 lost=10 nack=4 jb_ms=50 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=main",
-      "call media interval video#2 pkts=1000 lost=10 nack=4 jb_ms=50 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=light",
-      "call media interval video#3 pkts=1000 lost=10 nack=4 jb_ms=50 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=-",
-      "call media interval audio#4 pkts=500 lost=5 nack=0 jb_ms=0 concealed=1.0%",
+      "call media interval video#1 pkts=1000 lost=10 nack=4 jb_ms=50 jb_target_ms=100 jb_net_ms=20 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=main",
+      "call media interval video#2 pkts=1000 lost=10 nack=4 jb_ms=50 jb_target_ms=100 jb_net_ms=20 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=light",
+      "call media interval video#3 pkts=1000 lost=10 nack=4 jb_ms=50 jb_target_ms=100 jb_net_ms=20 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=-",
+      "call media interval audio#4 pkts=500 lost=5 nack=0 jb_ms=0 jb_target_ms=- jb_net_ms=- concealed=1.0%",
     ]);
   });
 });
@@ -445,7 +447,7 @@ describe("the middle sender and the middle track in the counters", () => {
     ]);
     // Every other field of a video line is where it was.
     expect(lines[1]).toBe(
-      "call media interval video#2 pkts=1000 lost=10 nack=4 jb_ms=50 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=middle",
+      "call media interval video#2 pkts=1000 lost=10 nack=4 jb_ms=50 jb_target_ms=100 jb_net_ms=20 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=middle",
     );
   });
 });

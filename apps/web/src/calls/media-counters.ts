@@ -40,6 +40,14 @@ export interface InboundCounters {
   readonly framesDropped: number;
   readonly jitterBufferDelay: number;
   readonly jitterBufferEmittedCount: number;
+  /** Cumulative target delay of the jitter buffer, in seconds per emitted
+   *  frame or sample; it includes what audio/video synchronisation and the
+   *  playout-delay header extension ask for. Zero where the browser does not
+   *  report it. */
+  readonly jitterBufferTargetDelay: number;
+  /** Cumulative delay the buffer would need for the network alone, without
+   *  those two. Zero where the browser does not report it. */
+  readonly jitterBufferMinimumDelay: number;
   readonly concealedSamples: number;
   readonly totalSamplesReceived: number;
 }
@@ -144,6 +152,8 @@ export function readMedia(
         framesDropped: num(e, "framesDropped"),
         jitterBufferDelay: num(e, "jitterBufferDelay"),
         jitterBufferEmittedCount: num(e, "jitterBufferEmittedCount"),
+        jitterBufferTargetDelay: num(e, "jitterBufferTargetDelay"),
+        jitterBufferMinimumDelay: num(e, "jitterBufferMinimumDelay"),
         concealedSamples: num(e, "concealedSamples"),
         totalSamplesReceived: num(e, "totalSamplesReceived"),
       });
@@ -192,6 +202,13 @@ export interface StreamDelta {
   /** Average time a frame or sample spent in the jitter buffer over the
    *  interval, in milliseconds; `null` when nothing left it. */
   readonly jitterBufferMs: number | null;
+  /** Average target delay of the jitter buffer over the interval, in
+   *  milliseconds; `null` when nothing left it or the browser reports none. */
+  readonly jitterTargetMs: number | null;
+  /** Average delay the network alone would need, in milliseconds. A target
+   *  far above it is held there by audio/video synchronisation or by the
+   *  playout-delay header extension, not by the network. */
+  readonly jitterNetworkMs: number | null;
   /** Share of received audio samples that were concealed, 0..1; `null` for
    *  video or when no samples arrived. */
   readonly concealedShare: number | null;
@@ -223,10 +240,18 @@ export function deltaOf(before: MediaReading | null, now: MediaReading): Map<str
       framesDecoded: d("framesDecoded"),
       framesDropped: d("framesDropped"),
       jitterBufferMs: emitted > 0 ? (d("jitterBufferDelay") / emitted) * 1000 : null,
+      jitterTargetMs: perEmitted(d("jitterBufferTargetDelay"), emitted),
+      jitterNetworkMs: perEmitted(d("jitterBufferMinimumDelay"), emitted),
       concealedShare: cur.kind === "audio" && samples > 0 ? d("concealedSamples") / samples : null,
     });
   }
   return out;
+}
+
+/** A cumulative per-emitted delay as milliseconds; `null` when nothing was
+ *  emitted or the browser reported no such delay at all. */
+function perEmitted(seconds: number, emitted: number): number | null {
+  return emitted > 0 && seconds > 0 ? (seconds / emitted) * 1000 : null;
 }
 
 function fixed(n: number | null, digits: number): string {
@@ -242,7 +267,8 @@ export function describeDeltas(label: string, deltas: ReadonlyMap<string, Stream
     n += 1;
     const common =
       `${label} ${d.kind}#${n} pkts=${d.packetsReceived} lost=${d.packetsLost} nack=${d.nacks}` +
-      ` jb_ms=${fixed(d.jitterBufferMs, 0)}`;
+      ` jb_ms=${fixed(d.jitterBufferMs, 0)} jb_target_ms=${fixed(d.jitterTargetMs, 0)}` +
+      ` jb_net_ms=${fixed(d.jitterNetworkMs, 0)}`;
     lines.push(
       d.kind === "video"
         ? `${common} pli=${d.keyframeRequests} freezes=${d.freezes} freeze_s=${fixed(d.freezeSeconds, 2)}` +

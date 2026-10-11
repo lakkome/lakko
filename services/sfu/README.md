@@ -1453,8 +1453,8 @@ that arrived of its own accord, are still closed without a line.
 
 ### What a missing packet was (2026-10-11)
 
-A lost FEC packet takes a sequence number and is not sent again (recalled
-from libwebrtc, not read for this), so on a stream that carries FEC a
+A lost FEC packet takes a sequence number and is not sent again (read in
+libwebrtc M125, `ulpfec_generator.cc`), so on a stream that carries FEC a
 packet that stays missing is media somebody needs or an FEC packet nobody
 does. Until 2026-10-11 nothing said which, and such a stream was judged by
 number alone: unrepaired only when more packets stayed missing than 2
@@ -1504,8 +1504,8 @@ What the descriptor facts rest on, and when they are not used:
 
 - **Frame ids** wrap at 16 bits and are compared by their wrapping
   difference. A libwebrtc sender numbers one sender's frames one after the
-  other, but simulcast layers of one sender share the counter (recalled,
-  not read), so the ids are used on a stream only after 8 frames in a row
+  other, but simulcast layers of one sender share the counter (read in
+  libwebrtc M125, `rtp_video_sender.cc`), so the ids are used on a stream only after 8 frames in a row
   (`FRAME_ID_TRUST`) began exactly one id after the frame before with
   nothing missing between, and never again once two such frames differed
   by anything else. Lakko's three camera senders are separate senders; a

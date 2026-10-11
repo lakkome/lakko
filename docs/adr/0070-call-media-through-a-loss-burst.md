@@ -778,7 +778,7 @@ asked for nothing left no line in the log.
   the 16-bit frame id of a frame's first packet. No payload (C-39).
 - Frame ids are used on a stream only after eight frames in a row followed
   the frame before with nothing missing between (simulcast layers of one
-  libwebrtc sender share a counter, recalled and not read, so a layer's ids
+  libwebrtc sender share a counter (read in libwebrtc M125, `rtp_video_sender.cc`), so a layer's ids
   skip; such a stream stays on the count rule). The boundary inference is
   dropped for a stream on which an FEC packet was seen inside a frame.
 - State per stream is bounded: at most 512 missing packets and a fixed
