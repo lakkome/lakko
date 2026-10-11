@@ -80,6 +80,26 @@ typedef NS_ENUM(NSInteger, LakkoSFrameAttachStatus) {
     LakkoSFrameAttachStatusNullArgument = 4,
 };
 
+/// The codec a sender negotiated, as far as the sealed-frame layout
+/// cares (ADR-0071). It decides how many leading bytes of each encoded
+/// frame stay in the clear so that a receiver without the generic frame
+/// descriptor still finds key frames: 10 of a VP8 key frame, 3 of any
+/// other VP8 frame, none for Opus and for every other codec.
+///
+/// The raw values are the `LAKKO_SFRAME_MEDIA_CODEC_*` constants of the
+/// `lakko-sframe-native` C ABI (`SFrameAttach.mm` asserts the match at
+/// compile time).
+typedef NS_ENUM(uint8_t, LakkoSFrameMediaCodec) {
+    /// Any codec without a rule (H.264, VP9, AV1, the RED / RTX / FEC
+    /// wrappers), and a codec that is not known yet. Nothing is left
+    /// clear. This is what an encryptor uses until it is told otherwise.
+    LakkoSFrameMediaCodecOther = 0,
+    /// VP8 video.
+    LakkoSFrameMediaCodecVP8 = 1,
+    /// Opus audio. Nothing is left clear.
+    LakkoSFrameMediaCodecOpus = 2,
+};
+
 @interface LakkoSFrameAttach : NSObject
 
 /// One-shot capability probe — runs once at app startup
@@ -114,6 +134,12 @@ typedef NS_ENUM(NSInteger, LakkoSFrameAttachStatus) {
 /// whole lifetime. Every `uint8_t` is a valid stream index — there
 /// is no fail-closed rejection on this argument.
 ///
+/// The fresh encryptor seals a VIDEO sender's frames as
+/// `LakkoSFrameMediaCodecOther` (nothing in the clear) until
+/// [+setCodec:forSender:] names the negotiated codec; an AUDIO sender
+/// needs no such call. Attaching again replaces the encryptor, so the
+/// codec has to be set again after a re-attach.
+///
 /// Returns `LakkoSFrameAttachStatusOK` on success.
 + (LakkoSFrameAttachStatus)attachEncryptorToSender:
                               (RTCRtpSender * _Nullable)sender
@@ -141,6 +167,41 @@ typedef NS_ENUM(NSInteger, LakkoSFrameAttachStatus) {
                               (RTCRtpReceiver * _Nullable)receiver
                                                   seed:(NSData *_Nullable)seed
     NS_SWIFT_NAME(attachDecryptor(toReceiver:seed:));
+
+/// Tell the encryptor attached to `sender` which codec the sender
+/// negotiated (ADR-0071). libwebrtc hands the encryptor a media type
+/// and no codec, so the Swift side reads it from the sender (the first
+/// entry of `sender.parameters.codecs` once the answer is applied) and
+/// calls this after every negotiation that could change it. A rekey
+/// keeps the codec; a re-attach does not.
+///
+/// Until this is called a video encryptor seals with nothing in the
+/// clear: the frames still open, but a receiver that has no generic
+/// frame descriptor (Firefox, Safari) cannot find key frames in them.
+/// Audio frames are sealed with nothing in the clear whatever is set.
+///
+/// Safe to call from any thread while media is flowing.
+///
+/// Returns `YES` when an encryptor was attached to `sender` and now
+/// holds `codec`; `NO` when `sender` is nil or carries no encryptor
+/// (nothing was changed).
++ (BOOL)setCodec:(LakkoSFrameMediaCodec)codec
+       forSender:(RTCRtpSender * _Nullable)sender
+    NS_SWIFT_NAME(setCodec(_:forSender:));
+
+/// The same as [+setCodec:forSender:], taking the codec by name: the
+/// `name` of an `RTCRtpCodecParameters` ("VP8", "opus") or the MIME
+/// form ("video/VP8", "audio/opus"), compared without regard to case.
+/// Any other name, and nil, is `LakkoSFrameMediaCodecOther`. The
+/// mapping is the bridge's (`LakkoFrameEncryptor::CodecFromName`), the
+/// one Android uses too.
++ (BOOL)setCodecName:(NSString * _Nullable)codecName
+           forSender:(RTCRtpSender * _Nullable)sender
+    NS_SWIFT_NAME(setCodecName(_:forSender:));
+
+/// The codec [+setCodecName:forSender:] would set for `codecName`.
++ (LakkoSFrameMediaCodec)codecForName:(NSString * _Nullable)codecName
+    NS_SWIFT_NAME(codec(forName:));
 
 /// Mid-call rekey (G-18, ADR-0029) — rotate the encryptor attached to
 /// `sender` to the new MLS epoch's 32-byte `seed`, keeping the SAME

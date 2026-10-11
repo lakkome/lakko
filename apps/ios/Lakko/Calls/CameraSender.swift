@@ -4,110 +4,186 @@
 import Foundation
 import WebRTC
 
-/// One send encoding of the camera, as plain values (ADR-0067 step 5).
-///
-/// The twin of an `RTCRtpEncodingParameters` this file fills in, kept apart
-/// from it so what is asked of the binding can be read and tested without a
-/// peer connection.
-struct CameraEncodingSpec: Equatable {
-    /// The layer's RTP stream id.
-    let rid: String
-    /// Each side of the picture divided by this; `nil` sends it whole.
-    let scaleResolutionDownBy: Double?
-    /// The layer's bitrate ceiling, bits a second; `nil` for none.
-    let maxBitrateBps: Int?
+/// One of this device's camera senders in an SFU call (ADR-0070 steps 1 and
+/// 5); the twin of `CameraSenderKind` in
+/// `apps/web/src/calls/sender-activity.ts`.
+enum CameraSenderKind: String, CaseIterable, Equatable {
+    /// The camera as it is captured.
+    case main
+    /// The camera at half size, sent only from three people in the call on.
+    case middle
+    /// The camera at a quarter size, always sent.
+    case light
 }
 
-/// How the group call's camera is sent: as two simulcast layers, the full
-/// picture and a light one (the twin of `apps/web/src/calls/camera-sender.ts`).
+/// A copy of the camera sent beside the main sender, each an ordinary sender
+/// on a transceiver of its own; the twin of `CameraCopyKind` in
+/// `apps/web/src/calls/camera-sender.ts`.
+enum CameraCopyKind: String, Equatable {
+    case light
+    case middle
+
+    /// Every copy, in the order they are added: the light one first, so it
+    /// keeps the media line it had before there was a middle one.
+    static let addOrder: [CameraCopyKind] = [.light, .middle]
+
+    var senderKind: CameraSenderKind {
+        switch self {
+        case .light: return .light
+        case .middle: return .middle
+        }
+    }
+}
+
+/// One send encoding of a camera sender, as plain values. Kept apart from
+/// `RTCRtpEncodingParameters` so what is asked of the binding can be read and
+/// tested without a peer connection.
+struct CameraEncodingSpec: Equatable {
+    /// Each side of the picture divided by this; `nil` sends it whole.
+    let scaleResolutionDownBy: Double?
+    /// The bitrate ceiling, bits a second; `nil` for none.
+    let maxBitrateBps: Int?
+    /// Whether the encoding is sent when the sender is created.
+    let active: Bool
+}
+
+/// One sender of the plan ``CameraSender/plan(middleActive:)`` gives.
+struct CameraSenderSpec: Equatable {
+    let kind: CameraSenderKind
+    /// The SFrame stream index the sender is sealed under (ADR-0035).
+    let streamIndex: UInt8
+    /// The id of the local track the sender carries.
+    let trackId: String
+    let encoding: CameraEncodingSpec
+}
+
+/// How an SFU call's camera is sent: as three ordinary senders (ADR-0070
+/// steps 1 and 5), the twin of `apps/web/src/calls/camera-sender.ts`.
 ///
-/// The SFU forwards both to every viewer as two tracks, and a viewer's tile
-/// shows the light one while the full one stands still
-/// (`services/sfu/README.md`, the `~light` contract). Used by the SFU session
-/// only: the one-to-one call sends one encoding, as before.
+/// The main one carries the camera as captured. The light one carries the
+/// same camera at a quarter of the size and at most 150 kbit/s, on a
+/// transceiver of its own; every viewer receives it and its tile shows it
+/// while the picture it watches stands still. The middle one carries it at
+/// half the size and at most 500 kbit/s and sends only from three people in
+/// the call on. No simulcast: which of them is sent is this client's and the
+/// SFU's decision, never a layer allocator's.
 ///
-/// Temporal layers are not asked for. This binding has no `scalabilityMode`;
-/// it has `numTemporalLayers`, which this client has never set, and whether
-/// the encoder honours it under simulcast is not something that can be read
-/// off a build.
+/// All three are fed by ONE capturer: each copy is a further `RTCVideoTrack`
+/// on the camera's `RTCVideoSource`, and its sender scales the picture down
+/// with `scaleResolutionDownBy` on its one encoding. That is the binding's
+/// form of what the web client does with a cloned track.
+///
+/// Used by the SFU session only: the one-to-one call sends one sender.
+///
+/// Temporal layers are not asked for. The web client asks for `L1T3` on the
+/// main sender; this binding has no `scalabilityMode`, only
+/// `numTemporalLayers`, which this client has never set.
 enum CameraSender {
 
-    /// The light layer's RTP stream id. The SFU matches it by this exact name.
-    static let ridLow = "q"
-    /// The full layer's RTP stream id.
-    static let ridFull = "f"
-    /// The light layer is the camera picture scaled down by this, each side.
-    static let lowScaleDown: Double = 4
-    /// The light layer's bitrate ceiling, bits a second.
-    static let lowMaxBitrateBps = 150_000
-    /// Whether the camera is sent as two layers at all.
-    static let simulcastEnabled = false
+    /// The SFrame stream index of the microphone.
+    static let streamIndexAudio: UInt8 = 0
+    /// The SFrame stream index of the main camera sender.
+    static let streamIndexCamera: UInt8 = 1
+    /// Reserved for a shared screen; no sender uses it yet.
+    static let streamIndexScreenShare: UInt8 = 2
+    /// The SFrame stream index of the light camera sender.
+    static let streamIndexCameraLight: UInt8 = 3
+    /// The SFrame stream index of the middle camera sender.
+    static let streamIndexCameraMiddle: UInt8 = 4
 
-    /// The two encodings, light layer first (the order the SFU and the web
-    /// client use).
-    static func simulcastEncodings() -> [CameraEncodingSpec] {
+    /// The light sender's picture is the camera's scaled down by this, each
+    /// side.
+    static let lightScaleDown: Double = 4
+    /// The light sender's bitrate ceiling, bits a second.
+    static let lightMaxBitrateBps = 150_000
+    /// The middle sender's picture is the camera's scaled down by this, each
+    /// side.
+    static let middleScaleDown: Double = 2
+    /// The middle sender's bitrate ceiling, bits a second.
+    static let middleMaxBitrateBps = 500_000
+
+    /// The SFrame stream index each sender is sealed under. Stated, never
+    /// derived from the track kind: each is a further video sender of the
+    /// participant and must not share another's key.
+    static func streamIndex(of kind: CameraSenderKind) -> UInt8 {
+        switch kind {
+        case .main: return streamIndexCamera
+        case .light: return streamIndexCameraLight
+        case .middle: return streamIndexCameraMiddle
+        }
+    }
+
+    /// The id of the local track each sender carries. Distinct, so the media
+    /// log can tell the senders apart by their media source.
+    static func trackId(of kind: CameraSenderKind) -> String {
+        switch kind {
+        case .main: return "lakko-video0"
+        case .light: return "lakko-video-light0"
+        case .middle: return "lakko-video-middle0"
+        }
+    }
+
+    /// The sender a local track id names; `nil` for any other track.
+    static func senderKind(ofTrackId trackId: String) -> CameraSenderKind? {
+        CameraSenderKind.allCases.first { self.trackId(of: $0) == trackId }
+    }
+
+    /// The one encoding of a copy's sender. No rid: an ordinary sender, not a
+    /// simulcast layer.
+    static func copyEncoding(_ kind: CameraCopyKind, active: Bool = true) -> CameraEncodingSpec {
+        switch kind {
+        case .light:
+            return CameraEncodingSpec(
+                scaleResolutionDownBy: lightScaleDown, maxBitrateBps: lightMaxBitrateBps,
+                active: active)
+        case .middle:
+            return CameraEncodingSpec(
+                scaleResolutionDownBy: middleScaleDown, maxBitrateBps: middleMaxBitrateBps,
+                active: active)
+        }
+    }
+
+    /// The camera's senders in the order they are added: main, light, middle.
+    ///
+    /// The main and the light sender are created sending. The middle one is
+    /// always created, so its media line exists from the first offer, and is
+    /// created sending or not as `middleActive` says (the people-count rule
+    /// and the SFU's last word, ``SenderActivityRule``).
+    static func plan(middleActive: Bool) -> [CameraSenderSpec] {
         [
-            CameraEncodingSpec(
-                rid: ridLow, scaleResolutionDownBy: lowScaleDown,
-                maxBitrateBps: lowMaxBitrateBps),
-            CameraEncodingSpec(rid: ridFull, scaleResolutionDownBy: nil, maxBitrateBps: nil),
+            CameraSenderSpec(
+                kind: .main, streamIndex: streamIndex(of: .main), trackId: trackId(of: .main),
+                encoding: CameraEncodingSpec(
+                    scaleResolutionDownBy: nil, maxBitrateBps: nil, active: true)),
+            CameraSenderSpec(
+                kind: .light, streamIndex: streamIndex(of: .light), trackId: trackId(of: .light),
+                encoding: copyEncoding(.light)),
+            CameraSenderSpec(
+                kind: .middle, streamIndex: streamIndex(of: .middle),
+                trackId: trackId(of: .middle),
+                encoding: copyEncoding(.middle, active: middleActive)),
         ]
     }
 
-    /// What the camera ended up being sent as.
-    enum Outcome: Equatable {
-        /// Two simulcast layers.
-        case simulcast
-        /// One encoding, as before simulcast.
-        case single
-        /// The binding gave no sender at all.
-        case none
+    /// The `mid`s an offer names for one copy of the camera: the copy's
+    /// media line when it has one, none otherwise. A transceiver has a `mid`
+    /// once a local description that includes it is set; before that, and
+    /// for a copy this device does not send, the list is empty.
+    static func mids(ofCopyMid mid: String?) -> [String] {
+        guard let mid, !mid.isEmpty else { return [] }
+        return [mid]
     }
 
-    /// Add the camera, trying two layers first and falling back to the one
-    /// encoding this client has always sent. Both the first publish and the
-    /// mid-call camera-on come through here, because encodings can only be
-    /// given when the sender is created.
-    ///
-    /// - Parameters:
-    ///   - simulcast: `false` skips straight to the single encoding.
-    ///   - addWithEncodings: create the sender with these encodings, or `nil`
-    ///     when the binding refuses them.
-    ///   - addPlain: create the sender the way it was created before
-    ///     simulcast.
-    ///   - log: one line for each refusal.
-    static func add<Sender>(
-        simulcast: Bool = simulcastEnabled,
-        addWithEncodings: ([CameraEncodingSpec]) -> Sender?,
-        addPlain: () -> Sender?,
-        log: (String) -> Void = { NSLog("%@", $0) }
-    ) -> (sender: Sender?, outcome: Outcome) {
-        if simulcast {
-            if let sender = addWithEncodings(simulcastEncodings()) {
-                return (sender, .simulcast)
-            }
-            log("camera sender: simulcast refused, sending one encoding")
+    /// The binding's own parameters for `spec`.
+    static func rtcEncoding(_ spec: CameraEncodingSpec) -> RTCRtpEncodingParameters {
+        let encoding = RTCRtpEncodingParameters()
+        encoding.isActive = spec.active
+        if let scale = spec.scaleResolutionDownBy {
+            encoding.scaleResolutionDownBy = NSNumber(value: scale)
         }
-        if let sender = addPlain() {
-            return (sender, .single)
+        if let bitrate = spec.maxBitrateBps {
+            encoding.maxBitrateBps = NSNumber(value: bitrate)
         }
-        log("camera sender: no sender was created")
-        return (nil, .none)
-    }
-
-    /// The binding's own parameters for `specs`.
-    static func rtcEncodings(_ specs: [CameraEncodingSpec]) -> [RTCRtpEncodingParameters] {
-        specs.map { spec in
-            let encoding = RTCRtpEncodingParameters()
-            encoding.rid = spec.rid
-            encoding.isActive = true
-            if let scale = spec.scaleResolutionDownBy {
-                encoding.scaleResolutionDownBy = NSNumber(value: scale)
-            }
-            if let bitrate = spec.maxBitrateBps {
-                encoding.maxBitrateBps = NSNumber(value: bitrate)
-            }
-            return encoding
-        }
+        return encoding
     }
 }

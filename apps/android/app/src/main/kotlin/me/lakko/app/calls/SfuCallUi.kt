@@ -22,8 +22,10 @@ import uniffi.lakko_ffi_uniffi.callSafetyNumber
  *     E2EE pill flips active on `CONNECTED`, since the SFrame seed is
  *     armed at connect),
  *   * `welcome` / `peer-joined` / `peer-left` -> the roster,
- *   * a remote video track -> the sole-remote tile (per-tile N-way video
- *     is a follow-up; audio plays out automatically).
+ *   * a remote video track -> its peer's tile, or that peer's middle /
+ *     light map (`LightStream.kt`); audio plays out automatically,
+ *   * `video-given` -> what each tile may show, and the tiles' reports ->
+ *     the session's `video-wants`.
  *
  * The caller owns deriving the inputs (the JWT via [CallJwtClient], the
  * seed via `Group.exportSecret("lakko/call/v1", callId, 32)`, the leaf
@@ -103,8 +105,14 @@ class SfuCallUi(
         val callbacks = SfuCallSession.Callbacks(
             onStateChange = { state ->
                 when (state) {
-                    SfuCallSession.State.CONNECTING ->
+                    SfuCallSession.State.CONNECTING -> {
                         ui.setPhase(CallUiState.CallPhase.Connecting)
+                        // The tiles of this call say which picture of a
+                        // person they show (`VideoWants.kt`).
+                        bindTileVideoQuality(ui) { tile, peerId, quality ->
+                            sessionRef?.reportTileVideoQuality(tile, peerId, quality)
+                        }
+                    }
                     SfuCallSession.State.CONNECTED -> {
                         ui.setPhase(CallUiState.CallPhase.Connected)
                         // SFrame is armed at connect, so media is E2E
@@ -123,7 +131,7 @@ class SfuCallUi(
                     SfuCallSession.State.CLOSED -> {
                         monitor.stop()
                         // The call's tracks are gone with its connection.
-                        ui.clearRemoteLightVideoTracks()
+                        ui.clearRemoteCopyVideoTracks()
                         ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
                     }
                     SfuCallSession.State.IDLE -> Unit
@@ -160,8 +168,9 @@ class SfuCallUi(
             },
             onRemoteVideoTrack = { track, streamId ->
                 // N-way remote video. The MSID stream id is the source peer
-                // id for a peer's main track and that id plus `~light` for its
-                // light companion (`LightStream.kt`).
+                // id for a peer's main track, that id plus `~mid` for its
+                // middle track and plus `~light` for its light companion
+                // (`LightStream.kt`).
                 //
                 // The main track is keyed on the peer's roster id
                 // (`peer-<peerId>`) so each tile renders its own peer, and
@@ -175,8 +184,8 @@ class SfuCallUi(
                 // is authoritative and records the true state in
                 // [lastKnownCameraOn]; the main track DEFERS to it.
                 //
-                // The companion goes to its own map and nothing else: no
-                // participant, no tile, no camera flag.
+                // A middle track or a companion goes to its own map and
+                // nothing else: no participant, no tile, no camera flag.
                 applyRemoteVideoTrack(ui, track, streamId, lastKnownCameraOn)
             },
             onLocalVideoTrack = { track ->
@@ -220,6 +229,9 @@ class SfuCallUi(
                 ui.setParticipantCamera(id, cameraOn)
             },
             onCameraFacing = { front -> ui.setCameraFrontFacing(front) },
+            // What the SFU says it gives of each person (`VideoGiven.kt`):
+            // a tile shows the lower of that and what it asked for.
+            onVideoGiven = { given -> applyVideoGiven(ui, given) },
             onServerError = { _, _ -> },
         )
         session = SfuCallSession(

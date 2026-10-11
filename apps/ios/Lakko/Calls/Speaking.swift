@@ -55,6 +55,8 @@ struct SpeakingTracker {
         var speaking = false
         /// Since when the ring has been on without a break, or `nil`.
         var speakingSince: UInt64?
+        /// The last reading with sound while the ring was on, or `nil`.
+        var lastSoundAt: UInt64?
     }
 
     private var voices: [String: Voice] = [:]
@@ -74,6 +76,7 @@ struct SpeakingTracker {
                 voice.speaking = true
                 voice.speakingSince = since
             }
+            if voice.speaking { voice.lastSoundAt = nowMs }
         } else {
             voice.soundSince = nil
             let since = voice.silenceSince ?? nowMs
@@ -81,9 +84,18 @@ struct SpeakingTracker {
             if voice.speaking, nowMs >= since, nowMs - since >= Speaking.ringOffMs {
                 voice.speaking = false
                 voice.speakingSince = nil
+                voice.lastSoundAt = nil
             }
         }
         voices[id] = voice
+    }
+
+    /// The person is muted: their ring goes off at once and they give up the
+    /// floor at the next snapshot. A muted person is never speaking, whatever
+    /// a level reading says.
+    mutating func silence(_ id: String) {
+        guard voices[id] != nil else { return }
+        voices[id] = Voice()
     }
 
     /// Forget people who are no longer in the call.
@@ -95,22 +107,38 @@ struct SpeakingTracker {
 
     /// The state after the samples so far.
     ///
-    /// `order` is the roster order, which breaks the tie when two people
-    /// reach the onset in the same reading.
-    mutating func snapshot(order: [String], nowMs: UInt64) -> SpeakingSnapshot {
+    /// `candidates` are the people who can hold the floor, in roster order,
+    /// which breaks the tie when two reach the onset in the same reading.
+    /// This device's own person is NOT one of them: the floor exists for the
+    /// large tile, which never shows the own tile while anyone else is
+    /// present, and a floor held by the own microphone (the person talking,
+    /// or the room heard through it) kept everyone else from taking it, so
+    /// the large tile never moved to the person speaking. The ring is for
+    /// everyone sampled, the own tile included.
+    mutating func snapshot(candidates: [String], nowMs: UInt64) -> SpeakingSnapshot {
         let speakingIds = Set(voices.filter { $0.value.speaking }.keys)
         let voices = self.voices
-        let qualifies: (String) -> Bool = { id in
+        // The ring is on: enough to keep a floor already held.
+        let stillSpeaking: (String) -> Bool = { voices[$0]?.speaking == true }
+        // Enough to take the floor: the speech itself has lasted the onset.
+        // The time the ring stays on after the last sound does not count, or
+        // a 0.8-second sound would grow into a 1.5-second one by standing
+        // still.
+        let earned: (String) -> Bool = { id in
             guard let voice = voices[id], voice.speaking, let since = voice.speakingSince,
-                  nowMs >= since
+                  let last = voice.lastSoundAt, last >= since
             else { return false }
-            return nowMs - since >= Speaking.floorOnsetMs
+            return last - since >= Speaking.floorOnsetMs
         }
         // Whoever holds the floor keeps it while they keep speaking;
-        // otherwise it goes to the first person in roster order who has
-        // earned it.
-        if floor.map(qualifies) != true {
-            floor = order.first(where: qualifies)
+        // otherwise it goes to the first candidate in roster order who has
+        // earned it. When the holder stops and nobody has, the floor is empty
+        // and `lastSpokeAtMs` still names them, which is what keeps the large
+        // tile on them.
+        if let holder = floor, candidates.contains(holder), stillSpeaking(holder) {
+            // Kept.
+        } else {
+            floor = candidates.first(where: earned)
         }
         if let floor { lastSpoke[floor] = nowMs }
         return SpeakingSnapshot(

@@ -6,136 +6,17 @@ import LakkoCore
 import WebRTC
 @testable import Lakko
 
-/// ADR-0067 step 5 on iOS: the camera goes out as two simulcast layers, and a
-/// remote person's light companion track is kept beside their main one and
-/// shown while the main one stands still.
+/// A remote person's further pictures on iOS (ADR-0067 step 5, ADR-0070
+/// steps 1 and 5): the light companion and the middle track are kept beside
+/// the main one, never as participants, and the light one is shown while the
+/// picture a tile watches stands still.
 ///
 /// What is covered here is everything that can be decided without a device:
-/// the encodings asked of the binding and the fallback, the stream-id split,
-/// that a companion is never a participant and goes with its peer, the lines
-/// of the media log, and the tile's controller driven through the shared rule
-/// (`LayerDisplay` of `lakko-ui-rules`, over the binding). Whether an encoder
-/// produces both layers and whether two Metal views keep drawing are not.
-
-// MARK: - Sending
-
-@MainActor
-final class CameraSenderTests: XCTestCase {
-
-    func testSimulcastEncodingsAreTheLightLayerThenTheFullOne() {
-        XCTAssertEqual(
-            CameraSender.simulcastEncodings(),
-            [
-                CameraEncodingSpec(rid: "q", scaleResolutionDownBy: 4, maxBitrateBps: 150_000),
-                CameraEncodingSpec(rid: "f", scaleResolutionDownBy: nil, maxBitrateBps: nil),
-            ])
-    }
-
-    func testRtcEncodingsCarryRidScaleAndBitrate() {
-        let encodings = CameraSender.rtcEncodings(CameraSender.simulcastEncodings())
-        XCTAssertEqual(encodings.map(\.rid), ["q", "f"])
-        XCTAssertEqual(encodings[0].scaleResolutionDownBy, NSNumber(value: 4.0))
-        XCTAssertEqual(encodings[0].maxBitrateBps, NSNumber(value: 150_000))
-        XCTAssertNil(encodings[1].scaleResolutionDownBy)
-        XCTAssertNil(encodings[1].maxBitrateBps)
-        XCTAssertTrue(encodings.allSatisfy(\.isActive))
-    }
-
-    func testTheSenderIsCreatedWithTwoEncodingsWhenTheBindingTakesThem() {
-        var asked: [[CameraEncodingSpec]] = []
-        var plainCalls = 0
-        var logged: [String] = []
-        let added = CameraSender.add(
-            simulcast: true,
-            addWithEncodings: { specs -> String? in
-                asked.append(specs)
-                return "simulcast-sender"
-            },
-            addPlain: { () -> String? in
-                plainCalls += 1
-                return "plain-sender"
-            },
-            log: { logged.append($0) })
-        XCTAssertEqual(added.sender, "simulcast-sender")
-        XCTAssertEqual(added.outcome, .simulcast)
-        XCTAssertEqual(asked, [CameraSender.simulcastEncodings()])
-        XCTAssertEqual(plainCalls, 0)
-        XCTAssertTrue(logged.isEmpty)
-    }
-
-    func testARefusalFallsBackToTheSingleEncodingAndIsLogged() {
-        var plainCalls = 0
-        var logged: [String] = []
-        let added = CameraSender.add(
-            simulcast: true,
-            addWithEncodings: { _ -> String? in nil },
-            addPlain: { () -> String? in
-                plainCalls += 1
-                return "plain-sender"
-            },
-            log: { logged.append($0) })
-        XCTAssertEqual(added.sender, "plain-sender")
-        XCTAssertEqual(added.outcome, .single)
-        XCTAssertEqual(plainCalls, 1)
-        XCTAssertEqual(logged, ["camera sender: simulcast refused, sending one encoding"])
-    }
-
-    func testSimulcastSwitchedOffNeverAsksForEncodings() {
-        var asked = 0
-        let added = CameraSender.add(
-            simulcast: false,
-            addWithEncodings: { _ -> String? in
-                asked += 1
-                return "simulcast-sender"
-            },
-            addPlain: { () -> String? in "plain-sender" },
-            log: { _ in })
-        XCTAssertEqual(added.outcome, .single)
-        XCTAssertEqual(asked, 0)
-    }
-
-    func testNoSenderAtAllIsReported() {
-        var logged: [String] = []
-        let added = CameraSender.add(
-            simulcast: true,
-            addWithEncodings: { _ -> String? in nil },
-            addPlain: { () -> String? in nil },
-            log: { logged.append($0) })
-        XCTAssertNil(added.sender)
-        XCTAssertEqual(added.outcome, .none)
-        XCTAssertEqual(logged.count, 2)
-    }
-
-    /// Both publish paths of the SFU session (the first publish and the
-    /// mid-call camera-on) create the camera sender through
-    /// `addLocalCameraTrack`. This asks the real binding, on a peer
-    /// connection that never negotiates.
-    func testThePeerConnectionCreatesTheCameraSenderWithBothRids() {
-        let connection = WebRTCPeerConnection(iceServers: [])
-        defer { connection.close() }
-        XCTAssertTrue(connection.isReady)
-
-        let outcome = connection.addLocalCameraTrack(WebRTCPeerConnection.newVideoSource())
-
-        XCTAssertEqual(outcome, .simulcast)
-        XCTAssertEqual(connection.cameraSendOutcome, .simulcast)
-        XCTAssertEqual(connection.cameraSendRids(), ["q", "f"])
-        XCTAssertNotNil(connection.currentLocalVideoTrack())
-        XCTAssertNotNil(connection.localVideoSender)
-    }
-
-    /// The one-to-one call is unchanged: one encoding, no rid.
-    func testTheOneToOnePathStillAddsOneEncoding() {
-        let connection = WebRTCPeerConnection(iceServers: [])
-        defer { connection.close() }
-
-        connection.addLocalVideoTrack(WebRTCPeerConnection.newVideoSource())
-
-        XCTAssertEqual(connection.cameraSendOutcome, CameraSender.Outcome.none)
-        XCTAssertEqual(connection.cameraSendRids().count, 1)
-        XCTAssertFalse(connection.cameraSendRids().contains("q"))
-    }
-}
+/// the stream-id split, that a companion is never a participant and goes with
+/// its peer, the lines of the media log, and the tile's controller driven
+/// through the shared rule (`LayerDisplay` of `lakko-ui-rules`, over the
+/// binding). Whether two Metal views keep drawing is not. The sending side is
+/// `GroupCallSendersTests`.
 
 // MARK: - The stream id
 
@@ -144,37 +25,54 @@ final class LightStreamTests: XCTestCase {
     func testAStreamIdEndingInTheSuffixIsThatPeersCompanion() {
         XCTAssertEqual(
             LightStream.split("p000000000000000518db68c125428388~light"),
-            LightStream.RemoteStreamId(peerId: "p000000000000000518db68c125428388", light: true))
+            LightStream.RemoteStreamId(
+                peerId: "p000000000000000518db68c125428388", role: .light))
     }
 
     func testAnOrdinaryStreamIdIsItsPeer() {
         XCTAssertEqual(
-            LightStream.split("p0001"), LightStream.RemoteStreamId(peerId: "p0001", light: false))
+            LightStream.split("p0001"), LightStream.RemoteStreamId(peerId: "p0001", role: .main))
     }
 
     func testTheBareSuffixNamesNoPeer() {
         XCTAssertEqual(
-            LightStream.split("~light"), LightStream.RemoteStreamId(peerId: "~light", light: false))
+            LightStream.split("~light"), LightStream.RemoteStreamId(peerId: "~light", role: .main))
     }
 
     func testTheSuffixOnlyCountsAtTheEnd() {
         XCTAssertEqual(
             LightStream.split("p1~lightx"),
-            LightStream.RemoteStreamId(peerId: "p1~lightx", light: false))
+            LightStream.RemoteStreamId(peerId: "p1~lightx", role: .main))
         XCTAssertEqual(
-            LightStream.split("p1~LIGHT"), LightStream.RemoteStreamId(peerId: "p1~LIGHT", light: false))
+            LightStream.split("p1~LIGHT"), LightStream.RemoteStreamId(peerId: "p1~LIGHT", role: .main))
     }
 
     func testSplitIsTheInverseOfLightStreamId() {
         XCTAssertEqual(LightStream.lightStreamId(of: "p7"), "p7~light")
         XCTAssertEqual(
             LightStream.split(LightStream.lightStreamId(of: "p7")),
-            LightStream.RemoteStreamId(peerId: "p7", light: true))
+            LightStream.RemoteStreamId(peerId: "p7", role: .light))
+    }
+
+    func testAStreamIdEndingInTheMiddleSuffixIsThatPeersMiddleTrack() {
+        XCTAssertEqual(
+            LightStream.split("p7~mid"), LightStream.RemoteStreamId(peerId: "p7", role: .middle))
+        XCTAssertEqual(LightStream.middleStreamId(of: "p7"), "p7~mid")
+        // One suffix is read, at the end.
+        XCTAssertEqual(
+            LightStream.split("p7~mid~light"),
+            LightStream.RemoteStreamId(peerId: "p7~mid", role: .light))
+        XCTAssertEqual(
+            LightStream.split("~mid"), LightStream.RemoteStreamId(peerId: "~mid", role: .main))
+        XCTAssertEqual(
+            LightStream.split("p7~middle"),
+            LightStream.RemoteStreamId(peerId: "p7~middle", role: .main))
     }
 
     func testARemoteVideoTrackIsRoutedByItsStreamId() {
         XCTAssertEqual(RemoteVideoRoute.of(streamId: "p7"), .main(streamId: "p7"))
         XCTAssertEqual(RemoteVideoRoute.of(streamId: "p7~light"), .light(peerId: "p7"))
+        XCTAssertEqual(RemoteVideoRoute.of(streamId: "p7~mid"), .middle(peerId: "p7"))
         XCTAssertEqual(RemoteVideoRoute.of(streamId: nil), .main(streamId: nil))
     }
 
@@ -254,6 +152,64 @@ final class LightCompanionStateTests: XCTestCase {
         XCTAssertTrue(state.remoteLightVideoTracks.isEmpty)
     }
 
+    func testAMiddleTrackIsNeverAParticipantAndGoesWithItsPeer() {
+        let state = CallUiState()
+        state.setParticipants([remote("peer-a"), remote("peer-b")])
+        let main = makeTrack("main-a")
+        let middleB = makeTrack("middle-b")
+        state.setRemoteVideoTrack(main, forParticipant: "peer-a")
+        state.setRemoteMiddleVideoTrack(makeTrack("middle-a"), forParticipant: "peer-a")
+        state.setRemoteMiddleVideoTrack(middleB, forParticipant: "peer-b")
+
+        XCTAssertEqual(state.participants.map(\.id), ["peer-a", "peer-b"])
+        XCTAssertEqual(state.participants.map(\.camOn), [false, false])
+        XCTAssertTrue(state.remoteVideoTracks["peer-a"] === main)
+        XCTAssertTrue(state.remoteLightVideoTracks.isEmpty)
+
+        state.participantLeft("peer-a")
+        XCTAssertNil(state.remoteMiddleVideoTracks["peer-a"])
+        XCTAssertTrue(state.remoteMiddleVideoTracks["peer-b"] === middleB)
+
+        state.clearRemoteVideoCopies()
+        XCTAssertTrue(state.remoteMiddleVideoTracks.isEmpty)
+    }
+
+    func testWhatTheSfuGivesIsKeptByParticipantAndGoesWithThePeer() {
+        let state = CallUiState()
+        state.setParticipants([remote("peer-a"), remote("peer-b")])
+        state.setRemoteVideoGiven(byPeerId: ["a": .light, "b": .middle])
+        XCTAssertEqual(state.remoteVideoGiven, ["peer-a": .light, "peer-b": .middle])
+
+        // A new set replaces the whole previous one.
+        state.setRemoteVideoGiven(byPeerId: ["b": .main])
+        XCTAssertEqual(state.remoteVideoGiven, ["peer-b": .main])
+
+        state.participantLeft("peer-b")
+        XCTAssertTrue(state.remoteVideoGiven.isEmpty)
+
+        state.setRemoteVideoGiven(byPeerId: ["a": .light])
+        state.clearRemoteVideoCopies()
+        XCTAssertTrue(state.remoteVideoGiven.isEmpty)
+    }
+
+    func testATilesReportReachesTheCallUnderTheSfuPeerId() {
+        let state = CallUiState()
+        final class Tile {}
+        let tile = Tile()
+        var reports: [(ObjectIdentifier, String, TileVideoQuality?)] = []
+        // No live call: a report is dropped.
+        state.reportTileVideoQuality(
+            tile: ObjectIdentifier(tile), participantId: "peer-a", quality: .main)
+        state.tileVideoQualitySink = { reports.append(($0, $1, $2)) }
+        state.reportTileVideoQuality(
+            tile: ObjectIdentifier(tile), participantId: "peer-a", quality: .middle)
+        state.reportTileVideoQuality(
+            tile: ObjectIdentifier(tile), participantId: "peer-a", quality: nil)
+        XCTAssertEqual(reports.map(\.1), ["a", "a"])
+        XCTAssertEqual(reports.map(\.2), [.middle, nil])
+        XCTAssertEqual(reports.map(\.0), [ObjectIdentifier(tile), ObjectIdentifier(tile)])
+    }
+
     func testANilCompanionRemovesOnlyThatEntry() {
         let state = CallUiState()
         state.setRemoteLightVideoTrack(makeTrack("light-a"), forParticipant: "peer-a")
@@ -274,13 +230,29 @@ final class CallMediaCountersTests: XCTestCase {
         let counters = LayerDisplayCounters(
             lightSwitches: 3, lightMs: 4200, stallMaxMs: 310, stallTotalMs: 780)
         XCTAssertEqual(
-            CallMediaCounters.describeShown("call media interval", peerId: "p7", counters),
-            "call media interval shown peer=p7 light_switches=3 light_ms=4200"
-                + " stall_max_ms=310 stall_total_ms=780")
+            CallMediaCounters.describeShown(
+                "call media interval", peerId: "p7", counters, want: .middle, given: .light),
+            "call media interval shown peer=p7 want=middle given=light light_switches=3"
+                + " light_ms=4200 stall_max_ms=310 stall_total_ms=780")
         XCTAssertEqual(
-            CallMediaCounters.describeShown("call media total", peerId: "p7", .zero),
-            "call media total shown peer=p7 light_switches=0 light_ms=0"
+            CallMediaCounters.describeShown("call media total", peerId: "p7", .zero, want: .main),
+            "call media total shown peer=p7 want=main given=- light_switches=0 light_ms=0"
                 + " stall_max_ms=0 stall_total_ms=0")
+    }
+
+    func testTheShownLinesAskWhatIsWantedAndGivenOfEachPeer() {
+        XCTAssertEqual(
+            CallMediaCounters.describeShownPeers(
+                "call media interval",
+                [(peerId: "a", counters: .zero), (peerId: "b", counters: .zero)],
+                wantOf: { $0 == "a" ? .main : .light },
+                givenOf: { $0 == "a" ? .middle : nil }),
+            [
+                "call media interval shown peer=a want=main given=middle light_switches=0"
+                    + " light_ms=0 stall_max_ms=0 stall_total_ms=0",
+                "call media interval shown peer=b want=light given=- light_switches=0"
+                    + " light_ms=0 stall_max_ms=0 stall_total_ms=0",
+            ])
     }
 
     private func inbound(
@@ -303,18 +275,20 @@ final class CallMediaCountersTests: XCTestCase {
         return CallMediaStatEntry(id: id, type: "inbound-rtp", values: values)
     }
 
-    func testAVideoReceiverIsNamedMainOrLightByItsTrack() {
+    func testAVideoReceiverIsNamedMainMiddleOrLightByItsTrack() {
         let reading = CallMediaCounters.read(
             [
                 inbound("IT2", track: "light-track", packets: 50, decoded: 30),
                 inbound("IT1", track: "main-track", packets: 500, decoded: 60),
                 inbound("IT3", track: nil, packets: 5, decoded: 0),
+                inbound("IT4", track: "middle-track", packets: 90, decoded: 40),
                 inbound("IT0", track: "voice", packets: 100, decoded: 0, kind: "audio"),
             ],
-            lightTrackIds: ["light-track"])
+            lightTrackIds: ["light-track"], middleTrackIds: ["middle-track"])
 
-        XCTAssertEqual(reading.inbound.map(\.id), ["IT1", "IT2", "IT3"])
-        XCTAssertEqual(reading.inbound.map(\.counters.layer), [.main, .light, .unknown])
+        XCTAssertEqual(reading.inbound.map(\.id), ["IT1", "IT2", "IT3", "IT4"])
+        XCTAssertEqual(
+            reading.inbound.map(\.counters.layer), [.main, .light, .unknown, .middle])
     }
 
     func testTheReceiverLineEndsWithItsLayer() {
@@ -351,26 +325,109 @@ final class CallMediaCountersTests: XCTestCase {
             ])
     }
 
-    func testTheSenderLineNamesEachLayerByItsRid() {
-        let entries = ["f", "q"].map { rid in
-            CallMediaStatEntry(
-                id: "OT-\(rid)", type: "outbound-rtp",
-                values: [
-                    "kind": "video" as NSString,
-                    "rid": rid as NSString,
-                    "frameWidth": NSNumber(value: rid == "q" ? 320 : 1280),
-                    "frameHeight": NSNumber(value: rid == "q" ? 180 : 720),
-                    "framesPerSecond": NSNumber(value: 30),
-                    "qualityLimitationReason": "none" as NSString,
-                ])
-        }
-        let reading = CallMediaCounters.read(entries, lightTrackIds: [])
+    private func outbound(
+        _ id: String, mid: String?, source: String?, width: Int, height: Int, bytes: Int
+    ) -> CallMediaStatEntry {
+        var values: [String: NSObject] = [
+            "kind": "video" as NSString,
+            "frameWidth": NSNumber(value: width),
+            "frameHeight": NSNumber(value: height),
+            "framesPerSecond": NSNumber(value: 30),
+            "qualityLimitationReason": "none" as NSString,
+            "bytesSent": NSNumber(value: bytes),
+        ]
+        if let mid { values["mid"] = mid as NSString }
+        if let source { values["mediaSourceId"] = source as NSString }
+        return CallMediaStatEntry(id: id, type: "outbound-rtp", values: values)
+    }
+
+    private func source(_ id: String, track: String) -> CallMediaStatEntry {
+        CallMediaStatEntry(
+            id: id, type: "media-source",
+            values: ["kind": "video" as NSString, "trackIdentifier": track as NSString])
+    }
+
+    /// Each camera sender is named by the media line it is sent on.
+    func testASenderIsNamedByItsMid() {
+        let reading = CallMediaCounters.read(
+            [
+                outbound("OT3", mid: "3", source: nil, width: 320, height: 180, bytes: 10),
+                outbound("OT1", mid: "1", source: nil, width: 1280, height: 720, bytes: 30),
+                outbound("OT4", mid: "4", source: nil, width: 640, height: 360, bytes: 20),
+            ],
+            lightTrackIds: [],
+            senderOfMid: ["1": .main, "3": .light, "4": .middle])
+        XCTAssertEqual(reading.outbound.map(\.sender), [.main, .middle, .light])
+        XCTAssertEqual(reading.outbound.map(\.frameWidth), [1280, 640, 320])
+    }
+
+    /// Where the report carries no `mid` the sender is read from the track
+    /// behind the stream's media source.
+    func testASenderWithoutAMidIsNamedByItsSourceTrack() {
+        let reading = CallMediaCounters.read(
+            [
+                source("SV1", track: CameraSender.trackId(of: .light)),
+                source("SV2", track: CameraSender.trackId(of: .main)),
+                source("SV3", track: "something-else"),
+                outbound("OT1", mid: nil, source: "SV1", width: 320, height: 180, bytes: 1),
+                outbound("OT2", mid: nil, source: "SV2", width: 1280, height: 720, bytes: 1),
+                outbound("OT3", mid: nil, source: "SV3", width: 8, height: 8, bytes: 1),
+            ],
+            lightTrackIds: [])
+        XCTAssertEqual(reading.outbound.map(\.sender), [.main, .light, nil])
+        // A media source is not a stream of its own.
+        XCTAssertTrue(reading.inbound.isEmpty)
+        XCTAssertEqual(reading.outbound.count, 3)
+    }
+
+    func testTheSenderLinesNameEachSenderItsBitrateAndItsActivity() {
+        let mids: [String: CameraSenderKind] = ["1": .main, "3": .light, "4": .middle]
+        let before = CallMediaCounters.read(
+            [
+                outbound("OT1", mid: "1", source: nil, width: 1280, height: 720, bytes: 100_000),
+                outbound("OT3", mid: "3", source: nil, width: 320, height: 180, bytes: 10_000),
+            ],
+            lightTrackIds: [], senderOfMid: mids)
+        let now = CallMediaCounters.read(
+            [
+                outbound("OT1", mid: "1", source: nil, width: 1280, height: 720, bytes: 350_000),
+                outbound("OT3", mid: "3", source: nil, width: 320, height: 180, bytes: 45_000),
+            ],
+            lightTrackIds: [], senderOfMid: mids)
+
+        let lines = CallMediaCounters.describeOutbound(
+            "call media interval", before: before, now: now, elapsedMs: 2_000,
+            activityOf: { kind in
+                switch kind {
+                case .main: return OutboundActivity(needed: true, active: true)
+                case .middle: return OutboundActivity(needed: false, active: false)
+                case .light: return OutboundActivity(needed: nil, active: true)
+                }
+            },
+            existing: [.main, .middle, .light])
 
         XCTAssertEqual(
-            CallMediaCounters.describeOutbound("call media interval", reading.outbound),
+            lines,
             [
-                "call media interval send video mode=- size=1280x720 fps=30 limited_by=none rid=f",
-                "call media interval send video mode=- size=320x180 fps=30 limited_by=none rid=q",
+                "call media interval send video mode=- size=1280x720 fps=30 limited_by=none"
+                    + " kbps=1000 sender=main needed=yes active=yes",
+                "call media interval send video mode=- size=320x180 fps=30 limited_by=none"
+                    + " kbps=140 sender=light needed=- active=yes",
+                // A sender the report carries no stream for still has its line.
+                "call media interval send video mode=- size=- fps=- limited_by=-"
+                    + " kbps=- sender=middle needed=no active=no",
+            ])
+    }
+
+    func testASenderLineHasNoBitrateWithoutAnEarlierReading() {
+        let now = CallMediaCounters.read(
+            [outbound("OT1", mid: "1", source: nil, width: 1280, height: 720, bytes: 350_000)],
+            lightTrackIds: [], senderOfMid: ["1": .main])
+        XCTAssertEqual(
+            CallMediaCounters.describeOutbound("call media interval", now: now),
+            [
+                "call media interval send video mode=- size=1280x720 fps=30 limited_by=none"
+                    + " kbps=- sender=main"
             ])
     }
 

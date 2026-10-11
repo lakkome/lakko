@@ -24,6 +24,13 @@ struct SfuSignalingCallbacks {
     var onSdpAnswer: ((_ sdp: String) -> Void)?
     var onSdpOffer: ((_ sdp: String) -> Void)?
     var onPong: ((_ nonce: UInt64) -> Void)?
+    /// What the SFU gives this device of each publisher's video (ADR-0070
+    /// step 6): the whole set, replacing the last one.
+    var onVideoGiven: ((_ given: [SfuVideoGiven]) -> Void)?
+    /// Which of this device's own camera senders somebody is being sent
+    /// (ADR-0070, "senders nobody watches"): the whole state, the last
+    /// frame wins. The light sender is always needed and is not named.
+    var onVideoNeeded: ((_ main: Bool, _ middle: Bool) -> Void)?
     var onServerError: ((_ code: SfuErrorCode, _ detail: String) -> Void)?
     /// A frame the shared parser rejected. The connection is NOT closed
     /// automatically — the caller decides.
@@ -263,13 +270,35 @@ final class SfuSignalingClient {
             callbacks.onPong?(nonce)
         case let .error(code, detail):
             callbacks.onServerError?(code, detail)
+        case let .videoGiven(given):
+            callbacks.onVideoGiven?(given)
+        case let .videoNeeded(main, middle):
+            callbacks.onVideoNeeded?(main, middle)
         }
     }
 
     // MARK: - Send (client -> SFU)
 
     /// Send a client -> SFU SDP offer (publish path).
-    func sendSdpOffer(_ sdp: String) { enqueue(try? composeSfuSdpOffer(sdp: sdp)) }
+    ///
+    /// `lightMids` and `middleMids` name the offer's m-lines that carry the
+    /// light and the middle copy of the camera (ADR-0070 steps 1 and 5), so
+    /// the SFU forwards them as the camera's `~light` companion and its
+    /// `~mid` track. Empty while this device has no such sender.
+    func sendSdpOffer(_ sdp: String, lightMids: [String] = [], middleMids: [String] = []) {
+        enqueue(try? composeSfuSdpOfferWithMiddle(
+            sdp: sdp, lightMids: lightMids, middleMids: middleMids))
+    }
+
+    /// Tell the SFU which picture of each publisher this device shows
+    /// (ADR-0070 step 5): the whole set each time. `false` when the frame
+    /// could not be composed or there is no open socket to put it on.
+    @discardableResult
+    func sendVideoWants(_ wants: [SfuVideoWant]) -> Bool {
+        guard isOpen, let json = try? composeSfuVideoWants(wants: wants) else { return false }
+        enqueue(json)
+        return true
+    }
 
     /// Send a client -> SFU SDP answer (responds to a SFU-initiated
     /// offer).

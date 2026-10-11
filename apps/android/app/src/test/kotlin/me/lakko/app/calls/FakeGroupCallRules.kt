@@ -6,6 +6,7 @@ package me.lakko.app.calls
 import uniffi.lakko_ffi_uniffi.CallBarPhase
 import uniffi.lakko_ffi_uniffi.CallGrid
 import uniffi.lakko_ffi_uniffi.StageCandidate
+import uniffi.lakko_ffi_uniffi.TileVideoQuality
 
 /**
  * A stand-in for the shared call rules, for host tests.
@@ -33,10 +34,13 @@ internal class FakeGroupCallRules(
     },
     private val stage: (people: List<StageCandidate>, pinned: UInt?) -> UInt? = { _, _ -> null },
     private val ringback: (groupCall: Boolean, phase: CallBarPhase) -> Boolean = { _, _ -> false },
+    private val tileQuality: (people: UInt, tileWidthPx: UInt, pinnedOrStage: Boolean) -> TileVideoQuality =
+        { _, _, _ -> TileVideoQuality.MAIN },
 ) : GroupCallRules {
     val gridQuestions = ArrayList<Triple<UInt, UInt, UInt>>()
     val stageQuestions = ArrayList<Pair<List<StageCandidate>, UInt?>>()
     val ringbackQuestions = ArrayList<Pair<Boolean, CallBarPhase>>()
+    val tileQualityQuestions = ArrayList<Triple<UInt, UInt, Boolean>>()
 
     override fun callGrid(count: UInt, width: UInt, height: UInt): CallGrid {
         gridQuestions.add(Triple(count, width, height))
@@ -51,6 +55,51 @@ internal class FakeGroupCallRules(
     override fun ringbackPlays(groupCall: Boolean, phase: CallBarPhase): Boolean {
         ringbackQuestions.add(groupCall to phase)
         return ringback(groupCall, phase)
+    }
+
+    override fun tileVideoQuality(people: UInt, tileWidthPx: UInt, pinnedOrStage: Boolean): TileVideoQuality {
+        tileQualityQuestions.add(Triple(people, tileWidthPx, pinnedOrStage))
+        return tileQuality(people, tileWidthPx, pinnedOrStage)
+    }
+}
+
+/**
+ * Timers a test moves by hand: nothing runs until [advance] reaches its time.
+ * Tasks due at the same instant run in the order they were scheduled.
+ */
+internal class FakeCallTimers : CallTimers {
+    private class Task(val at: Long, val order: Long, val run: () -> Unit)
+
+    private val tasks = ArrayList<Task>()
+    private var scheduled = 0L
+    var now: Long = 0L
+        private set
+
+    override fun nowMs(): Long = now
+
+    override fun schedule(ms: Long, run: () -> Unit): Any {
+        val task = Task(now + ms, scheduled++, run)
+        tasks += task
+        return task
+    }
+
+    override fun cancel(handle: Any) {
+        tasks.removeAll { it === handle }
+    }
+
+    /** How many tasks are waiting. */
+    val pending: Int get() = tasks.size
+
+    /** Move the clock on by [ms], running every task that falls due. */
+    fun advance(ms: Long) {
+        val until = now + ms
+        while (true) {
+            val next = tasks.filter { it.at <= until }.minWithOrNull(compareBy({ it.at }, { it.order })) ?: break
+            tasks.remove(next)
+            now = maxOf(now, next.at)
+            next.run()
+        }
+        now = until
     }
 }
 

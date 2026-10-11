@@ -20,6 +20,15 @@ import LakkoCore
 /// four stacks open the identical wire, a frame sealed on any one opens on any
 /// other (the cross-runtime half of G-26), no live SFU needed. Any drift in
 /// the iOS SFrame stack fails here.
+///
+/// Scope since ADR-0071: this vector is the HEADER-FIRST layout (ADR-0013),
+/// which the UniFFI `sealFramed` / `openFramed` still implement and which this
+/// test still pins for them. Call media no longer uses it: the native bridge
+/// seals and opens `clear_prefix || ciphertext || sframe_header || trailer`
+/// through the C ABI, UniFFI has no entry point for that layout, and its
+/// golden vector is pinned in `apps/shared/sframe-bridge/test_bridge.cc`
+/// (`test_media_frame_golden_vector`), which also asserts that the bytes
+/// below do NOT open on the media path.
 final class SFrameGoldenTests: XCTestCase {
 
     private static let goldenSeed = Data(repeating: 0x42, count: 32)

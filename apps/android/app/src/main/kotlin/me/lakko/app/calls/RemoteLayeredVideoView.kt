@@ -25,15 +25,20 @@ import uniffi.lakko_ffi_uniffi.layerTickMs
 
 /**
  * A remote person's picture in an SFU call (`docs/ux/group-call-grid.md`
- * section 7.5, ADR-0067 step 5).
+ * sections 7.5 and 7.6, ADR-0067 step 5, ADR-0070).
  *
  * ## One renderer, a sink on each track
  *
- * The tile has ONE `SurfaceViewRenderer`. Each of the person's tracks (the
- * main one, and the light companion when the publisher sends one) carries a
- * small [VideoSink] of this tile's. Every frame a track delivers is reported
- * to the shared rule ([LayeredTileDriver]), and handed on to the renderer only
- * when that track is the one the rule says to show.
+ * The tile has ONE `SurfaceViewRenderer`. Each of the two tracks it shows of
+ * the person (a heavy one: the main or the middle track, as the tile asked
+ * the SFU and the SFU gives; and the light companion when the publisher
+ * sends one) carries a small [VideoSink] of this tile's. Every frame a track
+ * delivers is reported to the shared rule ([LayeredTileDriver]), and handed
+ * on to the renderer only when that track is the one to show.
+ *
+ * With no heavy track (the tile shows the light picture alone) every light
+ * frame is drawn. When the heavy track is replaced by another, the light
+ * copy is drawn until the new one's first frame.
  *
  * Why this and not two stacked renderers switched by alpha or z-order, which
  * is how the web client does it: libwebrtc's Android renderer is a
@@ -49,8 +54,8 @@ import uniffi.lakko_ffi_uniffi.layerTickMs
  * its frames are drawn, and both sinks stay attached for as long as the tile
  * is on screen.
  *
- * Without a companion every main frame is drawn, which is the picture the
- * tile had before; the rule still counts how long it stood still.
+ * Without a companion every heavy frame is drawn; the rule still counts how
+ * long it stood still.
  *
  * ## Clock and foreground
  *
@@ -59,13 +64,14 @@ import uniffi.lakko_ffi_uniffi.layerTickMs
  * presented, so nothing is reported, and on return the tile starts again on
  * the full picture (`resync`).
  *
- * @param mainTrack the person's main video track.
+ * @param heavyTrack the person's main or middle video track, whichever this
+ *   tile shows; `null` when it shows the light picture alone.
  * @param lightTrack their light companion, or `null` when they send none.
  * @param peerId the SFU peer id, for the `shown` line of the media counters.
  */
 @Composable
 internal fun RemoteLayeredVideoView(
-    mainTrack: VideoTrack,
+    heavyTrack: VideoTrack?,
     lightTrack: VideoTrack?,
     peerId: String,
     eglContext: EglBase.Context,
@@ -73,7 +79,7 @@ internal fun RemoteLayeredVideoView(
     scalingType: RendererCommon.ScalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
 ) {
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
-    val currentMain by rememberUpdatedState(mainTrack)
+    val currentHeavy by rememberUpdatedState(heavyTrack)
     val currentLight by rememberUpdatedState(lightTrack)
     val currentScaling by rememberUpdatedState(scalingType)
 
@@ -124,12 +130,12 @@ internal fun RemoteLayeredVideoView(
                 // Never mirror the other person.
                 view.setMirror(false)
                 tile.renderer = view
-                tile.attach(currentMain, currentLight)
+                tile.attach(currentHeavy, currentLight)
                 view
             },
             update = { view ->
                 view.setScalingType(currentScaling)
-                tile.attach(currentMain, currentLight)
+                tile.attach(currentHeavy, currentLight)
             },
             onRelease = { view ->
                 tile.release()
@@ -152,31 +158,42 @@ private class LayeredTile(
     @Volatile
     var renderer: VideoSink? = null
 
-    private var attachedMain: VideoTrack? = null
+    private var attachedHeavy: VideoTrack? = null
     private var attachedLight: VideoTrack? = null
+    private var attachedOnce = false
     private var released = false
 
-    private val mainSink = VideoSink { frame: VideoFrame ->
-        if (driver.mainFrame()) renderer?.onFrame(frame)
+    private val heavySink = VideoSink { frame: VideoFrame ->
+        if (driver.heavyFrame()) renderer?.onFrame(frame)
     }
 
     private val lightSink = VideoSink { frame: VideoFrame ->
         if (driver.lightFrame()) renderer?.onFrame(frame)
     }
 
-    /** Put the sinks on [main] and [light], moving them off whatever they
-     *  were on, and tell the rule when the companion appears or goes. */
-    fun attach(main: VideoTrack?, light: VideoTrack?) {
+    /** Put the sinks on [heavy] and [light], moving them off whatever they
+     *  were on, and tell the driver what the tile has now. A heavy track that
+     *  takes the place of another starts the rule again. */
+    fun attach(heavy: VideoTrack?, light: VideoTrack?) {
         if (released) return
-        if (main !== attachedMain) {
-            attachedMain?.let { detach(it, mainSink) }
-            attachedMain = main?.takeIf { attach(it, mainSink) }
+        val heavyChanged = heavy !== attachedHeavy
+        val lightChanged = light !== attachedLight
+        if (attachedOnce && !heavyChanged && !lightChanged) return
+        if (heavyChanged) {
+            attachedHeavy?.let { detach(it, heavySink) }
+            attachedHeavy = heavy?.takeIf { attach(it, heavySink) }
         }
-        if (light !== attachedLight) {
+        if (lightChanged) {
             attachedLight?.let { detach(it, lightSink) }
             attachedLight = light?.takeIf { attach(it, lightSink) }
-            driver.setLightAvailable(attachedLight != null)
         }
+        driver.setSources(
+            hasHeavy = attachedHeavy != null,
+            hasLight = attachedLight != null,
+            // The first tracks of a new tile replace nothing.
+            heavyReplaced = attachedOnce && heavyChanged,
+        )
+        attachedOnce = true
     }
 
     /** One look at the clock, and what was counted goes to the ledger. */
@@ -191,9 +208,9 @@ private class LayeredTile(
     fun release() {
         if (released) return
         released = true
-        attachedMain?.let { detach(it, mainSink) }
+        attachedHeavy?.let { detach(it, heavySink) }
         attachedLight?.let { detach(it, lightSink) }
-        attachedMain = null
+        attachedHeavy = null
         attachedLight = null
         renderer = null
         driver.close()?.let { shownLayerLedger.add(peerId, it) }

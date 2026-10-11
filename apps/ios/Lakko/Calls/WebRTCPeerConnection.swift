@@ -320,6 +320,7 @@ public final class WebRTCPeerConnection: NSObject {
         peer = nil
         localAudioTrack = nil
         localVideoTrack = nil
+        cameraCopies = [:]
     }
 
     // MARK: - Local tracks
@@ -370,6 +371,9 @@ public final class WebRTCPeerConnection: NSObject {
     /// call (no local video track present).
     public func setCameraEnabled(_ on: Bool) {
         localVideoTrack?.isEnabled = on
+        // The copies of an SFU call's camera carry the same picture and are
+        // switched with it.
+        for copy in cameraCopies.values { copy.track.isEnabled = on }
     }
 
     /// G3-1-conn-quality — one-shot connection-stats sample
@@ -529,8 +533,9 @@ public final class WebRTCPeerConnection: NSObject {
             .map { CallStatEntry(type: $0.type, values: $0.values) }
     }
 
-    /// The video entries of the statistics report (`inbound-rtp` and
-    /// `outbound-rtp`), with their ids, for the group call's media log
+    /// The video entries of the statistics report (`inbound-rtp`,
+    /// `outbound-rtp` and the `media-source` each sender reads from), with
+    /// their ids, for the group call's media log
     /// (``CallMediaCounters``). `nil` when there is no peer connection.
     func sampleVideoStatEntries() async -> [CallMediaStatEntry]? {
         guard let peer = peer else { return nil }
@@ -538,7 +543,10 @@ public final class WebRTCPeerConnection: NSObject {
             peer.statistics { cont.resume(returning: $0) }
         }
         return report.statistics
-            .filter { $0.value.type == "inbound-rtp" || $0.value.type == "outbound-rtp" }
+            .filter {
+                $0.value.type == "inbound-rtp" || $0.value.type == "outbound-rtp"
+                    || $0.value.type == "media-source"
+            }
             .map { CallMediaStatEntry(id: $0.key, type: $0.value.type, values: $0.value.values) }
     }
 
@@ -594,52 +602,175 @@ public final class WebRTCPeerConnection: NSObject {
         self.localVideoSender = sender
     }
 
-    /// What the SFU call's camera sender was created as by
-    /// ``addLocalCameraTrack(_:)``; `.none` before it ran and on the
-    /// one-to-one path, which never calls it.
-    private(set) var cameraSendOutcome: CameraSender.Outcome = .none
+    // MARK: - The SFU call's camera: three senders (ADR-0070 steps 1 and 5)
 
-    /// Add the camera of an SFU call (group and link calls) as two simulcast
-    /// layers: rid `q`, a quarter of the size and at most 150 kbit/s, then
-    /// rid `f`, the full picture (ADR-0067 step 5, ``CameraSender``).
-    ///
-    /// Encodings can only be given when the sender is created, so the first
-    /// publish and the mid-call camera-on both come through here. When the
-    /// binding refuses the two encodings the track is added the way
-    /// ``addLocalVideoTrack(_:)`` adds it, as one encoding, and that is
-    /// logged.
-    ///
-    /// Either way there is ONE sender, so the SFrame attach that follows arms
-    /// one encryptor with one key and one counter for both layers. The
-    /// one-to-one call keeps ``addLocalVideoTrack(_:)``.
-    @discardableResult
-    func addLocalCameraTrack(_ source: RTCVideoSource) -> CameraSender.Outcome {
-        guard let peer = peer else { return .none }
-        let streamIds = ["lakko-local-stream"]
-        let track = Self.sharedFactory.videoTrack(with: source, trackId: "lakko-video0")
-        let added = CameraSender.add(
-            addWithEncodings: { specs in
-                let transceiverInit = RTCRtpTransceiverInit()
-                transceiverInit.direction = .sendRecv
-                transceiverInit.streamIds = streamIds
-                transceiverInit.sendEncodings = CameraSender.rtcEncodings(specs)
-                return peer.addTransceiver(with: track, init: transceiverInit)?.sender
-            },
-            addPlain: { peer.add(track, streamIds: streamIds) })
-        self.localVideoTrack = track
-        self.localVideoSender = added.sender
-        self.cameraSendOutcome = added.outcome
-        NSLog(
-            "WebRTCPeerConnection: camera sender created as %@",
-            added.outcome == .simulcast ? "two simulcast layers (q, f)" : "one encoding")
-        return added.outcome
+    /// A copy of the camera beside the main sender: a further track on the
+    /// camera's own `RTCVideoSource`, on a transceiver of its own, scaled
+    /// down by its one encoding (``CameraSender``).
+    struct CameraCopy {
+        let track: RTCVideoTrack
+        let transceiver: RTCRtpTransceiver
+        var sender: RTCRtpSender { transceiver.sender }
     }
 
-    /// The rids of the camera sender's encodings as the binding holds them,
-    /// in order; empty with no camera sender. Read by a test and by the
-    /// call's log.
-    func cameraSendRids() -> [String] {
-        localVideoSender?.parameters.encodings.map { $0.rid ?? "" } ?? []
+    /// The copies this connection sends, by kind. Never more than one of a
+    /// kind; empty on the one-to-one path.
+    private var cameraCopies: [CameraCopyKind: CameraCopy] = [:]
+
+    /// Add the camera of an SFU call (group and link calls) as its main
+    /// sender: the picture as captured, one encoding, SFrame stream index 1
+    /// as before. Created with `add(_:streamIds:)`, the way the one-to-one
+    /// call creates its sender, on the first publish and on a mid-call
+    /// camera-on alike (mid-call it may reuse a video transceiver the SFU
+    /// already negotiated). The copies are added by ``addCameraCopies(_:middleActive:)``.
+    func addLocalCameraTrack(_ source: RTCVideoSource) {
+        guard let peer = peer else { return }
+        let track = Self.sharedFactory.videoTrack(
+            with: source, trackId: CameraSender.trackId(of: .main))
+        let sender = peer.add(track, streamIds: ["lakko-local-stream"])
+        self.localVideoTrack = track
+        self.localVideoSender = sender
+        if let sender { preferFramerate(sender) }
+    }
+
+    /// Add the light and the middle copy of the camera, each an ordinary
+    /// sender on a transceiver of its own, in that order (so the light one
+    /// keeps the media line it had before there was a middle one). Call it
+    /// right after ``addLocalCameraTrack(_:)``, before SFrame is armed and
+    /// before any offer is built.
+    ///
+    /// `source` is the camera's own source: each copy is a further track on
+    /// it, so one capturer feeds all three senders, and the copy's size is
+    /// its encoding's `scaleResolutionDownBy`. `middleActive` says whether
+    /// the middle sender is created sending (``SenderActivityRule``); the
+    /// light one always is.
+    ///
+    /// Never fails the call: a copy the binding will not take is absent,
+    /// said once, and the call goes on without it. A copy that exists is
+    /// left alone.
+    func addCameraCopies(_ source: RTCVideoSource, middleActive: Bool) {
+        guard let peer = peer, localVideoSender != nil else { return }
+        let plan = CameraSender.plan(middleActive: middleActive)
+        for kind in CameraCopyKind.addOrder where cameraCopies[kind] == nil {
+            guard let spec = plan.first(where: { $0.kind == kind.senderKind }) else { continue }
+            let track = Self.sharedFactory.videoTrack(with: source, trackId: spec.trackId)
+            track.isEnabled = localVideoTrack?.isEnabled ?? true
+            let transceiverInit = RTCRtpTransceiverInit()
+            transceiverInit.direction = .sendOnly
+            transceiverInit.sendEncodings = [CameraSender.rtcEncoding(spec.encoding)]
+            guard let transceiver = peer.addTransceiver(with: track, init: transceiverInit) else {
+                NSLog(
+                    "WebRTCPeerConnection: publishing the camera without a %@ sender: "
+                        + "the transceiver was refused", kind.rawValue)
+                continue
+            }
+            cameraCopies[kind] = CameraCopy(track: track, transceiver: transceiver)
+            preferFramerate(transceiver.sender)
+        }
+    }
+
+    /// Take a copy's sender off the connection. Used when it could not be
+    /// sealed: an unsealed sender is never left in place (invariant #4).
+    func removeCameraCopy(_ kind: CameraCopyKind, reason: String) {
+        guard let copy = cameraCopies.removeValue(forKey: kind) else { return }
+        NSLog(
+            "WebRTCPeerConnection: publishing the camera without a %@ sender: %@",
+            kind.rawValue, reason)
+        copy.track.isEnabled = false
+        LakkoSFrameAttach.detach(fromSender: copy.sender)
+        if let peer = peer {
+            _ = peer.removeTrack(copy.sender)
+        }
+        copy.transceiver.stopInternal()
+    }
+
+    /// One of the camera's senders, or `nil` when this connection has none
+    /// of that kind.
+    func cameraSender(_ kind: CameraSenderKind) -> RTCRtpSender? {
+        switch kind {
+        case .main: return localVideoSender
+        case .light: return cameraCopies[.light]?.sender
+        case .middle: return cameraCopies[.middle]?.sender
+        }
+    }
+
+    /// The `mid`s of the offer's m-lines that carry the `kind` copy of the
+    /// camera: one once a local description that includes the copy is set,
+    /// none otherwise (``CameraSender/mids(ofCopyMid:)``). Sent with every
+    /// offer this client makes.
+    func cameraCopyMids(_ kind: CameraCopyKind) -> [String] {
+        CameraSender.mids(ofCopyMid: cameraCopies[kind]?.transceiver.mid)
+    }
+
+    /// Which camera sender each of this connection's media lines carries,
+    /// by `mid`, for the media log. A sender whose transceiver has no `mid`
+    /// yet is absent.
+    func cameraSenderMids() -> [String: CameraSenderKind] {
+        var out: [String: CameraSenderKind] = [:]
+        for kind in CameraCopyKind.addOrder {
+            for mid in cameraCopyMids(kind) { out[mid] = kind.senderKind }
+        }
+        if let peer = peer, let main = localVideoSender,
+            let mid = peer.transceivers.first(where: { $0.sender == main })?.mid, !mid.isEmpty {
+            out[mid] = .main
+        }
+        return out
+    }
+
+    /// A camera sender as ``SenderActivity`` drives it: its first encoding's
+    /// `isActive`, read and set off the main thread. `nil` without that
+    /// sender. The same object for the same sender, so a re-bind of an
+    /// unchanged sender is recognised as such.
+    func cameraActivitySender(_ kind: CameraSenderKind) -> RtcActivitySender? {
+        guard let sender = cameraSender(kind) else {
+            activitySenders[kind] = nil
+            return nil
+        }
+        if let held = activitySenders[kind], held.sender === sender { return held }
+        let made = RtcActivitySender(sender: sender, queue: Self.libwebrtcQueue)
+        activitySenders[kind] = made
+        return made
+    }
+
+    private var activitySenders: [CameraSenderKind: RtcActivitySender] = [:]
+
+    /// Ask a camera sender to keep its frame rate under a bitrate shortfall:
+    /// sharpness is what the camera gives up, not motion. Best effort; a
+    /// binding that does not take it keeps its default.
+    private func preferFramerate(_ sender: RTCRtpSender) {
+        let wanted = NSNumber(value: RTCDegradationPreference.maintainFramerate.rawValue)
+        Self.libwebrtcQueue.async {
+            let parameters = sender.parameters
+            if parameters.degradationPreference == wanted { return }
+            parameters.degradationPreference = wanted
+            sender.parameters = parameters
+        }
+    }
+
+    /// Tell every sender's SFrame encryptor which codec the sender
+    /// negotiated (ADR-0071): the first entry of the sender's negotiated
+    /// codecs. A video encryptor leaves nothing of a frame clear until it is
+    /// told, and an encryptor attached again starts untold, so this runs
+    /// after every negotiation and after every attach.
+    ///
+    /// The read of a sender's parameters blocks on libwebrtc's signaling
+    /// thread, so it is made off the main thread; the setter itself is safe
+    /// from any thread.
+    func syncSenderCodecs() {
+        var senders: [(name: String, sender: RTCRtpSender)] = []
+        if let sender = localAudioSender { senders.append(("audio", sender)) }
+        for kind in CameraSenderKind.allCases {
+            if let sender = cameraSender(kind) { senders.append((kind.rawValue, sender)) }
+        }
+        if senders.isEmpty { return }
+        Self.libwebrtcQueue.async {
+            let told = senders.map { entry -> String in
+                let codec = entry.sender.parameters.codecs.first?.name
+                let set = LakkoSFrameAttach.setCodecName(codec, forSender: entry.sender)
+                return "\(entry.name)=\(codec ?? "-")\(set ? "" : "(no encryptor)")"
+            }
+            NSLog("WebRTCPeerConnection: sender codecs %@", told.joined(separator: " "))
+        }
     }
 
     /// G3-1-video-ui — expose the currently-attached local
@@ -665,6 +796,10 @@ public final class WebRTCPeerConnection: NSObject {
         }
         localVideoSender = nil
         localVideoTrack = nil
+        // The copies of an SFU call's camera go with the camera.
+        for kind in CameraCopyKind.addOrder {
+            removeCameraCopy(kind, reason: "the camera sender was removed")
+        }
     }
 
     /// Stop or resume OFFERING video, without touching the sender.
@@ -732,8 +867,8 @@ public final class WebRTCPeerConnection: NSObject {
         // across the two streams of this leaf keys into disjoint
         // `(key, nonce_salt)` spaces and no longer reuses a nonce.
         let armSet: [(RTCRtpSender?, UInt8)] = [
-            (localAudioSender, 0),
-            (localVideoSender, 1),
+            (localAudioSender, CameraSender.streamIndexAudio),
+            (localVideoSender, CameraSender.streamIndexCamera),
         ]
         for (maybeSender, streamIndex) in armSet {
             guard let sender = maybeSender else { continue }
@@ -747,7 +882,28 @@ public final class WebRTCPeerConnection: NSObject {
                 allOk = false
             }
         }
+        armCameraCopyEncryptors(seed: seed, localLeaf: localLeaf)
         return allOk
+    }
+
+    /// Arm SFrame on the copies of an SFU call's camera, each under its own
+    /// stream index (3 the light one, 4 the middle one), so no two senders of
+    /// this leaf share a key. A copy that cannot be sealed is REMOVED rather
+    /// than left unsealed (invariant #4) and the call goes on without it: a
+    /// copy is a second picture, never the only one.
+    private func armCameraCopyEncryptors(seed: Data, localLeaf: UInt32) {
+        for kind in CameraCopyKind.addOrder {
+            guard let copy = cameraCopies[kind] else { continue }
+            let status = LakkoSFrameAttach.attachEncryptor(
+                toSender: copy.sender,
+                seed: seed,
+                localLeaf: localLeaf,
+                streamIndex: CameraSender.streamIndex(of: kind.senderKind)
+            )
+            if status != .OK {
+                removeCameraCopy(kind, reason: "its SFrame encryptor could not be attached")
+            }
+        }
     }
 
     /// Arm SFrame on ONLY the local VIDEO sender (mid-call
@@ -770,14 +926,17 @@ public final class WebRTCPeerConnection: NSObject {
             return false
         }
         guard let sender = localVideoSender else { return false }
-        // Stream 1 (ADR-0035): v1 carries at most one video track; a
-        // future second video / screen-share would use stream 2.
-        return LakkoSFrameAttach.attachEncryptor(
+        // Stream 1 (ADR-0035) for the camera's main sender; the copies of an
+        // SFU call's camera are sealed under 3 and 4 below, and a shared
+        // screen would use 2.
+        guard LakkoSFrameAttach.attachEncryptor(
             toSender: sender,
             seed: seed,
             localLeaf: localLeaf,
-            streamIndex: 1
-        ) == .OK
+            streamIndex: CameraSender.streamIndexCamera
+        ) == .OK else { return false }
+        armCameraCopyEncryptors(seed: seed, localLeaf: localLeaf)
+        return true
     }
 
     /// Arm SFrame for a freshly-arrived remote `RTCRtpReceiver`.
@@ -1113,6 +1272,48 @@ public final class WebRTCPeerConnection: NSObject {
             // `services/auth/src/turn.rs` for the credential REST
             // shape.
         ]
+    }
+}
+
+// MARK: - Sender activity
+
+/// An `RTCRtpSender` as ``SenderActivity`` drives it: one read-modify-set of
+/// its first encoding's `isActive`, nothing else. No renegotiation: the media
+/// line, the SSRC and the SFrame encryptor stay.
+///
+/// The read and the write of a sender's parameters block on libwebrtc's
+/// signaling thread, so both are made on the queue the peer connection's own
+/// blocking calls use, never on the main thread. The binding's setter reports
+/// nothing, so whether it took is read back.
+final class RtcActivitySender: ActivitySender {
+
+    let sender: RTCRtpSender
+    private let queue: DispatchQueue
+
+    init(sender: RTCRtpSender, queue: DispatchQueue) {
+        self.sender = sender
+        self.queue = queue
+    }
+
+    func applyEncodingActive(_ active: Bool) async -> SenderActivityOutcome {
+        let sender = self.sender
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                let parameters = sender.parameters
+                guard let first = parameters.encodings.first else {
+                    continuation.resume(returning: .noEncoding)
+                    return
+                }
+                if first.isActive == active {
+                    continuation.resume(returning: .applied)
+                    return
+                }
+                first.isActive = active
+                sender.parameters = parameters
+                let now = sender.parameters.encodings.first?.isActive
+                continuation.resume(returning: now == active ? .applied : .refused)
+            }
+        }
     }
 }
 

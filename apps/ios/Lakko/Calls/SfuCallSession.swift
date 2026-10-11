@@ -37,10 +37,19 @@ import WebRTC
 /// wire protocol has no server -> client ICE frame).
 ///
 /// Media: when `config.video` is set the session captures the local
-/// camera (`LocalCameraCapture`), adds the video track BEFORE arming
-/// SFrame + building the offer (so the offer advertises a video m-line
-/// and the video sender is SFrame-sealed alongside audio), and surfaces
-/// the local track through `onLocalVideoTrack` for the self-preview tile.
+/// camera (`LocalCameraCapture`), adds its senders BEFORE arming SFrame +
+/// building the offer (so the offer advertises their m-lines and each is
+/// SFrame-sealed alongside audio), and surfaces the local track through
+/// `onLocalVideoTrack` for the self-preview tile.
+///
+/// The camera goes out as three ordinary senders (ADR-0070 steps 1 and 5,
+/// ``CameraSender``): the main one, a light one at a quarter of the size and
+/// a middle one at half the size, each sealed under its own SFrame stream
+/// index; the offer names the light and the middle m-line to the SFU. Which
+/// of them encode and send now is ``SenderActivityRule`` over the people in
+/// the call and the SFU's `video-needed` word. What this device asks the SFU
+/// for of each other person is ``VideoWantsBook``, fed by the tiles; what
+/// the SFU says it gives is ``VideoGivenBook``.
 /// Audio-only calls skip all of that. `connect()` refuses before any
 /// capture if the SFrame native shim is unavailable (invariant #4).
 @MainActor
@@ -165,6 +174,17 @@ final class SfuCallSession {
         /// for a participant's main track. Defaulted so existing memberwise
         /// callers keep their shorter initialiser.
         var onRemoteLightVideoTrack: ((RTCVideoTrack, _ peerId: String) -> Void)? = nil
+        /// The middle track of `peerId`'s camera arrived (ADR-0070 step 5):
+        /// the same camera at half size, delivered under that person's
+        /// stream id plus `~mid`. Like the light companion it is a further
+        /// picture of a person already in the call and never reaches
+        /// ``onRemoteVideoTrack``. Its packets flow only while this device
+        /// asks for that person's middle picture.
+        var onRemoteMiddleVideoTrack: ((RTCVideoTrack, _ peerId: String) -> Void)? = nil
+        /// What the SFU says it gives of each person's video now, by SFU
+        /// peer id (ADR-0070 step 6): the whole set. Empty before the first
+        /// `video-given` frame and with downlink control off.
+        var onVideoGiven: (([String: TileVideoQuality]) -> Void)? = nil
     }
 
     private let config: Config
@@ -193,9 +213,48 @@ final class SfuCallSession {
     /// ``sampleAudioLevels()`` to attribute a level to a person; never sent
     /// anywhere.
     private var audioTrackPeers: [String: String] = [:]
-    /// The ids of the receiving video tracks that are light companions, so
-    /// the media log can say `layer=light` for their receivers.
+    /// The ids of the receiving video tracks that are light companions and
+    /// middle tracks, so the media log can say `layer=light` and
+    /// `layer=middle` for their receivers.
     private var lightTrackIds: Set<String> = []
+    private var middleTrackIds: Set<String> = []
+    /// When the last media reading was taken, on a clock that never goes
+    /// back; for the senders' bitrate over the interval.
+    private var mediaLogLastAtMs: UInt64?
+
+    // ---- The camera's three senders (ADR-0070) -----------------------------
+    /// The camera's own source: the copies are further tracks on it.
+    private var localCameraSource: RTCVideoSource?
+    /// The SFU's last `video-needed` frame: which of this device's camera
+    /// senders somebody is being sent. `nil` before the first frame, which
+    /// means every sender is needed.
+    private var videoNeeded: VideoNeeded?
+    /// Keeps each camera sender's one encoding active or not, as
+    /// ``sendersActiveNow()`` says. One per sender, so the parameter writes
+    /// on a sender never overlap and the last decision wins.
+    private let senderActivity: [CameraSenderKind: SenderActivity] = [
+        .main: SenderActivity(name: "main"),
+        .middle: SenderActivity(name: "middle"),
+        .light: SenderActivity(name: "light"),
+    ]
+    private let rules: TileQualityRules
+
+    // ---- What this device shows of each person (ADR-0070 steps 5 and 6) ----
+    /// The SFU's id for this device, from the Welcome.
+    private var selfPeerId: String?
+    /// The people of the call as the SFU names them, and the picture every
+    /// mounted tile reports. Sent to the SFU as a whole whenever it changes.
+    private var wantsBook = VideoWantsBook()
+    private lazy var wantsSender = VideoWantsSender(
+        wants: { [weak self] in self?.wantsBook.wants() ?? [] },
+        send: { [weak self] frame in self?.sendVideoWants(frame) ?? false })
+    /// What the SFU says it gives of each person. Read by the tiles and the
+    /// media log; never fed back into ``wantsBook``, so the SFU keeps being
+    /// asked for what the tiles really want.
+    private var givenBook = VideoGivenBook()
+    /// The publish offer is out: the SFU has media state for this peer, and
+    /// takes a `video-wants` frame only from then on.
+    private var publishOfferSent = false
     /// Reads the video counters every ``CallMediaCounters/intervalMs`` from
     /// the moment media connects to hang-up.
     private var mediaLogTask: Task<Void, Never>?
@@ -254,8 +313,10 @@ final class SfuCallSession {
     init(
         config: Config,
         callbacks: Callbacks,
-        nowMs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+        nowMs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) },
+        rules: TileQualityRules = SharedTileQualityRules()
     ) {
+        self.rules = rules
         self.config = config
         self.callbacks = callbacks
         self.activeSeed = config.seed
@@ -274,6 +335,133 @@ final class SfuCallSession {
     private func broadcastMediaState() {
         guard signaling != nil else { return }
         sendSignalRelayToCall(payload: composeMediaState(cameraOn: localCameraOn))
+    }
+
+    // MARK: - What this device shows, and what the SFU gives
+
+    /// A tile says which picture of `peerId` it shows (``VideoWants``), or
+    /// `nil` when it stops showing one. `tile` is the identity of any object
+    /// that lives as long as the tile. The session asks the SFU for the
+    /// highest quality any tile of a person wants, `light` for a person no
+    /// tile shows, and tells it whenever that changes.
+    func reportTileVideoQuality(
+        tile: ObjectIdentifier, peerId: String, quality: TileVideoQuality?
+    ) {
+        if wantsBook.setTile(tile, peerId: peerId, quality: quality) { wantsSender.changed() }
+    }
+
+    /// The picture of `peerId` this device asks the SFU for now.
+    func videoQuality(of peerId: String) -> TileVideoQuality {
+        wantsBook.quality(of: peerId)
+    }
+
+    /// What the SFU gives of `peerId` now; `nil` when it has not said
+    /// (downlink control off, or a person its last frame did not name).
+    func videoGiven(of peerId: String) -> TileVideoQuality? {
+        givenBook.given(of: peerId)
+    }
+
+    /// A `video-given` frame: the SFU's whole set replaces the last one. The
+    /// tiles are told, and one line says whose shown picture it changed. What
+    /// this device asks for is left as it is.
+    private func onVideoGivenFrame(_ entries: [SfuVideoGiven]) {
+        let before = givenBook
+        givenBook.replace(entries)
+        if let line = VideoGiven.describe(
+            "call video given",
+            VideoGiven.changes(
+                wants: wantsBook.wants(),
+                before: { before.given(of: $0) },
+                after: { self.givenBook.given(of: $0) })) {
+            NSLog("%@", line)
+        }
+        callbacks.onVideoGiven?(givenBook.snapshot)
+    }
+
+    /// Put one `video-wants` frame on the wire; `false` when it cannot go
+    /// yet (the sender then tries again at its next call).
+    private func sendVideoWants(_ frame: [SfuVideoWant]) -> Bool {
+        guard let signaling, publishOfferSent else { return false }
+        guard signaling.sendVideoWants(frame) else { return false }
+        NSLog("%@", VideoWants.describe(frame))
+        return true
+    }
+
+    // MARK: - Which camera senders send
+
+    /// Whether the middle sender sends now: the shared rule
+    /// (`middle_sender_wanted`) over the people in the call, this device's
+    /// own person included.
+    private func middleWanted() -> Bool {
+        rules.middleSenderWanted(people: UInt32(clamping: wantsBook.people))
+    }
+
+    /// The "camera is on" condition of the sender-activity decision: this
+    /// device has a camera track.
+    ///
+    /// Deliberately NOT the track's `isEnabled`. The person turning the
+    /// camera off is `isEnabled = false` on the camera's tracks, exactly as
+    /// before this rule existed: the senders go on sending (black frames, at
+    /// very little bitrate) and a viewer who joins meanwhile still gets its
+    /// key frame. The SFU's own bookkeeping for a silent sender covers only
+    /// a sender it told `false`; a sender this client silenced by itself
+    /// would be an unannounced stop on the SFU's side. So the person's
+    /// camera toggle and the SFU's word compose without touching each other.
+    private func cameraIsOn() -> Bool {
+        pc?.currentLocalVideoTrack() != nil
+    }
+
+    private func activityInput() -> SenderActivityRule.Input {
+        SenderActivityRule.Input(
+            cameraOn: cameraIsOn(), middleWanted: middleWanted(), needed: videoNeeded)
+    }
+
+    /// Which camera senders encode and send now (``SenderActivityRule``).
+    private func sendersActiveNow() -> [CameraSenderKind: Bool] {
+        let connection = pc
+        return SenderActivityRule.allActive(activityInput()) { kind in
+            connection?.cameraSender(kind) != nil
+        }
+    }
+
+    /// Make every camera sender's encoding active or not, as
+    /// ``sendersActiveNow()`` says now. A parameter write only: the media
+    /// lines, the SSRCs and the SFrame encryptors stay and nothing is
+    /// renegotiated.
+    ///
+    /// Called after everything that can change the answer or reset what the
+    /// binding holds: a `video-needed` frame, a change of the roster, a
+    /// sender added, a renegotiation, and every media-log tick (which is
+    /// also when a refused switch-on is asked again). A no-op for a sender
+    /// whose encoding already says so.
+    private func syncSenderActivity() {
+        let active = sendersActiveNow()
+        for kind in CameraSenderKind.allCases {
+            guard let activity = senderActivity[kind] else { continue }
+            activity.bind(pc?.cameraActivitySender(kind))
+            if activity.bound { activity.want(active[kind] ?? false) }
+        }
+    }
+
+    /// A `video-needed` frame: the SFU's whole word replaces the last one,
+    /// the senders follow at once, and one line says so when it changed
+    /// which of them is active.
+    private func onVideoNeededFrame(_ needed: VideoNeeded) {
+        let before = sendersActiveNow()
+        videoNeeded = needed
+        if let line = SenderActivityRule.describeChange(
+            needed, before: before, after: sendersActiveNow()) {
+            NSLog("%@", line)
+        }
+        syncSenderActivity()
+    }
+
+    /// The people of the call changed: the middle sender starts or stops
+    /// with the count, and the SFU is told what this device shows of the
+    /// people now in it (again, whatever it is, after a join).
+    private func onRosterChanged(joined: Bool) {
+        syncSenderActivity()
+        if joined { wantsSender.resend() } else { wantsSender.changed() }
     }
 
     /// Rotate the call key on a mid-call MLS epoch change (G-18,
@@ -429,7 +617,18 @@ final class SfuCallSession {
         CallAudioSession.configureCallOutput(loudspeakerByDefault: false)
         audioTrackPeers.removeAll()
         lightTrackIds.removeAll()
+        middleTrackIds.removeAll()
         offerQueue.removeAll()
+        localCameraSource = nil
+        videoNeeded = nil
+        for activity in senderActivity.values { activity.reset() }
+        publishOfferSent = false
+        wantsSender.reset()
+        wantsBook.clear()
+        if givenBook.count > 0 {
+            givenBook.clear()
+            callbacks.onVideoGiven?([:])
+        }
         // Reset the serialized-renegotiation + video-publish state so a late
         // callback after teardown starts clean.
         makingOffer = false
@@ -503,7 +702,14 @@ final class SfuCallSession {
         // `applyRemoteAnswer` clears it + arms `negotiationReady` for a
         // mid-call renegotiation (piece B: `publishVideo`).
         makingOffer = true
-        signaling?.sendSdpOffer(offer)
+        // The copies' transceivers have their `mid`s now.
+        signaling?.sendSdpOffer(
+            offer, lightMids: connection.cameraCopyMids(.light),
+            middleMids: connection.cameraCopyMids(.middle))
+        // The SFU has media state for this peer from this offer on: tell it
+        // what this device shows of everyone.
+        publishOfferSent = true
+        wantsSender.resend()
     }
 
     /// Capture the local camera + add a video track to the peer
@@ -526,9 +732,9 @@ final class SfuCallSession {
             NSLog("SfuCallSession: LocalCameraCapture init returned nil")
             return
         }
-        // Two simulcast layers on one sender (ADR-0067 step 5); the SFrame
-        // arm that follows in the caller seals that one sender.
-        connection.addLocalCameraTrack(source)
+        // Three ordinary senders (ADR-0070 steps 1 and 5); the SFrame arm
+        // that follows in the caller seals each under its own stream index.
+        addCameraSenders(on: connection, source: source)
         localCameraCapture = capture
         callbacks.onLocalVideoTrack?(connection.currentLocalVideoTrack())
         Task { [weak self] in
@@ -542,6 +748,24 @@ final class SfuCallSession {
                 }
             }
         }
+    }
+
+    /// Add the camera's main sender and its two copies, in that order. The
+    /// middle one is created sending or not as the roster and the SFU say
+    /// now; the main and the light one are created sending.
+    private func addCameraSenders(on connection: WebRTCPeerConnection, source: RTCVideoSource) {
+        connection.addLocalCameraTrack(source)
+        var input = activityInput()
+        // The camera is being turned on by this very call.
+        input.cameraOn = true
+        connection.addCameraCopies(
+            source, middleActive: SenderActivityRule.active(.middle, exists: true, input))
+        localCameraSource = source
+        NSLog(
+            "SfuCallSession: camera senders added main=%@ light=%@ middle=%@",
+            connection.cameraSender(.main) != nil ? "yes" : "no",
+            connection.cameraSender(.light) != nil ? "yes" : "no",
+            connection.cameraSender(.middle) != nil ? "yes" : "no")
     }
 
     /// Enable / disable the local camera track (local-only gate). Meaningful
@@ -634,14 +858,17 @@ final class SfuCallSession {
         // comes before the first suspension point, so nothing can negotiate
         // in between (fail-closed).
         //
-        // The camera goes out as two simulcast layers on ONE sender, as on
-        // the first publish (ADR-0067 step 5), so this one arm covers both.
-        liveConn.addLocalCameraTrack(source)
+        // The camera goes out as three senders, as on the first publish
+        // (ADR-0070). The arm below seals the main one, which decides the
+        // outcome, and each copy; a copy that cannot be sealed is removed
+        // there and the camera is published without it.
+        addCameraSenders(on: liveConn, source: source)
         localCameraCapture = capture
         guard liveConn.armSFrameVideoEncryptor(seed: seed, localLeaf: publishLeaf) else {
             liveConn.removeLocalVideoTrack()
             await capture.stop()
             localCameraCapture = nil
+            localCameraSource = nil
             callbacks.onLocalVideoTrack?(nil)
             setVideoPublishState(.failed)
             throw SfuCallError.sframeUnavailable
@@ -654,8 +881,14 @@ final class SfuCallSession {
         // the broadcast is what carries later mute/unmute transitions.
         localCameraOn = true
         broadcastMediaState()
+        // A fresh encryptor starts without its codec (ADR-0071). A sender
+        // that reuses a negotiated media line already has one; the others
+        // get theirs when the renegotiation below is answered.
+        liveConn.syncSenderCodecs()
+        // The new senders get their flags as the roster and the SFU say now.
+        syncSenderActivity()
         // Renegotiate so the SFU (and thus other peers) learn the new video
-        // m-line. Serialized behind any in-flight offer.
+        // m-lines. Serialized behind any in-flight offer.
         await driveRenegotiationOffer()
     }
 
@@ -682,7 +915,9 @@ final class SfuCallSession {
         makingOffer = true
         do {
             let offer = try await connection.createRenegotiationOffer()
-            signaling.sendSdpOffer(offer)
+            signaling.sendSdpOffer(
+                offer, lightMids: connection.cameraCopyMids(.light),
+                middleMids: connection.cameraCopyMids(.middle))
             // `makingOffer` stays true until `applyRemoteAnswer` clears it.
         } catch {
             makingOffer = false
@@ -721,12 +956,30 @@ final class SfuCallSession {
                 "SfuCallSession: welcome self=%@ call=%@ rosterCount=%d peers=%@",
                 selfPeerId, callId, roster.count,
                 roster.map(\.peerId).joined(separator: ","))
-            Task { @MainActor in self?.callbacks.onWelcome?(selfPeerId, roster) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.selfPeerId = selfPeerId
+                self.wantsBook.setPeers(roster.map(\.peerId).filter { $0 != selfPeerId })
+                self.onRosterChanged(joined: false)
+                self.callbacks.onWelcome?(selfPeerId, roster)
+            }
+        }
+        cb.onVideoGiven = { [weak self] given in
+            Task { @MainActor in self?.onVideoGivenFrame(given) }
+        }
+        cb.onVideoNeeded = { [weak self] main, middle in
+            Task { @MainActor in
+                self?.onVideoNeededFrame(VideoNeeded(main: main, middle: middle))
+            }
         }
         cb.onPeerJoined = { [weak self] peerId, pseudonym, peerTag in
             NSLog("SfuCallSession: peer joined peer=%@", peerId)
             Task { @MainActor in
                 guard let self else { return }
+                if peerId != self.selfPeerId {
+                    self.wantsBook.addPeer(peerId)
+                    self.onRosterChanged(joined: true)
+                }
                 self.callbacks.onPeerJoined?(peerId, pseudonym, peerTag)
                 // Camera-off-cleanup: re-announce our current camera state so
                 // the newcomer (which was not in our Welcome-roster broadcast)
@@ -736,7 +989,17 @@ final class SfuCallSession {
         }
         cb.onPeerLeft = { [weak self] peerId in
             NSLog("SfuCallSession: peer left peer=%@", peerId)
-            Task { @MainActor in self?.callbacks.onPeerLeft?(peerId) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.wantsBook.removePeer(peerId)
+                // What the SFU gave of them goes with them: someone who
+                // later joins under the same id starts with nothing said.
+                if self.givenBook.removePeer(peerId) {
+                    self.callbacks.onVideoGiven?(self.givenBook.snapshot)
+                }
+                self.onRosterChanged(joined: false)
+                self.callbacks.onPeerLeft?(peerId)
+            }
         }
         cb.onSdpAnswer = { [weak self] sdp in
             Task { @MainActor in await self?.applyRemoteAnswer(sdp) }
@@ -804,6 +1067,11 @@ final class SfuCallSession {
         // clear the in-flight flag + arm renegotiation for future track
         // changes (piece B). Then either drive a camera-on that queued while we
         // were mid-offer, or drain any SFU subscribe-offers that waited.
+        // The senders' codecs are negotiated now: their SFrame encryptors
+        // need them to leave the right codec header in the clear (ADR-0071).
+        pc.syncSenderCodecs()
+        // A flag this negotiation reset on a sender is put back.
+        syncSenderActivity()
         makingOffer = false
         negotiationReady = true
         if pendingRenegotiation {
@@ -833,6 +1101,9 @@ final class SfuCallSession {
                 let answer = try await pc.createAnswer(remoteOfferSdp: sdp)
                 signaling.sendSdpAnswer(answer)
                 NSLog("SfuCallSession: answered server offer bytes=%d", answer.count)
+                // Harmless when nothing changed for the senders (ADR-0071).
+                pc.syncSenderCodecs()
+                syncSenderActivity()
             } catch {
                 // A single bad renegotiation drops that subscription; the call
                 // stays up. Continue draining — but say so: dropping one
@@ -892,15 +1163,35 @@ final class SfuCallSession {
         }
         // The call may have ended while the report was read.
         guard pc === connection, mediaLogTask != nil else { return }
-        let reading = CallMediaCounters.read(entries, lightTrackIds: lightTrackIds)
+        // A sender the binding refused to start is asked again, and a flag a
+        // renegotiation reset is put back.
+        syncSenderActivity()
+        let reading = CallMediaCounters.read(
+            entries, lightTrackIds: lightTrackIds, middleTrackIds: middleTrackIds,
+            senderOfMid: connection.cameraSenderMids())
+        let nowMs = RemoteLayerController.monotonicMs()
+        let elapsedMs = mediaLogLastAtMs.map { nowMs >= $0 ? nowMs - $0 : 0 } ?? 0
         let label = CallMediaCounters.intervalLabel
+        let active = sendersActiveNow()
+        let needed = videoNeeded
         var lines = CallMediaCounters.describeInbound(label, before: mediaLogLast, now: reading)
-        lines += CallMediaCounters.describeOutbound(label, reading.outbound)
-        // What each remote tile showed over the interval.
+        lines += CallMediaCounters.describeOutbound(
+            label, before: mediaLogLast, now: reading, elapsedMs: elapsedMs,
+            activityOf: { kind in
+                OutboundActivity(
+                    needed: SenderActivityRule.neededWord(kind, needed),
+                    active: active[kind] ?? false)
+            },
+            existing: CameraSenderKind.allCases.filter { connection.cameraSender($0) != nil })
+        // What each remote tile showed over the interval, with what this
+        // device asks for of that person and what the SFU gives.
         lines += CallMediaCounters.describeShownPeers(
-            label, LayerDisplayLedger.shared.takeInterval())
+            label, LayerDisplayLedger.shared.takeInterval(),
+            wantOf: { self.wantsBook.quality(of: $0) },
+            givenOf: { self.givenBook.given(of: $0) })
         for line in lines { NSLog("%@", line) }
         mediaLogLast = reading
+        mediaLogLastAtMs = nowMs
     }
 
     /// Stop the reads and log the whole call's totals from what was read.
@@ -915,9 +1206,13 @@ final class SfuCallSession {
             // stream's start.
             lines += CallMediaCounters.describeInbound(label, before: nil, now: last)
         }
-        lines += CallMediaCounters.describeShownPeers(label, LayerDisplayLedger.shared.totals())
+        lines += CallMediaCounters.describeShownPeers(
+            label, LayerDisplayLedger.shared.totals(),
+            wantOf: { self.wantsBook.quality(of: $0) },
+            givenOf: { self.givenBook.given(of: $0) })
         for line in lines { NSLog("%@", line) }
         mediaLogLast = nil
+        mediaLogLastAtMs = nil
         LayerDisplayLedger.shared.reset()
     }
 
@@ -935,6 +1230,7 @@ final class SfuCallSession {
                 guard let self else { return }
                 // A stream id ending in `~light` is the light companion of
                 // the peer named before the suffix, not a stream of its own.
+                // One ending in `~mid` is that peer's middle track.
                 switch RemoteVideoRoute.of(streamId: streamId) {
                 case .main(let mainStreamId):
                     self.callbacks.onRemoteVideoTrack?(track, mainStreamId)
@@ -942,6 +1238,10 @@ final class SfuCallSession {
                     guard let track else { return }
                     NSLog("SfuCallSession: light companion track attached peer=%@", peerId)
                     self.callbacks.onRemoteLightVideoTrack?(track, peerId)
+                case .middle(let peerId):
+                    guard let track else { return }
+                    NSLog("SfuCallSession: middle track attached peer=%@", peerId)
+                    self.callbacks.onRemoteMiddleVideoTrack?(track, peerId)
                 }
             },
             onRemoteReceiver: { [weak self] receiver, streamId in
@@ -961,15 +1261,20 @@ final class SfuCallSession {
                 let kind = receiver.track?.kind ?? "unknown"
                 // Remember whose voice this track is, so a sound level read
                 // from the statistics can be put on the right tile.
-                if kind == "audio", let trackId = receiver.track?.trackId, let streamId {
+                let role = streamId.map { LightStream.split($0).role } ?? .main
+                if kind == "audio", role == .main, let trackId = receiver.track?.trackId,
+                    let streamId {
                     self.audioTrackPeers[trackId] = streamId
                 }
-                // A light companion's decryptor is armed exactly like any
-                // receiver's, below. Its track id is remembered so the media
-                // log can name the layer.
-                let isLight = streamId.map { LightStream.split($0).light } ?? false
-                if isLight, let trackId = receiver.track?.trackId {
-                    self.lightTrackIds.insert(trackId)
+                // A light companion's and a middle track's decryptor is armed
+                // exactly like any receiver's, below. Its track id is
+                // remembered so the media log can name the layer.
+                if let trackId = receiver.track?.trackId {
+                    switch role {
+                    case .light: self.lightTrackIds.insert(trackId)
+                    case .middle: self.middleTrackIds.insert(trackId)
+                    case .main: break
+                    }
                 }
                 guard !pc.armSFrameDecryptor(for: receiver, seed: seed) else {
                     // Logged on SUCCESS as well as failure. While only failures
@@ -997,11 +1302,11 @@ final class SfuCallSession {
                 NSLog(
                     "SfuCallSession: SFrame decryptor arm FAILED: kind=%@ peer=%@",
                     kind, streamId ?? "unknown")
-                // A companion that cannot be decrypted is never shown (it
-                // presents no frame, so the tile stays on the main picture);
-                // the peer is not marked for it, since their main stream may
-                // be fine and the stream id names no participant.
-                if isLight { return }
+                // A companion or a middle track that cannot be decrypted is
+                // never shown (it presents no frame); the peer is not marked
+                // for it, since their main stream may be fine and the stream
+                // id names no participant.
+                if role != .main { return }
                 self.callbacks.onUndecryptableReceiver?(streamId, kind)
             }
         )
@@ -1012,6 +1317,8 @@ final class SfuCallSession {
         case .connected:
             if state == .connecting { setState(.connected) }
             startMediaLog()
+            // Say again what this device shows, now that media flows.
+            wantsSender.resend()
             // Camera-off-cleanup: announce our initial camera state to the
             // roster now that the media path is up, so an already-present peer
             // renders us correctly (a peer joining camera-off is shown off).

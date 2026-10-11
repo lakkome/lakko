@@ -6,14 +6,23 @@ import SwiftUI
 import UIKit
 import WebRTC
 
-/// A remote person's picture in an SFU call: their main track and, when their
-/// device sends one, the light companion, in one box
-/// (`docs/ux/group-call-grid.md` section 7.5).
+/// A remote person's picture in an SFU call: the heavy track the tile watches
+/// and, when their device sends one, the light companion, in one box
+/// (`docs/ux/group-call-grid.md` sections 7.5 and 7.6).
 ///
-/// Without a companion this is one `RTCMTLVideoView` on the main track, as a
-/// remote tile has always been. With one there are two, the same frame and
-/// the same scaling, each attached to its own track for as long as the tile
-/// lives, and the one ``RemoteLayerController`` names is in front.
+/// The heavy track is the person's main track or their middle one, whichever
+/// the tile shows (``VideoGiven/heavyTrack(wanted:given:main:middle:hasLight:)``),
+/// or none when the tile shows the light picture alone. Without a companion
+/// this is one `RTCMTLVideoView` on the heavy track, as a remote tile has
+/// always been. With one there are two, the same frame and the same scaling,
+/// each attached to its own track for as long as the tile lives, and the one
+/// ``RemoteLayerController`` names is in front.
+///
+/// When the heavy track is replaced by another (a tile that changed size, a
+/// middle track arriving), the heavy view keeps the frame it last drew until
+/// the new track's first frame; if that takes long enough for the shared rule
+/// to call the picture standing, the light one comes to the front meanwhile.
+/// With no heavy track the light one is in front whatever the rule says.
 ///
 /// ## Why stacking order, not alpha and not one renderer fed from two tracks
 ///
@@ -34,8 +43,9 @@ import WebRTC
 ///
 /// Never mirrored: the viewer wants the other person's true orientation.
 struct LayeredRemoteVideoView: UIViewRepresentable {
-    /// The person's main track.
-    let main: RTCVideoTrack
+    /// The heavy picture the tile watches: the person's main or middle
+    /// track. `nil` when the tile shows the light picture alone.
+    let heavy: RTCVideoTrack?
     /// Their light companion, when the publisher sends one.
     let light: RTCVideoTrack?
     /// The SFU peer id, for the `shown` line of the call's media log.
@@ -44,13 +54,13 @@ struct LayeredRemoteVideoView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> LayeredRemoteVideoUIView {
         let view = LayeredRemoteVideoUIView(peerId: peerId, contentMode: contentMode)
-        view.setTracks(main: main, light: light)
+        view.setTracks(heavy: heavy, light: light)
         return view
     }
 
     func updateUIView(_ view: LayeredRemoteVideoUIView, context: Context) {
         view.setContentMode(contentMode)
-        view.setTracks(main: main, light: light)
+        view.setTracks(heavy: heavy, light: light)
     }
 
     static func dismantleUIView(_ view: LayeredRemoteVideoUIView, coordinator: Void) {
@@ -136,14 +146,18 @@ final class LayeredRemoteVideoUIView: UIView {
 
     /// Attach the tracks. A track that did not change is left alone, so its
     /// renderer keeps the picture it has.
-    func setTracks(main: RTCVideoTrack, light: RTCVideoTrack?) {
-        if mainTrack !== main {
+    func setTracks(heavy: RTCVideoTrack?, light: RTCVideoTrack?) {
+        var changed = false
+        if mainTrack !== heavy {
             detachMain()
-            let sink = LayerFrameSink { [controller] in controller.mainFrame() }
-            main.add(mainView)
-            main.add(sink)
-            mainTrack = main
-            mainSink = sink
+            if let heavy {
+                let sink = LayerFrameSink { [controller] in controller.mainFrame() }
+                heavy.add(mainView)
+                heavy.add(sink)
+                mainTrack = heavy
+                mainSink = sink
+            }
+            changed = true
         }
         if lightTrack !== light {
             detachLight()
@@ -159,8 +173,9 @@ final class LayeredRemoteVideoUIView: UIView {
                 lightView = nil
             }
             controller.setLightAvailable(light != nil)
-            apply(controller.shown)
+            changed = true
         }
+        if changed { apply(controller.shown) }
     }
 
     /// The tile is going away: detach everything and hand the counters over.
@@ -217,9 +232,10 @@ final class LayeredRemoteVideoUIView: UIView {
         lightSink = nil
     }
 
-    /// Put the named picture in front. A hard cut: no fade, no badge.
+    /// Put the named picture in front. A hard cut: no fade, no badge. With
+    /// no heavy track there is only the light picture to show.
     private func apply(_ layer: ShownLayer) {
-        if layer == .light, let lightView {
+        if layer == .light || mainTrack == nil, let lightView {
             bringSubviewToFront(lightView)
         } else {
             bringSubviewToFront(mainView)

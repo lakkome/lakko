@@ -45,19 +45,25 @@ class CallMediaCountersTest {
     )
 
     @Test
-    fun `a video receiver is the light companion when its track is one, else main`() {
+    fun `a video receiver is named by the copy its track is, else main`() {
         val reading = readMedia(
             listOf(
                 inboundVideo("V1", "main-track", 10),
                 inboundVideo("V2", "light-track", 5),
                 inboundVideo("V3", null, 1),
+                inboundVideo("V4", "middle-track", 7),
+                // In both sets: read as light.
+                inboundVideo("V5", "both", 2),
                 inboundAudio("A1", 50, 960, 0),
             ),
-            lightTrackIds = setOf("light-track"),
+            lightTrackIds = setOf("light-track", "both"),
+            middleTrackIds = setOf("middle-track", "both"),
         )
         assertEquals("main", reading.inbound["V1"]?.layer)
         assertEquals("light", reading.inbound["V2"]?.layer)
         assertEquals("-", reading.inbound["V3"]?.layer)
+        assertEquals("middle", reading.inbound["V4"]?.layer)
+        assertEquals("light", reading.inbound["V5"]?.layer)
         assertNull(reading.inbound["A1"]?.layer)
     }
 
@@ -71,7 +77,7 @@ class CallMediaCountersTest {
             ),
         )
         assertTrue(reading.inbound.isEmpty())
-        assertTrue(reading.outboundVideoLayers.isEmpty())
+        assertTrue(reading.outboundVideoSenders.isEmpty())
     }
 
     @Test
@@ -137,35 +143,141 @@ class CallMediaCountersTest {
         assertEquals(12.0, deltas["V9"]!!.packetsReceived, 0.0)
     }
 
+    private fun outbound(
+        id: String,
+        mid: String?,
+        width: Int?,
+        height: Int?,
+        fps: Double?,
+        bytes: Long = 0,
+        mode: String? = null,
+        extra: Map<String, Any?> = emptyMap(),
+    ) = RtcStat(
+        type = "outbound-rtp",
+        id = id,
+        members = mapOf<String, Any?>(
+            "kind" to "video",
+            "mid" to mid,
+            "scalabilityMode" to mode,
+            "qualityLimitationReason" to "none",
+            "frameWidth" to width,
+            "frameHeight" to height,
+            "framesPerSecond" to fps,
+            "bytesSent" to bytes,
+        ) + extra,
+    )
+
+    private val mids = mapOf(
+        "1" to CameraSenderKind.MAIN,
+        "2" to CameraSenderKind.LIGHT,
+        "3" to CameraSenderKind.MIDDLE,
+    )
+
     @Test
-    fun `the camera sender is one line for each simulcast layer it sends`() {
-        fun outbound(rid: String?, width: Int?, height: Int?, fps: Double?) = RtcStat(
-            type = "outbound-rtp",
-            id = "O-$rid",
-            members = mapOf(
-                "kind" to "video",
-                "rid" to rid,
-                "scalabilityMode" to "L1T3",
-                "qualityLimitationReason" to "none",
-                "frameWidth" to width,
-                "frameHeight" to height,
-                "framesPerSecond" to fps,
+    fun `each camera sender is named by the mid of its media line, main first`() {
+        val reading = readMedia(
+            listOf(
+                outbound("O-l", "2", 320, 180, 30.0),
+                outbound("O-m", "3", 640, 360, 30.0),
+                outbound("O-f", "1", 1280, 720, 29.6, mode = "L1T3"),
             ),
+            senderByMid = mids,
         )
-        val two = readMedia(listOf(outbound("q", 320, 180, 30.0), outbound("f", 1280, 720, 29.6)))
+        assertEquals(
+            listOf(CameraSenderKind.MAIN, CameraSenderKind.MIDDLE, CameraSenderKind.LIGHT),
+            reading.outboundVideoSenders.map { it.sender },
+        )
+        // An entry with no mid, or one nobody named, is the main sender.
+        val unnamed = readMedia(listOf(outbound("O-x", null, 1, 1, 1.0), outbound("O-y", "9", 1, 1, 1.0)), senderByMid = mids)
+        assertEquals(
+            listOf(CameraSenderKind.MAIN, CameraSenderKind.MAIN),
+            unnamed.outboundVideoSenders.map { it.sender },
+        )
+    }
+
+    @Test
+    fun `a sender's line says its size, what it sent, the SFU's word and whether it is active`() {
+        val before = readMedia(
+            listOf(outbound("O-f", "1", 1280, 720, 30.0, bytes = 100_000), outbound("O-l", "2", 320, 180, 30.0, bytes = 10_000)),
+            senderByMid = mids,
+        )
+        val now = readMedia(
+            listOf(
+                outbound("O-f", "1", 1280, 720, 29.6, bytes = 350_000, mode = "L1T3"),
+                outbound("O-l", "2", 320, 180, 30.0, bytes = 45_000),
+            ),
+            senderByMid = mids,
+        )
+        val kbps = senderKbps(before, now, elapsedMs = 2_000)
+        assertEquals(1_000.0, kbps.getValue(CameraSenderKind.MAIN), 1e-9)
+        assertEquals(140.0, kbps.getValue(CameraSenderKind.LIGHT), 1e-9)
+        val needed = VideoNeeded(main = true, middle = false)
         assertEquals(
             listOf(
-                "call media interval send video mode=L1T3 size=320x180 fps=30 limited_by=none rid=q",
-                "call media interval send video mode=L1T3 size=1280x720 fps=30 limited_by=none rid=f",
+                "call media interval send video mode=L1T3 size=1280x720 fps=30 kbps=1000 limited_by=none" +
+                    " sender=main needed=yes active=yes",
+                "call media interval send video mode=- size=320x180 fps=30 kbps=140 limited_by=none" +
+                    " sender=light needed=- active=yes",
+                // The middle sender exists and reports nothing: it was
+                // switched off, and still has its line.
+                "call media interval send video mode=- size=- fps=- kbps=- limited_by=-" +
+                    " sender=middle needed=no active=no",
             ),
-            describeOutboundLayers(MEDIA_COUNTERS_INTERVAL_LABEL, two.outboundVideoLayers),
+            describeOutboundSenders(
+                MEDIA_COUNTERS_INTERVAL_LABEL,
+                now.outboundVideoSenders,
+                activityOf = { kind ->
+                    SenderActivityNote(neededWord(kind, needed), active = kind != CameraSenderKind.MIDDLE)
+                },
+                existing = CAMERA_SENDER_KINDS,
+                kbpsOf = { kbps[it] },
+            ),
         )
-        // One encoding: no rid, as before simulcast. A layer that is not
-        // being sent reports no size and no frame rate.
-        val one = readMedia(listOf(outbound(null, null, null, null)))
+    }
+
+    @Test
+    fun `a sender's bitrate is unknown on the first reading and when its counter went back`() {
+        val a = readMedia(listOf(outbound("O-f", "1", 1, 1, 1.0, bytes = 500)), senderByMid = mids)
+        val b = readMedia(listOf(outbound("O-f", "1", 1, 1, 1.0, bytes = 100)), senderByMid = mids)
+        assertTrue(senderKbps(null, a, 2_000).isEmpty())
+        assertTrue(senderKbps(a, b, 2_000).isEmpty())
+        assertTrue(senderKbps(a, a, 0).isEmpty())
+    }
+
+    @Test
+    fun `the sender line sums the camera senders and names the main one's codec`() {
+        val stats = listOf(
+            RtcStat("codec", mapOf("mimeType" to "video/VP8"), id = "C-v"),
+            RtcStat("codec", mapOf("mimeType" to "audio/opus"), id = "C-a"),
+            RtcStat("outbound-rtp", mapOf("kind" to "audio", "codecId" to "C-a"), id = "O-a"),
+            outbound(
+                "O-l", "2", 320, 180, 30.0,
+                extra = mapOf("framesEncoded" to 60, "packetsSent" to 80, "targetBitrate" to 150_000.0),
+            ),
+            outbound(
+                "O-f", "1", 1280, 720, 30.0,
+                extra = mapOf(
+                    "framesEncoded" to 60, "packetsSent" to 400, "retransmittedPacketsSent" to 3,
+                    "nackCount" to 2, "pliCount" to 1, "targetBitrate" to 1_200_000.0, "codecId" to "C-v",
+                ),
+            ),
+            RtcStat("remote-inbound-rtp", mapOf("kind" to "video", "fractionLost" to 0.02, "roundTripTime" to 0.045)),
+            RtcStat("remote-inbound-rtp", mapOf("kind" to "video", "fractionLost" to 0.1, "roundTripTime" to 0.03)),
+            RtcStat("candidate-pair", mapOf("availableOutgoingBitrate" to 2_000_000.0, "nominated" to true)),
+        )
+        val reading = readSender(stats, mids)!!
         assertEquals(
-            listOf("call media interval send video mode=L1T3 size=- fps=- limited_by=none"),
-            describeOutboundLayers(MEDIA_COUNTERS_INTERVAL_LABEL, one.outboundVideoLayers),
+            "call media interval sender encoded=120 pkts=480 rtx=3 nack_in=2 pli_in=1 fir_in=0 huge=0" +
+                " target_kbps=1350 estimate_kbps=2000 remote_lost=10% remote_rtt_ms=45" +
+                " audio=audio/opus video=video/VP8",
+            describeSender(MEDIA_COUNTERS_INTERVAL_LABEL, null, reading),
         )
+        // The next interval counts from the last reading.
+        assertTrue(
+            describeSender(MEDIA_COUNTERS_INTERVAL_LABEL, reading, reading)
+                .startsWith("call media interval sender encoded=0 pkts=0 rtx=0"),
+        )
+        // No camera, no line.
+        assertNull(readSender(listOf(RtcStat("outbound-rtp", mapOf("kind" to "audio"), id = "O-a"))))
     }
 }

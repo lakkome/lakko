@@ -302,10 +302,23 @@ final class MultiJoinerCall {
                 // kept beside the main track for the peer's tile to draw, and
                 // nothing else. No participant, no camera flag.
                 self?.ui.setRemoteLightVideoTrack(track, forParticipant: "peer-\(peerId)")
+            },
+            onRemoteMiddleVideoTrack: { [weak self] track, peerId in
+                // That peer's middle track (ADR-0070 step 5): the heavy
+                // picture a tile watches when the shared rule says `middle`.
+                self?.ui.setRemoteMiddleVideoTrack(track, forParticipant: "peer-\(peerId)")
+            },
+            onVideoGiven: { [weak self] given in
+                // What the SFU gives of each person (ADR-0070 step 6).
+                self?.ui.setRemoteVideoGiven(byPeerId: given)
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
         self.speaking.source = { [weak self] in await self?.session.sampleAudioLevels() }
+        // What a tile shows of a person, for the SFU (``VideoWants``).
+        ui.tileVideoQualitySink = { [weak self] tile, peerId, quality in
+            self?.session.reportTileVideoQuality(tile: tile, peerId: peerId, quality: quality)
+        }
         // A username verified or a contact renamed re-names the tiles on screen.
         self.names.follow(ui: ui)
         // A joiner behind a symmetric NAT has no server-reflexive candidate and
@@ -584,7 +597,7 @@ final class MultiJoinerCall {
             }
         case .failed, .closed:
             speaking.stop()
-            ui.clearRemoteLightVideoTracks()
+            ui.clearRemoteVideoCopies()
             ui.setPhase(.ended(endedAt: Date()))
             cbs.onEnded?()
         case .idle:

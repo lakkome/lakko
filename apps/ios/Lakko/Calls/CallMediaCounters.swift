@@ -22,11 +22,12 @@ struct CallMediaStatEntry {
     let values: [String: NSObject]
 }
 
-/// Which of a remote camera's two tracks a video receiver carries: the main
-/// one or the light companion (``LightStream``). `unknown` when the report
-/// does not say which track the receiver belongs to.
+/// Which of a remote camera's tracks a video receiver carries: the main one,
+/// the middle one or the light companion (``LightStream``). `unknown` when
+/// the report does not say which track the receiver belongs to.
 enum ReceiverLayer: String, Equatable {
     case main
+    case middle
     case light
     case unknown = "-"
 }
@@ -46,16 +47,26 @@ struct InboundVideoCounters: Equatable {
     var jitterBufferEmittedCount: Int64 = 0
 }
 
-/// One layer of this device's own camera sender.
-struct OutboundVideoLayer: Equatable {
-    /// The layer's RTP stream id (`q`, `f`); `nil` when the camera is sent as
-    /// one encoding.
-    var rid: String?
+/// One of this device's own camera senders, as the statistics report it.
+struct OutboundVideoSender: Equatable {
+    /// Which sender it is; `nil` when the report does not tie the stream to
+    /// one of the three.
+    var sender: CameraSenderKind?
     var scalabilityMode: String?
     var qualityLimitationReason: String?
     var frameWidth: Int64?
     var frameHeight: Int64?
     var framesPerSecond: Double?
+    /// Cumulative bytes sent on the stream.
+    var bytesSent: Int64 = 0
+}
+
+/// What the call log says of one sender's activity (``SenderActivityRule``):
+/// the SFU's last word for it (`nil`: none) and whether its encoding is asked
+/// to be active.
+struct OutboundActivity: Equatable {
+    let needed: Bool?
+    let active: Bool
 }
 
 /// One statistics reading, reduced to the video this client logs.
@@ -63,8 +74,9 @@ struct CallMediaReading: Equatable {
     /// Remote video streams, ordered by statistics id so a stream keeps its
     /// number from one interval to the next.
     var inbound: [(id: String, counters: InboundVideoCounters)] = []
-    /// Every layer the camera sender reports, ordered by rid.
-    var outbound: [OutboundVideoLayer] = []
+    /// Every camera sender the report carries, in the order main, middle,
+    /// light, then any the report does not name.
+    var outbound: [OutboundVideoSender] = []
 
     static func == (a: CallMediaReading, b: CallMediaReading) -> Bool {
         a.outbound == b.outbound
@@ -82,13 +94,32 @@ enum CallMediaCounters {
     /// How often the session reads, milliseconds (the web client's interval).
     static let intervalMs: UInt64 = 2_000
 
-    /// Reduce a report to a reading. `lightTrackIds` holds the ids of the
-    /// remote tracks that are light companions; a video receiver whose
-    /// `trackIdentifier` is among them is `light`, any other is `main`.
+    /// Reduce a report to a reading.
+    ///
+    /// `lightTrackIds` and `middleTrackIds` hold the ids of the remote tracks
+    /// that are light companions and middle tracks; a video receiver whose
+    /// `trackIdentifier` is among them is `light` or `middle`, any other is
+    /// `main`.
+    ///
+    /// An `outbound-rtp` video stream is one of this device's camera
+    /// senders. Which one is read from the stream's `mid` (`senderOfMid`,
+    /// the media lines the session knows) and, where the report carries no
+    /// `mid` or the session does not know it, from the track id of the
+    /// stream's `media-source` (``CameraSender/senderKind(ofTrackId:)``).
     static func read(
-        _ entries: [CallMediaStatEntry], lightTrackIds: Set<String>
+        _ entries: [CallMediaStatEntry],
+        lightTrackIds: Set<String>,
+        middleTrackIds: Set<String> = [],
+        senderOfMid: [String: CameraSenderKind] = [:]
     ) -> CallMediaReading {
         var reading = CallMediaReading()
+        // The local track behind each media source, by the source's id.
+        var sourceTrackIds: [String: String] = [:]
+        for entry in entries where entry.type == "media-source" {
+            if let trackId = entry.values["trackIdentifier"] as? String {
+                sourceTrackIds[entry.id] = trackId
+            }
+        }
         for entry in entries {
             // `kind` is the current spelling; `mediaType` the older one.
             let kind = (entry.values["kind"] as? String) ?? (entry.values["mediaType"] as? String)
@@ -106,7 +137,13 @@ enum CallMediaCounters {
             case "inbound-rtp":
                 let layer: ReceiverLayer
                 if let trackId = string("trackIdentifier") {
-                    layer = lightTrackIds.contains(trackId) ? .light : .main
+                    if lightTrackIds.contains(trackId) {
+                        layer = .light
+                    } else if middleTrackIds.contains(trackId) {
+                        layer = .middle
+                    } else {
+                        layer = .main
+                    }
                 } else {
                     layer = .unknown
                 }
@@ -126,26 +163,38 @@ enum CallMediaCounters {
                         jitterBufferEmittedCount: int("jitterBufferEmittedCount"))
                 ))
             case "outbound-rtp":
-                reading.outbound.append(OutboundVideoLayer(
-                    rid: string("rid"),
+                var sender = string("mid").flatMap { senderOfMid[$0] }
+                if sender == nil, let sourceId = string("mediaSourceId"),
+                    let trackId = sourceTrackIds[sourceId] {
+                    sender = CameraSender.senderKind(ofTrackId: trackId)
+                }
+                reading.outbound.append(OutboundVideoSender(
+                    sender: sender,
                     scalabilityMode: string("scalabilityMode"),
                     qualityLimitationReason: string("qualityLimitationReason"),
                     frameWidth: (entry.values["frameWidth"] as? NSNumber)?.int64Value,
                     frameHeight: (entry.values["frameHeight"] as? NSNumber)?.int64Value,
-                    framesPerSecond: (entry.values["framesPerSecond"] as? NSNumber)?.doubleValue))
+                    framesPerSecond: (entry.values["framesPerSecond"] as? NSNumber)?.doubleValue,
+                    bytesSent: int("bytesSent")))
             default:
                 continue
             }
         }
         reading.inbound.sort { $0.id < $1.id }
-        reading.outbound.sort { ($0.rid ?? "") < ($1.rid ?? "") }
+        reading.outbound.sort { senderOrder($0.sender) < senderOrder($1.sender) }
         return reading
+    }
+
+    /// The order senders are named in: main, middle, light, then unnamed.
+    private static func senderOrder(_ sender: CameraSenderKind?) -> Int {
+        sender.flatMap { CameraSenderKind.allCases.firstIndex(of: $0) }
+            ?? CameraSenderKind.allCases.count
     }
 
     /// One line per remote video stream: how it changed since `before` (from
     /// zero when `before` is `nil`, when the stream is new, or when its
     /// counters went backwards). Each line ends with `layer=`: `main`,
-    /// `light`, or `-` when unknown.
+    /// `middle`, `light`, or `-` when unknown.
     static func describeInbound(
         _ label: String, before: CallMediaReading?, now: CallMediaReading
     ) -> [String] {
@@ -181,40 +230,82 @@ enum CallMediaCounters {
         return lines
     }
 
-    /// The camera sender, one line for each layer it sends. A simulcast
-    /// layer's line ends with its `rid`; a single encoding's line has none.
-    static func describeOutbound(_ label: String, _ layers: [OutboundVideoLayer]) -> [String] {
-        layers.map { layer in
+    /// The camera, one line for each of its senders (main, middle, light):
+    /// the size and frame rate it sends, the bitrate over the interval since
+    /// `before` (`-` without an earlier reading or an elapsed time), and,
+    /// where `activityOf` answers, the SFU's last word for it and whether its
+    /// encoding is asked to be active: `needed=yes|no|- active=yes|no`.
+    ///
+    /// A sender named in `existing` that the report carries no stream for
+    /// (an inactive encoding may report none) still has its line, all
+    /// dashes, so a sender that was switched off does not vanish from the
+    /// log.
+    static func describeOutbound(
+        _ label: String,
+        before: CallMediaReading? = nil,
+        now: CallMediaReading,
+        elapsedMs: UInt64 = 0,
+        activityOf: (CameraSenderKind) -> OutboundActivity? = { _ in nil },
+        existing: [CameraSenderKind] = []
+    ) -> [String] {
+        var senders = now.outbound
+        for kind in CameraSenderKind.allCases
+        where existing.contains(kind) && !senders.contains(where: { $0.sender == kind }) {
+            senders.append(OutboundVideoSender(sender: kind))
+        }
+        return senders.map { out in
             let size: String
-            if let w = layer.frameWidth, let h = layer.frameHeight {
+            if let w = out.frameWidth, let h = out.frameHeight {
                 size = "\(w)x\(h)"
             } else {
                 size = "-"
             }
-            let fps = layer.framesPerSecond.map { String(format: "%.0f", $0) } ?? "-"
-            return "\(label) send video mode=\(layer.scalabilityMode ?? "-") size=\(size)"
-                + " fps=\(fps) limited_by=\(layer.qualityLimitationReason ?? "-")"
-                + (layer.rid.map { " rid=\($0)" } ?? "")
+            let fps = out.framesPerSecond.map { String(format: "%.0f", $0) } ?? "-"
+            var kbps = "-"
+            if elapsedMs > 0, let sender = out.sender,
+                let prev = before?.outbound.first(where: { $0.sender == sender }),
+                prev.bytesSent <= out.bytesSent {
+                let bits = Double(out.bytesSent - prev.bytesSent) * 8
+                kbps = String(format: "%.0f", bits / Double(elapsedMs))
+            }
+            let activity = out.sender.flatMap(activityOf)
+            return "\(label) send video mode=\(out.scalabilityMode ?? "-") size=\(size)"
+                + " fps=\(fps) limited_by=\(out.qualityLimitationReason ?? "-")"
+                + " kbps=\(kbps) sender=\(out.sender?.rawValue ?? "-")"
+                + (activity.map {
+                    SenderActivityRule.describe(needed: $0.needed, active: $0.active)
+                } ?? "")
         }
     }
 
-    /// What one remote peer's tile showed, in one line: how often it switched
-    /// to the light track, how long the light track was the shown one, and
-    /// the longest and the total displayed stall. Whole milliseconds.
-    /// `peerId` is the SFU's per-call peer id, the one the stream ids carry.
+    /// What one remote peer's tile showed, in one line: which picture this
+    /// device asks for of them and which one the SFU gives (`-` when it has
+    /// not said), how often the tile switched to the light track, how long
+    /// the light track was the shown one, and the longest and the total
+    /// displayed stall. Whole milliseconds. `peerId` is the SFU's per-call
+    /// peer id, the one the stream ids carry.
     static func describeShown(
-        _ label: String, peerId: String, _ shown: LayerDisplayCounters
+        _ label: String, peerId: String, _ shown: LayerDisplayCounters,
+        want: TileVideoQuality, given: TileVideoQuality? = nil
     ) -> String {
-        "\(label) shown peer=\(peerId) light_switches=\(shown.lightSwitches)"
+        "\(label) shown peer=\(peerId) want=\(want.wireName) given=\(given?.wireName ?? "-")"
+            + " light_switches=\(shown.lightSwitches)"
             + " light_ms=\(shown.lightMs) stall_max_ms=\(shown.stallMaxMs)"
             + " stall_total_ms=\(shown.stallTotalMs)"
     }
 
-    /// ``describeShown(_:peerId:_:)`` for every peer, in the order given.
+    /// ``describeShown(_:peerId:_:want:given:)`` for every peer, in the order
+    /// given.
     static func describeShownPeers(
-        _ label: String, _ byPeer: [(peerId: String, counters: LayerDisplayCounters)]
+        _ label: String, _ byPeer: [(peerId: String, counters: LayerDisplayCounters)],
+        wantOf: (String) -> TileVideoQuality,
+        givenOf: (String) -> TileVideoQuality? = { _ in nil }
     ) -> [String] {
-        byPeer.map { describeShown(label, peerId: $0.peerId, $0.counters) }
+        byPeer.map {
+            describeShown(
+                label, peerId: $0.peerId, $0.counters, want: wantOf($0.peerId),
+                given: givenOf($0.peerId))
+        }
     }
 }
 

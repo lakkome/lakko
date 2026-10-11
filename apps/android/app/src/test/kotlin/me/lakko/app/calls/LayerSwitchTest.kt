@@ -11,6 +11,7 @@ import org.junit.Test
 import uniffi.lakko_ffi_uniffi.LayerDisplayCounters
 import uniffi.lakko_ffi_uniffi.LayerDisplayInterface
 import uniffi.lakko_ffi_uniffi.ShownLayer
+import uniffi.lakko_ffi_uniffi.TileVideoQuality
 
 /**
  * The Android wiring around the shared layer rule (`LayerSwitch.kt`).
@@ -78,12 +79,12 @@ class LayerSwitchTest {
     // ---- the driver ------------------------------------------------------
 
     @Test
-    fun `while the rule shows the full track only main frames are drawn`() {
+    fun `while the rule shows the full track only heavy frames are drawn`() {
         val rule = ScriptedRule()
         var now = 1_000L
         val driver = LayeredTileDriver(rule, clock = { now })
 
-        assertTrue(driver.mainFrame())
+        assertTrue(driver.heavyFrame())
         now = 1_020L
         assertFalse(driver.lightFrame())
         assertEquals(listOf("full@1000", "light@1020"), rule.calls)
@@ -94,7 +95,7 @@ class LayerSwitchTest {
         val rule = ScriptedRule().apply { answer = ShownLayer.LIGHT }
         val driver = LayeredTileDriver(rule, clock = { 5L })
 
-        assertFalse(driver.mainFrame())
+        assertFalse(driver.heavyFrame())
         assertTrue(driver.lightFrame())
         assertEquals(ShownLayer.LIGHT, driver.shown())
     }
@@ -103,7 +104,7 @@ class LayerSwitchTest {
     fun `every frame of both tracks is reported, drawn or not`() {
         val rule = ScriptedRule()
         val driver = LayeredTileDriver(rule, clock = { 0L })
-        repeat(3) { driver.mainFrame() }
+        repeat(3) { driver.heavyFrame() }
         repeat(2) { driver.lightFrame() }
         assertEquals(3, rule.calls.count { it.startsWith("full@") })
         assertEquals(2, rule.calls.count { it.startsWith("light@") })
@@ -115,13 +116,79 @@ class LayerSwitchTest {
         var now = 10L
         val driver = LayeredTileDriver(rule, clock = { now })
 
-        driver.setLightAvailable(true)
+        driver.setSources(hasHeavy = true, hasLight = true, heavyReplaced = false)
         now = 60L
         driver.tick()
         now = 70L
-        driver.setLightAvailable(false)
+        driver.setSources(hasHeavy = true, hasLight = false, heavyReplaced = false)
 
         assertEquals(listOf("available=true@10", "tick@60", "available=false@70"), rule.calls)
+    }
+
+    @Test
+    fun `a tile with no heavy picture draws every light frame as its one picture`() {
+        val rule = ScriptedRule()
+        var now = 0L
+        val driver = LayeredTileDriver(rule, clock = { now })
+
+        driver.setSources(hasHeavy = false, hasLight = true, heavyReplaced = false)
+        now = 40L
+        assertTrue(driver.lightFrame())
+        // The light track is not a companion here: the rule is told there is
+        // none, and its frames are reported as the tile's picture.
+        assertEquals(listOf("available=false@0", "full@40"), rule.calls)
+
+        // In the background too: there is nothing else to draw.
+        driver.pause()
+        assertTrue(driver.lightFrame())
+    }
+
+    @Test
+    fun `a replaced heavy picture starts the rule again and the light copy covers until its first frame`() {
+        val rule = ScriptedRule()
+        var now = 100L
+        val driver = LayeredTileDriver(rule, clock = { now })
+        driver.setSources(hasHeavy = true, hasLight = true, heavyReplaced = false)
+        // A new tile is not a replaced picture: the rule alone decides.
+        assertFalse(driver.lightFrame())
+
+        now = 500L
+        driver.setSources(hasHeavy = true, hasLight = true, heavyReplaced = true)
+        assertTrue(rule.calls.containsAll(listOf("resync@500", "available=true@500")))
+        // The rule still says full, but nothing of the new picture has come.
+        now = 520L
+        assertTrue(driver.lightFrame())
+        // Its first frame ends the cover.
+        now = 600L
+        assertTrue(driver.heavyFrame())
+        now = 620L
+        assertFalse(driver.lightFrame())
+    }
+
+    @Test
+    fun `the cover of a replaced picture ends after the time the rule itself waits`() {
+        assertEquals(1_500L, FIRST_FRAME_GRACE_MS)
+        val rule = ScriptedRule()
+        var now = 0L
+        val driver = LayeredTileDriver(rule, clock = { now })
+        driver.setSources(hasHeavy = true, hasLight = true, heavyReplaced = true)
+
+        now = FIRST_FRAME_GRACE_MS - 1
+        driver.tick()
+        assertTrue(driver.lightFrame())
+        now = FIRST_FRAME_GRACE_MS
+        driver.tick()
+        // From here the rule decides, and it says full.
+        assertFalse(driver.lightFrame())
+    }
+
+    @Test
+    fun `a replaced picture with no light copy has nothing to cover with`() {
+        val rule = ScriptedRule()
+        val driver = LayeredTileDriver(rule, clock = { 0L })
+        driver.setSources(hasHeavy = true, hasLight = false, heavyReplaced = true)
+        assertFalse(driver.lightFrame())
+        assertTrue(rule.calls.contains("available=false@0"))
     }
 
     @Test
@@ -131,7 +198,7 @@ class LayerSwitchTest {
         val driver = LayeredTileDriver(rule, clock = { now })
 
         driver.pause()
-        assertTrue(driver.mainFrame())
+        assertTrue(driver.heavyFrame())
         assertFalse(driver.lightFrame())
         driver.tick()
         assertTrue(rule.calls.isEmpty())
@@ -139,7 +206,7 @@ class LayerSwitchTest {
         // Back in the foreground: the tile starts again, then observes.
         now = 9_000L
         driver.resume()
-        driver.mainFrame()
+        driver.heavyFrame()
         assertEquals(listOf("resync@9000", "full@9000"), rule.calls)
     }
 
@@ -147,7 +214,7 @@ class LayerSwitchTest {
     fun `a tile created in the background observes nothing until it is resumed`() {
         val rule = ScriptedRule()
         val driver = LayeredTileDriver(rule, clock = { 1L }, observing = false)
-        driver.mainFrame()
+        driver.heavyFrame()
         driver.tick()
         assertTrue(rule.calls.isEmpty())
         driver.resume()
@@ -169,10 +236,10 @@ class LayerSwitchTest {
 
         // Closed: nothing reaches the rule, and the main track is the drawn one.
         rule.answer = ShownLayer.LIGHT
-        assertTrue(driver.mainFrame())
+        assertTrue(driver.heavyFrame())
         assertFalse(driver.lightFrame())
         driver.tick()
-        driver.setLightAvailable(true)
+        driver.setSources(hasHeavy = true, hasLight = true, heavyReplaced = true)
         driver.resume()
         assertNull(driver.drain())
         assertNull(driver.close())
@@ -185,7 +252,7 @@ class LayerSwitchTest {
     fun `a frame that arrives while the rule is being released draws the main track`() {
         val rule = ScriptedRule().apply { answer = ShownLayer.LIGHT; destroyed = true }
         val driver = LayeredTileDriver(rule, clock = { 0L })
-        assertTrue(driver.mainFrame())
+        assertTrue(driver.heavyFrame())
         assertFalse(driver.lightFrame())
         assertNull(driver.drain())
     }
@@ -225,9 +292,21 @@ class LayerSwitchTest {
     @Test
     fun `the shown line carries the web client's field names`() {
         assertEquals(
-            "call media interval shown peer=p518db light_switches=2 light_ms=1340" +
+            "call media interval shown peer=p518db want=middle given=light light_switches=2 light_ms=1340" +
                 " stall_max_ms=410 stall_total_ms=560",
-            describeShown("call media interval", "p518db", counters(2, 1340, 410, 560)),
+            describeShown(
+                "call media interval",
+                "p518db",
+                counters(2, 1340, 410, 560),
+                want = TileVideoQuality.MIDDLE,
+                given = TileVideoQuality.LIGHT,
+            ),
+        )
+        // The SFU has said nothing about the person.
+        assertEquals(
+            "call media total shown peer=p want=main given=- light_switches=0 light_ms=0" +
+                " stall_max_ms=0 stall_total_ms=0",
+            describeShown("call media total", "p", counters(), want = TileVideoQuality.MAIN),
         )
     }
 
@@ -239,10 +318,17 @@ class LayerSwitchTest {
         )
         assertEquals(
             listOf(
-                "call media total shown peer=a light_switches=1 light_ms=10 stall_max_ms=20 stall_total_ms=30",
-                "call media total shown peer=b light_switches=0 light_ms=0 stall_max_ms=0 stall_total_ms=0",
+                "call media total shown peer=a want=main given=middle" +
+                    " light_switches=1 light_ms=10 stall_max_ms=20 stall_total_ms=30",
+                "call media total shown peer=b want=light given=-" +
+                    " light_switches=0 light_ms=0 stall_max_ms=0 stall_total_ms=0",
             ),
-            describeShownPeers(MEDIA_COUNTERS_TOTAL_LABEL, byPeer),
+            describeShownPeers(
+                MEDIA_COUNTERS_TOTAL_LABEL,
+                byPeer,
+                wantOf = { if (it == "a") TileVideoQuality.MAIN else TileVideoQuality.LIGHT },
+                givenOf = { if (it == "a") TileVideoQuality.MIDDLE else null },
+            ),
         )
         assertEquals("call media interval", MEDIA_COUNTERS_INTERVAL_LABEL)
     }

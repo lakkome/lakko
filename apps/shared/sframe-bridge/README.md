@@ -73,7 +73,7 @@ What that does:
 1. `cargo build -p lakko-sframe-native --release` (workspace root).
 2. `c++ -std=c++17` compile of `sframe-bridge.cc` + `test_bridge.cc`
    + `test_checks_stub.cc`, linking against the staticlib.
-3. Runs the four-test round-trip suite.
+3. Runs the test functions listed under Tests below.
 
 The `test_checks_stub.cc` file supplies a stub for
 `rtc::webrtc_checks_impl::FatalLog` so the test binary can link
@@ -88,12 +88,27 @@ be populated — if it is not, run
 
 ## Tests
 
-| Test                                  | What it proves                                                        |
-|---------------------------------------|------------------------------------------------------------------------|
-| `test_round_trip_single_sender`       | Encrypt + Decrypt recover the original plaintext under the same seed   |
-| `test_aad_binding`                    | A tampered `additional_data` (RTP header bits) causes Decrypt to fail  |
-| `test_multi_sender_into_one_receiver` | Three encryptors with distinct `local_leaf` all decode into one cache  |
-| `test_bad_seed_length`                | `Create` returns nullptr on short seed (no silent E2EE downgrade)      |
+Every test works in the ADR-0071 frame layout
+(`clear_prefix || ciphertext_and_tag || sframe_header || trailer`),
+which is the only one the bridge seals or opens.
+
+| Test | What it proves |
+|---|---|
+| `test_round_trip_single_sender` | Encrypt + Decrypt recover the frame; the sealed frame fits frame + 36 |
+| `test_additional_data_ignored_header_is_aad` | The host `additional_data` is not authenticated; the SFrame header is |
+| `test_multi_sender_into_one_receiver` | Three encryptors with distinct leaves open through one decryptor |
+| `test_bad_seed_length` | `Create` returns nullptr on a short seed |
+| `test_ciphertext_tamper` | A flipped ciphertext byte fails |
+| `test_counter_monotonicity_and_out_of_order` | 1000 frames open in any order |
+| `test_per_call_key_isolation` | A frame of one call does not open under another call's seed |
+| `test_payload_size_extremes` | 1 byte to 64 KiB round-trips |
+| `test_media_frame_golden_vector` | The canonical ADR-0071 golden frame opens; a seal of the same input has the same shape and opens |
+| `test_codec_decides_the_clear_prefix` | VP8 key frame keeps 10 bytes, other VP8 frames 3, audio / Opus / OTHER / unknown none; `CodecFromName` |
+| `test_every_byte_is_authenticated` | Flipping any byte of a sealed frame, or changing its length, fails |
+| `test_header_first_layout_is_refused` | The ADR-0013 layout does not open |
+| `test_set_codec_races_encrypt` | `SetCodec` on one thread while another seals |
+| `test_mid_call_rekey_overlap` | Rekey keeps the overlap window and the codec |
+| `test_empty_frame_is_not_a_decrypt_failure` | An empty frame is zero bytes out with an OK status |
 
 ## Platform integration
 

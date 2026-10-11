@@ -19,6 +19,15 @@
 #include "../../../shared/sframe-bridge/sframe-bridge.h"
 #include "api/scoped_refptr.h"
 
+// The Swift-facing codec enum carries the C ABI's values verbatim, so the
+// shim passes it straight through. A renumbering on either side fails here.
+static_assert(LakkoSFrameMediaCodecOther == LAKKO_SFRAME_MEDIA_CODEC_OTHER,
+              "LakkoSFrameMediaCodecOther must equal the C ABI's OTHER");
+static_assert(LakkoSFrameMediaCodecVP8 == LAKKO_SFRAME_MEDIA_CODEC_VP8,
+              "LakkoSFrameMediaCodecVP8 must equal the C ABI's VP8");
+static_assert(LakkoSFrameMediaCodecOpus == LAKKO_SFRAME_MEDIA_CODEC_OPUS,
+              "LakkoSFrameMediaCodecOpus must equal the C ABI's OPUS");
+
 // MARK: - Selector probe
 
 namespace {
@@ -335,6 +344,44 @@ void LakkoBridgeLogSink(const char *line) {
                              wrapper,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return LakkoSFrameAttachStatusOK;
+}
+
+// MARK: - Negotiated codec (ADR-0071)
+
++ (BOOL)setCodec:(LakkoSFrameMediaCodec)codec
+       forSender:(RTCRtpSender * _Nullable)sender {
+    if (sender == nil) {
+        return NO;
+    }
+    id obj = objc_getAssociatedObject(
+        sender, (__bridge const void *)kEncryptorAssociationKey);
+    LakkoSFrameEncryptorWrapper *wrapper = (LakkoSFrameEncryptorWrapper *)obj;
+    if (wrapper == nil || wrapper->_cppEncryptor == nullptr) {
+        return NO;
+    }
+    // An atomic store on the bridge side: safe against a concurrent
+    // Encrypt on the codec thread.
+    wrapper->_cppEncryptor->SetCodec(static_cast<uint8_t>(codec));
+    return YES;
+}
+
++ (BOOL)setCodecName:(NSString * _Nullable)codecName
+           forSender:(RTCRtpSender * _Nullable)sender {
+    return [LakkoSFrameAttach setCodec:[LakkoSFrameAttach codecForName:codecName]
+                             forSender:sender];
+}
+
++ (LakkoSFrameMediaCodec)codecForName:(NSString * _Nullable)codecName {
+    const uint8_t codec = lakko::sframe::LakkoFrameEncryptor::CodecFromName(
+        codecName != nil ? codecName.UTF8String : nullptr);
+    switch (codec) {
+        case LAKKO_SFRAME_MEDIA_CODEC_VP8:
+            return LakkoSFrameMediaCodecVP8;
+        case LAKKO_SFRAME_MEDIA_CODEC_OPUS:
+            return LakkoSFrameMediaCodecOpus;
+        default:
+            return LakkoSFrameMediaCodecOther;
+    }
 }
 
 // MARK: - Mid-call rekey (G-18, ADR-0029)

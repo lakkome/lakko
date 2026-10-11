@@ -22,6 +22,22 @@
 //   3. Own the per-call keying state and expose a mid-call `Rekey`
 //      (G-18, ADR-0029) so an MLS epoch change during a live call
 //      rotates the SFrame key with an overlap window.
+//   4. Hold the one fact the frame layout needs that libwebrtc's
+//      encryptor interface does not carry: which codec a video sender
+//      negotiated (`SetCodec`, ADR-0071).
+//
+// ## Frame layout (ADR-0071)
+//
+// Every frame is sealed as
+//
+//   clear_prefix || ciphertext_and_tag || sframe_header || trailer
+//
+// where `clear_prefix` is the codec's own frame header (10 bytes of a
+// VP8 key frame, 3 of any other VP8 frame, nothing for Opus or for a
+// codec without a rule), so that a receiver with no generic frame
+// descriptor still finds key frames. Every byte that is not ciphertext
+// is authenticated. The header-first layout of ADR-0013 is neither
+// produced nor accepted here: a frame in it fails to open.
 //
 // All Rust-side errors collapse to libwebrtc's documented failure
 // shapes:
@@ -71,6 +87,11 @@
 //
 //   - The encryptor guards `participant_key_` with `seal_mutex_`
 //     (Encrypt reads it while Rekey swaps it).
+//   - The encryptor's codec is a `std::atomic<uint8_t>`: `SetCodec`
+//     stores it, Encrypt loads it once per frame. A frame in flight
+//     during a `SetCodec` is sealed under one value or the other, and
+//     either opens: the receiver reads the split from the frame's own
+//     trailer, never from a codec.
 //   - The decryptor needs no C++ mutex — the Rust `CallKeyRing` is
 //     `Mutex`-guarded internally, so open / rekey / prune all
 //     serialise on the Rust side.
@@ -139,6 +160,34 @@ class LakkoFrameEncryptor : public webrtc::FrameEncryptorInterface {
   std::size_t GetMaxCiphertextByteSize(cricket::MediaType media_type,
                                        std::size_t frame_size) override;
 
+  // Tell the encryptor which codec its sender negotiated (ADR-0071), as
+  // one of the `LAKKO_SFRAME_MEDIA_CODEC_*` values of the C ABI. It
+  // decides how many leading bytes of each frame stay in the clear. A
+  // value the C ABI does not know is stored and treated as OTHER.
+  //
+  // libwebrtc's `Encrypt` names a media type and no codec, so the
+  // platform shim calls this once the sender's parameters name one (the
+  // first codec after negotiation) and again when a renegotiation
+  // changes it. Until then the encryptor seals as OTHER: nothing clear,
+  // the frame still opens, and a receiver with no frame descriptor
+  // cannot find its key frames.
+  //
+  // A frame libwebrtc hands over as audio is always sealed with nothing
+  // clear, whatever was set here.
+  //
+  // Callable from any thread, concurrently with Encrypt.
+  void SetCodec(uint8_t codec);
+
+  // The value last given to `SetCodec` (OTHER before the first call).
+  uint8_t Codec() const;
+
+  // Map a negotiated codec name to a `LAKKO_SFRAME_MEDIA_CODEC_*` value.
+  // Accepts the bare name libwebrtc's sender parameters carry ("VP8",
+  // "opus") and the MIME form ("video/VP8", "audio/opus"), without
+  // regard to case. Anything else, null and the RED / RTX / ULPFEC
+  // wrappers included, is OTHER.
+  static uint8_t CodecFromName(const char* name);
+
   // Mid-call rekey (G-18, ADR-0029): swap the seal key to the new MLS
   // epoch's `seed`, keeping the SAME local leaf. Returns false on a bad
   // seed length or HKDF failure, in which case the current key is
@@ -155,9 +204,9 @@ class LakkoFrameEncryptor : public webrtc::FrameEncryptorInterface {
                       uint32_t local_leaf,
                       uint8_t stream_index);
 
-  // Owned. The seal key for the CURRENT epoch; `seal_framed` re-emits
+  // Owned. The seal key for the CURRENT epoch; `seal_media_frame` emits
   // the composite KID (`(local_leaf << 8) | stream_index`) into the
-  // SFrame header internally (ADR-0013 / ADR-0035). Guarded by
+  // SFrame header internally (ADR-0035 / ADR-0071). Guarded by
   // `seal_mutex_` because Encrypt (codec thread) reads it while Rekey
   // (signaling thread) swaps it.
   lakko_sframe_participant_key_t* participant_key_;
@@ -169,6 +218,9 @@ class LakkoFrameEncryptor : public webrtc::FrameEncryptorInterface {
   // epoch.
   uint8_t stream_index_;
   mutable std::mutex seal_mutex_;
+
+  // The sender's negotiated codec (ADR-0071); OTHER until `SetCodec`.
+  std::atomic<uint8_t> codec_{LAKKO_SFRAME_MEDIA_CODEC_OTHER};
 
   mutable std::atomic<int> refcount_{0};
 };
@@ -198,7 +250,8 @@ class LakkoFrameDecryptor : public webrtc::FrameDecryptorInterface {
   // uses on every other participant. Returns nullptr on bad seed
   // length. The decryptor opens each frame through the call-key
   // ring, which reads the composite KID from the frame's own SFrame
-  // header (ADR-0035) — the single per-stream discriminator that
+  // header (ADR-0035; the header sits before the 3-byte trailer at the
+  // end of the frame, ADR-0071) — the single per-stream discriminator that
   // survives the SFU — derives that sender+stream's key internally,
   // and, during a mid-call rekey overlap window, tries the previous
   // epoch's key on an AEAD failure (ADR-0029).

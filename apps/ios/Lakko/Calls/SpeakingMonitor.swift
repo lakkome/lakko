@@ -77,10 +77,16 @@ enum CallAudioLevelStats {
 /// ``SpeakingTracker``; the twin of `apps/web/src/calls/speaking-monitor.ts`.
 ///
 /// The levels come from the peer connection's statistics, read about seven
-/// times a second. A report that carries no level for someone simply yields no
-/// sample for them: no ring is drawn and the large tile falls back to the
-/// roster order, which is the call as it was before this existed. A level is
-/// never guessed.
+/// times a second: each other person's from the `audioLevel` of the
+/// `inbound-rtp` stream of the receiver that decodes their audio, this
+/// device's own from its audio `media-source`. This binding offers a receiver
+/// no synchronization sources and the app no decoded samples, so the
+/// statistics are the one source there is; the web client's other two are
+/// absent here.
+///
+/// A person the report carries no level for is sampled as silence: no ring is
+/// drawn and the large tile falls back to the roster order, which is the call
+/// as it was before this existed. A muted person's level is not read at all.
 ///
 /// Group calls only: a one-to-one has one voice.
 @MainActor
@@ -93,6 +99,18 @@ final class GroupSpeakingMonitor {
     private let nowMs: () -> UInt64
     private var tracker = SpeakingTracker()
     private var task: Task<Void, Never>?
+    /// What each person's level was since the last `voices` line.
+    private var report: [String: VoiceNote] = [:]
+    private var readingsSinceReport = 0
+
+    /// How many readings one `voices` line covers (about two seconds).
+    static let reportEveryReadings = 13
+
+    private struct VoiceNote {
+        var measured = false
+        var peak: Double?
+        var speaking = false
+    }
 
     /// Where a reading comes from. Set once the call's session exists; `nil`
     /// yields no readings.
@@ -125,31 +143,86 @@ final class GroupSpeakingMonitor {
         task?.cancel()
         task = nil
         tracker = SpeakingTracker()
+        report = [:]
+        readingsSinceReport = 0
         ui.setSpeech(speakingIds: [], speech: .none)
     }
 
     /// Fold one reading into the call's state: the ring on every speaking
     /// tile, and who holds the floor.
+    ///
+    /// A muted person is never speaking: their level is not read at all
+    /// while their microphone is off, this device's own included (a muted
+    /// microphone still measures the room). A person the report carried no
+    /// level for is sampled as silence, as on the web client, so a ring whose
+    /// source went away goes off instead of standing.
+    ///
+    /// This device's own person is sampled for its ring and is never a
+    /// candidate for the floor (``SpeakingTracker/snapshot(candidates:nowMs:)``).
     func ingest(_ levels: CallAudioLevels, nowMs: UInt64) {
         let people = ui.participants
         let order = people.map(\.id)
         tracker.keepOnly(Set(order))
         for person in people {
+            guard person.micOn else {
+                tracker.silence(person.id)
+                report[person.id] = nil
+                continue
+            }
             let level: Double?
             if person.isLocal {
                 level = levels.local
             } else {
                 level = levels.remoteByPeerId[Self.peerId(ofParticipant: person.id)]
             }
-            guard let level else { continue }
-            tracker.sample(person.id, level: level, nowMs: nowMs)
+            var note = report[person.id] ?? VoiceNote()
+            note.measured = level != nil
+            if let level { note.peak = max(note.peak ?? 0, level) }
+            report[person.id] = note
+            tracker.sample(person.id, level: level ?? 0, nowMs: nowMs)
         }
-        let snapshot = tracker.snapshot(order: order, nowMs: nowMs)
+        let candidates = people.filter { !$0.isLocal }.map(\.id)
+        let snapshot = tracker.snapshot(candidates: candidates, nowMs: nowMs)
+        for id in snapshot.speakingIds { report[id]?.speaking = true }
         ui.setSpeech(
             speakingIds: snapshot.speakingIds,
             speech: StageSpeech(
                 activeSpeakerId: snapshot.activeSpeakerId,
                 lastSpokeAtMs: snapshot.lastSpokeAtMs))
+        readingsSinceReport += 1
+        if readingsSinceReport >= Self.reportEveryReadings {
+            readingsSinceReport = 0
+            logVoices(people: people, floorId: snapshot.activeSpeakerId)
+        }
+    }
+
+    /// The `voices` line of the call log, for the readings since the last
+    /// one (``VoiceDiagnostics``).
+    private func logVoices(people: [CallUiState.Participant], floorId: String?) {
+        let voices = people.map { person -> VoiceReport in
+            let note = report[person.id]
+            return VoiceReport(
+                id: person.id, isLocal: person.isLocal,
+                path: note?.measured == true ? .statsLevel : .none,
+                peak: note?.peak, speaking: note?.speaking ?? false)
+        }
+        report = [:]
+        let layout = GroupCallLayout.kind(
+            choice: ui.layoutChoice, pinnedId: ui.pinnedId, people: people)
+        var stage: (id: String, reason: StageReason)?
+        if layout == .focus,
+            let person = GroupCallLayout.stagePerson(
+                SharedGroupCallRules(), people: people, pinnedId: ui.pinnedId, speech: ui.speech) {
+            stage = (
+                id: person.id,
+                reason: VoiceDiagnostics.stageReason(
+                    stageId: person.id, people: people, pinnedId: ui.pinnedId, speech: ui.speech))
+        }
+        NSLog(
+            "%@",
+            VoiceDiagnostics.describe(
+                "call media interval", voices: voices, floorId: floorId, stage: stage,
+                layout: layout))
     }
 
     /// The SFU peer id behind a roster id (`"peer-<peerId>"`).

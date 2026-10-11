@@ -23,12 +23,15 @@ import uniffi.lakko_ffi_uniffi.FfiWsMessage
 import uniffi.lakko_ffi_uniffi.SfuErrorCode
 import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
 import uniffi.lakko_ffi_uniffi.SfuServerFrame
+import uniffi.lakko_ffi_uniffi.SfuVideoGiven
+import uniffi.lakko_ffi_uniffi.SfuVideoWant
 import uniffi.lakko_ffi_uniffi.composeSfuIceCandidate
 import uniffi.lakko_ffi_uniffi.composeSfuPing
 import uniffi.lakko_ffi_uniffi.composeSfuSdpAnswer
-import uniffi.lakko_ffi_uniffi.composeSfuSdpOffer
+import uniffi.lakko_ffi_uniffi.composeSfuSdpOfferWithMiddle
 import uniffi.lakko_ffi_uniffi.composeSfuSignalRelayToCall
 import uniffi.lakko_ffi_uniffi.composeSfuSignalRelayToPeer
+import uniffi.lakko_ffi_uniffi.composeSfuVideoWants
 import uniffi.lakko_ffi_uniffi.openTunneledWebsocket
 import uniffi.lakko_ffi_uniffi.parseSfuServerFrame
 import uniffi.lakko_ffi_uniffi.TunneledWsConnection
@@ -64,6 +67,14 @@ interface SfuSignalingCallbacks {
 
     /** Application-layer pong reply. */
     fun onPong(nonce: ULong) {}
+
+    /** What the SFU gives this device of each publisher's video (ADR-0070
+     *  step 6): the whole set, one entry per publisher it sends video of. */
+    fun onVideoGiven(given: List<SfuVideoGiven>) {}
+
+    /** Which of this device's own camera senders somebody is being sent
+     *  (ADR-0070, "senders nobody watches"): the whole state each time. */
+    fun onVideoNeeded(main: Boolean, middle: Boolean) {}
 
     /** Server reported a protocol-level error. */
     fun onServerError(code: SfuErrorCode, detail: String) {}
@@ -271,13 +282,39 @@ class SfuSignalingClient(
             is SfuServerFrame.SdpOffer -> callbacks.onSdpOffer(frame.sdp)
             is SfuServerFrame.Pong -> callbacks.onPong(frame.nonce)
             is SfuServerFrame.Error -> callbacks.onServerError(frame.code, frame.detail)
+            is SfuServerFrame.VideoGiven -> callbacks.onVideoGiven(frame.given)
+            is SfuServerFrame.VideoNeeded -> callbacks.onVideoNeeded(frame.main, frame.middle)
         }
     }
 
     // ---- Send (client -> SFU) ---------------------------------------
 
-    /** Send a client -> SFU SDP offer (publish path). */
-    fun sendSdpOffer(sdp: String) = enqueue(composeSfuSdpOffer(sdp))
+    /**
+     * Send a client -> SFU SDP offer (publish path). [lightMids] and
+     * [middleMids] name the offer's media lines that carry the light and the
+     * middle copy of the camera (ADR-0070 steps 1 and 5), so the SFU forwards
+     * them as the camera's light companion and its middle track.
+     */
+    fun sendSdpOffer(sdp: String, lightMids: List<String>, middleMids: List<String>) =
+        enqueue(composeSfuSdpOfferWithMiddle(sdp, lightMids, middleMids))
+
+    /**
+     * Tell the SFU which picture of each publisher this device shows
+     * (ADR-0070 step 5): the whole set each time. `false` when the frame
+     * could not be composed or the socket is not open.
+     */
+    fun sendVideoWants(wants: List<SfuVideoWant>): Boolean {
+        if (!isOpen) return false
+        val json = try {
+            composeSfuVideoWants(wants)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            return false
+        }
+        enqueue(json)
+        return true
+    }
 
     /** Send a client -> SFU SDP answer (responds to a SFU-initiated
      *  offer). */

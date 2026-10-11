@@ -154,7 +154,7 @@ final class SfuCallUi {
                     speaking.start()
                 case .failed, .closed:
                     speaking.stop()
-                    ui.clearRemoteLightVideoTracks()
+                    ui.clearRemoteVideoCopies()
                     ui.setPhase(.ended(endedAt: Date()))
                 case .idle:
                     break
@@ -317,11 +317,26 @@ final class SfuCallUi {
                 // nothing else. No participant, no camera flag, no probe: it
                 // is not what decides that there is a picture.
                 ui.setRemoteLightVideoTrack(track, forParticipant: Self.participantId(forPeer: peerId))
+            },
+            onRemoteMiddleVideoTrack: { track, peerId in
+                // That peer's middle track (ADR-0070 step 5): the heavy
+                // picture a tile watches when the shared rule says `middle`.
+                // No participant, no camera flag, no probe.
+                ui.setRemoteMiddleVideoTrack(track, forParticipant: Self.participantId(forPeer: peerId))
+            },
+            onVideoGiven: { given in
+                // What the SFU gives of each person (ADR-0070 step 6): a tile
+                // shows the lower of that and what it wants.
+                ui.setRemoteVideoGiven(byPeerId: given)
             }
         )
         let session = SfuCallSession(config: config, callbacks: callbacks)
         self.session = session
         speaking.source = { [weak session] in await session?.sampleAudioLevels() }
+        // What a tile shows of a person, for the SFU (``VideoWants``).
+        ui.tileVideoQualitySink = { [weak session] tile, peerId, quality in
+            session?.reportTileVideoQuality(tile: tile, peerId: peerId, quality: quality)
+        }
     }
 
     /// Open the SFU connection + publish (delegates to the session).

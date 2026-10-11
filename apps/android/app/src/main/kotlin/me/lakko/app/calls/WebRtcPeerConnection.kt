@@ -166,11 +166,57 @@ public class WebRtcPeerConnection(
      * The ids of the incoming video tracks that are light companions
      * (`LightStream.kt`): a track that arrived in a stream whose id ends in
      * `~light`. Written on libwebrtc's signaling thread as tracks arrive and
-     * read by the media counters, which label a video receiver `light` or
-     * `main` by it. Never filled on a one-to-one call.
+     * read by the media counters, which label a video receiver `light`,
+     * `middle` or `main` by it. Never filled on a one-to-one call.
      */
     private val remoteLightVideoTrackIds: MutableSet<String> =
         java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** The same for the middle tracks: a stream whose id ends in `~mid`. */
+    private val remoteMiddleVideoTrackIds: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** Follows each audio entry's energy counters across statistics reports
+     *  ([sampleAudioLevels]). Used from the caller's one thread. */
+    private val audioLevelReader = AudioLevelReader()
+
+    /**
+     * One copy of the camera sent beside the main sender (ADR-0070 steps 1
+     * and 5, `CameraSenders.kt`): a second track over the camera's video
+     * source on a send-only transceiver of its own, sealed by an encryptor of
+     * its own under its own SFrame stream index.
+     */
+    private class CopySlot(
+        val transceiver: RtpTransceiver,
+        var track: VideoTrack,
+        val encryptor: me.lakko.sframe.LakkoFrameEncryptor,
+    ) {
+        val sender: org.webrtc.RtpSender get() = transceiver.sender
+    }
+
+    /**
+     * The transceiver of a group call's main camera sender, when the sender
+     * was made with one ([addLocalVideoTrack] with `groupCamera`); `null` on a
+     * one-to-one call and when the camera fell back to the plain `addTrack`.
+     *
+     * ## Why the transceivers are held
+     *
+     * `PeerConnection.getTransceivers()` in libwebrtc's Java API disposes
+     * every `RtpTransceiver` wrapper it handed out before, the ones
+     * `addTransceiver` returned included, and a disposed transceiver disposes
+     * its sender: the `RtpSender` this class kept from `addTransceiver(..)
+     * .sender` would throw on its next use. So a connection that has senders
+     * made by `addTransceiver` (every group call) never asks for the
+     * transceiver list; it reads the `mid` of a sender's media line from the
+     * transceiver it was given. Only the one-to-one call, whose senders all
+     * come from `addTrack`, uses the list ([setLocalVideoSending],
+     * [sampleLocalVideoSendFacts]).
+     */
+    private var localVideoTransceiver: RtpTransceiver? = null
+
+    /** The camera's copies, by kind. Never more than one per kind. Group
+     *  calls only; empty on a one-to-one call. */
+    private val cameraCopies = java.util.EnumMap<CameraCopyKind, CopySlot>(CameraCopyKind::class.java)
 
     /**
      * An SFrame encryptor is attached to the local video sender.
@@ -264,8 +310,12 @@ public class WebRtcPeerConnection(
             // the incoming audio track plays out via libwebrtc's audio
             // device automatically and needs no UI handle.
             val track = r.track() as? VideoTrack ?: return
-            if (streamId != null && splitStreamId(streamId).light) {
-                runCatching { track.id() }.getOrNull()?.let { remoteLightVideoTrackIds += it }
+            when (streamId?.let { splitStreamId(it).role }) {
+                RemoteStreamRole.LIGHT ->
+                    runCatching { track.id() }.getOrNull()?.let { remoteLightVideoTrackIds += it }
+                RemoteStreamRole.MIDDLE ->
+                    runCatching { track.id() }.getOrNull()?.let { remoteMiddleVideoTrackIds += it }
+                else -> Unit
             }
             // Remembered so `onRemoveTrack` can tell the peer's video receiver
             // from its audio one: by the time that callback runs, the track is
@@ -396,6 +446,7 @@ public class WebRtcPeerConnection(
             localAudioTrack?.dispose()
             localAudioSource?.dispose()
             localVideoTrack?.dispose()
+            cameraCopies.values.forEach { it.track.dispose() }
             peer?.close()
             peer?.dispose()
         } catch (cause: Throwable) {
@@ -407,8 +458,14 @@ public class WebRtcPeerConnection(
         localVideoTrack = null
         localAudioSender = null
         localVideoSender = null
+        cameraCopies.clear()
+        activitySenders.clear()
+        localVideoTransceiver = null
+        videoSenderSealed = false
+        videoSenderEncryptor = null
         remoteAudioStreamByTrackId.clear()
         remoteLightVideoTrackIds.clear()
+        remoteMiddleVideoTrackIds.clear()
     }
 
     // ----------------------------------------------------------------
@@ -450,6 +507,8 @@ public class WebRtcPeerConnection(
      *  no SDP renegotiation. No-op on an audio-only call. */
     public fun setCameraEnabled(on: Boolean) {
         localVideoTrack?.setEnabled(on)
+        // The copies' tracks are enabled and disabled with the camera.
+        cameraCopies.values.forEach { copy -> runCatching { copy.track.setEnabled(on) } }
     }
 
     /**
@@ -585,19 +644,30 @@ public class WebRtcPeerConnection(
                 if (cont.isActive) cont.resume(null)
             }
         } ?: return null
-        return audioLevelsFrom(
-            stats = report.statsMap.values.map { RtcStat(type = it.type, members = it.members) },
+        return audioLevelReader.read(
+            stats = report.statsMap.values.map { RtcStat(type = it.type, members = it.members, id = it.id) },
             streamIdByTrackId = remoteAudioStreamByTrackId,
         )
     }
 
+    /** What the group call's media counters read in one go. */
+    internal class MediaStatsSample(
+        /** Every entry of the connection's statistics report, with its id. */
+        val stats: List<RtcStat>,
+        /** The ids of the incoming light companion tracks. */
+        val lightTrackIds: Set<String>,
+        /** The ids of the incoming middle tracks. */
+        val middleTrackIds: Set<String>,
+        /** This device's camera senders, by the `mid` of their media line. */
+        val senderByMid: Map<String, CameraSenderKind>,
+    )
+
     /**
-     * Every entry of the connection's statistics report, with its id, and the
-     * ids of the incoming light companion tracks: what the group call's media
-     * counters read (`CallMediaCounters.kt`). `null` when there is no
-     * connection or no report. Reading it sends nothing anywhere.
+     * The connection's statistics report and what is needed to name its
+     * entries (`CallMediaCounters.kt`). `null` when there is no connection or
+     * no report. Reading it sends nothing anywhere.
      */
-    public suspend fun sampleMediaStats(): Pair<List<RtcStat>, Set<String>>? {
+    internal suspend fun sampleMediaStats(): MediaStatsSample? {
         val p = peer ?: return null
         val report = suspendCancellableCoroutine<org.webrtc.RTCStatsReport?> { cont ->
             try {
@@ -609,7 +679,12 @@ public class WebRtcPeerConnection(
         val stats = report.statsMap.values.map {
             RtcStat(type = it.type, members = it.members, id = it.id)
         }
-        return stats to remoteLightVideoTrackIds.toSet()
+        return MediaStatsSample(
+            stats = stats,
+            lightTrackIds = remoteLightVideoTrackIds.toSet(),
+            middleTrackIds = remoteMiddleVideoTrackIds.toSet(),
+            senderByMid = cameraSenderByMid(),
+        )
     }
 
     /**
@@ -629,14 +704,14 @@ public class WebRtcPeerConnection(
      * first offer) AND mid-call for the ADR-0032 "camera-on"
      * renegotiation path (`SfuCallSession.publishVideo`).
      *
-     * @param groupCamera add the camera the way a group call sends it
-     *   (ADR-0067 steps 2 and 5, [addCameraSender]): through a transceiver
-     *   created with two simulcast encodings (rid `q`, then rid `f`) each in
-     *   three temporal layers, falling back step by step to one encoding and
-     *   then to the plain `addTrack` when libwebrtc refuses. One sender either
-     *   way, so one SFrame encryptor seals both layers. The SFU session passes
-     *   `true` on the initial publish and on the mid-call camera-on; the
-     *   one-to-one call keeps the plain add.
+     * @param groupCamera add the camera as a group call's MAIN sender
+     *   (ADR-0067 step 2, ADR-0070, [addCameraSender]): one encoding in three
+     *   temporal layers on a transceiver of its own, falling back to the plain
+     *   `addTrack` with the layers asked for afterwards when libwebrtc
+     *   refuses. The camera's light and middle copies are added separately
+     *   ([addCameraCopySender]). The SFU session passes `true` on the initial
+     *   publish and on the mid-call camera-on; the one-to-one call keeps the
+     *   plain add.
      */
     public fun addLocalVideoTrack(source: VideoSource, groupCamera: Boolean = false) {
         val factory = sharedFactory ?: return
@@ -648,27 +723,275 @@ public class WebRtcPeerConnection(
             this.localVideoSender = peer.addTrack(track, streams)
             return
         }
+        localVideoTransceiver = null
         val added = addCameraSender(
             addWithEncodings = { encodings ->
-                peer.addTransceiver(
+                val transceiver = peer.addTransceiver(
                     track,
                     RtpTransceiver.RtpTransceiverInit(
                         RtpTransceiver.RtpTransceiverDirection.SEND_RECV,
                         streams,
                         encodings,
                     ),
-                ).sender
+                )
+                localVideoTransceiver = transceiver
+                transceiver.sender
             },
             addPlain = { peer.addTrack(track, streams) },
-            onRefused = { what, cause ->
-                Log.w(TAG, "camera sender: $what refused, trying less", cause)
+            onRefused = { cause ->
+                Log.w(TAG, "camera sender: temporal layers refused with the transceiver, trying less", cause)
             },
         )
-        Log.i(TAG, "camera sender: added with ${added.accepted ?: "a plain track"}")
+        Log.i(TAG, "camera sender: added with ${if (added.layered) "temporal layers" else "a plain track"}")
         this.localVideoSender = added.sender
         // The plain add took no encodings: ask for the temporal layers
         // afterwards, best effort.
-        if (added.accepted == null) requestLocalCameraLayers()
+        if (!added.layered) requestLocalCameraLayers()
+        preferCameraFramerate(added.sender)
+    }
+
+    /**
+     * Tell a camera sender to keep its frame rate under a bitrate shortfall:
+     * what the camera gives up is sharpness, not motion (the web client's
+     * `preferCameraFramerate`). Best effort: a sender that refuses keeps
+     * libwebrtc's default.
+     */
+    private fun preferCameraFramerate(sender: org.webrtc.RtpSender) {
+        try {
+            val params = sender.parameters ?: return
+            if (params.degradationPreference == org.webrtc.RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE) {
+                return
+            }
+            params.degradationPreference = org.webrtc.RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+            if (!sender.setParameters(params)) Log.w(TAG, "camera sender: frame-rate preference refused")
+        } catch (cause: RuntimeException) {
+            Log.w(TAG, "camera sender: frame-rate preference refused", cause)
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // The camera's copies (ADR-0070 steps 1 and 5)
+    // ----------------------------------------------------------------
+
+    /**
+     * Add the [kind] copy of the camera and seal it, in one step: a second
+     * video track over the camera's [source] on a send-only transceiver of
+     * its own, with its size and its bitrate ceiling, and an SFrame encryptor
+     * of its own under the copy's stream index, attached before this returns
+     * and so before any offer that carries the new media line can be built
+     * (security invariant #4).
+     *
+     * ## Why a second track over the same source
+     *
+     * The web client clones the camera track. libwebrtc's Java API has no
+     * clone; a second `VideoTrack` created over the same `VideoSource` is the
+     * same thing: the one capturer feeds the source, and each sender encodes
+     * the source's frames by itself, scaled down by its own encoding's
+     * `scaleResolutionDownBy`. A second `VideoSource` narrowed with
+     * `adaptOutputFormat` would need the capturer's frames fanned out to two
+     * sources by hand, for the same picture.
+     *
+     * Never fails the call. `false` when libwebrtc takes no such sender,
+     * takes none with the right size, or the encryptor cannot be created:
+     * the sender is then removed again (a full-size or an unsealed copy is
+     * never left in place) and the call goes on without that copy.
+     *
+     * @param active whether the copy's encoding is created active; `null`
+     *   leaves it active, as every encoding is by default.
+     */
+    internal fun addCameraCopySender(
+        kind: CameraCopyKind,
+        source: VideoSource,
+        seed: ByteArray,
+        localLeaf: Int,
+        active: Boolean?,
+    ): Boolean {
+        if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) return false
+        if (cameraCopies.containsKey(kind)) return true
+        val factory = sharedFactory ?: return false
+        val peer = peer ?: return false
+        val name = kind.sender.wireName
+        val track = try {
+            factory.createVideoTrack(copyTrackId(kind), source)
+        } catch (cause: RuntimeException) {
+            Log.w(TAG, "camera sender: no $name copy: a second track could not be made", cause)
+            return false
+        }
+        track.setEnabled(localVideoTrack?.enabled() ?: true)
+        val sendOnly = RtpTransceiver.RtpTransceiverDirection.SEND_ONLY
+        val added = addCopySender(
+            kind = kind,
+            active = active,
+            addWithEncoding = { encoding ->
+                peer.addTransceiver(
+                    track,
+                    RtpTransceiver.RtpTransceiverInit(sendOnly, emptyList(), listOf(encoding)),
+                )
+            },
+            addPlain = { peer.addTransceiver(track, RtpTransceiver.RtpTransceiverInit(sendOnly)) },
+            refused = { what, cause -> Log.w(TAG, "camera sender: no $name copy: $what", cause) },
+        )
+        if (added == null) {
+            track.dispose()
+            return false
+        }
+        val transceiver = added.sender
+        val sender = transceiver.sender
+        fun dropAgain(why: String): Boolean {
+            Log.w(TAG, "camera sender: no $name copy: $why")
+            runCatching { peer.removeTrack(sender) }
+            runCatching { if (!transceiver.isStopped) transceiver.stop() }
+            track.dispose()
+            return false
+        }
+        // Sealed first: an unsealed sender is never left in place.
+        val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf, kind.sender.streamIndex)
+            ?: return dropAgain("its SFrame encryptor could not be created")
+        sender.setFrameEncryptor(enc)
+        attachedEncryptors += enc
+        if (!added.configured) {
+            // libwebrtc refused the size and the ceiling with the transceiver;
+            // ask again on the sender. Without them this would be another
+            // full-size camera, so a refusal here removes the sender.
+            val ok = try {
+                val params = sender.parameters
+                params != null && configureCopyEncoding(params.encodings, kind, active) { sender.setParameters(params) }
+            } catch (cause: RuntimeException) {
+                false
+            }
+            if (!ok) {
+                attachedEncryptors -= enc
+                dropAgain("its size and bitrate ceiling were refused")
+                enc.release()
+                return false
+            }
+        }
+        preferCameraFramerate(sender)
+        cameraCopies[kind] = CopySlot(transceiver, track, enc)
+        // A copy added mid-call onto a negotiated connection may already have
+        // its codec; otherwise the answer brings it ([syncSenderCodecs]).
+        syncSenderCodec(sender, enc)
+        Log.i(
+            TAG,
+            "sframe arm (copy): leaf=$localLeaf stream=${kind.sender.streamIndex} " +
+                "kid=0x${enc.sealKid.toString(16)} sender=$name",
+        )
+        return true
+    }
+
+    /** Whether this device has the [kind] camera sender. */
+    internal fun hasCameraSender(kind: CameraSenderKind): Boolean = when (kind) {
+        CameraSenderKind.MAIN -> localVideoSender != null
+        CameraSenderKind.LIGHT -> cameraCopies.containsKey(CameraCopyKind.LIGHT)
+        CameraSenderKind.MIDDLE -> cameraCopies.containsKey(CameraCopyKind.MIDDLE)
+    }
+
+    private fun cameraSenderOf(kind: CameraSenderKind): org.webrtc.RtpSender? = when (kind) {
+        CameraSenderKind.MAIN -> localVideoSender
+        CameraSenderKind.LIGHT -> cameraCopies[CameraCopyKind.LIGHT]?.sender
+        CameraSenderKind.MIDDLE -> cameraCopies[CameraCopyKind.MIDDLE]?.sender
+    }
+
+    /** The `mid` of the [kind] camera sender's media line, read from the
+     *  transceiver this class was given for it; `null` before a local
+     *  description that includes it is set, and for a main sender that came
+     *  from the plain `addTrack`. */
+    private fun cameraSenderMid(kind: CameraSenderKind): String? {
+        val transceiver = when (kind) {
+            CameraSenderKind.MAIN -> localVideoTransceiver
+            CameraSenderKind.LIGHT -> cameraCopies[CameraCopyKind.LIGHT]?.transceiver
+            CameraSenderKind.MIDDLE -> cameraCopies[CameraCopyKind.MIDDLE]?.transceiver
+        }
+        return runCatching { transceiver?.mid }.getOrNull()
+    }
+
+    /**
+     * The `mid`s an offer names for the [kind] copy of the camera
+     * ([copyMids]): its transceiver's, once a local description that includes
+     * it is set.
+     */
+    internal fun cameraCopyMids(kind: CameraCopyKind): List<String> = copyMids(cameraSenderMid(kind.sender))
+
+    /** This device's camera senders, by the `mid` of their media line, for
+     *  the media counters. A sender whose media line has no `mid` yet is
+     *  absent. */
+    private fun cameraSenderByMid(): Map<String, CameraSenderKind> {
+        val out = HashMap<String, CameraSenderKind>()
+        for (kind in CAMERA_SENDER_KINDS) {
+            val mid = cameraSenderMid(kind)
+            if (!mid.isNullOrEmpty()) out[mid] = kind
+        }
+        return out
+    }
+
+    /** Take the [kind] copy off the connection: its sender, its track and
+     *  its encryptor. Every step is best effort. */
+    internal fun removeCameraCopySender(kind: CameraCopyKind) {
+        val copy = cameraCopies.remove(kind) ?: return
+        activitySenders.remove(kind.sender)
+        runCatching { peer?.removeTrack(copy.sender) }
+        runCatching { if (!copy.transceiver.isStopped) copy.transceiver.stop() }
+        runCatching { copy.track.dispose() }
+        // After the sender let go of it, as in [close].
+        attachedEncryptors -= copy.encryptor
+        copy.encryptor.release()
+    }
+
+    /**
+     * The [kind] camera sender as [SenderActivity] drives it (ADR-0070,
+     * "senders nobody watches"): its first encoding's `active` flag, read and
+     * set with `getParameters` / `setParameters` and nothing else. No
+     * renegotiation: the media line, the SSRC and the SFrame encryptor stay.
+     * `null` when this device has no such sender. The object is the same for
+     * as long as the sender is.
+     */
+    internal fun activitySender(kind: CameraSenderKind): ActivitySender? {
+        val sender = cameraSenderOf(kind) ?: return null
+        activitySenders[kind]?.takeIf { it.sender === sender }?.let { return it }
+        return RtpActivitySender(sender).also { activitySenders[kind] = it }
+    }
+
+    private class RtpActivitySender(val sender: org.webrtc.RtpSender) : ActivitySender {
+        override fun encodingActive(): Boolean? = sender.parameters?.encodings?.firstOrNull()?.active
+
+        override fun setEncodingActive(active: Boolean): Boolean {
+            val params = sender.parameters ?: return false
+            val first = params.encodings.firstOrNull() ?: return false
+            first.active = active
+            return sender.setParameters(params)
+        }
+    }
+
+    private val activitySenders =
+        java.util.EnumMap<CameraSenderKind, RtpActivitySender>(CameraSenderKind::class.java)
+
+    /**
+     * Tell every video sender's SFrame encryptor the codec its sender
+     * negotiated (ADR-0071): the first entry of the sender's codecs. The
+     * encryptor leaves that codec's frame header in the clear so a receiver
+     * without the generic frame descriptor still finds key frames; told
+     * nothing (or a codec with no rule) it keeps nothing clear.
+     *
+     * Called after every step that can change a sender's codec or give a
+     * sender a new encryptor: the SFU's answer, an answer of this device's to
+     * an SFU offer, a mid-call arm, a copy added. Safe to call at any time.
+     */
+    public fun syncSenderCodecs() {
+        val main = localVideoSender
+        val mainEnc = videoSenderEncryptor
+        if (main != null && mainEnc != null) syncSenderCodec(main, mainEnc)
+        for (copy in cameraCopies.values) syncSenderCodec(copy.sender, copy.encryptor)
+    }
+
+    private fun syncSenderCodec(sender: org.webrtc.RtpSender, encryptor: me.lakko.sframe.LakkoFrameEncryptor) {
+        val name = try {
+            senderCodecName(sender.parameters?.codecs.orEmpty().map { it.name })
+        } catch (cause: RuntimeException) {
+            null
+        }
+        if (!encryptor.setCodecName(name)) {
+            Log.w(TAG, "sframe codec: the encryptor of stream ${encryptor.stream} is released")
+        }
     }
 
     /**
@@ -755,6 +1078,26 @@ public class WebRtcPeerConnection(
         }
         localVideoTrack?.dispose()
         localVideoTrack = track
+        // The copies follow the camera to the new source: same senders, same
+        // encryptors, same counters, no renegotiation. A copy that will not
+        // take the new track is removed.
+        for (kind in CAMERA_COPY_KINDS) {
+            val copy = cameraCopies[kind] ?: continue
+            val next = factory.createVideoTrack(copyTrackId(kind), source)
+            val taken = try {
+                copy.sender.setTrack(next, false)
+            } catch (cause: RuntimeException) {
+                false
+            }
+            if (taken) {
+                copy.track.dispose()
+                copy.track = next
+            } else {
+                Log.w(TAG, "camera sender: the ${kind.sender.wireName} copy would not take the new camera")
+                next.dispose()
+                removeCameraCopySender(kind)
+            }
+        }
         return true
     }
 
@@ -768,6 +1111,8 @@ public class WebRtcPeerConnection(
      * only runs on the arm-FAILED path, where none was attached.
      */
     public fun removeLocalVideoTrack() {
+        // No copy of a camera that is not sent.
+        for (kind in CAMERA_COPY_KINDS) removeCameraCopySender(kind)
         videoSenderSealed = false
         videoSenderEncryptor = null
         val peer = peer
@@ -782,6 +1127,8 @@ public class WebRtcPeerConnection(
         localVideoTrack?.dispose()
         localVideoTrack = null
         localVideoSender = null
+        localVideoTransceiver = null
+        activitySenders.remove(CameraSenderKind.MAIN)
     }
 
     // ----------------------------------------------------------------
@@ -803,20 +1150,22 @@ public class WebRtcPeerConnection(
         if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) {
             return false
         }
-        // Release any prior encryptors first (re-arming on
-        // mid-call rotation goes through here).
-        attachedEncryptors.forEach { it.release() }
-        attachedEncryptors.clear()
+        // Release any prior encryptors of the microphone and the main camera
+        // first. The encryptors of the camera's copies stay: their senders
+        // still hold them.
+        val copyEncryptors = cameraCopies.values.map { it.encryptor }
+        attachedEncryptors.filter { it !in copyEncryptors }.forEach { it.release() }
+        attachedEncryptors.retainAll(copyEncryptors)
 
         var allOk = true
-        // Each sender is bound to its own per-sender stream ordinal (ADR-0035):
-        // audio = 0, the (single, v1) video = 1. The seal KID is
+        // Each sender is bound to its own per-sender stream index (ADR-0035,
+        // `CameraSenders.kt`): audio = 0, the main camera = 1. The seal KID is
         // `(localLeaf << 8) | streamIndex`, so a participant never reuses one
-        // (key, nonce) across the two streams. A future second video / screen-
-        // share would take stream index 2.
+        // (key, nonce) across streams. A group call's light and middle copies
+        // of the camera take 3 and 4 ([addCameraCopySender]).
         for ((sender, streamIndex) in listOf(
-            localAudioSender to AUDIO_STREAM_INDEX,
-            localVideoSender to VIDEO_STREAM_INDEX,
+            localAudioSender to SFRAME_STREAM_AUDIO,
+            localVideoSender to SFRAME_STREAM_CAMERA,
         )) {
             sender ?: continue
             val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf, streamIndex)
@@ -826,7 +1175,7 @@ public class WebRtcPeerConnection(
             }
             sender.setFrameEncryptor(enc)
             attachedEncryptors += enc
-            if (streamIndex == VIDEO_STREAM_INDEX) {
+            if (streamIndex == SFRAME_STREAM_CAMERA) {
                 videoSenderSealed = true
                 videoSenderEncryptor = enc
             }
@@ -872,17 +1221,20 @@ public class WebRtcPeerConnection(
         val enc = me.lakko.sframe.LakkoFrameEncryptor.create(
             seed,
             localLeaf,
-            VIDEO_STREAM_INDEX,
+            SFRAME_STREAM_CAMERA,
         ) ?: return false
         sender.setFrameEncryptor(enc)
         attachedEncryptors += enc
         videoSenderSealed = true
         videoSenderEncryptor = enc
+        // A sender on a transceiver that was already negotiated has its codec
+        // now; a new media line gets it with the answer ([syncSenderCodecs]).
+        syncSenderCodec(sender, enc)
         // The line to compare, field by field, with the `sframe arm (connect)`
         // line a call that starts as video prints for the same stream.
         Log.i(
             TAG,
-            "sframe arm (mid-call): leaf=$localLeaf stream=$VIDEO_STREAM_INDEX " +
+            "sframe arm (mid-call): leaf=$localLeaf stream=$SFRAME_STREAM_CAMERA " +
                 "kid=0x${enc.sealKid.toString(16)}",
         )
         return true
@@ -1302,16 +1654,8 @@ public class WebRtcPeerConnection(
         private const val AUDIO_TRACK_ID = "lakko-audio0"
         private const val VIDEO_TRACK_ID = "lakko-video0"
 
-        /**
-         * ADR-0035 per-`(leaf, stream)` key spaces. The seal KID is
-         * `(localLeaf << 8) | streamIndex`, so audio and video never reuse one
-         * `(key, nonce)`. Named once because the connect-time arm and the
-         * mid-call arm must agree: a mid-call video sender sealed on a
-         * different index than the one the peer's decryptor derives produces
-         * frames it drops in silence.
-         */
-        private const val AUDIO_STREAM_INDEX = 0
-        private const val VIDEO_STREAM_INDEX = 1
+        /** The track id of a copy of the camera ([addCameraCopySender]). */
+        private fun copyTrackId(kind: CameraCopyKind): String = "lakko-video-${kind.sender.wireName}0"
 
         /**
          * The pause between deactivating and reactivating the video encoding in

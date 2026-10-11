@@ -34,32 +34,32 @@ final class SpeakingTrackerTests: XCTestCase {
     func testTheRingComesOnAfterAShortSoundAndGoesOffAfterAPause() {
         var t = SpeakingTracker()
         t.sample("a", level: loud, nowMs: 0)
-        XCTAssertFalse(t.snapshot(order: order, nowMs: 0).speakingIds.contains("a"))
+        XCTAssertFalse(t.snapshot(candidates: order, nowMs: 0).speakingIds.contains("a"))
         t.sample("a", level: loud, nowMs: Speaking.ringOnMs)
         XCTAssertTrue(
-            t.snapshot(order: order, nowMs: Speaking.ringOnMs).speakingIds.contains("a"))
+            t.snapshot(candidates: order, nowMs: Speaking.ringOnMs).speakingIds.contains("a"))
         t.sample("a", level: 0, nowMs: Speaking.ringOnMs + 100)
         XCTAssertTrue(
-            t.snapshot(order: order, nowMs: Speaking.ringOnMs + 100).speakingIds.contains("a"))
+            t.snapshot(candidates: order, nowMs: Speaking.ringOnMs + 100).speakingIds.contains("a"))
         let off = Speaking.ringOnMs + 100 + Speaking.ringOffMs
         t.sample("a", level: 0, nowMs: off)
-        XCTAssertFalse(t.snapshot(order: order, nowMs: off).speakingIds.contains("a"))
+        XCTAssertFalse(t.snapshot(candidates: order, nowMs: off).speakingIds.contains("a"))
     }
 
     func testTheRingIsOnForEveryoneWhoIsSpeakingAtOnce() {
         var t = SpeakingTracker()
         feed(&t, "a", loud, 0, 500)
         feed(&t, "b", loud, 0, 500)
-        XCTAssertEqual(t.snapshot(order: order, nowMs: 500).speakingIds, ["a", "b"])
+        XCTAssertEqual(t.snapshot(candidates: order, nowMs: 500).speakingIds, ["a", "b"])
     }
 
     /// A level that is not a number is silence, never sound.
     func testANonsenseLevelIsSilence() {
         var t = SpeakingTracker()
         feed(&t, "a", .nan, 0, 600)
-        XCTAssertTrue(t.snapshot(order: order, nowMs: 600).speakingIds.isEmpty)
+        XCTAssertTrue(t.snapshot(candidates: order, nowMs: 600).speakingIds.isEmpty)
         feed(&t, "a", Speaking.level / 2, 700, 1_300)
-        XCTAssertTrue(t.snapshot(order: order, nowMs: 1_300).speakingIds.isEmpty)
+        XCTAssertTrue(t.snapshot(candidates: order, nowMs: 1_300).speakingIds.isEmpty)
     }
 
     // MARK: - The floor
@@ -67,17 +67,17 @@ final class SpeakingTrackerTests: XCTestCase {
     func testTheFloorIsNotTakenByACough() {
         var t = SpeakingTracker()
         feed(&t, "a", loud, 0, 600)
-        XCTAssertNil(t.snapshot(order: order, nowMs: 600).activeSpeakerId)
+        XCTAssertNil(t.snapshot(candidates: order, nowMs: 600).activeSpeakerId)
     }
 
     func testTheFloorGoesToSomeoneWhoKeepsSpeakingAndIsRememberedAfterTheyStop() {
         var t = SpeakingTracker()
         feed(&t, "a", loud, 0, Speaking.floorOnsetMs)
-        let during = t.snapshot(order: order, nowMs: Speaking.floorOnsetMs)
+        let during = t.snapshot(candidates: order, nowMs: Speaking.floorOnsetMs)
         XCTAssertEqual(during.activeSpeakerId, "a")
         let end = Speaking.floorOnsetMs + 100 + Speaking.ringOffMs
         feed(&t, "a", 0, Speaking.floorOnsetMs + 100, end)
-        let after = t.snapshot(order: order, nowMs: end)
+        let after = t.snapshot(candidates: order, nowMs: end)
         XCTAssertNil(after.activeSpeakerId)
         XCTAssertEqual(after.lastSpokeAtMs["a"], Speaking.floorOnsetMs)
     }
@@ -85,27 +85,88 @@ final class SpeakingTrackerTests: XCTestCase {
     func testTheFloorStaysWithWhoeverHoldsItWhileASecondPersonTalksOverThem() {
         var t = SpeakingTracker()
         feed(&t, "b", loud, 0, Speaking.floorOnsetMs)
-        XCTAssertEqual(t.snapshot(order: order, nowMs: Speaking.floorOnsetMs).activeSpeakerId, "b")
+        XCTAssertEqual(t.snapshot(candidates: order, nowMs: Speaking.floorOnsetMs).activeSpeakerId, "b")
         // `a` is earlier in the roster and now qualifies too; `b` keeps the floor.
         let end = 2 * Speaking.floorOnsetMs + 200
         feed(&t, "a", loud, Speaking.floorOnsetMs, end)
         feed(&t, "b", loud, Speaking.floorOnsetMs, end)
-        XCTAssertEqual(t.snapshot(order: order, nowMs: end).activeSpeakerId, "b")
+        XCTAssertEqual(t.snapshot(candidates: order, nowMs: end).activeSpeakerId, "b")
     }
 
     func testTheRosterOrderBreaksATie() {
         var t = SpeakingTracker()
         feed(&t, "b", loud, 0, Speaking.floorOnsetMs)
         feed(&t, "a", loud, 0, Speaking.floorOnsetMs)
-        XCTAssertEqual(t.snapshot(order: order, nowMs: Speaking.floorOnsetMs).activeSpeakerId, "a")
+        XCTAssertEqual(t.snapshot(candidates: order, nowMs: Speaking.floorOnsetMs).activeSpeakerId, "a")
+    }
+
+    /// The onset is measured on the speech itself. The time the ring stays
+    /// on after the last sound does not count, or a 0.8-second sound would
+    /// grow into a 1.5-second one by standing still.
+    func testTheRingsTailDoesNotCountTowardsTheOnset() {
+        var t = SpeakingTracker()
+        feed(&t, "a", loud, 0, 800)
+        // Silence, sampled while the ring is still on (it goes off 800 ms
+        // after the last sound).
+        feed(&t, "a", 0, 900, 1_600)
+        let snap = t.snapshot(candidates: order, nowMs: 1_600)
+        XCTAssertTrue(snap.speakingIds.contains("a"), "the ring is still on")
+        XCTAssertNil(snap.activeSpeakerId, "0.8 s of sound is not 1.5 s of speech")
+    }
+
+    /// The floor exists for the large tile, which never shows the own tile
+    /// while anyone else is present: this device's own person is sampled for
+    /// its ring and is not a candidate.
+    func testSomeoneWhoIsNotACandidateNeverTakesTheFloor() {
+        var t = SpeakingTracker()
+        feed(&t, "local", loud, 0, 2 * Speaking.floorOnsetMs)
+        let snap = t.snapshot(candidates: ["a", "b"], nowMs: 2 * Speaking.floorOnsetMs)
+        XCTAssertEqual(snap.speakingIds, ["local"], "the ring is for everyone sampled")
+        XCTAssertNil(snap.activeSpeakerId)
+        XCTAssertNil(snap.lastSpokeAtMs["local"])
+    }
+
+    /// A floor held by the own microphone kept everyone else from taking it.
+    func testACandidateTakesTheFloorWhileTheOwnMicrophoneIsLoud() {
+        var t = SpeakingTracker()
+        let end = 2 * Speaking.floorOnsetMs
+        feed(&t, "local", loud, 0, end)
+        feed(&t, "b", loud, Speaking.floorOnsetMs - 200, end)
+        XCTAssertEqual(t.snapshot(candidates: ["a", "b"], nowMs: end).activeSpeakerId, "b")
+    }
+
+    /// A holder who stops being a candidate gives the floor up at once.
+    func testAHolderWhoIsNoLongerACandidateLosesTheFloor() {
+        var t = SpeakingTracker()
+        feed(&t, "a", loud, 0, Speaking.floorOnsetMs)
+        XCTAssertEqual(
+            t.snapshot(candidates: order, nowMs: Speaking.floorOnsetMs).activeSpeakerId, "a")
+        XCTAssertNil(
+            t.snapshot(candidates: ["b"], nowMs: Speaking.floorOnsetMs + 100).activeSpeakerId)
+    }
+
+    /// A muted person is never speaking, whatever a level reading says.
+    func testSilencingTurnsTheRingOffAtOnceAndGivesUpTheFloor() {
+        var t = SpeakingTracker()
+        feed(&t, "a", loud, 0, Speaking.floorOnsetMs)
+        XCTAssertEqual(
+            t.snapshot(candidates: order, nowMs: Speaking.floorOnsetMs).activeSpeakerId, "a")
+        t.silence("a")
+        let snap = t.snapshot(candidates: order, nowMs: Speaking.floorOnsetMs + 100)
+        XCTAssertTrue(snap.speakingIds.isEmpty)
+        XCTAssertNil(snap.activeSpeakerId)
+        // Sound has to last all over again.
+        t.sample("a", level: loud, nowMs: Speaking.floorOnsetMs + 200)
+        XCTAssertTrue(
+            t.snapshot(candidates: order, nowMs: Speaking.floorOnsetMs + 200).speakingIds.isEmpty)
     }
 
     func testSomeoneWhoLeftTheCallIsForgotten() {
         var t = SpeakingTracker()
         feed(&t, "a", loud, 0, Speaking.floorOnsetMs)
-        _ = t.snapshot(order: order, nowMs: Speaking.floorOnsetMs)
+        _ = t.snapshot(candidates: order, nowMs: Speaking.floorOnsetMs)
         t.keepOnly(["b"])
-        let snap = t.snapshot(order: ["b"], nowMs: Speaking.floorOnsetMs + 100)
+        let snap = t.snapshot(candidates: ["b"], nowMs: Speaking.floorOnsetMs + 100)
         XCTAssertNil(snap.activeSpeakerId)
         XCTAssertNil(snap.lastSpokeAtMs["a"])
         XCTAssertTrue(snap.speakingIds.isEmpty)
@@ -234,8 +295,8 @@ final class GroupSpeakingMonitorTests: XCTestCase {
         XCTAssertEqual(speaking(state), ["local"])
     }
 
-    /// When a level cannot be read, the tracker is fed with nothing: no ring,
-    /// and the stage falls back to the roster. Never a guessed value.
+    /// When a level cannot be read, the person is sampled as silence, as on
+    /// the web client: no ring, and the stage falls back to the roster.
     func testAReadingWithNoLevelsDrawsNoRingAndMovesNoStage() {
         let state = CallUiState()
         state.setParticipants([tile("local", isLocal: true), tile("peer-a")])
@@ -245,6 +306,87 @@ final class GroupSpeakingMonitorTests: XCTestCase {
         }
         XCTAssertEqual(speaking(state), [])
         XCTAssertEqual(state.speech, .none)
+    }
+
+    private func tile(_ id: String, isLocal: Bool, micOn: Bool) -> CallUiState.Participant {
+        CallUiState.Participant(
+            id: id, displayName: id, isLocal: isLocal,
+            micOn: micOn, camOn: false, handRaised: false,
+            quality: .good, speaking: false, screenSharing: false)
+    }
+
+    /// The own microphone never takes the floor, however long it is loud:
+    /// the roster's first person used to be this device's own, and a floor
+    /// held by it kept the large tile from moving to the person speaking.
+    func testTheOwnMicrophoneNeverTakesTheFloor() {
+        let state = CallUiState()
+        state.setParticipants([tile("local", isLocal: true), tile("peer-a"), tile("peer-b")])
+        let monitor = GroupSpeakingMonitor(ui: state)
+        let own = CallAudioLevels(local: 0.5, remoteByPeerId: ["a": 0, "b": 0])
+        for now in stride(from: UInt64(0), through: 2 * Speaking.floorOnsetMs, by: 150) {
+            monitor.ingest(own, nowMs: now)
+        }
+        XCTAssertEqual(speaking(state), ["local"], "the own ring is drawn")
+        XCTAssertNil(state.speech.activeSpeakerId)
+        XCTAssertNil(state.speech.lastSpokeAtMs["local"])
+    }
+
+    /// Someone else takes the floor while the own microphone is loud too.
+    func testAnotherPersonTakesTheFloorOverTheOwnMicrophone() {
+        let state = CallUiState()
+        state.setParticipants([tile("local", isLocal: true), tile("peer-a"), tile("peer-b")])
+        let monitor = GroupSpeakingMonitor(ui: state)
+        let both = CallAudioLevels(local: 0.5, remoteByPeerId: ["a": 0, "b": 0.3])
+        for now in stride(from: UInt64(0), through: 2 * Speaking.floorOnsetMs, by: 150) {
+            monitor.ingest(both, nowMs: now)
+        }
+        XCTAssertEqual(state.speech.activeSpeakerId, "peer-b")
+    }
+
+    /// A muted microphone still measures the room. Its level is not read
+    /// while the microphone is off: no ring on the own tile.
+    func testTheOwnLevelIsIgnoredWhileTheMicrophoneIsOff() {
+        let state = CallUiState()
+        state.setParticipants([
+            tile("local", isLocal: true, micOn: false), tile("peer-a"),
+        ])
+        let monitor = GroupSpeakingMonitor(ui: state)
+        let own = CallAudioLevels(local: 0.5, remoteByPeerId: ["a": 0])
+        for now in stride(from: UInt64(0), through: 1_500, by: 150) {
+            monitor.ingest(own, nowMs: now)
+        }
+        XCTAssertEqual(speaking(state), [])
+    }
+
+    /// Turning the microphone off turns the ring off at once, not 800 ms
+    /// later.
+    func testMutingTurnsTheOwnRingOffAtOnce() {
+        let state = CallUiState()
+        state.setParticipants([tile("local", isLocal: true), tile("peer-a")])
+        let monitor = GroupSpeakingMonitor(ui: state)
+        let own = CallAudioLevels(local: 0.5, remoteByPeerId: ["a": 0])
+        monitor.ingest(own, nowMs: 0)
+        monitor.ingest(own, nowMs: Speaking.ringOnMs)
+        XCTAssertEqual(speaking(state), ["local"])
+        state.setMic(false)
+        monitor.ingest(own, nowMs: Speaking.ringOnMs + 150)
+        XCTAssertEqual(speaking(state), [])
+    }
+
+    /// A person whose level stops being reported is sampled as silence, so
+    /// their ring goes off instead of standing.
+    func testARingGoesOffWhenItsLevelStopsBeingReported() {
+        let state = CallUiState()
+        state.setParticipants([tile("local", isLocal: true), tile("peer-a")])
+        let monitor = GroupSpeakingMonitor(ui: state)
+        let loud = CallAudioLevels(local: 0, remoteByPeerId: ["a": 0.3])
+        monitor.ingest(loud, nowMs: 0)
+        monitor.ingest(loud, nowMs: Speaking.ringOnMs)
+        XCTAssertEqual(speaking(state), ["peer-a"])
+        let gone = CallAudioLevels(local: 0, remoteByPeerId: [:])
+        monitor.ingest(gone, nowMs: Speaking.ringOnMs + 150)
+        monitor.ingest(gone, nowMs: Speaking.ringOnMs + 150 + Speaking.ringOffMs)
+        XCTAssertEqual(speaking(state), [])
     }
 
     func testStoppingClearsEveryRing() {

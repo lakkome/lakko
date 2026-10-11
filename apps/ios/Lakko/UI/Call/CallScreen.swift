@@ -390,9 +390,24 @@ private struct ParticipantTile: View {
     let participant: CallUiState.Participant
     let size: CGSize
     @ObservedObject var state: CallUiState
-    /// Pin or unpin, or `nil` for this device's own tile, which cannot be
-    /// pinned (section 5.3).
+    /// The tile is the stage of the Focus layout: with the pin, what counts
+    /// as the large tile when the picture is chosen (section 7.6).
+    let isStage: Bool
+    /// The tile's controls are up after a tap (section 6.2).
+    let controlsRevealed: Bool
+    /// A tap on the tile: bring its controls up. It never pins. `nil` for
+    /// this device's own tile, which has no controls (section 5.3).
     let onTap: (() -> Void)?
+    /// The pin control was pressed: pin, or unpin the pinned person.
+    let onPin: (() -> Void)?
+
+    /// This tile's width as the call's picture rule reads it, and its
+    /// identity in the call's book of wants (section 7.6).
+    @StateObject private var video = TileVideoWant()
+    @Environment(\.displayScale) private var displayScale
+    /// A screen reader cannot bring the controls up with a tap that does
+    /// nothing else, so for it they are always there.
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
 
     private static let corner: CGFloat = 12
     /// Section 7.3: the ring is a border inside the tile edge, so the tile
@@ -461,12 +476,109 @@ private struct ParticipantTile: View {
                     participant.speaking ? Color.lakkoAccent : Color.lakkoBorder,
                     lineWidth: participant.speaking ? Self.ringWidth : 1))
         .contentShape(Rectangle())
-        // A tap pins, a tap on the pinned tile unpins (section 6.2). A drag
-        // that turns the page moves too far to be a tap, so a swipe is not
-        // one.
+        // A tap brings this tile's controls up and does nothing else: a tile
+        // is never itself the pin control (section 6.2). A drag that turns
+        // the page moves too far to be a tap, so a swipe is not one.
         .onTapGesture { onTap?() }
         .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(onTap == nil ? [] : .isButton)
+        // Over the tile and outside its combined element, so the control is
+        // an element of its own with its own name.
+        .overlay(alignment: .topTrailing) { pinControlView }
+        .onAppear { measure() }
+        .onChange(of: size.width) { _, _ in measure() }
+        .onChange(of: displayScale) { _, _ in measure() }
+        .modifier(
+            TileVideoWantReport(
+                state: state, participantId: participant.id, quality: reportedQuality))
+    }
+
+    // MARK: Which picture (section 7.6)
+
+    private func measure() {
+        video.measured(VideoWants.physicalTileWidth(points: size.width, scale: displayScale))
+    }
+
+    /// The picture this tile asks for: the shared rule over the people in
+    /// the call, this tile's settled width in physical pixels, and whether
+    /// it is the pinned person or the stage. `nil` for this device's own
+    /// tile and until the tile was measured.
+    private var askedQuality: TileVideoQuality? {
+        guard !participant.isLocal, let widthPx = video.widthPx else { return nil }
+        return VideoWants.askedQuality(
+            VideoWants.tileQuality(
+                people: state.participants.count, tileWidthPx: widthPx,
+                pinnedOrStage: isStage || isPinned),
+            hasLight: state.remoteLightVideoTracks[participant.id] != nil)
+    }
+
+    /// What the call is told this tile shows. A tile that draws no picture
+    /// of the person (camera off, no track yet, not measured yet) shows
+    /// none.
+    private var reportedQuality: TileVideoQuality? {
+        guard participant.camOn, state.remoteVideoTracks[participant.id] != nil else {
+            return nil
+        }
+        return askedQuality
+    }
+
+    // MARK: The pin control (section 6.2)
+
+    private var pinControl: TilePinControl {
+        guard onPin != nil else { return .none }
+        return TilePinControl.of(
+            isLocal: participant.isLocal, isPinned: isPinned,
+            revealed: controlsRevealed || voiceOver)
+    }
+
+    @ViewBuilder
+    private var pinControlView: some View {
+        switch pinControl {
+        case .none:
+            EmptyView()
+        case .pinButton:
+            Button {
+                onPin?()
+            } label: {
+                Image(systemName: "pin")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Color.lakkoText)
+                    .frame(width: 32, height: 32)
+                    .background(Color.lakkoBackground.opacity(0.6))
+                    .clipShape(Circle())
+                    .frame(
+                        width: TilePinControl.touchTarget, height: TilePinControl.touchTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                l10n.t("call.participant.pin_a11y", texts: ["name": displayLabel]))
+        case .pinnedChip:
+            // The pinned tile carries the chip for as long as it is pinned;
+            // a press on it unpins.
+            Button {
+                onPin?()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                    Text(l10n.t("call.participant.pinned"))
+                        .font(.caption)
+                        .lineLimit(1)
+                }
+                .foregroundColor(Color.lakkoAccent)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.lakkoBackground.opacity(0.6))
+                .clipShape(Capsule())
+                .frame(
+                    minWidth: TilePinControl.touchTarget, minHeight: TilePinControl.touchTarget)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                l10n.t("call.participant.unpin_a11y", texts: ["name": displayLabel]))
+            .accessibilityAddTraits(.isSelected)
+        }
     }
 
     /// The scrim along the bottom edge: mic-off glyph, name, connection, pin.
@@ -512,13 +624,21 @@ private struct ParticipantTile: View {
                     mirrored: state.settings.mirrorLocal,
                     contentMode: .scaleAspectFill)
             } else if !participant.isLocal, let track = state.remoteVideoTracks[participant.id] {
-                // An SFU call: the person's main track and, when their device
-                // sends one, the light companion, in the same box. The tile
-                // shows the light one while the main one stands still
-                // (`docs/ux/group-call-grid.md` section 7.5).
+                // An SFU call: the heavy picture this tile watches (the
+                // person's main track or their middle one, the lower of what
+                // the tile wants and what the SFU gives) and, when their
+                // device sends one, the light companion, in the same box. The
+                // tile shows the light one while the heavy one stands still
+                // (`docs/ux/group-call-grid.md` sections 7.5 and 7.6).
+                let light = state.remoteLightVideoTracks[participant.id]
                 LayeredRemoteVideoView(
-                    main: track,
-                    light: state.remoteLightVideoTracks[participant.id],
+                    heavy: VideoGiven.heavyTrack(
+                        wanted: askedQuality ?? .main,
+                        given: state.remoteVideoGiven[participant.id],
+                        main: track,
+                        middle: state.remoteMiddleVideoTracks[participant.id],
+                        hasLight: light != nil),
+                    light: light,
                     peerId: CallScreenPresentation.sfuPeerId(ofParticipant: participant.id))
             } else if !participant.isLocal,
                 participant.id == state.soleRemoteParticipantId,
@@ -568,6 +688,8 @@ private struct ParticipantTile: View {
 private struct GroupCallArea: View {
     @ObservedObject var state: CallUiState
     @ObservedObject var l10n = Localization.shared
+    /// The one tile whose controls a tap brought up (section 6.2).
+    @ObservedObject var reveal: TileControlsRevealModel
     let rules: GroupCallRules
     /// A finished drag that did not turn the page (the collapse swipe).
     let onOtherDrag: (CGSize) -> Void
@@ -701,7 +823,7 @@ private struct GroupCallArea: View {
             }
             .frame(width: area.width, height: metrics.tileHeight)
             if let stage {
-                tile(stage, size: stageSize)
+                tile(stage, size: stageSize, isStage: true)
                     .id(stage.id)
             }
         }
@@ -715,15 +837,24 @@ private struct GroupCallArea: View {
 
     // MARK: A tile
 
-    private func tile(_ person: CallUiState.Participant, size: CGSize) -> some View {
+    private func tile(
+        _ person: CallUiState.Participant, size: CGSize, isStage: Bool = false
+    ) -> some View {
         ParticipantTile(
             participant: person,
             size: size,
             state: state,
-            // Never this device's own tile (section 5.3).
-            onTap: person.isLocal
+            isStage: isStage,
+            controlsRevealed: reveal.tileId == person.id,
+            // Never this device's own tile (section 5.3). A tap only brings
+            // the controls up; pinning is the pin control's alone.
+            onTap: person.isLocal ? nil : { reveal.tap(person.id) },
+            onPin: person.isLocal
                 ? nil
-                : { state.pin(state.pinnedId == person.id ? nil : person.id) })
+                : {
+                    state.togglePin(person.id)
+                    reveal.hide()
+                })
     }
 }
 
@@ -962,6 +1093,10 @@ public struct CallScreen: View {
     /// everyone, or `nil`.
     private let endedLine: String?
     /// The choice behind `End` is open.
+    /// The one group-call tile whose controls a tap brought up
+    /// (`docs/ux/group-call-grid.md` section 6.2).
+    @StateObject private var tileReveal = TileControlsRevealModel()
+    @Environment(\.displayScale) private var displayScale
     @State private var endMenuOpen = false
     /// Where each control of the group row sits, in ``menuSpace``: a menu
     /// opened from a control is placed above its own button.
@@ -1220,8 +1355,33 @@ public struct CallScreen: View {
                 groupCallView(size: geo.size)
             } else {
                 callView(width: geo.size.width)
+                    // No tile is drawn for the one other person of an SFU
+                    // call, so the screen says what it shows of them.
+                    .modifier(
+                        TileVideoWantReport(
+                            state: state,
+                            participantId: state.soleRemoteParticipantId ?? "",
+                            quality: soleRemoteWant(
+                                widthPx: VideoWants.physicalTileWidth(
+                                    points: geo.size.width, scale: displayScale))))
             }
         }
+    }
+
+    /// The picture this screen asks for of the one other person of an SFU
+    /// call (`docs/ux/group-call-grid.md` section 7.6): the shared rule's
+    /// answer for a full-screen picture, which with two people is the full
+    /// one. `nil` (nothing heavy) when this is not an SFU call, there is not
+    /// exactly one other person, or their camera is off.
+    private func soleRemoteWant(widthPx: UInt32) -> TileVideoQuality? {
+        guard externallyDriven, let sole = state.soleRemoteParticipantId,
+            state.remoteVideoTracks[sole] != nil,
+            state.participants.first(where: { $0.id == sole })?.camOn == true
+        else { return nil }
+        return VideoWants.askedQuality(
+            VideoWants.tileQuality(
+                people: state.participants.count, tileWidthPx: widthPx, pinnedOrStage: true),
+            hasLight: state.remoteLightVideoTracks[sole] != nil)
     }
 
     /// The bar's margin from each screen edge.
@@ -1242,6 +1402,8 @@ public struct CallScreen: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 if state.qualityPopoverOpen { state.setQualityPopoverOpen(false) }
+                // A tap beside every tile puts a tile's controls away.
+                tileReveal.hide()
                 showControls()
             }
             // Section 4.5's other way back — a downward swipe on the screen,
@@ -1330,9 +1492,9 @@ public struct CallScreen: View {
         return ZStack {
             CallBackdrop(identity: tintIdentity)
 
-            // Under the tiles here: a tap on a tile pins it, and this layer
-            // only catches the taps and the downward swipe that land beside
-            // them.
+            // Under the tiles here: a tap on a tile brings that tile's
+            // controls up, and this layer only catches the taps and the
+            // downward swipe that land beside them.
             tapLayer
 
             InviteScope(offer: invite) { offer in
@@ -1340,7 +1502,8 @@ public struct CallScreen: View {
                     VStack(spacing: 0) {
                         groupHeader(inviteLine: offer?.statusLine)
                         GroupCallArea(
-                            state: state, rules: rules, onOtherDrag: collapseIfSwipedDown
+                            state: state, reveal: tileReveal, rules: rules,
+                            onOtherDrag: collapseIfSwipedDown
                         )
                         .padding(.horizontal, margin)
                         .padding(.vertical, 8)
@@ -1540,9 +1703,17 @@ public struct CallScreen: View {
             // An SFU call with one other person: their main track and, when
             // their device sends one, the light companion
             // (`docs/ux/group-call-grid.md` section 7.5).
+            // With one other person the picture is the full one at any size
+            // (section 7.6); the SFU may still give less.
+            let light = state.remoteLightVideoTracks[sole]
             LayeredRemoteVideoView(
-                main: track,
-                light: state.remoteLightVideoTracks[sole],
+                heavy: VideoGiven.heavyTrack(
+                    wanted: .main,
+                    given: state.remoteVideoGiven[sole],
+                    main: track,
+                    middle: state.remoteMiddleVideoTracks[sole],
+                    hasLight: light != nil),
+                light: light,
                 peerId: CallScreenPresentation.sfuPeerId(ofParticipant: sole))
                 .ignoresSafeArea()
                 .accessibilityHidden(true)

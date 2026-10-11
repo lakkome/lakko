@@ -27,16 +27,16 @@
 //!
 //! ## Two frame layouts (ADR-0071)
 //!
-//! The header-first functions (`_seal_framed`, `_open_framed`,
-//! `_call_key_ring_open_framed_with_overlap`) are what the iOS and
-//! Android bridges call today and are unchanged. Beside them sit the
-//! entry points for the ADR-0071 layout, which leaves the codec's frame
-//! header in the clear and puts the SFrame header at the end:
-//! [`lakko_sframe_media_clear_prefix_len`],
+//! The media path of every client uses the ADR-0071 layout, which leaves
+//! the codec's frame header in the clear and puts the SFrame header at
+//! the end: [`lakko_sframe_media_clear_prefix_len`],
 //! [`lakko_sframe_seal_media_frame`] and
-//! [`lakko_sframe_call_key_ring_open_media_frame_with_overlap`]. The web
-//! client uses only that layout, the two do not open as each other, and
-//! a bridge moves to the new entry points in ADR-0071 phase 2.
+//! [`lakko_sframe_call_key_ring_open_media_frame_with_overlap`]. The C++
+//! bridge shared by iOS and Android calls only these three for a frame.
+//! The header-first functions (`_seal_framed`, `_open_framed`,
+//! `_call_key_ring_open_framed_with_overlap`) are still exported and
+//! unchanged, have no caller on a media path, and do not open a frame of
+//! the other layout.
 //!
 //! ## Memory ownership
 //!
@@ -832,19 +832,31 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_framed_with_overlap(
 // These entry points sit BESIDE the header-first `_seal_framed` /
 // `_open_framed` / `_ring_open_framed_with_overlap`, whose behaviour is
 // unchanged. The two layouts do not open as each other. The web client
-// sends and accepts only the layout below; a native bridge still on the
-// header-first functions does not interoperate with it on media until it
-// moves to these (ADR-0071, phase 2).
+// and the native bridge send and accept only the layout below.
+
+// The four constants below are written as literals, not as
+// `MediaCodec::Vp8 as u8` or a path to the core's constant: cbindgen
+// emits a `#define` only for a constant whose value it can read off the
+// source, and with a computed value the generated header carried none of
+// them, so a C++ bridge had nothing to name a codec with. The assertions
+// that follow tie each literal to the core's definition at compile time.
 
 /// [`lakko_sframe_media_clear_prefix_len`] codec value: any codec without
 /// a rule, or one the sender could not determine. Nothing is left clear.
-pub const LAKKO_SFRAME_MEDIA_CODEC_OTHER: u8 = MediaCodec::Other as u8;
+pub const LAKKO_SFRAME_MEDIA_CODEC_OTHER: u8 = 0;
 /// [`lakko_sframe_media_clear_prefix_len`] codec value: VP8 video.
-pub const LAKKO_SFRAME_MEDIA_CODEC_VP8: u8 = MediaCodec::Vp8 as u8;
+pub const LAKKO_SFRAME_MEDIA_CODEC_VP8: u8 = 1;
 /// [`lakko_sframe_media_clear_prefix_len`] codec value: Opus audio.
-pub const LAKKO_SFRAME_MEDIA_CODEC_OPUS: u8 = MediaCodec::Opus as u8;
+pub const LAKKO_SFRAME_MEDIA_CODEC_OPUS: u8 = 2;
 /// The most bytes [`lakko_sframe_seal_media_frame`] leaves in the clear.
-pub const LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN: usize = lakko_calls::MAX_CLEAR_PREFIX_LEN;
+pub const LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN: usize = 16;
+
+const _: () = {
+    assert!(LAKKO_SFRAME_MEDIA_CODEC_OTHER == MediaCodec::Other as u8);
+    assert!(LAKKO_SFRAME_MEDIA_CODEC_VP8 == MediaCodec::Vp8 as u8);
+    assert!(LAKKO_SFRAME_MEDIA_CODEC_OPUS == MediaCodec::Opus as u8);
+    assert!(LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN == lakko_calls::MAX_CLEAR_PREFIX_LEN);
+};
 
 /// How many leading bytes of an encoded frame a sender leaves in the
 /// clear for `codec` (one of the `LAKKO_SFRAME_MEDIA_CODEC_*` values;

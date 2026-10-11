@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import org.webrtc.VideoTrack
+import uniffi.lakko_ffi_uniffi.TileVideoQuality
 
 /**
  * In-call UI state (Phase 3c6-android).
@@ -283,6 +284,68 @@ public class CallUiState(
     public val remoteLightVideoTracks: StateFlow<Map<String, VideoTrack>> =
         _remoteLightVideoTracks.asStateFlow()
 
+    /** The middle track of each remote peer that sends one (`LightStream.kt`,
+     *  ADR-0070 step 5), keyed like [remoteVideoTracks]. A second picture of a
+     *  person already in the call, as the light companion is: a tile that
+     *  asks the SFU for the middle picture puts its heavy sink on this track
+     *  (`VideoWants.kt`). Removed with its peer and when the call ends. */
+    private val _remoteMiddleVideoTracks = MutableStateFlow<Map<String, VideoTrack>>(emptyMap())
+    public val remoteMiddleVideoTracks: StateFlow<Map<String, VideoTrack>> =
+        _remoteMiddleVideoTracks.asStateFlow()
+
+    /** What the SFU says it gives of each remote peer's video
+     *  (`VideoGiven.kt`, ADR-0070 step 6), by roster participant id. A peer
+     *  with no entry is given what is asked for. Empty with downlink control
+     *  off, and when the call ends. */
+    private val _remoteVideoGiven = MutableStateFlow<Map<String, TileVideoQuality>>(emptyMap())
+    public val remoteVideoGiven: StateFlow<Map<String, TileVideoQuality>> =
+        _remoteVideoGiven.asStateFlow()
+
+    public fun setRemoteVideoGiven(given: Map<String, TileVideoQuality>) {
+        if (_remoteVideoGiven.value != given) _remoteVideoGiven.value = given
+    }
+
+    /**
+     * Where a tile says which picture of a person it shows (`VideoWants.kt`),
+     * or `null` when the call cannot act on it (a one-to-one call, or no call).
+     * Set by the SFU call's adapter and cleared when the call ends, so a tile
+     * taken down after the call is over reports to nobody.
+     */
+    @Volatile
+    private var tileVideoQualityReporter:
+        ((tile: Any, participantId: String, quality: TileVideoQuality?) -> Unit)? = null
+
+    /** What every drawn tile last reported, so a call bound after its tiles
+     *  were drawn still hears of them. Main thread only. */
+    private val tileVideoQualityReports = LinkedHashMap<Any, Pair<String, TileVideoQuality>>()
+
+    /**
+     * Bind (or, with `null`, unbind) the call that takes the tiles' reports.
+     * A newly bound call is told at once what every drawn tile shows.
+     */
+    public fun setTileVideoQualityReporter(
+        reporter: ((tile: Any, participantId: String, quality: TileVideoQuality?) -> Unit)?,
+    ) {
+        tileVideoQualityReporter = reporter
+        if (reporter == null) return
+        for ((tile, shown) in tileVideoQualityReports) reporter(tile, shown.first, shown.second)
+    }
+
+    /**
+     * The tile [tile] (any object that is the same for the tile's lifetime)
+     * shows [participantId] at [quality]; `null` when it stops showing a
+     * picture of them. Kept for a call bound later; forwarded to the bound
+     * one. Call on the main thread.
+     */
+    public fun reportTileVideoQuality(tile: Any, participantId: String, quality: TileVideoQuality?) {
+        if (quality == null) {
+            tileVideoQualityReports.remove(tile)
+        } else {
+            tileVideoQualityReports[tile] = participantId to quality
+        }
+        tileVideoQualityReporter?.invoke(tile, participantId, quality)
+    }
+
     /** Job for an active [bindTo] subscription. Cancelled on
      *  [reset] / re-bind to a different session so the previous
      *  flow doesn't keep pushing onto the StateFlow. */
@@ -324,11 +387,18 @@ public class CallUiState(
     public fun participantLeft(id: String) {
         _participants.value = _participants.value.filterNot { it.id == id }
         // Section 6.2: if the pinned person leaves, the pin is cleared and the
-        // layout returns to what it was.
+        // stage goes back to the speaker; the layout stays as it is.
         if (_pinnedId.value == id) _pinnedId.value = null
-        // A light companion goes with its peer.
+        // A light companion and a middle track go with their peer, and so
+        // does what the SFU said it gives of them.
         if (id in _remoteLightVideoTracks.value) {
             _remoteLightVideoTracks.value = _remoteLightVideoTracks.value - id
+        }
+        if (id in _remoteMiddleVideoTracks.value) {
+            _remoteMiddleVideoTracks.value = _remoteMiddleVideoTracks.value - id
+        }
+        if (id in _remoteVideoGiven.value) {
+            _remoteVideoGiven.value = _remoteVideoGiven.value - id
         }
     }
 
@@ -455,9 +525,29 @@ public class CallUiState(
             }
     }
 
-    /** Drop every light companion: the call ended. */
-    public fun clearRemoteLightVideoTracks() {
+    /**
+     * Set / remove a remote peer's middle track, keyed on the peer's roster
+     * participant id. A `null` [track] removes the entry. Touches nothing
+     * else: not the roster, not a camera flag, not the main track.
+     */
+    public fun setRemoteMiddleVideoTrack(track: VideoTrack?, participantId: String) {
+        _remoteMiddleVideoTracks.value =
+            if (track == null) {
+                _remoteMiddleVideoTracks.value - participantId
+            } else {
+                _remoteMiddleVideoTracks.value + (participantId to track)
+            }
+    }
+
+    /**
+     * The call ended: drop every light companion and middle track and what
+     * the SFU said it gives, and take no further tile reports.
+     */
+    public fun clearRemoteCopyVideoTracks() {
         _remoteLightVideoTracks.value = emptyMap()
+        _remoteMiddleVideoTracks.value = emptyMap()
+        _remoteVideoGiven.value = emptyMap()
+        tileVideoQualityReporter = null
     }
 
     /**
@@ -707,6 +797,10 @@ public class CallUiState(
         // N-way SFU per-peer video map — wipe so the next call starts empty.
         _remoteVideoTracks.value = emptyMap()
         _remoteLightVideoTracks.value = emptyMap()
+        _remoteMiddleVideoTracks.value = emptyMap()
+        _remoteVideoGiven.value = emptyMap()
+        tileVideoQualityReporter = null
+        tileVideoQualityReports.clear()
         // ADR-0032 piece B2a — no camera-on in flight for a fresh call.
         _videoPublishState.value = VideoPublishState.Off
         // Every call starts on the front camera, so the self-view starts mirrored.

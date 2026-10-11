@@ -143,6 +143,47 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_nativeRekey(
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
+// Negotiated codec (ADR-0071). Tell the encryptor which codec its sender
+// negotiated, as one of the `LAKKO_SFRAME_MEDIA_CODEC_*` values (0 other,
+// 1 VP8, 2 Opus; any other value is stored and sealed as "other"). It
+// decides how many leading bytes of each frame stay in the clear. Only
+// the low 8 bits of `codec` are used; the Kotlin facade passes 0..=2. A
+// null pointer is a no-op. An atomic store on the bridge side, so it is
+// safe against a concurrent Encrypt on the codec thread.
+JNIEXPORT void JNICALL
+Java_me_lakko_sframe_LakkoFrameEncryptor_nativeSetCodec(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jlong native_ptr,
+    jint codec) {
+    if (native_ptr == 0) {
+        return;
+    }
+    auto* enc = reinterpret_cast<lakko::sframe::LakkoFrameEncryptor*>(native_ptr);
+    enc->SetCodec(static_cast<uint8_t>(codec));
+}
+
+// Map a negotiated codec name ("VP8", "opus", "video/VP8", "audio/opus",
+// any case) to its `LAKKO_SFRAME_MEDIA_CODEC_*` value; anything else and
+// null map to 0 (other). The one mapping iOS uses too
+// (`LakkoFrameEncryptor::CodecFromName`).
+JNIEXPORT jint JNICALL
+Java_me_lakko_sframe_LakkoFrameEncryptor_nativeCodecFromName(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring name) {
+    if (name == nullptr) {
+        return static_cast<jint>(LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+    }
+    const char* chars = env->GetStringUTFChars(name, /*isCopy=*/nullptr);
+    if (chars == nullptr) {
+        return static_cast<jint>(LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+    }
+    const uint8_t codec = lakko::sframe::LakkoFrameEncryptor::CodecFromName(chars);
+    env->ReleaseStringUTFChars(name, chars);
+    return static_cast<jint>(codec);
+}
+
 // ---------------------------------------------------------------
 // LakkoFrameDecryptor
 // ---------------------------------------------------------------

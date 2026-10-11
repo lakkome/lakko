@@ -31,9 +31,9 @@ internal const val MEDIA_COUNTERS_TOTAL_LABEL: String = "call media total"
 internal data class InboundCounters(
     /** `audio` or `video`. */
     val kind: String,
-    /** A video receiver's layer: `main`, `light` (the light companion,
-     *  `LightStream.kt`) or `-` when the report does not name the receiver's
-     *  track; `null` for audio. */
+    /** A video receiver's track: `main`, `middle` (the middle track), `light`
+     *  (the light companion, `LightStream.kt`) or `-` when the report does
+     *  not name the receiver's track; `null` for audio. */
     val layer: String?,
     val packetsReceived: Double,
     val packetsLost: Double,
@@ -49,17 +49,17 @@ internal data class InboundCounters(
     val totalSamplesReceived: Double,
 )
 
-/** What this device's own camera sender reports for one simulcast layer (or
- *  for the whole camera when it is sent as one encoding). */
+/** What one of this device's own camera senders reports. */
 internal data class OutboundVideo(
-    /** The layer's RTP stream id (`q`, `f`); `null` when the camera is sent
-     *  as one encoding. */
-    val rid: String?,
+    /** Which sender: the main camera, its middle copy or its light copy. */
+    val sender: CameraSenderKind,
     val scalabilityMode: String?,
     val qualityLimitationReason: String?,
     val frameWidth: Double?,
     val frameHeight: Double?,
     val framesPerSecond: Double?,
+    /** Cumulative; the bitrate of an interval is its growth. */
+    val bytesSent: Double,
 )
 
 /** One statistics report, reduced to what is logged. */
@@ -67,8 +67,9 @@ internal data class MediaReading(
     /** Keyed by the id of the `inbound-rtp` entry, which stays the same for a
      *  stream across readings. */
     val inbound: Map<String, InboundCounters>,
-    /** Every layer the camera sender reports, in the report's order. */
-    val outboundVideoLayers: List<OutboundVideo>,
+    /** Every camera sender that reports: the main one first, then the middle
+     *  one, then the light one. */
+    val outboundVideoSenders: List<OutboundVideo>,
 )
 
 private fun num(stat: RtcStat, key: String): Double =
@@ -77,16 +78,32 @@ private fun num(stat: RtcStat, key: String): Double =
 private fun numOrNull(stat: RtcStat, key: String): Double? =
     (stat.members[key] as? Number)?.toDouble()?.takeIf { it.isFinite() }
 
-private fun strOrNull(stat: RtcStat, key: String): String? = stat.members[key] as? String
+private fun strOrNull(stat: RtcStat, key: String): String? =
+    (stat.members[key] as? String)?.takeIf { it.isNotEmpty() }
 
 /**
- * Reduce a statistics report to a reading. [lightTrackIds] holds the ids of
- * the remote tracks that are light companions; a video receiver whose
- * `trackIdentifier` is among them is `light`, any other is `main`.
+ * Reduce a statistics report to a reading.
+ *
+ * [lightTrackIds] and [middleTrackIds] hold the ids of the remote tracks that
+ * are light companions and middle tracks; a video receiver whose
+ * `trackIdentifier` is among them is `light` or `middle`, any other is
+ * `main`. An id in both sets is read as light.
+ *
+ * [senderByMid] names this device's camera senders by the `mid` of their
+ * media line: a video `outbound-rtp` entry is the sender its `mid` leads to,
+ * and the `main` one when it names no `mid` or one that is not in the map.
+ * (The web client reads each copy's own sender report instead; libwebrtc's
+ * outbound entries carry the `mid`, which answers the same question from the
+ * one report.)
  */
-internal fun readMedia(stats: Iterable<RtcStat>, lightTrackIds: Set<String> = emptySet()): MediaReading {
+internal fun readMedia(
+    stats: Iterable<RtcStat>,
+    lightTrackIds: Set<String> = emptySet(),
+    middleTrackIds: Set<String> = emptySet(),
+    senderByMid: Map<String, CameraSenderKind> = emptyMap(),
+): MediaReading {
     val inbound = LinkedHashMap<String, InboundCounters>()
-    val outbound = ArrayList<OutboundVideo>()
+    val bySender = CAMERA_SENDER_KINDS.associateWith { ArrayList<OutboundVideo>() }
     for (stat in stats) {
         val kind = stat.members["kind"] as? String
         if (kind != "audio" && kind != "video") continue
@@ -99,6 +116,7 @@ internal fun readMedia(stats: Iterable<RtcStat>, lightTrackIds: Set<String> = em
                     kind == "audio" -> null
                     trackId == null -> "-"
                     trackId in lightTrackIds -> "light"
+                    trackId in middleTrackIds -> "middle"
                     else -> "main"
                 },
                 packetsReceived = num(stat, "packetsReceived"),
@@ -115,18 +133,23 @@ internal fun readMedia(stats: Iterable<RtcStat>, lightTrackIds: Set<String> = em
                 totalSamplesReceived = num(stat, "totalSamplesReceived"),
             )
         } else if (stat.type == "outbound-rtp" && kind == "video") {
-            // One camera sender; one entry for each simulcast layer it sends.
-            outbound += OutboundVideo(
-                rid = strOrNull(stat, "rid"),
+            // Three camera senders at most, one entry each.
+            val sender = strOrNull(stat, "mid")?.let { senderByMid[it] } ?: CameraSenderKind.MAIN
+            bySender.getValue(sender) += OutboundVideo(
+                sender = sender,
                 scalabilityMode = strOrNull(stat, "scalabilityMode"),
                 qualityLimitationReason = strOrNull(stat, "qualityLimitationReason"),
                 frameWidth = numOrNull(stat, "frameWidth"),
                 frameHeight = numOrNull(stat, "frameHeight"),
                 framesPerSecond = numOrNull(stat, "framesPerSecond"),
+                bytesSent = num(stat, "bytesSent"),
             )
         }
     }
-    return MediaReading(inbound = inbound, outboundVideoLayers = outbound)
+    return MediaReading(
+        inbound = inbound,
+        outboundVideoSenders = CAMERA_SENDER_KINDS.flatMap { bySender.getValue(it) },
+    )
 }
 
 /** How one stream changed between two readings. */
@@ -189,7 +212,7 @@ private fun fixed(n: Double?, digits: Int): String =
 private fun count(n: Double): String = n.toLong().toString()
 
 /** One plain-text line per stream (ASCII, no names). A video line ends with
- *  `layer=`: `main`, `light`, or `-` when unknown. */
+ *  `layer=`: `main`, `middle`, `light`, or `-` when unknown. */
 internal fun describeDeltas(label: String, deltas: Map<String, StreamDelta>): List<String> {
     val lines = ArrayList<String>()
     var n = 0
@@ -209,20 +232,189 @@ internal fun describeDeltas(label: String, deltas: Map<String, StreamDelta>): Li
     return lines
 }
 
-/** One camera layer in one line. A simulcast layer's line ends with its
- *  `rid`; a single encoding's line has none. */
-internal fun describeOutbound(label: String, out: OutboundVideo): String {
+/**
+ * What each camera sender sent over the interval since [before], kilobits a
+ * second, from the growth of its `bytesSent` over [elapsedMs]. A sender that
+ * did not report in both readings, or whose counter went back, has no entry.
+ */
+internal fun senderKbps(
+    before: MediaReading?,
+    now: MediaReading,
+    elapsedMs: Long,
+): Map<CameraSenderKind, Double> {
+    if (before == null || elapsedMs <= 0) return emptyMap()
+    val out = LinkedHashMap<CameraSenderKind, Double>()
+    for (cur in now.outboundVideoSenders) {
+        val prev = before.outboundVideoSenders.firstOrNull { it.sender == cur.sender } ?: continue
+        val bytes = cur.bytesSent - prev.bytesSent
+        if (bytes < 0) continue
+        out[cur.sender] = bytes * 8.0 / elapsedMs
+    }
+    return out
+}
+
+/**
+ * One camera sender in one line. The line names which sender it is
+ * (`sender=main`, `sender=middle` or `sender=light`), what it sent over the
+ * interval (`kbps=`, `-` when unknown; a field the web client's line does not
+ * have) and, when [activity] is given, ends with the SFU's last word for it
+ * and whether its encoding is active: `needed=yes|no|- active=yes|no`.
+ */
+internal fun describeOutbound(
+    label: String,
+    out: OutboundVideo,
+    activity: SenderActivityNote? = null,
+    kbps: Double? = null,
+): String {
     val size = if (out.frameWidth != null && out.frameHeight != null) {
         "${count(out.frameWidth)}x${count(out.frameHeight)}"
     } else {
         "-"
     }
     return "$label send video mode=${out.scalabilityMode ?: "-"} size=$size" +
-        " fps=${fixed(out.framesPerSecond, 0)} limited_by=${out.qualityLimitationReason ?: "-"}" +
-        (if (out.rid == null) "" else " rid=${out.rid}")
+        " fps=${fixed(out.framesPerSecond, 0)} kbps=${fixed(kbps, 0)}" +
+        " limited_by=${out.qualityLimitationReason ?: "-"}" +
+        " sender=${out.sender.wireName}" +
+        (activity?.let(::describeSenderActivity) ?: "")
 }
 
-/** The camera sender, one line for each layer it sends: how a log shows
- *  whether libwebrtc took the two simulcast encodings. */
-internal fun describeOutboundLayers(label: String, layers: List<OutboundVideo>): List<String> =
-    layers.map { describeOutbound(label, it) }
+/**
+ * The camera, one line for each of its senders (main, middle, light). A
+ * sender libwebrtc is sending nothing on reports no size and no frame rate
+ * (`-`). [activityOf] adds each line's `needed=` and `active=`. A sender
+ * named in [existing] that the report has no outbound stream for still has
+ * its line, all dashes, so a sender that was switched off does not vanish
+ * from the log.
+ */
+internal fun describeOutboundSenders(
+    label: String,
+    senders: List<OutboundVideo>,
+    activityOf: (CameraSenderKind) -> SenderActivityNote? = { null },
+    existing: List<CameraSenderKind> = emptyList(),
+    kbpsOf: (CameraSenderKind) -> Double? = { null },
+): List<String> {
+    val lines = ArrayList<String>()
+    val reported = HashSet<CameraSenderKind>()
+    for (sender in senders) {
+        reported += sender.sender
+        lines += describeOutbound(label, sender, activityOf(sender.sender), kbpsOf(sender.sender))
+    }
+    for (kind in existing) {
+        if (kind in reported) continue
+        lines += describeOutbound(
+            label,
+            OutboundVideo(
+                sender = kind,
+                scalabilityMode = null,
+                qualityLimitationReason = null,
+                frameWidth = null,
+                frameHeight = null,
+                framesPerSecond = null,
+                bytesSent = 0.0,
+            ),
+            activityOf(kind),
+            null,
+        )
+    }
+    return lines
+}
+
+/** What the sending side of the call reports, cumulative where it counts. */
+internal data class SenderReading(
+    /** Camera `outbound-rtp`: frames and packets this device produced, summed
+     *  over every camera sender. */
+    val framesEncoded: Double,
+    val packetsSent: Double,
+    val retransmittedPacketsSent: Double,
+    val nackCount: Double,
+    val pliCount: Double,
+    val firCount: Double,
+    val hugeFramesSent: Double,
+    /** Bits a second the encoders are currently asked for, summed over the
+     *  senders; `null` if unknown. */
+    val targetBitrate: Double?,
+    /** What the far end (the SFU) says it lost of the camera, 0..1; the worse
+     *  of the senders' figures. */
+    val remoteFractionLost: Double?,
+    /** Round trip the far end's reports give, in milliseconds; the largest
+     *  across the senders. */
+    val remoteRttMs: Double?,
+    /** libwebrtc's own estimate of what it may send, bits a second. */
+    val availableOutgoingBitrate: Double?,
+    /** The formats on the wire, e.g. `audio/opus`, `video/VP8`; `null` when
+     *  the report does not say. */
+    val audioCodec: String?,
+    val videoCodec: String?,
+)
+
+/**
+ * Reduce a statistics report to the sender reading, or `null` with no camera.
+ * Every camera sender is summed. [senderByMid] is as in [readMedia]; it only
+ * decides whose codec is named (the main sender's, when it reports).
+ */
+internal fun readSender(
+    stats: Iterable<RtcStat>,
+    senderByMid: Map<String, CameraSenderKind> = emptyMap(),
+): SenderReading? {
+    val outs = ArrayList<RtcStat>()
+    val remotes = ArrayList<RtcStat>()
+    var pair: RtcStat? = null
+    var audioOut: RtcStat? = null
+    val codecs = HashMap<String, String>()
+    for (stat in stats) {
+        val kind = stat.members["kind"] as? String
+        when {
+            stat.type == "codec" -> {
+                val id = stat.id
+                val mime = strOrNull(stat, "mimeType")
+                if (id != null && mime != null) codecs[id] = mime
+            }
+            stat.type == "outbound-rtp" && kind == "audio" -> if (audioOut == null) audioOut = stat
+            stat.type == "outbound-rtp" && kind == "video" -> outs += stat
+            stat.type == "remote-inbound-rtp" && kind == "video" -> remotes += stat
+            stat.type == "candidate-pair" && stat.members["availableOutgoingBitrate"] != null ->
+                if (pair == null || stat.members["nominated"] == true) pair = stat
+        }
+    }
+    fun isCopy(stat: RtcStat): Boolean {
+        val kind = strOrNull(stat, "mid")?.let { senderByMid[it] }
+        return kind != null && kind != CameraSenderKind.MAIN
+    }
+    val first = outs.firstOrNull { !isCopy(it) } ?: outs.firstOrNull() ?: return null
+    fun sum(key: String): Double = outs.sumOf { num(it, key) }
+    fun largest(from: List<RtcStat>, key: String): Double? = from.mapNotNull { numOrNull(it, key) }.maxOrNull()
+    val targets = outs.mapNotNull { numOrNull(it, "targetBitrate") }
+    fun codecOf(stat: RtcStat?): String? = (stat?.members?.get("codecId") as? String)?.let { codecs[it] }
+    return SenderReading(
+        framesEncoded = sum("framesEncoded"),
+        packetsSent = sum("packetsSent"),
+        retransmittedPacketsSent = sum("retransmittedPacketsSent"),
+        nackCount = sum("nackCount"),
+        pliCount = sum("pliCount"),
+        firCount = sum("firCount"),
+        hugeFramesSent = sum("hugeFramesSent"),
+        targetBitrate = if (targets.isEmpty()) null else targets.sum(),
+        remoteFractionLost = largest(remotes, "fractionLost"),
+        remoteRttMs = largest(remotes, "roundTripTime")?.let { it * 1000 },
+        availableOutgoingBitrate = pair?.let { numOrNull(it, "availableOutgoingBitrate") },
+        audioCodec = codecOf(audioOut),
+        videoCodec = codecOf(first),
+    )
+}
+
+/** One plain-text line on the sender for the interval since [before]. */
+internal fun describeSender(label: String, before: SenderReading?, now: SenderReading): String {
+    fun d(read: (SenderReading) -> Double): Double {
+        val base = before?.let(read)?.takeIf { it <= read(now) } ?: 0.0
+        return maxOf(0.0, read(now) - base)
+    }
+    fun kbps(bps: Double?): String = fixed(bps?.let { it / 1000 }, 0)
+    return "$label sender encoded=${count(d { it.framesEncoded })} pkts=${count(d { it.packetsSent })}" +
+        " rtx=${count(d { it.retransmittedPacketsSent })}" +
+        " nack_in=${count(d { it.nackCount })} pli_in=${count(d { it.pliCount })}" +
+        " fir_in=${count(d { it.firCount })} huge=${count(d { it.hugeFramesSent })}" +
+        " target_kbps=${kbps(now.targetBitrate)} estimate_kbps=${kbps(now.availableOutgoingBitrate)}" +
+        " remote_lost=${fixed(now.remoteFractionLost?.let { it * 100 }, 0)}%" +
+        " remote_rtt_ms=${fixed(now.remoteRttMs, 0)}" +
+        " audio=${now.audioCodec ?: "-"} video=${now.videoCodec ?: "-"}"
+}

@@ -57,6 +57,8 @@ public class SpeakingTracker {
         var speaking: Boolean = false,
         /** Since when the ring has been on without a break, or `null`. */
         var speakingSince: Long? = null,
+        /** The last reading with sound while the ring was on, or `null`. */
+        var lastSoundAt: Long? = null,
     )
 
     private val voices = LinkedHashMap<String, Voice>()
@@ -73,14 +75,30 @@ public class SpeakingTracker {
                 v.speaking = true
                 v.speakingSince = since
             }
+            if (v.speaking) v.lastSoundAt = nowMs
         } else {
             v.soundSince = null
             val since = v.silenceSince ?: nowMs.also { v.silenceSince = it }
             if (v.speaking && nowMs - since >= RING_OFF_MS) {
                 v.speaking = false
                 v.speakingSince = null
+                v.lastSoundAt = null
             }
         }
+    }
+
+    /**
+     * The person is muted: their ring goes off at once and they give up the
+     * floor at the next snapshot. A muted person is never speaking, whatever a
+     * level reading says.
+     */
+    public fun silence(id: String) {
+        val v = voices[id] ?: return
+        v.soundSince = null
+        v.silenceSince = null
+        v.speaking = false
+        v.speakingSince = null
+        v.lastSoundAt = null
     }
 
     /** Forget people who are no longer in the call. */
@@ -93,22 +111,41 @@ public class SpeakingTracker {
     /**
      * The state after the samples so far.
      *
-     * [order] is the roster order, which breaks the tie when two people reach
-     * the onset in the same reading.
+     * [candidates] are the people who can hold the floor, in roster order,
+     * which breaks the tie when two reach the onset in the same reading. This
+     * device's own person is NOT one of them: the floor exists for the large
+     * tile, which never shows the own tile while anyone else is present, and a
+     * floor held by the own microphone (the person talking, or the room heard
+     * through it) kept everyone else from taking it, so the large tile never
+     * moved to the person speaking. The ring is for everyone sampled, the own
+     * tile included.
      */
-    public fun snapshot(order: List<String>, nowMs: Long): SpeakingSnapshot {
+    public fun snapshot(candidates: List<String>, nowMs: Long): SpeakingSnapshot {
         val speakingIds = voices.filterValues { it.speaking }.keys.toSet()
 
-        fun qualifies(id: String): Boolean {
+        /** The ring is on: enough to keep a floor already held. */
+        fun stillSpeaking(id: String): Boolean = voices[id]?.speaking == true
+
+        /**
+         * Enough to take the floor: the speech itself has lasted the onset.
+         * The time the ring stays on after the last sound does not count, or
+         * a 0.8-second sound would grow into a 1.5-second one by standing
+         * still.
+         */
+        fun earned(id: String): Boolean {
             val v = voices[id] ?: return false
             val since = v.speakingSince ?: return false
-            return v.speaking && nowMs - since >= FLOOR_ONSET_MS
+            val lastSound = v.lastSoundAt ?: return false
+            return v.speaking && lastSound - since >= FLOOR_ONSET_MS
         }
-        // Whoever holds the floor keeps it while they keep speaking; otherwise it
-        // goes to the first person in roster order who has earned it.
+        // Whoever holds the floor keeps it while they keep speaking; otherwise
+        // it goes to the first candidate in roster order who has earned it.
+        // When the holder stops and nobody has, the floor is empty and
+        // `lastSpokeAtMs` still names them, which is what keeps the large tile
+        // on them.
         val held = floor
-        if (held == null || !qualifies(held)) {
-            floor = order.firstOrNull(::qualifies)
+        if (held == null || held !in candidates || !stillSpeaking(held)) {
+            floor = candidates.firstOrNull(::earned)
         }
         floor?.let { lastSpoke = lastSpoke + (it to nowMs) }
         return SpeakingSnapshot(

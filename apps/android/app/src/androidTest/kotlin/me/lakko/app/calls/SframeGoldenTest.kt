@@ -30,6 +30,15 @@ import uniffi.lakko_ffi_uniffi.unwrapSframeFrame
  * cross-runtime half of G-26), no live SFU needed. Any drift in the Android
  * SFrame stack fails here.
  *
+ * Scope since ADR-0071: this vector is the HEADER-FIRST layout (ADR-0013),
+ * which the UniFFI `sealFramed` / `openFramed` still implement and which this
+ * test still pins for them. Call media no longer uses it: the native bridge
+ * seals and opens `clear_prefix || ciphertext || sframe_header || trailer`
+ * through the C ABI, UniFFI has no entry point for that layout, and its golden
+ * vector is pinned in `apps/shared/sframe-bridge/test_bridge.cc`
+ * (`test_media_frame_golden_vector`), which also asserts that the bytes below
+ * do NOT open on the media path.
+ *
  * Instrumented (runs on a device/emulator) because the UniFFI core is backed by
  * the native `liblakko_ffi_uniffi` library.
  */

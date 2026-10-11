@@ -3,6 +3,7 @@
 
 import Combine
 import Foundation
+import LakkoCore
 import SwiftUI
 import WebRTC
 
@@ -259,6 +260,27 @@ public final class CallUiState: ObservableObject {
     /// ``reset()``.
     @Published public private(set) var remoteLightVideoTracks: [String: RTCVideoTrack] = [:]
 
+    /// The middle track of a remote peer's camera (ADR-0070 step 5), keyed
+    /// on the roster participant id like ``remoteVideoTracks``: the same
+    /// camera at half size. Like the light companion it is a further picture
+    /// of a person already in the call, never a participant, a tile or a
+    /// camera flag. It is the heavy picture a tile watches when the shared
+    /// rule says `middle` (``VideoWants``). Dropped with its peer, when the
+    /// call ends, and on ``reset()``.
+    @Published public private(set) var remoteMiddleVideoTracks: [String: RTCVideoTrack] = [:]
+
+    /// What the SFU says it gives of each remote person's video, keyed on
+    /// the roster participant id (ADR-0070 step 6, ``VideoGiven``). Empty
+    /// until it says anything; a tile then shows what it wants.
+    @Published private(set) var remoteVideoGiven: [String: TileVideoQuality] = [:]
+
+    /// Where a tile's report of the picture it shows goes: the live SFU
+    /// call's session, which asks the SFU accordingly. Set by the call's
+    /// adapter; `nil` on a one-to-one call and when no call is live, where a
+    /// report is dropped. The first argument is the identity of an object
+    /// that lives as long as the tile, the second an SFU peer id.
+    var tileVideoQualitySink: ((ObjectIdentifier, String, TileVideoQuality?) -> Void)?
+
     /// B2a — mid-call camera-on lifecycle, driven by the bound session
     /// (1×1 `CallSession.videoPublishState` via `driveFrom`; SFU via
     /// `SfuCallUi`). `CallScreen` reads this for the camera-button
@@ -294,14 +316,18 @@ public final class CallUiState: ObservableObject {
 
     public func participantLeft(_ id: String) {
         participants.removeAll(where: { $0.id == id })
-        // If the pinned person leaves, the pin is cleared and the layout
-        // returns to what it was (`docs/ux/group-call-grid.md` section 6.2).
+        // If the pinned person leaves, the pin is cleared and the stage goes
+        // back to the speaker; the layout stays as it is
+        // (`docs/ux/group-call-grid.md` section 6.2).
         if pinnedId == id { pinnedId = nil }
         // A peer that left takes its undecryptable streams with it. Keeping the
         // id would make a later rejoin under the same id start out accused.
         undecryptable.remove(id)
-        // The light companion is a picture of that peer and goes with it.
+        // The light companion and the middle track are pictures of that
+        // peer and go with it, as does what the SFU said it gave of them.
         remoteLightVideoTracks.removeValue(forKey: id)
+        remoteMiddleVideoTracks.removeValue(forKey: id)
+        remoteVideoGiven.removeValue(forKey: id)
     }
 
     /// Record that a participant's incoming media cannot be decrypted (an
@@ -456,6 +482,24 @@ public final class CallUiState: ObservableObject {
         self.pinnedId = id
     }
 
+    /// The pin control of `id`'s tile was pressed
+    /// (`docs/ux/group-call-grid.md` section 6.2).
+    ///
+    /// On the pinned person it unpins and leaves the layout as it is: Focus
+    /// stays and the stage goes back to following the speaker. On anyone
+    /// else it pins them, which is asking to see them large, so the layout
+    /// choice becomes Focus; that is also where a later unpin, or the pinned
+    /// person leaving, leaves the screen. One pin at a time: pinning someone
+    /// else moves it.
+    func togglePin(_ id: String) {
+        if pinnedId == id {
+            pinnedId = nil
+            return
+        }
+        if layoutChoice != .focus { layoutChoice = .focus }
+        pinnedId = id
+    }
+
     public func setParticipantListOpen(_ open: Bool) {
         self.participantListOpen = open
     }
@@ -599,6 +643,42 @@ public final class CallUiState: ObservableObject {
         if !remoteLightVideoTracks.isEmpty { self.remoteLightVideoTracks = [:] }
     }
 
+    /// Set (or, with `nil`, remove) a remote peer's middle track, keyed on
+    /// its roster participant id. Touches nothing else.
+    public func setRemoteMiddleVideoTrack(_ track: RTCVideoTrack?, forParticipant id: String) {
+        if let track {
+            self.remoteMiddleVideoTracks[id] = track
+        } else {
+            self.remoteMiddleVideoTracks.removeValue(forKey: id)
+        }
+    }
+
+    /// The SFU's latest `video-given` set, by SFU peer id: it replaces the
+    /// whole previous one.
+    func setRemoteVideoGiven(byPeerId given: [String: TileVideoQuality]) {
+        var next: [String: TileVideoQuality] = [:]
+        for (peerId, quality) in given { next["peer-\(peerId)"] = quality }
+        if next != remoteVideoGiven { remoteVideoGiven = next }
+    }
+
+    /// The call ended: drop every further picture of a remote person (light
+    /// companions and middle tracks) and what the SFU said it gave.
+    func clearRemoteVideoCopies() {
+        clearRemoteLightVideoTracks()
+        if !remoteMiddleVideoTracks.isEmpty { remoteMiddleVideoTracks = [:] }
+        if !remoteVideoGiven.isEmpty { remoteVideoGiven = [:] }
+    }
+
+    /// A tile says which picture of a participant it shows, or `nil` when it
+    /// stops showing one (``VideoWants``). Forwarded to the live SFU call;
+    /// dropped when there is none.
+    func reportTileVideoQuality(
+        tile: ObjectIdentifier, participantId: String, quality: TileVideoQuality?
+    ) {
+        tileVideoQualitySink?(
+            tile, CallScreenPresentation.sfuPeerId(ofParticipant: participantId), quality)
+    }
+
     /// B2a — push the mid-call camera-on lifecycle. Driven by the
     /// bound session (`driveFrom` for 1×1, `SfuCallUi` for the SFU
     /// path); exposed as a setter so both callers converge on the one
@@ -648,6 +728,8 @@ public final class CallUiState: ObservableObject {
         // N-way SFU per-peer video tracks — drop them all.
         self.remoteVideoTracks = [:]
         self.remoteLightVideoTracks = [:]
+        self.remoteMiddleVideoTracks = [:]
+        self.remoteVideoGiven = [:]
         // B2a — no camera-on in flight for a fresh call.
         self.videoPublishState = .off
     }

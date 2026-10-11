@@ -256,6 +256,8 @@ class MultiJoinerCall private constructor(
                 onPeerJoined = { peerId, pseudo, tag -> onSfuPeerJoined(peerId, pseudo, tag) },
                 onPeerLeft = { peerId -> onSfuPeerLeft(peerId) },
                 onRemoteVideoTrack = { track, streamId -> onRemoteVideoTrack(track, streamId) },
+                // What the SFU says it gives of each person (`VideoGiven.kt`).
+                onVideoGiven = { given -> applyVideoGiven(opts.ui, given) },
                 onRemoteMediaState = { peerId, cameraOn ->
                     // camera-off-cleanup — a remote peer signalled its camera
                     // on/off over the opaque SFU relay (SfuCallSession
@@ -558,8 +560,14 @@ class MultiJoinerCall private constructor(
 
     private fun onSessionState(state: SfuCallSession.State) {
         when (state) {
-            SfuCallSession.State.CONNECTING ->
+            SfuCallSession.State.CONNECTING -> {
                 ui.setPhase(CallUiState.CallPhase.Connecting)
+                // The tiles of this call say which picture of a person they
+                // show (`VideoWants.kt`).
+                bindTileVideoQuality(ui) { tile, peerId, quality ->
+                    session.reportTileVideoQuality(tile, peerId, quality)
+                }
+            }
             SfuCallSession.State.CONNECTED -> {
                 ui.setPhase(CallUiState.CallPhase.Connected)
                 ui.setE2ee(CallUiState.E2eeState(active = true, shortFingerprint = safetyNumber))
@@ -573,7 +581,7 @@ class MultiJoinerCall private constructor(
             SfuCallSession.State.CLOSED -> {
                 speaking.stop()
                 // The call's tracks are gone with its connection.
-                ui.clearRemoteLightVideoTracks()
+                ui.clearRemoteCopyVideoTracks()
                 ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
                 opts.onEnded()
             }
@@ -634,9 +642,9 @@ class MultiJoinerCall private constructor(
         // for a peer we already know is muted keeps it off, an unknown peer
         // defaults on, a null track is off. Guard a null streamId.
         //
-        // A stream id ending in `~light` is the peer's light companion
-        // (`LightStream.kt`): it goes to its own map and creates no
-        // participant, no tile and no camera flag.
+        // A stream id ending in `~mid` or `~light` is the peer's middle track
+        // or light companion (`LightStream.kt`): it goes to its own map and
+        // creates no participant, no tile and no camera flag.
         applyRemoteVideoTrack(ui, track, streamId, lastKnownCameraOn)
     }
 

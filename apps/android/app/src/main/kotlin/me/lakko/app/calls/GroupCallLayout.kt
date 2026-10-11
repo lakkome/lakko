@@ -6,6 +6,7 @@ package me.lakko.app.calls
 import uniffi.lakko_ffi_uniffi.CallBarPhase
 import uniffi.lakko_ffi_uniffi.CallGrid
 import uniffi.lakko_ffi_uniffi.StageCandidate
+import uniffi.lakko_ffi_uniffi.TileVideoQuality
 
 /**
  * How a group call's tiles are laid out (`docs/ux/group-call-grid.md`
@@ -43,6 +44,11 @@ public interface GroupCallRules {
     public fun callStage(people: List<StageCandidate>, pinned: UInt?): UInt?
 
     public fun ringbackPlays(groupCall: Boolean, phase: CallBarPhase): Boolean
+
+    /** Which picture of a person a tile shows (section 7.6): the people in
+     *  the call, the tile's width in physical pixels, and whether it is the
+     *  pinned person or the stage. */
+    public fun tileVideoQuality(people: UInt, tileWidthPx: UInt, pinnedOrStage: Boolean): TileVideoQuality
 }
 
 /** The rules as the core defines them. Never re-implemented here. */
@@ -55,6 +61,9 @@ public object SharedGroupCallRules : GroupCallRules {
 
     override fun ringbackPlays(groupCall: Boolean, phase: CallBarPhase): Boolean =
         uniffi.lakko_ffi_uniffi.ringbackPlays(groupCall, phase)
+
+    override fun tileVideoQuality(people: UInt, tileWidthPx: UInt, pinnedOrStage: Boolean): TileVideoQuality =
+        uniffi.lakko_ffi_uniffi.tileVideoQuality(people, tileWidthPx, pinnedOrStage)
 }
 
 /** The grid, as plain numbers in dp. */
@@ -98,7 +107,8 @@ public enum class GroupLayoutKind { GRID, FOCUS }
  *
  * A pin always means Focus: pinning someone is asking to see them large.
  * Otherwise the person's own choice for this call, and Grid until they make
- * one.
+ * one. Pinning also makes Focus that choice ([togglePin]), so an unpin
+ * leaves the layout as it is.
  */
 public fun groupLayoutKind(
     choice: GroupLayoutKind?,

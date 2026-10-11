@@ -520,8 +520,9 @@ public enum CallScreenPresentation {
         if alone { return false }
         // Only the video fill hides them. A group call's tiles are not one
         // picture the bar stands in front of: the tile area ends above the
-        // bar, and a tap on a tile pins it, so the tap is not there to bring
-        // a faded row back (`docs/ux/group-call-grid.md` section 6.2).
+        // bar, and a tap on a tile brings that tile's controls up, so the tap
+        // is not there to bring a faded row back
+        // (`docs/ux/group-call-grid.md` section 6.2).
         return layout == .video
     }
 }

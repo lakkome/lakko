@@ -99,6 +99,68 @@ class SpeakingTest {
     }
 
     @Test
+    fun `this device's own voice never takes the floor, and does not keep others from it`() {
+        val t = SpeakingTracker()
+        // The own microphone is sampled (its tile has a ring) and has spoken
+        // for longer than anyone; it is not a candidate.
+        feed(t, "me", loud, 0, 2 * FLOOR_ONSET_MS)
+        val alone = t.snapshot(listOf("a", "b"), 2 * FLOOR_ONSET_MS)
+        assertNull(alone.activeSpeakerId)
+        assertTrue("me" in alone.speakingIds)
+        assertNull(alone.lastSpokeAtMs["me"])
+        // Someone else starts while the own microphone goes on: they take it.
+        feed(t, "me", loud, 2 * FLOOR_ONSET_MS, 4 * FLOOR_ONSET_MS)
+        feed(t, "b", loud, 2 * FLOOR_ONSET_MS, 4 * FLOOR_ONSET_MS)
+        assertEquals("b", t.snapshot(listOf("a", "b"), 4 * FLOOR_ONSET_MS).activeSpeakerId)
+    }
+
+    @Test
+    fun `a floor held by someone who is no longer a candidate is given up`() {
+        val t = SpeakingTracker()
+        feed(t, "a", loud, 0, FLOOR_ONSET_MS)
+        assertEquals("a", t.snapshot(order, FLOOR_ONSET_MS).activeSpeakerId)
+        feed(t, "a", loud, FLOOR_ONSET_MS, FLOOR_ONSET_MS + 300)
+        assertNull(t.snapshot(listOf("b"), FLOOR_ONSET_MS + 300).activeSpeakerId)
+    }
+
+    @Test
+    fun `the time the ring stays on after the last sound does not count towards the onset`() {
+        val t = SpeakingTracker()
+        // A sound of 0.9 s, then silence: the ring stays on for another 0.8 s,
+        // which together is past the onset. The speech itself was not.
+        feed(t, "a", loud, 0, 900)
+        feed(t, "a", 0.0, 1_000, 1_600)
+        val snap = t.snapshot(order, 1_600)
+        assertTrue("a" in snap.speakingIds)
+        assertNull(snap.activeSpeakerId)
+    }
+
+    @Test
+    fun `the holder keeps the floor through a pause shorter than the ring's`() {
+        val t = SpeakingTracker()
+        feed(t, "a", loud, 0, FLOOR_ONSET_MS)
+        assertEquals("a", t.snapshot(order, FLOOR_ONSET_MS).activeSpeakerId)
+        // A breath: the ring is still on, so the floor is still held.
+        feed(t, "a", 0.0, FLOOR_ONSET_MS + 100, FLOOR_ONSET_MS + 500)
+        assertEquals("a", t.snapshot(order, FLOOR_ONSET_MS + 500).activeSpeakerId)
+    }
+
+    @Test
+    fun `a muted person's ring goes off at once and they give up the floor`() {
+        val t = SpeakingTracker()
+        feed(t, "a", loud, 0, FLOOR_ONSET_MS)
+        assertEquals("a", t.snapshot(order, FLOOR_ONSET_MS).activeSpeakerId)
+        t.silence("a")
+        val snap = t.snapshot(order, FLOOR_ONSET_MS + 10)
+        assertFalse("a" in snap.speakingIds)
+        assertNull(snap.activeSpeakerId)
+        // They held it, which is still remembered for the large tile.
+        assertEquals(FLOOR_ONSET_MS, snap.lastSpokeAtMs["a"])
+        // Silencing someone never sampled does nothing.
+        t.silence("nobody")
+    }
+
+    @Test
     fun `someone who left the call is forgotten`() {
         val t = SpeakingTracker()
         feed(t, "a", loud, 0, FLOOR_ONSET_MS)

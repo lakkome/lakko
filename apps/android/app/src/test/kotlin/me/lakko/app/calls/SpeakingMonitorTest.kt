@@ -24,7 +24,7 @@ class SpeakingMonitorTest {
 
     @Test
     fun `a remote level is put on the person the track arrived from`() {
-        val levels = audioLevelsFrom(
+        val levels = AudioLevelReader().read(
             listOf(
                 RtcStat("inbound-rtp", mapOf("kind" to "audio", "trackIdentifier" to "track-a", "audioLevel" to 0.4)),
                 RtcStat("inbound-rtp", mapOf("kind" to "audio", "trackIdentifier" to "track-b", "audioLevel" to 0.0)),
@@ -32,12 +32,14 @@ class SpeakingMonitorTest {
             tracks,
         )
         assertEquals(mapOf("peer-a-id" to 0.4, "peer-b-id" to 0.0), levels.remoteByStreamId)
+        assertEquals(LevelPath.STATS_LEVEL, levels.remotePathByStreamId["peer-a-id"])
         assertNull(levels.local)
+        assertEquals(LevelPath.NONE, levels.localPath)
     }
 
     @Test
     fun `this device's own level is the audio source's`() {
-        val levels = audioLevelsFrom(
+        val levels = AudioLevelReader().read(
             listOf(
                 RtcStat("media-source", mapOf("kind" to "audio", "audioLevel" to 0.25f)),
                 RtcStat("media-source", mapOf("kind" to "video")),
@@ -45,12 +47,13 @@ class SpeakingMonitorTest {
             tracks,
         )
         assertEquals(0.25, levels.local!!, 1e-6)
+        assertEquals(LevelPath.STATS_LEVEL, levels.localPath)
         assertTrue(levels.remoteByStreamId.isEmpty())
     }
 
     @Test
     fun `what cannot be read is left out, never guessed`() {
-        val levels = audioLevelsFrom(
+        val levels = AudioLevelReader().read(
             listOf(
                 // A picture has no sound level.
                 RtcStat("inbound-rtp", mapOf("kind" to "video", "trackIdentifier" to "track-a", "audioLevel" to 0.9)),
@@ -71,7 +74,7 @@ class SpeakingMonitorTest {
 
     @Test
     fun `two entries for one person keep the louder`() {
-        val levels = audioLevelsFrom(
+        val levels = AudioLevelReader().read(
             listOf(
                 RtcStat("inbound-rtp", mapOf("kind" to "audio", "trackIdentifier" to "track-a", "audioLevel" to 0.1)),
                 RtcStat("inbound-rtp", mapOf("kind" to "audio", "trackIdentifier" to "track-a", "audioLevel" to 0.6)),
@@ -81,6 +84,48 @@ class SpeakingMonitorTest {
         assertEquals(mapOf("peer-a-id" to 0.6), levels.remoteByStreamId)
     }
 
+    private fun energy(id: String, total: Double, duration: Double, level: Double? = null) = RtcStat(
+        type = "inbound-rtp",
+        id = id,
+        members = mapOf(
+            "kind" to "audio",
+            "trackIdentifier" to "track-a",
+            "totalAudioEnergy" to total,
+            "totalSamplesDuration" to duration,
+            "audioLevel" to level,
+        ),
+    )
+
+    @Test
+    fun `a level is the energy played since the last reading, once there is a last reading`() {
+        val reader = AudioLevelReader()
+        // The first reading has nothing to measure from: the entry's own level.
+        val first = reader.read(listOf(energy("A", total = 1.0, duration = 10.0, level = 0.3)), tracks)
+        assertEquals(0.3, first.remoteByStreamId.getValue("peer-a-id"), 1e-9)
+        assertEquals(LevelPath.STATS_LEVEL, first.remotePathByStreamId["peer-a-id"])
+        // 0.04 of energy over 1 s played: a root mean square of 0.2, whatever
+        // the instantaneous level says.
+        val second = reader.read(listOf(energy("A", total = 1.04, duration = 11.0, level = 0.9)), tracks)
+        assertEquals(0.2, second.remoteByStreamId.getValue("peer-a-id"), 1e-9)
+        assertEquals(LevelPath.STATS_ENERGY, second.remotePathByStreamId["peer-a-id"])
+        // Nothing played since: silence, not the last level.
+        val third = reader.read(listOf(energy("A", total = 1.04, duration = 11.0, level = 0.9)), tracks)
+        assertEquals(0.0, third.remoteByStreamId.getValue("peer-a-id"), 0.0)
+    }
+
+    @Test
+    fun `energy counters that went back start again, and a first reading with no level is left out`() {
+        val reader = AudioLevelReader()
+        assertTrue(reader.read(listOf(energy("A", 5.0, 50.0)), tracks).remoteByStreamId.isEmpty())
+        // A new stream under the same id: nothing to measure from yet.
+        assertTrue(reader.read(listOf(energy("A", 0.1, 1.0)), tracks).remoteByStreamId.isEmpty())
+        val next = reader.read(listOf(energy("A", 0.35, 2.0)), tracks)
+        assertEquals(0.5, next.remoteByStreamId.getValue("peer-a-id"), 1e-9)
+        // A level is never above 1.
+        val loud = reader.read(listOf(energy("A", 9.35, 3.0)), tracks)
+        assertEquals(1.0, loud.remoteByStreamId.getValue("peer-a-id"), 0.0)
+    }
+
     // ---- The monitor ---------------------------------------------------------
 
     private class Harness(scope: TestScope, micOn: Boolean = true) {
@@ -88,6 +133,7 @@ class SpeakingMonitorTest {
         var now = 0L
         var reading: CallAudioLevels? = null
         var readings = 0
+        val reports = ArrayList<Pair<List<VoiceReport>, String?>>()
         val monitor = SpeakingMonitor(
             scope = scope,
             ui = ui,
@@ -97,6 +143,7 @@ class SpeakingMonitorTest {
             },
             participantIdOf = { "peer-$it" },
             nowMs = { now },
+            onReport = { voices, floorId -> reports += voices to floorId },
         )
 
         init {
@@ -144,6 +191,77 @@ class SpeakingMonitorTest {
         val muted = Harness(this, micOn = false)
         muted.feed(CallAudioLevels(local = loud, remoteByStreamId = emptyMap()), 0, RING_ON_MS)
         assertTrue(muted.speaking().isEmpty())
+    }
+
+    @Test
+    fun `this device's own voice never takes the floor, however long it lasts`() = runTest {
+        val h = Harness(this)
+        h.feed(CallAudioLevels(local = loud, remoteByStreamId = emptyMap()), 0, 3 * FLOOR_ONSET_MS)
+        assertEquals(setOf("local"), h.speaking())
+        assertNull(h.ui.speech.value.activeSpeakerId)
+        assertTrue(h.ui.speech.value.lastSpokeAtMs.isEmpty())
+        // And it does not keep the floor from the person who then speaks.
+        h.feed(
+            CallAudioLevels(local = loud, remoteByStreamId = mapOf("b" to loud)),
+            3 * FLOOR_ONSET_MS + 100,
+            5 * FLOOR_ONSET_MS,
+        )
+        assertEquals("peer-b", h.ui.speech.value.activeSpeakerId)
+    }
+
+    @Test
+    fun `the own level is not looked at while the microphone is off`() = runTest {
+        val h = Harness(this)
+        h.feed(CallAudioLevels(local = loud, remoteByStreamId = emptyMap()), 0, RING_ON_MS)
+        assertEquals(setOf("local"), h.speaking())
+        // Muted mid-sentence: the ring goes off at once, not after the pause.
+        h.ui.setMic(false)
+        h.feed(CallAudioLevels(local = loud, remoteByStreamId = emptyMap()), RING_ON_MS + 100, RING_ON_MS + 100)
+        assertTrue(h.speaking().isEmpty())
+    }
+
+    @Test
+    fun `someone whose stream stopped reporting falls silent`() = runTest {
+        val h = Harness(this)
+        h.feed(CallAudioLevels(local = 0.0, remoteByStreamId = mapOf("a" to loud)), 0, RING_ON_MS)
+        assertEquals(setOf("peer-a"), h.speaking())
+        // No entry for them any more: read as silence, so the ring goes off.
+        h.feed(
+            CallAudioLevels(local = 0.0, remoteByStreamId = emptyMap()),
+            RING_ON_MS + 100,
+            RING_ON_MS + 100 + RING_OFF_MS,
+        )
+        assertTrue(h.speaking().isEmpty())
+    }
+
+    @Test
+    fun `every thirteenth reading reports each person's source, peak and ring, and the floor`() = runTest {
+        assertEquals(13, SPEAKING_REPORT_EVERY_TICKS)
+        val h = Harness(this)
+        h.ui.setMic(false)
+        val levels = CallAudioLevels(
+            local = loud,
+            remoteByStreamId = mapOf("a" to loud, "b" to 0.01),
+            remotePathByStreamId = mapOf("a" to LevelPath.STATS_ENERGY),
+        )
+        h.feed(levels, 0, 1_100)
+        assertTrue(h.reports.isEmpty())
+        h.feed(levels, 1_200, 1_200)
+        val (voices, floorId) = h.reports.single()
+        assertNull(floorId)
+        assertEquals(
+            listOf(
+                // Muted: not read at all.
+                VoiceReport("local", isLocal = true, path = LevelPath.NONE, peak = null, speaking = false),
+                VoiceReport("peer-a", isLocal = false, path = LevelPath.STATS_ENERGY, peak = loud, speaking = true),
+                VoiceReport("peer-b", isLocal = false, path = LevelPath.STATS_LEVEL, peak = 0.01, speaking = false),
+            ),
+            voices,
+        )
+        // The next report starts from nothing and names the floor.
+        h.feed(levels, 1_300, 2_500)
+        assertEquals(2, h.reports.size)
+        assertEquals("peer-a", h.reports.last().second)
     }
 
     @Test
