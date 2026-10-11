@@ -1836,10 +1836,10 @@ credential for a current one, and two verifiers that now parse a proof).
 ## T6 as built (2026-10-08): the clients, and where they disagree
 
 Built on web, iOS and Android against the T5 server; unit-tested only (web vitest 4315, iOS
-`LakkoTests` 2976 with 0 failures and the core rebuilt, Android 3353 on the host JVM without the
+`LakkoTests` 2976 with 0 failures and the core rebuilt, Android 3370 on the host JVM without the
 native core, whose `.so` was not rebuilt). Nothing was walked on a device or against a server.
-**Stage A is not safe to walk end to end yet: the three clients made three different choices about
-the mailbox and reach keys after a rotation, listed below.**
+**Stage A is not safe to walk end to end yet: the mailbox rule of part 3.5 is undecided, and web
+differs from iOS and Android on reach keys after a rotation, listed below.**
 
 Built on all three:
 
@@ -1871,10 +1871,16 @@ Where the clients differ (to be aligned before any walk):
 
 | | web | iOS | Android |
 |---|---|---|---|
-| Owned group journals re-rooted | yes (ADR-0057 takeover) | yes | **no** |
-| Channel owner handed over | yes | yes (channels this device created) | **no** |
-| Reach keys after the rotation | restarted under the new key; grants name the new mailbox, which peers do not address | `rekey` under the new key; cannot write to the own old mailbox | **stay bound to the predecessor mailbox** |
-| Backup re-sealed | marked dirty | re-sealed | marked dirty |
+| Owned group journals re-rooted | yes (ADR-0057 takeover) | yes | yes (aligned with iOS 2026-10-11) |
+| Channel owner handed over | yes | yes (channels this device created) | yes (every channel it holds a publisher seed for; a co-published one ends as not-owner) |
+| Reach keys after the rotation | restarted under the new key; grants name the new mailbox, which peers do not address | `rekey` under the new key; cannot write to the own old mailbox | re-keyed like iOS, with the same limit |
+| Backup re-sealed | marked dirty | re-sealed, an upload failure swallowed | re-sealed and awaited; a failure keeps the step owed |
+
+Android first answered "done" for the journal, channel, reach and backup steps without doing them
+(a rotation reported success while the old seed still rooted the account's groups and owned its
+channels); since 2026-10-11 each is a real step of the owed record that stays owed and is retried
+on failure. On iOS and Android the journal step is recorded once the takeovers are durably
+scheduled, not once they land.
 
 Not built on any client:
 

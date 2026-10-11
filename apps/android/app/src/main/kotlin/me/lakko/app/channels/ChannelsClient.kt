@@ -371,6 +371,28 @@ public class ChannelsClient(
         if (!response.status.isSuccess()) throw decodeError(response, "put listing")
     }
 
+    /**
+     * `PUT /v1/channels/:id/owner` (ADR-0066 section 3.5, "Channels") -
+     * replace the channel's owner key with [newOwnerKey] (32 raw bytes, the
+     * body). [signer] is the CURRENT owner's signer: the old seed's for the
+     * handover, the new seed's for the probe that asks whether it already
+     * landed (naming the key that already owns the channel is a `204` that
+     * changes nothing). Throws [ChannelsApiException]: `401
+     * owner-proof-required` (the signer is not the owner), `400
+     * bad-owner-pubkey`, `409 owner-changed`.
+     */
+    public suspend fun replaceOwner(channelIdHex: String, signer: ChannelOwnerSigner, newOwnerKey: ByteArray) {
+        val path = "/v1/channels/$channelIdHex/owner"
+        val proof = signer.sign("PUT", path, "", newOwnerKey)
+        val response: HttpResponse = client.request("$baseUrl$path") {
+            method = HttpMethod.Put
+            header(channelOwnerProofHeaderName(), proof)
+            contentType(ContentType.Application.OctetStream)
+            setBody(newOwnerKey)
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "replace owner")
+    }
+
     /** `DELETE /v1/channels/:id/listing` — withdraw the listing (owner-signed,
      *  idempotent). */
     public suspend fun deleteListing(channelIdHex: String, owner: ChannelOwnerSigner) {
@@ -820,7 +842,19 @@ public class ChannelsClient(
          *  (ADR-0059 section 1). Only the account that created the channel
          *  derives the key the server registered for it. Deriving it needs
          *  only the identity's seed; the signer outlives the identity call. */
+        //
+        // ADR-0066 section 3.5: after a rotation of the account keys the
+        // owner key is the one the CURRENT account seed derives, while the
+        // identity a caller holds (the one its PublisherGroup runs on) stays
+        // the conversation identity; [ChannelOwnerSuccession] maps the one
+        // to the other here, so every owner request follows the handover.
         public fun ownerSigner(accountIdentity: Identity, channelIdHex: String): ChannelOwnerSigner =
+            ChannelOwnerSuccession.withOwnerIdentity(accountIdentity) { ownerSignerExact(it, channelIdHex) }
+
+        /** The owner signer [accountIdentity] ITSELF derives, with no
+         *  succession applied: what the owner handover signs with (the old
+         *  key) and names (the new key). */
+        public fun ownerSignerExact(accountIdentity: Identity, channelIdHex: String): ChannelOwnerSigner =
             channelOwnerSigner(accountIdentity, channelIdBytes(channelIdHex))
 
         /** The 16 bytes of a 32-hex channel id. */

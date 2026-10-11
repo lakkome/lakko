@@ -143,23 +143,56 @@ public class ReachManager internal constructor(
     // Session
     // -----------------------------------------------------------------
 
-    /** Bind to the signed-in account and reconcile its mailbox. Idempotent. */
+    /**
+     * Bind to the signed-in account and reconcile its mailbox. Idempotent.
+     *
+     * ADR-0066 section 3.5, "Reach": [account] is the identity the directory
+     * serves. When it is not the key the stored registrations were made
+     * under (the account's keys were rotated, in this session or before a
+     * restart), the reach keys MOVE: see [rekeyDecision].
+     */
     public fun bind(accountIdB64: String, account: Identity) {
         val current = binding.get()
-        if (current != null && current.accountIdB64 == accountIdB64) {
+        val accountKey = account.signaturePublicKey()
+        if (current != null && current.accountIdB64 == accountIdB64 && current.accountKey.contentEquals(accountKey)) {
             launchSync()
             return
         }
+        val sameAccount = current != null && current.accountIdB64 == accountIdB64
         val ffiSigner = uniffi.lakko_ffi_uniffi.dsMailboxSigner(account)
         val bound = Binding(
             accountIdB64 = accountIdB64,
             accountSeed = account.ed25519Seed(),
-            accountKey = account.signaturePublicKey(),
+            accountKey = accountKey,
             mailbox = ffiSigner.mailboxPseudonym(),
             mailboxSigner = FfiDsJournalSigner(ffiSigner),
         )
+        // The previous binding's seed is NOT wiped here: a reconcile still
+        // running against it would derive its keys from zeroes.
         binding.set(bound)
-        doc = store.load(accountIdB64)
+        // The same account under another key keeps the document it holds:
+        // the setting, the version counters and the grants this account
+        // HOLDS for other people are filed under the contact, not this key.
+        if (!sameAccount) doc = store.load(accountIdB64)
+        val boundKeyHex = reachHex(accountKey)
+        val decision = rekeyDecision(
+            boundKeyHex = boundKeyHex,
+            registeredForKeyHex = doc.registeredForKeyHex,
+            previousKeyHex = if (sameAccount) current?.accountKey?.let(::reachHex) else null,
+        )
+        if (decision != ReachRekey.KEEP) {
+            // What was registered was registered on the OLD mailbox: nothing
+            // is registered on the new one yet, so the next sync registers
+            // everything there. The old mailbox and its keys are left as
+            // they are.
+            doc = if (decision == ReachRekey.MOVE) {
+                doc.copy(registered = emptyList(), registeredOpen = null, registeredForKeyHex = boundKeyHex)
+            } else {
+                doc.copy(registeredForKeyHex = boundKeyHex)
+            }
+            store.save(accountIdB64, doc)
+            if (decision == ReachRekey.MOVE) Log.i(LOG_TAG, "reach keys moved to the rotated account key")
+        }
         mutableVisibility.value = decodeVisibility(doc.visibilityHex)
         launchSync()
         while (true) {
@@ -585,6 +618,9 @@ public class ReachManager internal constructor(
                     open = openChange,
                 )
             }
+            // The account's keys were rotated while this ran: what it
+            // registered is on the OLD mailbox and is not recorded.
+            if (binding.get() !== b) return false
             doc = doc.copy(
                 registered = desired.map { (pk, key) ->
                     StoredRegistered(pk, key.slot.kind.name, key.slot.scopeHex, key.version, key.expiresAtMs)

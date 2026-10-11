@@ -18,11 +18,8 @@ import me.lakko.app.devices.sync.DeviceGroupSyncRepository
  * backup. The machine and every decision are in [KeyRotationRunner]; this
  * only connects them.
  *
- * What Stage A does NOT move on Android (stated, not hidden): the journals
- * of the groups this account owns and the owner keys of its channels stay
- * under the PREDECESSOR key, and the reach keys stay bound to the
- * predecessor's mailbox. Those two ports answer "done" so the rotation
- * completes; see [moveOwnedJournals] and [moveOwnedChannels].
+ * No port answers "done" for work it did not do: a step that could not run
+ * answers `false` or throws, and the runner keeps it owed.
  */
 internal object KeyRotationDevice {
     private const val TAG = "KeyRotation"
@@ -98,36 +95,70 @@ internal object KeyRotationDevice {
                 authRepository.rotationMoveDeviceGroupRoot(attestationB64, keyGeneration)
 
             override suspend fun moveOwnedJournals(): Boolean {
-                // NOT BUILT on Android: the root of an owned group's journal
-                // and its registrar seeds derive from the account seed the
-                // chat layer acts under, which Stage A keeps at the
-                // predecessor. They stay rooted under the predecessor key.
-                Log.w(TAG, "owned group journals stay rooted under the previous account key (not moved)")
+                // ADR section 3.5, "DS": every journal this account roots
+                // goes from the old seed's root to the new seed's through
+                // the ADR-0057 takeover (root transfer by the old root, the
+                // registrar set replaced, the registrar seeds re-sent). The
+                // step is done once each old root is KEPT on this device and
+                // its takeover scheduled: from there the chat layer retries
+                // it durably by itself. No chat layer, or a root that could
+                // not be kept, leaves the step owed.
+                val chats = chatRepository ?: return false
+                val (oldSeed, newSeed) = authRepository.rotationSeedPair() ?: return false
+                try {
+                    chats.transferOwnedJournalRoots(oldSeed, newSeed)
+                } finally {
+                    oldSeed.fill(0)
+                    newSeed.fill(0)
+                }
                 return true
             }
 
-            override suspend fun moveOwnedChannels(): Boolean {
-                // NOT BUILT on Android: a channel's owner proofs are signed
-                // by the identity its PublisherGroup runs on, which stays the
-                // predecessor (no leaf is moved in place). The owner key is
-                // not handed over.
-                Log.w(TAG, "owned channels keep their owner key under the previous account key (not handed over)")
-                return true
-            }
+            override suspend fun moveOwnedChannels(): Boolean =
+                // ADR section 3.5, "Channels": `PUT /v1/channels/{id}/owner`
+                // for every channel this device publishes to. `false` (owed)
+                // while any channel has no verdict.
+                authRepository.rotationMoveOwnedChannels()
 
             override suspend fun rekeyReach(): Boolean {
-                // The mailbox of the published key is claimed by the chat
-                // layer as soon as the session carries the new seed
-                // (`ChatRepository.bootstrap` on the same account). The reach
-                // keys stay bound to the predecessor's mailbox, where the
-                // Welcomes for the bindings that exist still arrive.
-                return true
+                // ADR section 3.5, "Reach": the reach keys and the mailbox
+                // they are registered on derive from the account seed, so
+                // both move to the new one; done only once the new mailbox
+                // holds the key set. The predecessor's mailbox keeps being
+                // read for the Welcomes of the bindings that exist.
+                val current = authRepository.identitySecrets.value ?: return false
+                val reach = me.lakko.app.reach.ReachManager.get(app)
+                uniffi.lakko_ffi_uniffi.Identity.fromSeed(current.accountIdentitySeed).use { identity ->
+                    // The new mailbox is claimed before anything is
+                    // registered on it (idempotent; a refusal throws and
+                    // the step stays owed).
+                    val ffi = uniffi.lakko_ffi_uniffi.dsMailboxSigner(identity)
+                    me.lakko.app.ds.DsClient().use { ds ->
+                        ds.claimMailbox(ffi.mailboxPseudonym(), me.lakko.app.ds.FfiDsJournalSigner(ffi))
+                    }
+                    reach.bind(accountIdB64, identity)
+                }
+                return reach.sync()
             }
 
             override suspend fun sealBackup(): Boolean {
-                // The phrase on this device is the new one: the next backup
-                // run seals under it and mints a new head.
-                me.lakko.app.backup.AutoBackupStore.markDirty(app, accountIdB64, System.currentTimeMillis())
+                // ADR section 3.5, "Backup": re-sealed under the new phrase
+                // and uploaded, awaited. A chat layer that is not ready
+                // leaves the step owed: an envelope with an empty snapshot
+                // would overwrite the one the server holds.
+                val chats = chatRepository ?: return false
+                val state = chats.state.value
+                if (!state.bootstrapped) return false
+                val snapshot = chats.currentStorageSnapshot() ?: return false
+                try {
+                    authRepository.rotationSealBackup(
+                        wholeStorageSnapshot = snapshot,
+                        knownGroupIdsHex = state.threads.map { it.groupIdHex },
+                        syncedState = DeviceGroupSyncRepository.active?.currentSyncedStateBytes(),
+                    )
+                } finally {
+                    snapshot.fill(0)
+                }
                 return true
             }
 

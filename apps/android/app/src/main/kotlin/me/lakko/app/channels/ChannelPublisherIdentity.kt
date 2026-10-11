@@ -99,10 +99,24 @@ public class ChannelPublisherIdentity(
      * Idempotent for the same account; a different account replaces the
      * identity. Runs off the main thread.
      */
-    public suspend fun bind(accountIdB64: String, accountIdentitySeed: ByteArray) {
+    public suspend fun bind(
+        accountIdB64: String,
+        accountIdentitySeed: ByteArray,
+        /** ADR-0066 section 3.5 - the account's CURRENT phrase seed when the
+         *  caller knows it. After a rotation it differs from
+         *  [accountIdentitySeed] (the conversation identity's): OWNER
+         *  requests are then signed by the key the current seed derives,
+         *  while every PublisherGroup stays on this identity. Applied on
+         *  every call, an idempotent one included, so an adoption in the
+         *  same session takes effect. */
+        currentAccountSeed: ByteArray? = null,
+    ) {
         withContext(Dispatchers.Default) {
             mutex.withLock {
-                if (boundAccountIdB64 == accountIdB64 && identity != null) return@withLock
+                if (boundAccountIdB64 == accountIdB64 && identity != null) {
+                    identity?.let { applyOwnerSuccession(it, currentAccountSeed) }
+                    return@withLock
+                }
                 MainThreadGuard.assertOffMain("ChannelPublisherIdentity.bind")
                 identity?.close()
                 identity = null
@@ -126,7 +140,28 @@ public class ChannelPublisherIdentity(
                 }
                 identity = fresh
                 boundAccountIdB64 = accountIdB64
+                applyOwnerSuccession(fresh, currentAccountSeed)
             }
+        }
+    }
+
+    /** Install or drop the owner-key succession for the bound identity
+     *  ([ChannelOwnerSuccession]). A failure leaves owner requests on the
+     *  bound identity, which the server then refuses (`401`) for a channel
+     *  already handed over: loud, never a wrong key accepted. */
+    private fun applyOwnerSuccession(bound: Identity, currentAccountSeed: ByteArray?) {
+        if (currentAccountSeed == null) return
+        try {
+            val current = Identity.fromSeed(currentAccountSeed)
+            val boundKey = bound.signaturePublicKey()
+            if (current.signaturePublicKey().contentEquals(boundKey)) {
+                current.close()
+                ChannelOwnerSuccession.clear()
+            } else {
+                ChannelOwnerSuccession.install(boundKey, current)
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "channel owner succession not applied", e)
         }
     }
 
@@ -164,6 +199,7 @@ public class ChannelPublisherIdentity(
 
     /** Close the identity; the snapshot on disk stays. Logout. */
     public fun unbind() {
+        ChannelOwnerSuccession.clear()
         identity?.close()
         identity = null
         boundAccountIdB64 = null

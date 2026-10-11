@@ -474,3 +474,35 @@ public fun reachRotationOnShrink(
     val now = currentMemberKeys.toHashSet()
     return previousMemberKeys.any { it !in now }
 }
+
+/** What a bind does with the registrations a document records. */
+public enum class ReachRekey {
+    /** They were made under the bound key: nothing changes. */
+    KEEP,
+
+    /** Nothing says which key they were made under and nothing says the key
+     *  changed: they are the bound key's, and the document now says so. */
+    STAMP,
+
+    /** They were made under ANOTHER key of this account, hence on another
+     *  mailbox: they are forgotten here and everything is registered again
+     *  under the bound key. The old mailbox is left as it is. */
+    MOVE,
+}
+
+/**
+ * ADR-0066 section 3.5, "Reach" - a reach key and the mailbox it is
+ * registered on both derive from the account seed, so after a rotation of
+ * the account keys the registrations a device recorded describe the OLD
+ * mailbox. [boundKeyHex] is the account key being bound now,
+ * [registeredForKeyHex] the key the stored registrations are recorded under
+ * (`null` when never recorded), [previousKeyHex] the key this same account
+ * was bound under in this process until now (`null` on a first bind). Pure.
+ */
+public fun rekeyDecision(boundKeyHex: String, registeredForKeyHex: String?, previousKeyHex: String?): ReachRekey =
+    when {
+        registeredForKeyHex == boundKeyHex -> ReachRekey.KEEP
+        registeredForKeyHex != null -> ReachRekey.MOVE
+        previousKeyHex != null && previousKeyHex != boundKeyHex -> ReachRekey.MOVE
+        else -> ReachRekey.STAMP
+    }

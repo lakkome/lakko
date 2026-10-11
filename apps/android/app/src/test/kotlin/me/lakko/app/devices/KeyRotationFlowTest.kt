@@ -639,6 +639,110 @@ class KeyRotationFlowTest {
         assertTrue(storage.map.isEmpty())
     }
 
+    // --- ADR section 3.5: the steps that follow the seed outside MLS --------
+
+    /** The four steps Android first shipped as warn-and-succeed stubs. */
+    private val seedSteps = listOf(
+        RotationStep.MoveJournals to "journals",
+        RotationStep.MoveChannels to "channels",
+        RotationStep.RekeyReach to "reach",
+        RotationStep.SealBackup to "backup",
+    )
+
+    private fun FakePorts.set(step: RotationStep, answer: () -> Boolean) {
+        when (step) {
+            RotationStep.MoveJournals -> journals = answer
+            RotationStep.MoveChannels -> channels = answer
+            RotationStep.RekeyReach -> reach = answer
+            else -> backup = answer
+        }
+    }
+
+    private fun KeyRotationOwed.done(step: RotationStep): Boolean = when (step) {
+        RotationStep.MoveJournals -> journalsMoved
+        RotationStep.MoveChannels -> channelsMoved
+        RotationStep.RekeyReach -> reachRekeyed
+        else -> backupSealed
+    }
+
+    @Test
+    fun `a step that answers not done keeps the rotation owed and is not recorded`() = runTest {
+        for ((step, call) in seedSteps) {
+            val ports = FakePorts()
+            val storage = MapStorage()
+            ports.set(step) { false }
+            val r = runner(ports, storage)
+            val result = r.rotate(device)
+            assertEquals("$step", step, (result as RotationResult.Pending).step)
+            val owed = r.owed()!!
+            assertFalse("$step must not be recorded", owed.done(step))
+            assertEquals("$step is the next step", step, nextRotationStep(owed))
+            // Every other step of the four ran and was recorded.
+            for ((other, _) in seedSteps) if (other != step) assertTrue("$other", owed.done(other))
+            assertEquals(0, ports.discarded)
+            // Retried by itself, alone, and only then is the rotation done.
+            ports.calls.clear()
+            ports.set(step) { true }
+            assertEquals(RotationResult.Done, r.resume())
+            assertEquals(listOf(call), ports.calls)
+            assertNull(r.owed())
+        }
+    }
+
+    @Test
+    fun `a step that throws keeps the rotation owed exactly like one that answers not done`() = runTest {
+        for ((step, _) in seedSteps) {
+            val ports = FakePorts()
+            val storage = MapStorage()
+            ports.set(step) { throw IOException("down") }
+            val r = runner(ports, storage)
+            assertEquals("$step", step, (r.rotate(device) as RotationResult.Pending).step)
+            assertFalse(r.owed()!!.done(step))
+            // Still failing at the next landing: still owed, never done.
+            assertEquals("$step", step, (r.resume() as RotationResult.Pending).step)
+            assertFalse(r.owed()!!.done(step))
+        }
+    }
+
+    @Test
+    fun `the rotation is not done while any of the four steps is owed`() = runTest {
+        val ports = FakePorts()
+        val storage = MapStorage()
+        for ((step, _) in seedSteps) ports.set(step) { false }
+        val r = runner(ports, storage)
+        // The first one owed is the one reported.
+        assertEquals(RotationStep.MoveJournals, (r.rotate(device) as RotationResult.Pending).step)
+        // One lands per landing; the result is Pending until the last did.
+        val expected = listOf(RotationStep.MoveChannels, RotationStep.RekeyReach, RotationStep.SealBackup)
+        for ((index, pair) in seedSteps.withIndex()) {
+            ports.set(pair.first) { true }
+            val result = r.resume()
+            if (index < expected.size) {
+                assertEquals(expected[index], (result as RotationResult.Pending).step)
+                assertTrue(storage.map.isNotEmpty())
+            } else {
+                assertEquals(RotationResult.Done, result)
+            }
+        }
+        assertTrue(storage.map.isEmpty())
+        assertEquals(1, ports.discarded)
+    }
+
+    @Test
+    fun `an owed step survives a restart and is the only thing the next process runs`() = runTest {
+        val storage = MapStorage()
+        val first = FakePorts()
+        first.channels = { false }
+        runner(first, storage).rotate(device)
+        // A new process: new ports, the same stored record.
+        val second = FakePorts()
+        val r = runner(second, storage)
+        assertTrue(rotationResumesByItself(r.owed()!!))
+        assertFalse(rotationCanBeAbandoned(r.owed()!!))
+        assertEquals(RotationResult.Done, r.resume())
+        assertEquals(listOf("channels"), second.calls)
+    }
+
     @Test
     fun `keys that could not be stored locally are retried without a second commit`() = runTest {
         val ports = FakePorts()

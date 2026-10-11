@@ -1159,6 +1159,9 @@ private fun SessionRoot(
                 // group founded under the account identity; after a rotation
                 // it stays under the predecessor (no leaf is moved).
                 accountIdentitySeed = me.lakko.app.auth.conversationAccountSeedOf(chatRepository.context, me.lakko.app.auth.base64Encode(secrets.accountId), secrets.accountIdentitySeed),
+                // Owner requests follow the CURRENT key (section 3.5,
+                // "Channels"): the owner key is handed over, the group is not.
+                currentAccountSeed = secrets.accountIdentitySeed,
             )
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause

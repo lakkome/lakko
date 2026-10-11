@@ -299,8 +299,19 @@ public class ChatRepository(
     /** ADR-0066 part 3 - the account identity the directory serves, when it
      *  is NOT the conversation identity ([accountIdentity]): set after a
      *  rotation of the account keys, `null` otherwise. Used only for the
-     *  mailbox of the published key. */
+     *  mailbox of the published key, the reach keys and the journal roots
+     *  ([rootAccountIdentity]). */
     private val publishedAccountIdentity = AtomicReference<Identity?>(null)
+
+    /**
+     * ADR-0066 section 3.5, "DS" - the account identity the ROOT of an owned
+     * journal derives from: the identity the directory serves (the new key
+     * after a rotation), else the conversation identity. What the role
+     * tables, the registrar-seed envelopes and the invite issuers name stays
+     * [accountIdentity] (the conversation identity); only what derives from
+     * the seed OUTSIDE MLS follows the rotation.
+     */
+    private fun rootAccountIdentity(): Identity? = publishedAccountIdentity.get() ?: accountIdentity.get()
 
     /**
      * Keep [publishedAccountIdentity] in step with the session's current
@@ -617,7 +628,9 @@ public class ChatRepository(
             // ADR-0053 — a re-authentication of the same account still claims
             // both mailboxes ("after every login").
             claimOwnMailboxesBestEffort()
-            accountIdentity.get()?.let { bindReachBestEffort(newAccountIdB64, it) }
+            // ADR-0066 section 3.5, "Reach": the reach keys and the mailbox
+            // they are registered on follow the published key.
+            rootAccountIdentity()?.let { bindReachBestEffort(newAccountIdB64, it) }
             return
         }
         if (existing != null) {
@@ -631,10 +644,11 @@ public class ChatRepository(
         // ADR-0066 part 3, Stage A: after a rotation of the account keys the
         // conversation leaves that exist stay bound to the PREDECESSOR key
         // (no leaf is moved in place), so the account identity the chat
-        // layer acts as - role tables, registrar seeds, the mailbox Welcomes
-        // for those bindings arrive in, journal roots of owned groups - is
-        // the predecessor's. The identity the directory serves is kept
-        // beside it for the mailbox of the published key.
+        // layer acts as - role tables, registrar-seed envelopes, the mailbox
+        // Welcomes for those bindings arrive in - is the predecessor's. The
+        // identity the directory serves is kept beside it for what derives
+        // from the seed outside MLS: the mailbox of the published key, the
+        // reach keys and the journal roots of owned groups (section 3.5).
         val conversationSeed = me.lakko.app.auth.conversationAccountSeedOf(
             applicationContext,
             newAccountIdB64,
@@ -801,7 +815,9 @@ public class ChatRepository(
         claimOwnMailboxesBestEffort()
         // ADR-0060 — bind the reach keys to this account and reconcile its
         // mailbox (the default setting for an account that never chose).
-        bindReachBestEffort(newAccountIdB64, account)
+        // ADR-0066 section 3.5, "Reach": after a rotation the reach keys
+        // derive from the published key, not the conversation identity's.
+        bindReachBestEffort(newAccountIdB64, publishedAccountIdentity.get() ?: account)
 
         // Every session start — a password / passkey / recovery landing AND
         // the silent cold-start restore — publishes a KeyPackage minted from
@@ -7612,7 +7628,7 @@ public class ChatRepository(
     /** ADR-0057 — the journal's root signer, derived from the ACCOUNT identity
      *  (every device of the owner's account derives the same one). */
     private fun rootStatementSigner(groupId: ByteArray): me.lakko.app.ds.DsStatementSigning? {
-        val account = accountIdentity.get() ?: return null
+        val account = rootAccountIdentity() ?: return null
         return try {
             me.lakko.app.ds.FfiDsStatementSigning.root(account, groupId)
         } catch (cause: Throwable) {
@@ -7754,7 +7770,7 @@ public class ChatRepository(
         ) {
             return revokeKeysFromRegistrarList(record, groupIdHex, evictees)
         }
-        val account = accountIdentity.get() ?: return emptyList()
+        val account = rootAccountIdentity() ?: return emptyList()
         val rootSeed = try {
             uniffi.lakko_ffi_uniffi.dsJournalRootSeed(account.ed25519Seed(), record.groupId)
         } catch (_: Throwable) {
@@ -8115,7 +8131,7 @@ public class ChatRepository(
                 return
             }
             val root = rootStatementSigner(record.groupId) ?: return
-            val account = accountIdentity.get() ?: return
+            val account = rootAccountIdentity() ?: return
             val rootSeed = uniffi.lakko_ffi_uniffi.dsJournalRootSeed(account.ed25519Seed(), record.groupId)
             try {
                 val result = me.lakko.app.ds.reconcileAppointments(
@@ -8512,7 +8528,7 @@ public class ChatRepository(
                     liveOwner = { providerLock.withLock { roleTableOrNull(record.group)?.owner } },
                     ownerX25519 = { accountKey -> memberX25519KeyOrNull(accountKey) },
                     rootSeed = {
-                        val account = accountIdentity.get() ?: throw IllegalStateException("no account identity")
+                        val account = rootAccountIdentity() ?: throw IllegalStateException("no account identity")
                         val accountSeed = account.ed25519Seed()
                         try {
                             uniffi.lakko_ffi_uniffi.dsJournalRootSeed(accountSeed, record.groupId)
@@ -8578,6 +8594,64 @@ public class ChatRepository(
         takeoverNotBeforeMs.remove(groupIdHex)
         scheduleTakeover(groupIdHex)
     }
+
+    /**
+     * ADR-0066 section 3.5, "DS" - for every group journal this account
+     * roots (it is the ADR-0022 owner), hand the root from the one the OLD
+     * seed derives to the one the new seed derives: the old root seed is
+     * kept as the pending takeover seed and the ADR-0057 takeover runs,
+     * exactly as after an ownership handover (the `root` transfer signed by
+     * the old root, then the registrar set replaced and the registrar seeds
+     * re-sent). Durable: a takeover that does not land is retried at session
+     * start and from the poll tail ([scheduleTakeover]).
+     *
+     * [predecessorSeed] and [currentSeed] are 64-byte phrase seeds (the
+     * LATEST own predecessor and the session's current one). Returns how
+     * many journals were scheduled. Throws when a pending seed could not be
+     * persisted: the caller then keeps its step owed, because a takeover
+     * that lives only in this process is not one a restart finishes.
+     */
+    public suspend fun transferOwnedJournalRoots(predecessorSeed: ByteArray, currentSeed: ByteArray): Int =
+        withContext(mlsDispatcher) {
+            val accountIdB64 = currentAccountIdB64.get()
+                ?: throw IllegalStateException("ChatRepository not bootstrapped")
+            // The new root derives from the identity the directory serves.
+            refreshPublishedAccountIdentity(currentSeed)
+            val owned = providerLock.withLock {
+                groups.filter { (_, record) -> ownsJournal(record.group) }
+                    .map { (groupIdHex, record) -> groupIdHex to record.groupId }
+            }
+            val oldAccountSeed = Identity.fromSeed(predecessorSeed).use { it.ed25519Seed() }
+            try {
+                for ((groupIdHex, groupId) in owned) {
+                    val held = journalOwnershipStore.pendingRootSeeds.get(accountIdB64, groupIdHex)
+                    if (held != null) {
+                        // An earlier run (or an ownership handover) already
+                        // keeps the root the journal is still under.
+                        held.fill(0)
+                    } else {
+                        val rootSeed = uniffi.lakko_ffi_uniffi.dsJournalRootSeed(oldAccountSeed, groupId)
+                        try {
+                            journalOwnershipStore.pendingRootSeeds.put(accountIdB64, groupIdHex, rootSeed)
+                        } finally {
+                            rootSeed.fill(0)
+                        }
+                        // The store's write reports nothing: read it back.
+                        val kept = journalOwnershipStore.pendingRootSeeds.get(accountIdB64, groupIdHex)
+                            ?: throw IllegalStateException("the previous journal root was not kept")
+                        kept.fill(0)
+                    }
+                }
+            } finally {
+                oldAccountSeed.fill(0)
+            }
+            for ((groupIdHex, _) in owned) {
+                takeoverNotBeforeMs.remove(groupIdHex)
+                scheduleTakeover(groupIdHex)
+            }
+            android.util.Log.i("ChatRepository", "ADR-0066: ${owned.size} owned journal root transfer(s) scheduled")
+            owned.size
+        }
 
     /** Groups whose takeover is running now. */
     private val takeoverInFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
@@ -8663,7 +8737,7 @@ public class ChatRepository(
                 }
             },
             newRegistrarPublicKey = { accountKey ->
-                val account = accountIdentity.get() ?: throw IllegalStateException("no account identity")
+                val account = rootAccountIdentity() ?: throw IllegalStateException("no account identity")
                 val accountSeed = account.ed25519Seed()
                 val rootSeed = try {
                     uniffi.lakko_ffi_uniffi.dsJournalRootSeed(accountSeed, record.groupId)

@@ -101,6 +101,11 @@ internal data class ReachDoc(
     val visibilityHex: String? = null,
     /** The `open` flag the server was last told, or `null` when never told. */
     val registeredOpen: Boolean? = null,
+    /** ADR-0066 section 3.5 - the account key (hex) whose mailbox
+     *  [registered] and [registeredOpen] describe, once a rotation moved the
+     *  reach keys; `null` before any rotation (the key the session first
+     *  bound). */
+    val registeredForKeyHex: String? = null,
     /** Every conversation group this account is in, hex. */
     val joinedGroups: List<String> = emptyList(),
     /** Every channel this account is subscribed to or publishes, hex. */

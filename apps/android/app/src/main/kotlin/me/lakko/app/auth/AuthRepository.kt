@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import me.lakko.app.backup.DevicePhrase
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.push.PushSubscriber
@@ -4992,6 +4993,116 @@ public class AuthRepository(
         }
     }
 
+    /**
+     * The seeds the steps that follow the seed outside MLS move between
+     * (ADR section 3.5): the LATEST own predecessor's phrase seed and the
+     * session's current one, as fresh copies the caller zeroes. `null` when
+     * no predecessor is readable on this device; after an adoption that is
+     * a failure of the store, and the callers keep their step owed.
+     */
+    public fun rotationSeedPair(): Pair<ByteArray, ByteArray>? {
+        val secrets = rotationSecrets()
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val previous = ownPredecessorStore.load(accountIdB64).let { rows ->
+            val last = rows.lastOrNull()?.phraseSeed?.copyOf()
+            rows.forEach { it.zero() }
+            last
+        } ?: return null
+        return previous to secrets.accountIdentitySeed.copyOf()
+    }
+
+    /**
+     * ADR section 3.5, "Channels": hand the owner key of every channel this
+     * device publishes to from the predecessor's key to the current one.
+     * `true` only when every channel has a verdict; throws when the channel
+     * list could not be read. Run by the rotating device as a step of its
+     * owed record and, idempotently, by a kept device when it adopts.
+     */
+    public suspend fun rotationMoveOwnedChannels(): Boolean {
+        val accountIdB64 = base64Encode(rotationSecrets().accountId)
+        // Called only after the new keys were adopted, when a predecessor
+        // always exists: none readable is a failure, not "nothing to do".
+        val (oldSeed, newSeed) = rotationSeedPair() ?: return false
+        return try {
+            withContext(Dispatchers.IO) {
+                me.lakko.app.channels.KeyRotationChannels.handOverAll(applicationContext, accountIdB64, oldSeed, newSeed)
+            }
+        } finally {
+            oldSeed.fill(0)
+            newSeed.fill(0)
+        }
+    }
+
+    /**
+     * ADR section 3.5, "Backup": re-seal the backup under the phrase this
+     * device holds NOW and upload it, awaited. Throws on anything but an
+     * accepted upload, so the rotation keeps the step owed; nothing here is
+     * best-effort. [knownGroupIdsHex] and [wholeStorageSnapshot] come from
+     * the chat layer, [syncedState] from the DeviceGroup sync runtime.
+     */
+    public suspend fun rotationSealBackup(
+        wholeStorageSnapshot: ByteArray,
+        knownGroupIdsHex: List<String>,
+        syncedState: ByteArray?,
+    ) {
+        val secrets = rotationSecrets()
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val phrase = DevicePhrase.read(applicationContext, accountIdB64)
+            ?: throw IllegalStateException("the new phrase is not readable on this device")
+        withContext(Dispatchers.IO) {
+            val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
+            val phraseSeed = RecoveryMnemonic.fromPhrase(phrase).use { it.toSeed() }
+            try {
+                // An envelope sealed under the OLD words would be exactly
+                // the backup this step exists to replace.
+                check(phraseSeed.contentEquals(secrets.accountIdentitySeed)) {
+                    "the phrase on this device is not the rotated one"
+                }
+                val seed = me.lakko.app.backup.ed25519SeedFromIdentitySeed(phraseSeed)
+                try {
+                    val contacts =
+                        me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, accountIdB64).map { c ->
+                            uniffi.lakko_ffi_uniffi.BackupContactRecord(
+                                ed25519Pubkey = c.request.fromPubkey,
+                                x25519Pubkey = ByteArray(32),
+                                displayName = c.displayName ?: "",
+                                accountId = c.request.fromAccountId,
+                            )
+                        }
+                    me.lakko.app.backup.BackupClient().use { client ->
+                        client.setSessionToken(secrets.sessionToken)
+                        client.uploadNow(
+                            accountId = secrets.accountId,
+                            ed25519Seed = seed,
+                            phraseBytes = phraseBytes,
+                            contacts = contacts,
+                            wholeStorageSnapshot = wholeStorageSnapshot,
+                            context = applicationContext,
+                            accountIdB64 = accountIdB64,
+                            knownGroupIdsHex = knownGroupIdsHex,
+                            syncedState = syncedState,
+                        )
+                    }
+                } finally {
+                    seed.fill(0)
+                }
+            } finally {
+                phraseSeed.fill(0)
+                phraseBytes.fill(0)
+            }
+            // The scheduled backup has nothing older to send.
+            val now = System.currentTimeMillis()
+            me.lakko.app.backup.AutoBackupStore.save(
+                applicationContext,
+                accountIdB64,
+                me.lakko.app.backup.AutoBackup.markedUploaded(
+                    me.lakko.app.backup.AutoBackupStore.load(applicationContext, accountIdB64),
+                    now,
+                ),
+            )
+        }
+    }
+
     /** The publish landed far enough: the new words may be shown. */
     public fun rotationPhraseReleased() {
         mutablePublishOwedRevision.value = mutablePublishOwedRevision.value + 1
@@ -5300,6 +5411,21 @@ public class AuthRepository(
                 } catch (cause: Throwable) {
                     if (cause is kotlinx.coroutines.CancellationException) throw cause
                     Log.w("lakko-auth", "device list root not confirmed after adopting: ${cause.javaClass.simpleName}")
+                }
+            }
+            // The channels this device publishes to follow the new owner
+            // key: idempotent, whichever device gets there first hands each
+            // over (ADR section 3.5, "Channels"). Not this device's owed
+            // record: a kept device has none, and the rotating device's
+            // record carries the step.
+            pushScope.launch {
+                try {
+                    if (!rotationMoveOwnedChannels()) {
+                        Log.w("lakko-auth", "a channel owner handover got no verdict after adopting; the rotating device's step covers it")
+                    }
+                } catch (cause: Throwable) {
+                    if (cause is kotlinx.coroutines.CancellationException) throw cause
+                    Log.w("lakko-auth", "channel owner handover not run after adopting: ${cause.javaClass.simpleName}")
                 }
             }
         }

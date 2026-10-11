@@ -256,7 +256,14 @@ public class ChannelsUiState(
      * channels still lacking keys are re-opened). A different account
      * replaces everything account-scoped. Runs off the main thread.
      */
-    public suspend fun bind(accountIdB64: String, accountIdentitySeed: ByteArray) {
+    public suspend fun bind(
+        accountIdB64: String,
+        accountIdentitySeed: ByteArray,
+        /** ADR-0066 section 3.5 - the account's current phrase seed, which
+         *  after a rotation is not [accountIdentitySeed]; see
+         *  [ChannelPublisherIdentity.bind]. */
+        currentAccountSeed: ByteArray? = null,
+    ) {
         withContext(Dispatchers.Default) {
             if (boundAccountIdB64 != accountIdB64) {
                 val store = logStore
@@ -299,7 +306,7 @@ public class ChannelsUiState(
                     if (_counterByChannel.value.isNotEmpty()) persistPublisherCounters()
                 }
             }
-            publisher?.bind(accountIdB64, accountIdentitySeed)
+            publisher?.bind(accountIdB64, accountIdentitySeed, currentAccountSeed)
             // ADR-0065 phase 2 / UX 16.6 — re-read: the reset that records
             // the set runs between two binds of the same account.
             _orphaned.value = orphanStore?.load(accountIdB64) ?: emptySet()
