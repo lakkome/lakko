@@ -106,6 +106,51 @@ export interface ReachBook {
    * checked when it appears, not only the scopes known at the first sync.
    */
   readonly recovery: { readonly checked: Readonly<Record<string, true>> } | null;
+  /**
+   * ADR-0066 section 3.5, "Reach": the account key (hex) whose mailbox
+   * `registered` and `open` describe. Absent on a book written before it
+   * was recorded.
+   */
+  readonly registeredForKeyHex?: string;
+}
+
+/** What binding a book to an account key does with its registrations. */
+export type ReachRebind =
+  /** They were made under the bound key: nothing changes. */
+  | "keep"
+  /** Nothing says which key they were made under: they are the bound key's,
+   *  and the book now says so. */
+  | "stamp"
+  /** They were made under ANOTHER key of this account, hence on another
+   *  mailbox: forgotten here, and everything is registered again under the
+   *  bound key. The old mailbox is left as it is. */
+  | "move";
+
+/** The decision of {@link bindReachBook}. Pure. */
+export function reachRebind(boundKeyHex: string, registeredForKeyHex: string | undefined): ReachRebind {
+  if (registeredForKeyHex === boundKeyHex) return "keep";
+  return registeredForKeyHex === undefined ? "stamp" : "move";
+}
+
+/**
+ * The book as the session of `boundKeyHex` holds it (ADR-0066 section 3.5,
+ * "Reach"; the rule iOS's `ReachCenter.rekey` and Android's `rekeyDecision`
+ * apply). A reach key and the mailbox it is registered on both derive from
+ * the account seed, so after a rotation the recorded registrations describe
+ * the OLD mailbox: they are dropped (with the `open` flag), and the next
+ * sync registers every wanted key on the new one. The version counters, the
+ * links and the open requests are kept. Returns the same object when nothing
+ * changes.
+ */
+export function bindReachBook(book: ReachBook, boundKeyHex: string): ReachBook {
+  switch (reachRebind(boundKeyHex, book.registeredForKeyHex)) {
+    case "keep":
+      return book;
+    case "stamp":
+      return { ...book, registeredForKeyHex: boundKeyHex };
+    case "move":
+      return { ...book, registered: {}, open: null, registeredForKeyHex: boundKeyHex };
+  }
 }
 
 export const EMPTY_REACH_BOOK: ReachBook = {
@@ -534,6 +579,9 @@ export function decodeReachBook(json: string | null | undefined): ReachBook {
       fofRotatedAtMs: typeof raw.fofRotatedAtMs === "number" ? raw.fofRotatedAtMs : 0,
       stateUpdatedAtMs: typeof raw.stateUpdatedAtMs === "number" ? raw.stateUpdatedAtMs : 0,
       recovery: decodeRecovery(raw.recovery),
+      ...(typeof raw.registeredForKeyHex === "string"
+        ? { registeredForKeyHex: raw.registeredForKeyHex }
+        : {}),
     };
   } catch {
     return EMPTY_REACH_BOOK;

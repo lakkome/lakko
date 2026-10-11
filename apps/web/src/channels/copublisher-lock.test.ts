@@ -187,7 +187,11 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
     // `fetch` can land before the approve even acquires — that IS the split
     // working (the network half is outside the lock). The load-bearing part is
     // what is ABSENT: no apply, and the epoch moved by exactly the one Add.
-    expect(order).toEqual(["fetch", "approve-merge", "publish-commit"]);
+    // Whether `fetch` lands before or after the approve's merge is scheduling
+    // and not asserted (it moved when the approve lost an `await`); the merge
+    // precedes its publish, and the fetch happened.
+    expect([...order].sort()).toEqual(["approve-merge", "fetch", "publish-commit"]);
+    expect(order.indexOf("approve-merge")).toBeLessThan(order.indexOf("publish-commit"));
     expect(g.epoch()).toBe(6);
     expect(applyMock(g.group)).not.toHaveBeenCalled();
 
@@ -197,14 +201,17 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
 
     // The reseal happened INSIDE the region, so it read the epoch the approve
     // committed (6) — not one a concurrent apply had already moved past.
-    expect(order).toEqual([
-      "fetch",
+    expect(order.filter((o) => o !== "fetch")).toEqual([
       "approve-merge",
       "publish-commit",
       "publish-welcome",
       "seed@6",
       "apply:#7",
     ]);
+    // The one fetch is the poll's network half: before the commit publish
+    // released, and so before the apply it feeds.
+    expect(order.filter((o) => o === "fetch")).toHaveLength(1);
+    expect(order.indexOf("fetch")).toBeLessThan(order.indexOf("publish-welcome"));
     expect(g.epoch()).toBe(7);
   });
 

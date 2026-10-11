@@ -23,6 +23,7 @@ import { journalHex } from "../ds/access";
 import { loadWasm } from "../wasm";
 import type { ScopedEnvelopeKind } from "./envelope-sniff";
 import { fileDelegations } from "./received-grants";
+import { resolveAccountKeyHex } from "../contacts/address-resolver";
 import { reachSession } from "./reach-service";
 import { loadReachRow, saveReachRow } from "./reach-store";
 
@@ -102,7 +103,12 @@ export async function intakeScopedEnvelope(args: {
   if (session === null) return;
   let senderHex: string | null = null;
   try {
-    if (args.senderKeyB64 !== undefined) senderHex = journalHex(base64Decode(args.senderKeyB64));
+    // ADR-0066 section 3.5a rule 2 - the sender as a PERSON: a leaf bound to
+    // a proven predecessor (this account's own other devices included) is
+    // filed, and recognised as self, under the current key.
+    if (args.senderKeyB64 !== undefined) {
+      senderHex = resolveAccountKeyHex(journalHex(base64Decode(args.senderKeyB64)));
+    }
   } catch {
     senderHex = null;
   }

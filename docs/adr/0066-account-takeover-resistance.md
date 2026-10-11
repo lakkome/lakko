@@ -899,6 +899,32 @@ read; build-time check.
 uploaded with a new head. Passkeys keep signing in; "let this passkey
 restore keys" is off for each until the person turns it on again.
 
+#### 3.5a The mailbox after a rotation (decided 2026-10-11)
+
+The maintainer's decision: **the account moves to the new mailbox at once.** A mailbox's address and
+the right to read it both derive from the account key, so the holder of the old seed can read the old
+mailbox for as long as anything is delivered there; keeping it as the inbound address for all of
+Stage A (the alternative considered) would leave the stolen key a live inbox, and would let its
+holder rewrite that mailbox's reach-key set.
+
+1. **Senders resolve before they address.** Wherever a client derives a mailbox from an account key
+   (a Welcome for a leaf, a contact request, a call cold start, a committer delegation, "another
+   device of my own account"), it first maps the key through the proven-predecessor resolver
+   (predecessor -> current, own account included) and addresses the CURRENT key's mailbox with a
+   grant issued for it. An unproven change never gets this treatment.
+2. **Grants are keyed on the person, not on the key they arrived under.** A reach grant received in
+   a profile envelope from a leaf bound to a predecessor key is stored for the current key of that
+   account.
+3. **The rotating account re-sends its profile** (and therefore its grants for the new mailbox) to
+   its one-to-ones and groups after the reach re-key, through the existing throttled publisher.
+4. **The old mailbox is read, never written to, and then abandoned.** The account's devices keep
+   polling each predecessor mailbox for 30 days after adopting (the DS journal retention; chosen)
+   so nothing already sent is lost, then stop. No new reach key is registered there.
+
+Until a sender has observed the proven change (it fetches the bundle on its next lookup of that
+account) it still addresses the old mailbox with an old grant; that write is accepted and is read
+under rule 4, which is the window the 30 days cover.
+
 #### 3.6 Stage B, in outline
 
 Built on ADR-0065 R.5 to R.7 once those exist. The rotating account's
@@ -1874,7 +1900,7 @@ Where the clients differ (to be aligned before any walk):
 | Owned group journals re-rooted | yes (ADR-0057 takeover) | yes | yes (aligned with iOS 2026-10-11) |
 | Channel owner handed over | yes | yes (channels this device created) | yes (every channel it holds a publisher seed for; a co-published one ends as not-owner) |
 | Reach keys after the rotation | restarted under the new key; grants name the new mailbox, which peers do not address | `rekey` under the new key; cannot write to the own old mailbox | re-keyed like iOS, with the same limit |
-| Backup re-sealed | marked dirty | re-sealed, an upload failure swallowed | re-sealed and awaited; a failure keeps the step owed |
+| Backup re-sealed | marked dirty | re-sealed and awaited since 2026-10-11 (an upload failure was swallowed before) | re-sealed and awaited; a failure keeps the step owed |
 
 Android first answered "done" for the journal, channel, reach and backup steps without doing them
 (a rotation reported success while the old seed still rooted the account's groups and owned its
@@ -1886,13 +1912,54 @@ Not built on any client:
 
 - **A device paired after a rotation** binds under the new key and reads as another account to the
   groups; the pairing bundle must carry the predecessor binding (a cross-client format change).
-- **The mailbox rule of part 3.5.** Leaves still name the old account key, so Welcomes go to the
+- **The mailbox rule (decided 2026-10-11 as 3.5a; see "3.5a as built").** As first built: Leaves still name the old account key, so Welcomes go to the
   old mailbox for all of Stage A; nothing registers the new reach keys there or maps predecessor
   to current on the sender side. This is the open design decision.
 - **A peer away longer than the proof's 14 days** is refused (no reset flag): discovery does not
   serve the attestation, so its `signed_at` cannot stand in for the clock.
 - PublisherGroup journal roots are not transferred. The predecessor mapping is wired into names
   only; a contact first added after their own rotation is not mapped to their old-key leaves.
+
+## 3.5a as built (2026-10-11): the mailbox rule on the three clients
+
+Built on web, iOS and Android; unit-tested only (web vitest 4340, iOS `LakkoTests` 2997 with 0
+failures, Android 3391 on the host JVM without the native core). Nothing was walked on a device or
+against a server; no server or core change was needed. The same day the iOS rotation's backup step
+stopped reporting success on a failed or empty upload, and web's reach step, which answered done
+without registering anything, became a real owed step.
+
+All three: every sender site resolves an account key through the proven-predecessor resolver before
+deriving a mailbox (Welcomes incl. the sweep and the ADR-0040 replay, contact acks, committer
+delegations, people search, channel member cards, "another device of my own account"); a received
+grant is filed and found per person; the rotating device has an owed `profile` step after the reach
+re-key; predecessor mailboxes are polled for 30 days after adoption and nothing is registered there.
+
+Differences and gaps:
+
+- **A contact request to a proven-predecessor key**: iOS re-fetches the current bundle and sends;
+  web and Android refuse the send (the request is sealed to the X25519 key in hand).
+- **A kept device's profile re-send**: durable on Android (a marker retried at each session start),
+  the throttled effect on web, one best-effort attempt on iOS.
+- **Predecessor mailboxes carry Welcomes only.** A contact request or ack that reaches the old
+  mailbox inside the 30 days is not acted on (Android states why: the pending list dedupes by DS
+  message id across mailboxes).
+- **Web knows only the oldest own predecessor** in a session; after a second rotation the
+  intermediate key's mailbox is not polled.
+- **Proposer and committer may disagree** about a person's (or the committer's) current key until
+  both observed the proof; the delegation then names the other mailbox and the Welcome stays owed.
+
+Consequences of the rule itself, open for the maintainer:
+
+1. **Everything granted before a rotation stops opening the mailbox once the sender has observed
+   the change**: the rotating account's old `/i/` and `/c/` links and the `reply` grant of its
+   unanswered contact requests name the old mailbox. An accept is addressed to the new mailbox with
+   the old grant and is refused; no shared conversation exists through which a new grant could
+   arrive.
+2. **A peer that receives the re-sent profile before it observes the proven key** holds the new
+   grant and the old address; its single-shot writes fail until its next identity fetch (queued
+   sweep Welcomes retry by themselves).
+3. **People search refuses a hit whose key is a proven predecessor** of the fetched bundle's key
+   (iOS; not checked on the others).
 
 ## Not verified
 

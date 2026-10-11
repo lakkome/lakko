@@ -22,7 +22,10 @@ import { putChannelOwner } from "../channels/api";
 import { loadOwnerMoved, markOwnerMoved } from "../channels/owner-moved";
 import { useChats } from "../chat/ChatContext";
 import { DiscoveryHttpError } from "../discovery/client";
+import { journalHex } from "../ds/access";
 import { takeOverOwnedJournals } from "../ds/rotation-takeover";
+import { resendProfileAfterRotation } from "../profile/rotation-resend";
+import { reachSession } from "../reach/reach-service";
 import { channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import {
@@ -106,7 +109,7 @@ export function useKeyRotation(): KeyRotationRuntime {
   ): { ports: RotationPorts; error: () => unknown } {
     let error: unknown = null;
     const publish = async (
-      step: "key-package" | "device-group-root" | "journals" | "channels" | "reach" | "backup",
+      step: "key-package" | "device-group-root" | "journals" | "channels" | "reach" | "profile" | "backup",
       current: RotationOwed,
     ): Promise<PublishVerdict> => {
       switch (step) {
@@ -165,11 +168,24 @@ export function useKeyRotation(): KeyRotationRuntime {
             oldSeed.fill(0);
           }
         }
-        case "reach":
+        case "reach": {
           // The new mailbox is claimed, and the reach session restarted for
           // the new key, when the account identity is replaced
-          // (`ChatContext`, `ReachProvider`). Nothing more is sent here.
-          return chats.accountIdentity() === null ? "later" : "done";
+          // (`ChatContext`, `ReachProvider`); a book bound to the old key
+          // forgets what it registered there (`bindReachBook`). The step is
+          // done once every wanted key is registered on the NEW mailbox: a
+          // sync that fails throws, which keeps the step owed.
+          const identity = chats.accountIdentity();
+          const session = reachSession();
+          if (identity === null || session === null) return "later";
+          if (session.accountKeyHex !== journalHex(identity.signaturePublicKey)) return "later";
+          await session.syncNow(true);
+          return "done";
+        }
+        case "profile":
+          // ADR-0066 section 3.5a rule 3 - the grants for the new mailbox,
+          // to every one-to-one and group. Owed until all of them landed.
+          return resendProfileAfterRotation();
         case "backup":
           // Re-sealed under the new phrase and uploaded with a new head by
           // the automatic backup at its next tick.

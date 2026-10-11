@@ -50,7 +50,13 @@ export const EMPTY_RECEIVED_GRANTS: ReceivedGrants = { people: {}, delegations: 
 function newer(incoming: HeldGrant, stored: HeldGrant | undefined): boolean {
   // A higher version replaces; the same version re-sent (a growth re-send)
   // changes nothing; a lower one is a stale replay and is ignored.
-  return stored === undefined || incoming.version > stored.version;
+  if (stored === undefined || incoming.version > stored.version) return true;
+  // ADR-0066 section 3.5a: the version counters survive a rotation of the
+  // account keys, but every reach key is derived from the account seed, so
+  // the profile re-sent after a rotation carries the SAME version with
+  // another key. That grant is the one the new mailbox accepts; the stored
+  // one opens only the mailbox that was left.
+  return incoming.version === stored.version && incoming.wireB64 !== stored.wireB64;
 }
 
 /** File a `contact` grant from `senderHex`. */
@@ -207,6 +213,69 @@ export function grantsInOrder(
     if (member !== undefined) out.push(member);
   }
   return out;
+}
+
+/**
+ * ADR-0066 section 3.5a rule 2 - the grants held for one PERSON, over every
+ * key they have had (`keysHex`: the current key first, then the proven
+ * predecessors, as `personKeysHex` gives them). A grant filed under a key
+ * that later became a proven predecessor is still found; the grants filed
+ * under the current key come first, since those are the ones issued for the
+ * mailbox being addressed.
+ */
+export function grantsInOrderForPerson(
+  store: ReceivedGrants,
+  keysHex: readonly string[],
+  options: { readonly scopeHex?: string; readonly allowMember?: boolean } = {},
+): HeldGrant[] {
+  const out: HeldGrant[] = [];
+  const seen = new Set<string>();
+  for (const hex of keysHex) {
+    for (const g of grantsInOrder(store, hex, options)) {
+      if (seen.has(g.wireB64)) continue;
+      seen.add(g.wireB64);
+      out.push(g);
+    }
+  }
+  return out;
+}
+
+/** The best grant held for a person ({@link grantsInOrderForPerson}). */
+export function bestGrantForPerson(
+  store: ReceivedGrants,
+  keysHex: readonly string[],
+  options: { readonly scopeHex?: string; readonly allowMember?: boolean } = {},
+): HeldGrant | null {
+  return grantsInOrderForPerson(store, keysHex, options)[0] ?? null;
+}
+
+/** {@link heldClasses} over every key of one person. */
+export function heldClassesForPerson(
+  store: ReceivedGrants,
+  keysHex: readonly string[],
+  scopeHex?: string,
+): Set<ReachClassName> {
+  const out = new Set<ReachClassName>();
+  for (const hex of keysHex) for (const cls of heldClasses(store, hex, scopeHex)) out.add(cls);
+  return out;
+}
+
+/** Every kept committer-delegation envelope for adds of one person, under
+ *  any key they have had, newest first. */
+export function delegationsForPerson(
+  store: ReceivedGrants,
+  keysHex: readonly string[],
+): HeldDelegations[] {
+  const out: HeldDelegations[] = [];
+  const seen = new Set<string>();
+  for (const hex of keysHex) {
+    for (const d of delegationsFor(store, hex)) {
+      if (seen.has(d.envelopeB64)) continue;
+      seen.add(d.envelopeB64);
+      out.push(d);
+    }
+  }
+  return out.sort((a, b) => b.receivedAtMs - a.receivedAtMs);
 }
 
 /** Whether this account can find (and so offer "Add contact" for) a person:

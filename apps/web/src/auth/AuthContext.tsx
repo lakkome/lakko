@@ -251,6 +251,7 @@ import {
   type KeyRotationState,
   type PreparedRotation,
 } from "./key-rotation-store";
+import { stampPredecessorAdoption } from "../contacts/address-resolver";
 import {
   SUPERSESSION_WINDOW_SECS,
   clearRotatedNotice,
@@ -3422,6 +3423,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }));
     await putAccountIdentitySeed(ctx.accountIdB64, seed, ctx.deviceKey);
     await storeDevicePhrase(ctx.accountIdB64, phrase, ctx.deviceKey, "key-rotation");
+    // ADR-0066 section 3.5a rule 4: the predecessor mailbox is read for 30
+    // days from now, then left.
+    stampPredecessorAdoption(ctx.accountIdB64, Date.now(), true);
     return { phrase, seed, conversationSeed: conversationSeed(next) ?? ctx.oldSeed };
   }
 

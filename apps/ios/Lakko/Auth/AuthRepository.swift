@@ -5196,6 +5196,13 @@ extension AuthRepository {
             return
         }
         try ownPredecessors.add(predecessorSeed, accountIdB64: accountIdB64)
+        // ADR-0066 section 3.5a rule 4 — the old mailbox is read for 30 days
+        // from NOW (the adoption), then left. Recorded once per key.
+        if let oldKey = try? Identity.fromSeed(seed: predecessorSeed).signaturePublicKey() {
+            PredecessorMailbox.AdoptionStore().recordIfAbsent(
+                accountIdB64: accountIdB64, keyB64: base64Encode(oldKey),
+                nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        }
         try AccountIdentitySeedStore.putAccountIdentitySeed(accountIdB64: accountIdB64, seed: seed)
         // The device holds the new keys, so it holds the new phrase.
         DevicePhrase.store(phrase, accountIdB64: accountIdB64, context: context)
@@ -5263,8 +5270,24 @@ extension AuthRepository {
     }
 
     /// The backup, re-sealed under the phrase this device holds now and
-    /// uploaded with a new head (ADR-0066 section 3.5, "Backup").
-    public func resealBackupAfterKeyRotation(wholeStorageSnapshot: Data = Data()) async throws {
+    /// uploaded, awaited (ADR-0066 section 3.5, "Backup").
+    ///
+    /// Nothing here is best-effort: it returns only when the storage tier
+    /// accepted the new envelope, and throws on anything else (no session,
+    /// no phrase, a phrase that is not the rotated one, the phrase cache,
+    /// the seal, the upload), so the rotation keeps the step owed and
+    /// retries it. The one soft step is the ADR-0037 head mint inside
+    /// ``BackupClient/uploadNow``: a failed mint still writes the legacy
+    /// unframed envelope, and that counts as uploaded.
+    ///
+    /// `wholeStorageSnapshot` and `knownGroupIdsHex` come from a chat layer
+    /// the caller has already found ready (``KeyRotationBackup``); this
+    /// function never substitutes an empty snapshot.
+    public func resealBackupAfterKeyRotation(
+        wholeStorageSnapshot: Data,
+        knownGroupIdsHex: [String],
+        syncedState: Data?
+    ) async throws {
         guard let secrets = identitySecrets, let token = tokenProvider.current?.sessionToken else {
             throw SessionNotReady()
         }
@@ -5272,14 +5295,47 @@ extension AuthRepository {
         guard let phrase = DevicePhrase.read(accountIdB64: accountIdB64) else {
             throw AuthClientError.argument("the new phrase is not readable on this device")
         }
-        await Self.bootstrapBackupBestEffort(
+        // An envelope sealed under the OLD words would be exactly the backup
+        // this step exists to replace.
+        let phraseSeed = try RecoveryMnemonic.fromPhrase(phrase: phrase).toSeed()
+        guard phraseSeed == secrets.accountIdentitySeed else {
+            throw AuthClientError.argument("the phrase on this device is not the rotated one")
+        }
+        var phraseBytes = Data(phrase.utf8)
+        defer { phraseBytes.resetBytes(in: 0..<phraseBytes.count) }
+
+        let backupClient = BackupClient()
+        backupClient.setSessionToken(token)
+        // The scheduled backup seals with the cached phrase: left on the old
+        // words it would overwrite this envelope with one the new words
+        // cannot open, so a failed cache write keeps the step owed too.
+        try backupClient.cachePhrase(accountIdB64: accountIdB64, phraseBytes: phraseBytes)
+
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        let contacts = AcceptedContactsStore.load(accountIdB64: accountIdB64).map { c in
+            BackupContactRecord(
+                ed25519Pubkey: c.request.fromPubkey,
+                x25519Pubkey: Data(count: 32),
+                displayName: c.displayName ?? "",
+                accountId: c.request.fromAccountId
+            )
+        }
+        try await backupClient.uploadNow(
             accountId: secrets.accountId,
             accountIdB64: accountIdB64,
-            accountIdentitySeed: secrets.accountIdentitySeed,
-            sessionToken: token,
-            phrase: phrase,
-            context: "key rotation",
-            wholeStorageSnapshot: wholeStorageSnapshot
+            ed25519Seed: identity.ed25519Seed(),
+            phraseBytes: phraseBytes,
+            contacts: contacts,
+            wholeStorageSnapshot: wholeStorageSnapshot,
+            knownGroupIdsHex: knownGroupIdsHex,
+            syncedState: syncedState
+        )
+        // The scheduled backup has nothing older to send.
+        AutoBackupStore.save(
+            accountIdB64: accountIdB64,
+            state: AutoBackup.markedUploaded(
+                AutoBackupStore.load(accountIdB64: accountIdB64),
+                nowMs: Int64(Date().timeIntervalSince1970 * 1000))
         )
     }
 }

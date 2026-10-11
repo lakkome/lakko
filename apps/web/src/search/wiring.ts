@@ -21,7 +21,8 @@ import { DiscoveryClient } from "../discovery/client";
 import { DsClient } from "../ds/client";
 import { bytesToHex } from "../channels/composer";
 import { accountMailboxOf } from "../reach/mailbox-write";
-import { bestGrantFor } from "../reach/received-grants";
+import { bestGrantForPerson } from "../reach/received-grants";
+import { personKeysHex } from "../contacts/address-resolver";
 import { reachSession, reachSignerForGrantWire } from "../reach/reach-service";
 import { loadIntroductions } from "../reach/scoped-intake";
 import { ScopedDiscoveryClient, usernameCertKey } from "../reach/scoped-discovery";
@@ -55,7 +56,10 @@ export function knownPerson(
   if (session !== null) {
     try {
       keptGrantWireB64 =
-        bestGrantFor(session.receivedGrants(), toHex(base64Decode(keyB64)))?.wireB64 ?? null;
+        // ADR-0066 section 3.5a rule 2 - the grants of the PERSON, under
+        // any key a proven rotation left behind.
+        bestGrantForPerson(session.receivedGrants(), personKeysHex(toHex(base64Decode(keyB64))))
+          ?.wireB64 ?? null;
     } catch {
       keptGrantWireB64 = null;
     }

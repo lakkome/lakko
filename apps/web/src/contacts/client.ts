@@ -123,13 +123,15 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 // them the same way the poll does.
 import { consumeRegistrarSeed, ChatClient, rosterOf, toEvent } from "../chat/client";
 import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
-import { bestGrantFor } from "../reach/received-grants";
+import { bestGrantForPerson } from "../reach/received-grants";
+import { personKeysHex, resolveAccountKey } from "./address-resolver";
 import { DELEGATION_TTL_MS, committerCandidates } from "../reach/delegation-rules";
 import type { ReachGrant as WasmReachGrant } from "../../wasm/lakko_ffi_wasm";
 import { reachSession } from "../reach/reach-service";
 import {
   accountKeyOfKeyPackage,
   accountKeyOfLeaf,
+  accountMailboxOf,
   MailboxUnreachableError,
   resolveWriteAuth,
   writeWelcome,
@@ -888,10 +890,13 @@ function sweepPortsFor(
       // sweep is skipped (its devices share one mailbox and one Welcome).
       publishMailbox: async (leafKey, bytes) => {
         const accountKey = accountKeyOfLeaf(rosterOf(group), leafKey);
-        const accountHex = journalHex(accountKey);
+        // ADR-0066 section 3.5a rule 1 - the leaf's binding may name a proven
+        // predecessor: the Welcome goes to the person's CURRENT mailbox, and
+        // two leaves of one person bound under different keys share it.
+        const accountHex = journalHex(resolveAccountKey(accountKey));
         const done = welcomedAccounts.get(accountHex);
         if (done !== undefined) return done;
-        const pseudonym = wasm.IdentityPseudonym.fromIdentity(accountKey).asBytes();
+        const pseudonym = await accountMailboxOf(accountKey);
         const explicit = joinReplyFor(leafKey);
         // ADR-0050 section 2.5a item 7 — never unsigned: every grant held for
         // the account is tried in order (next on 401); with none left nothing
@@ -1590,7 +1595,14 @@ export class ContactsClient {
           // Welcome -> the new member's mailbox (NOT this device's group
           // journal), so no echo re-arm — the committer never re-fetches it.
           const secondBytes = base64Decode(entry.secondArtifactB64);
-          const pseudonym = base64Decode(entry.secondArtifactMailboxB64);
+          // ADR-0066 section 3.5a rule 1 - the entry recorded the mailbox as
+          // it was derived then; the account may have rotated (with a proof)
+          // since, so it is derived again from the account key when the
+          // entry carries one.
+          const pseudonym =
+            entry.secondArtifactAccountKeyB64 === undefined
+              ? base64Decode(entry.secondArtifactMailboxB64)
+              : await accountMailboxOf(base64Decode(entry.secondArtifactAccountKeyB64));
           // ADR-0060 — signed with the key that reaches the account the
           // mailbox is named after (unsigned when the entry predates it).
           const write =
@@ -2302,9 +2314,21 @@ export class ContactsClient {
     // identity pubkey can compute the same 32-byte value, by
     // design. This is the routing address for cold contact
     // requests (see ADR-0005 §13.7).
-    const recipientPseudonym = wasm.IdentityPseudonym.fromIdentity(
-      recipientSignaturePubkey,
-    ).asBytes();
+    //
+    // ADR-0066 section 3.5a rule 1 - resolved first. A request is sealed to
+    // the X25519 key the caller supplied, which belongs to the key it
+    // supplied: when that key is a PROVEN predecessor of an account this
+    // device has pinned at a newer key, the bundle (or the link) is stale
+    // and a request sealed to it would be readable by the holder of the old
+    // seed. Refused; the caller fetches the current bundle.
+    if (
+      journalHex(resolveAccountKey(recipientSignaturePubkey)) !== journalHex(recipientSignaturePubkey)
+    ) {
+      throw ContactsError.wrap(
+        new Error("contact request: the recipient key was superseded by a proven key rotation"),
+      );
+    }
+    const recipientPseudonym = await accountMailboxOf(recipientSignaturePubkey);
 
     // Sender's `from_pseudonym` field. For a first cold contact
     // we use the sender's identity pseudonym (public, derivable
@@ -2430,9 +2454,9 @@ export class ContactsClient {
 
     // Sender's mailbox = `IdentityPseudonym.fromIdentity(sender_pubkey)`.
     // The original request's `fromPubkey` is the routing handle.
-    const senderMailbox = wasm.IdentityPseudonym.fromIdentity(
-      originalRequest.fromPubkey,
-    ).asBytes();
+    // ADR-0066 section 3.5a rule 1 - resolved: an ack never goes to the
+    // mailbox of a key a proven rotation superseded.
+    const senderMailbox = await accountMailboxOf(originalRequest.fromPubkey);
 
     const acceptedAtMs = BigInt(Date.now());
 
@@ -2503,13 +2527,12 @@ export class ContactsClient {
       readonly explicitGrantB64?: string | null;
     } = {},
   ): Promise<{ messageId: number; createdAt: string }> {
-    const wasm = await loadWasm();
     // ADR-0060 section 6 — one inbound mailbox per person: a Welcome goes to
     // the added leaf's ACCOUNT mailbox, signed with the key that lets us
     // reach that account.
-    const recipientPseudonym = wasm.IdentityPseudonym.fromIdentity(
-      recipientAccountKey,
-    ).asBytes();
+    // ADR-0066 section 3.5a rule 1 - the CURRENT mailbox of that account
+    // (the leaf may be bound to a proven predecessor; own account included).
+    const recipientPseudonym = await accountMailboxOf(recipientAccountKey);
     const envelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
     const write = await resolveWriteAuth(recipientAccountKey, {
       ...(options.groupId === undefined ? {} : { scope: options.groupId }),
@@ -2893,10 +2916,14 @@ export class ContactsClient {
     const delivered = new Set<string>();
     for (const dev of devices) {
       const accountKey = await accountKeyOfKeyPackage(dev.keyPackage);
-      const accountHex = journalHex(accountKey);
+      // ADR-0066 section 3.5a rule 1 - one write per PERSON: a KeyPackage
+      // bound to a proven predecessor (a kept device, ours included) names
+      // the same mailbox as one bound to the current key.
+      const accountHex = journalHex(resolveAccountKey(accountKey));
       if (delivered.has(accountHex)) continue;
       delivered.add(accountHex);
-      const isRecipient = accountHex === journalHex(recipientSignaturePubkey);
+      const isRecipient =
+        accountHex === journalHex(resolveAccountKey(recipientSignaturePubkey));
       let publish;
       try {
         publish = await this.sendWelcome(accountKey, added.welcome, {
@@ -3182,9 +3209,13 @@ export class ContactsClient {
   ): Promise<void> {
     const session = reachSession();
     if (session === null) return;
-    const held = bestGrantFor(session.receivedGrants(), journalHex(addedAccountKey), {
-      scopeHex: journalHex(group.groupId),
-    });
+    // ADR-0066 section 3.5a rules 1 and 2 - the grant held for the PERSON
+    // (under any key they have had), for their CURRENT mailbox.
+    const held = bestGrantForPerson(
+      session.receivedGrants(),
+      personKeysHex(journalHex(addedAccountKey)),
+      { scopeHex: journalHex(group.groupId) },
+    );
     if (held === null) return;
     try {
       const wasm = await loadWasm();
@@ -3213,7 +3244,7 @@ export class ContactsClient {
       const grant = wasm.decodeReachGrant(base64Decode(held.wireB64));
       const seed = grant.seed;
       grant.free();
-      const mailbox = wasm.IdentityPseudonym.fromIdentity(addedAccountKey).asBytes();
+      const mailbox = await accountMailboxOf(addedAccountKey);
       const expires = BigInt(Date.now() + DELEGATION_TTL_MS);
       const blobs: Uint8Array[] = [];
       try {
@@ -3222,7 +3253,11 @@ export class ContactsClient {
             wasm.signDelegationBlob(
               seed,
               mailbox,
-              hexBytes(hex),
+              // The committer as the role table names it, resolved: a
+              // committer whose account rotated signs with its current key
+              // (it also tries the key named here unresolved, for a proposer
+              // that has not observed the rotation).
+              resolveAccountKey(hexBytes(hex)),
               expires,
               crypto.getRandomValues(new Uint8Array(16)),
             ),
@@ -3333,12 +3368,12 @@ export class ContactsClient {
     let entryId: string;
     try {
       groupIdBytes = group.groupId;
-      const wasm = await loadWasm();
       // ADR-0060 section 6 (amending ADR-0050 section 2.7): the Welcome is
       // sealed to THIS leaf's KeyPackage but addressed to the ACCOUNT mailbox
       // the leaf's binding names — one inbound mailbox per person.
       welcomeAccountKey = await accountKeyOfKeyPackage(keyPackageBytes);
-      welcomePseudonym = wasm.IdentityPseudonym.fromIdentity(welcomeAccountKey).asBytes();
+      // ADR-0066 section 3.5a rule 1 - resolved to the CURRENT mailbox.
+      welcomePseudonym = await accountMailboxOf(welcomeAccountKey);
       welcomeEnvelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
       // ADR-0053 contract point 3 — register N+1 before anything durable says
       // the commit exists. A refusal lands in the catch below: reset, no publish.

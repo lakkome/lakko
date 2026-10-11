@@ -106,6 +106,11 @@ internal data class ReachDoc(
      *  reach keys; `null` before any rotation (the key the session first
      *  bound). */
     val registeredForKeyHex: String? = null,
+    /** ADR-0066 section 3.5a rule 3 - the account key (hex) the profile
+     *  still has to be re-sent under to every conversation, set when the
+     *  reach keys moved to it and cleared once every conversation took the
+     *  envelope; `null` when nothing is owed. */
+    val profileResendOwedForKeyHex: String? = null,
     /** Every conversation group this account is in, hex. */
     val joinedGroups: List<String> = emptyList(),
     /** Every channel this account is subscribed to or publishes, hex. */

@@ -75,6 +75,9 @@ public struct KeyRotationRecord: Codable, Equatable {
     public var journalsDone = false
     public var channelsDone = false
     public var reachDone = false
+    /// ADR-0066 section 3.5a rule 3 — the profile re-send. Optional so a
+    /// record written before the step existed still decodes (as owed).
+    public var profileDone: Bool?
     public var backupDone = false
     /// The person saw and confirmed the new words.
     public var phraseAcknowledged = false
@@ -100,6 +103,7 @@ public struct KeyRotationRecord: Codable, Equatable {
         case journalsDone = "journals_done"
         case channelsDone = "channels_done"
         case reachDone = "reach_done"
+        case profileDone = "profile_done"
         case backupDone = "backup_done"
         case phraseAcknowledged = "phrase_acknowledged"
     }
@@ -122,6 +126,10 @@ public enum KeyRotationPlan {
         case channels
         /// The new mailbox claim and the reach keys.
         case reach
+        /// The own profile, with grants for the new mailbox, re-sent to every
+        /// one-to-one and group (section 3.5a rule 3). Runs only after
+        /// ``reach``: a grant must name a key the mailbox already knows.
+        case profile
         /// The backup, re-sealed under the new phrase.
         case backup
     }
@@ -135,6 +143,7 @@ public enum KeyRotationPlan {
         if !record.journalsDone { steps.append(.journals) }
         if !record.channelsDone { steps.append(.channels) }
         if !record.reachDone { steps.append(.reach) }
+        if record.profileDone != true { steps.append(.profile) }
         if !record.backupDone { steps.append(.backup) }
         return steps
     }
@@ -148,6 +157,7 @@ public enum KeyRotationPlan {
         case .journals: next.journalsDone = true
         case .channels: next.channelsDone = true
         case .reach: next.reachDone = true
+        case .profile: next.profileDone = true
         case .backup: next.backupDone = true
         }
         return next
@@ -555,6 +565,9 @@ public final class KeyRotationRunner: ObservableObject {
         public var transferOwnedJournals: @MainActor () async throws -> Void
         public var handOverChannels: @MainActor (_ keyGeneration: UInt64?) async throws -> Void
         public var rekeyReach: @MainActor () async throws -> Void
+        /// Section 3.5a rule 3: re-send the profile to every conversation.
+        /// Throws while any send has not landed.
+        public var resendProfile: @MainActor () async throws -> Void
         public var resealBackup: @MainActor () async throws -> Void
         /// The new words for the screen, read from this device's own store.
         public var devicePhrase: @MainActor (_ accountIdB64: String) -> String?
@@ -850,6 +863,12 @@ public final class KeyRotationRunner: ObservableObject {
                 case .reach:
                     try await ports.rekeyReach()
                     landed = true
+                case .profile:
+                    // The grants the profile carries must already be
+                    // registered on the new mailbox.
+                    guard record.reachDone else { continue }
+                    try await ports.resendProfile()
+                    landed = true
                 case .backup:
                     try await ports.resealBackup()
                     landed = true
@@ -1008,15 +1027,60 @@ extension KeyRotationRunner.Ports {
                 // this registers them on the new mailbox.
                 guard await ReachCenter.shared.syncNow() else { throw SessionNotReady() }
             },
+            resendProfile: { [weak chat] in
+                guard let chat else { throw SessionNotReady() }
+                try await chat.resendProfileAfterKeyRotation()
+            },
             resealBackup: { [weak auth, weak chat] in
                 guard let auth else { throw SessionNotReady() }
-                try await auth.resealBackupAfterKeyRotation(
-                    wholeStorageSnapshot: chat?.currentStorageSnapshot() ?? Data())
+                try await KeyRotationBackup.reseal(
+                    chatBootstrapped: chat?.state.bootstrapped ?? false,
+                    snapshot: { chat?.currentStorageSnapshot() },
+                    knownGroupIdsHex: { chat?.state.threads.map(\.groupIdHex) ?? [] },
+                    upload: { snapshot, groupIds in
+                        try await auth.resealBackupAfterKeyRotation(
+                            wholeStorageSnapshot: snapshot,
+                            knownGroupIdsHex: groupIds,
+                            syncedState: auth.identitySecrets.flatMap {
+                                SyncedStateStore.bytes(accountIdB64: base64Encode($0.accountId))
+                            })
+                    })
             },
             devicePhrase: { accountIdB64 in DevicePhrase.read(accountIdB64: accountIdB64) },
             dropFreshAuth: { [weak auth] in auth?.dropFreshAuth() },
             nowMs: { Int64(Date().timeIntervalSince1970 * 1000) }
         )
+    }
+}
+
+/// The backup step of a rotation (ADR-0066 section 3.5, "Backup"): the
+/// decision of whether there is anything that may be uploaded, apart from the
+/// upload itself so a test can run it.
+enum KeyRotationBackup {
+
+    /// Why the step did not run. Thrown, so the runner keeps the step owed.
+    enum NotReady: Error, Equatable {
+        /// The chat layer has not bootstrapped: its group list is not known.
+        case chatNotBootstrapped
+        /// No MLS storage snapshot could be taken, or it is empty.
+        case noSnapshot
+    }
+
+    /// Re-seal and upload, or throw. Returns only when `upload` returned,
+    /// which it does only for an accepted upload. A chat layer that is not
+    /// ready throws before `upload` is called: an envelope with an empty
+    /// snapshot would overwrite the one the server holds.
+    @MainActor
+    static func reseal(
+        chatBootstrapped: Bool,
+        snapshot: @MainActor () -> Data?,
+        knownGroupIdsHex: @MainActor () -> [String],
+        upload: @MainActor (_ snapshot: Data, _ knownGroupIdsHex: [String]) async throws -> Void
+    ) async throws {
+        guard chatBootstrapped else { throw NotReady.chatNotBootstrapped }
+        guard var taken = snapshot(), !taken.isEmpty else { throw NotReady.noSnapshot }
+        defer { taken.resetBytes(in: 0..<taken.count) }
+        try await upload(taken, knownGroupIdsHex())
     }
 }
 

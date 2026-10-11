@@ -1041,10 +1041,18 @@ public class ChatRepository(
         // publish failure still throws before the group is registered or
         // persisted, exactly as when one mutex covered the whole block.
         val createdHex = DsClient.pseudonymHex(created.groupId)
+        // ADR-0066 3.5a rule 1 — the recipient is the PERSON: a leaf bound
+        // to a proven predecessor of the key the caller named is theirs, and
+        // two keys of one person are one mailbox (written once).
+        val recipientCurrent = mailboxAccountKeyOf(recipientSignaturePubkey)
+        val writtenMailboxes = HashSet<String>()
         for (account in created.recipientAccounts) {
-            val explicit = if (account.contentEquals(recipientSignaturePubkey)) recipientReach else null
+            val explicit =
+                if (mailboxAccountKeyOf(account).contentEquals(recipientCurrent)) recipientReach else null
+            val mailbox = welcomeMailboxFor(account)
+            if (!writtenMailboxes.add(DsClient.pseudonymHex(mailbox))) continue
             try {
-                publishWelcomeToMailbox(welcomeMailboxFor(account), created.welcomeEnvelope, createdHex, explicit)
+                publishWelcomeToMailbox(mailbox, created.welcomeEnvelope, createdHex, explicit)
             } catch (e: Throwable) {
                 throw ChatError(dsErrorMessage(e, "DS publishMailbox (Welcome) failed"), e)
             }
@@ -1106,11 +1114,33 @@ public class ChatRepository(
      */
     private val welcomeTargetAccounts = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
 
-    /** The account mailbox a Welcome for [accountKey] goes to, remembered for
-     *  [publishWelcomeToMailbox]. */
+    /**
+     * ADR-0066 section 3.5a rule 1 — the account key whose mailbox is
+     * addressed for the person known by [accountKey] (a leaf's binding, a
+     * contact row, this account's own conversation key): the key its PROVEN
+     * steps lead to, else the key itself. An unproven change is never
+     * followed. The identity when the reach manager cannot answer.
+     */
+    private fun mailboxAccountKeyOf(accountKey: ByteArray): ByteArray =
+        try {
+            me.lakko.app.reach.ReachManager.get(applicationContext).mailboxAccountKey(accountKey)
+        } catch (_: Throwable) {
+            accountKey.copyOf()
+        }
+
+    /**
+     * The account mailbox a Welcome for [accountKey] goes to, remembered for
+     * [publishWelcomeToMailbox]. THE one place a Welcome's mailbox is
+     * derived (group creation, the direct add, the sweep's fan-out, another
+     * device of this account): [accountKey] is what the added leaf's binding
+     * names, which after a rotation of that account's keys is a proven
+     * predecessor, so it is resolved first and the CURRENT key's mailbox is
+     * addressed, with the grants held for that person (ADR-0066 3.5a).
+     */
     private fun welcomeMailboxFor(accountKey: ByteArray): ByteArray {
-        val mailbox = uniffi.lakko_ffi_uniffi.IdentityPseudonym.fromIdentity(accountKey).use { it.asBytes() }
-        welcomeTargetAccounts[DsClient.pseudonymHex(mailbox)] = accountKey.copyOf()
+        val current = mailboxAccountKeyOf(accountKey)
+        val mailbox = uniffi.lakko_ffi_uniffi.IdentityPseudonym.fromIdentity(current).use { it.asBytes() }
+        welcomeTargetAccounts[DsClient.pseudonymHex(mailbox)] = current
         return mailbox
     }
 
@@ -1305,6 +1335,19 @@ public class ChatRepository(
             // grant is retried the moment one for that person arrives.
             reach.onGrantHeld = { ownerKey -> retryOwedWelcomesFor(ownerKey) }
             reach.bind(accountIdB64, account)
+            // ADR-0066 3.5a rule 3 — a re-send the key change left owed (a
+            // kept device right after adopting; any device after a restart).
+            if (reach.profileResendOwed()) {
+                reachScope.launch {
+                    try {
+                        resendProfileAfterKeyChange()
+                    } catch (cause: kotlinx.coroutines.CancellationException) {
+                        throw cause
+                    } catch (cause: Throwable) {
+                        android.util.Log.w("ChatRepository", "ADR-0066 3.5a: profile re-send failed: ${cause.javaClass.simpleName}")
+                    }
+                }
+            }
             publishThreadList()
             // ADR-0060 §4 — the introduction record and the relayed bundle,
             // now and on the periodic re-check.
@@ -4300,18 +4343,25 @@ public class ChatRepository(
      * unknown, and when this device's membership has ended — an evicted device
      * cannot seal into the group and must not try.
      */
-    private suspend fun publishOwnProfile(groupIdHex: String): Boolean {
-        val identity = canonicalIdentity.get() ?: return false
-        val record = groups[groupIdHex] ?: return false
-        if (readIsActive { record.group.isActive() } == false) return false
-        val profile = ownProfileForWire(groupIdHex, record.group) ?: return false
+    private suspend fun publishOwnProfile(groupIdHex: String): Boolean =
+        publishOwnProfileOutcome(groupIdHex) == me.lakko.app.reach.ProfileResend.SENT
+
+    /** [publishOwnProfile], telling "nothing to send here" from "could not
+     *  be sent" (ADR-0066 3.5a rule 3 keeps only the second owed). */
+    private suspend fun publishOwnProfileOutcome(groupIdHex: String): me.lakko.app.reach.ProfileResend {
+        val nothing = me.lakko.app.reach.ProfileResend.NOTHING_TO_SEND
+        val failed = me.lakko.app.reach.ProfileResend.FAILED
+        val identity = canonicalIdentity.get() ?: return failed
+        val record = groups[groupIdHex] ?: return nothing
+        if (readIsActive { record.group.isActive() } == false) return nothing
+        val profile = ownProfileForWire(groupIdHex, record.group) ?: return nothing
         val envelope = try {
             uniffi.lakko_ffi_uniffi.composeProfileEnvelope(profile)
         } catch (cause: Throwable) {
             // A stored profile the core refuses (it was validated when saved,
             // so this is not expected) is never sent in a weakened form.
             android.util.Log.w("ChatRepository", "ADR-0048 own profile refused by the composer", cause)
-            return false
+            return nothing
         }
         return try {
             broadcastControlToGroup(
@@ -4320,10 +4370,63 @@ public class ChatRepository(
                 group = record.group,
                 envelope = envelope,
             )
-            true
+            me.lakko.app.reach.ProfileResend.SENT
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0048 profile not published", cause)
-            false
+            failed
+        }
+    }
+
+    /** ADR-0066 3.5a rule 3 — the conversations that already took the
+     *  profile re-sent under an account key (`"<keyHex>:<groupHex>"`), so a
+     *  retry in this process does not send there again. In memory: after a
+     *  restart an owed re-send goes to every conversation once more, which a
+     *  receiver treats as the same profile. */
+    private val profileResentTo: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** One re-send at a time. */
+    private val profileResendMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * ADR-0066 section 3.5a rule 3 — after the account's reach keys moved to
+     * the mailbox of a new account key (the rotation's reach re-key on the
+     * rotating device, the adoption on a kept one), every one-to-one and
+     * group this device is in holds grants for the OLD mailbox. Re-send the
+     * profile, which carries the grants for the new one, through the profile
+     * publisher.
+     *
+     * Owed in the reach document from the moment the keys moved
+     * ([me.lakko.app.reach.ReachManager.profileResendOwed]) until every
+     * conversation took the envelope. `true`: nothing is owed (any more).
+     * `false`: still owed — the new mailbox does not hold the key set yet,
+     * the chat layer is not ready, or a conversation could not be written;
+     * the rotation keeps its step, and every session start retries.
+     */
+    public suspend fun resendProfileAfterKeyChange(): Boolean {
+        val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+        if (!reach.profileResendOwed()) return true
+        return profileResendMutex.withLock {
+            if (!reach.profileResendOwed()) return@withLock true
+            if (!mutableState.value.bootstrapped) return@withLock false
+            // The grants must open the new mailbox before anyone is handed
+            // them.
+            if (!reach.sync()) return@withLock false
+            val keyHex = reach.ownAccountKey()?.let { me.lakko.app.reach.reachHex(it) } ?: return@withLock false
+            val targets = synchronized(groups) { groups.keys.toList() }.filter { "$keyHex:$it" !in profileResentTo }
+            val done = profileRepublish.publishAllAwaited(
+                groupIdHexes = targets,
+                onSent = { groupIdHex -> profileResentTo += "$keyHex:$groupIdHex" },
+                attempt = { groupIdHex -> publishOwnProfileOutcome(groupIdHex) },
+            )
+            if (done) {
+                reach.profileResendDone()
+                profileResentTo.removeIf { it.startsWith("$keyHex:") }
+            } else {
+                android.util.Log.w("ChatRepository", "ADR-0066 3.5a: the profile re-send is still owed")
+            }
+            done
         }
     }
 
@@ -4700,10 +4803,16 @@ public class ChatRepository(
             val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
             val selfHex = reach.ownAccountKey()?.let { me.lakko.app.reach.reachHex(it) } ?: return
             val senderBytes = senderKey?.let { java.util.Base64.getDecoder().decode(it) } ?: return
-            val senderHex = me.lakko.app.reach.reachHex(senderBytes)
+            // ADR-0066 3.5a rule 2 — the roster names the keys the leaves are
+            // bound to, which after a rotation are proven predecessors (this
+            // account's own included). The acceptance rule is about PEOPLE,
+            // so every key is mapped to its account's current key first.
+            val senderHex = reach.mailboxAccountKeyHex(me.lakko.app.reach.reachHex(senderBytes))
             val people = personKeysOf(group.members())
             val oneToOne = people.size == 2
-            val peopleHex = people.map { me.lakko.app.reach.reachHex(java.util.Base64.getDecoder().decode(it)) }
+            val peopleHex = people.map {
+                reach.mailboxAccountKeyHex(me.lakko.app.reach.reachHex(java.util.Base64.getDecoder().decode(it)))
+            }
             val other = if (oneToOne) peopleHex.firstOrNull { it != selfHex } else null
             val isMember = senderHex in peopleHex
             for (grant in profile.grants) {
@@ -8825,7 +8934,14 @@ public class ChatRepository(
     private fun claimOwnMailboxesBestEffort() {
         // ADR-0066 part 3: and the mailbox of the PUBLISHED account key when
         // it differs from the conversation identity's (after a rotation).
-        val identities = listOfNotNull(accountIdentity.get(), publishedAccountIdentity.get(), canonicalIdentity.get())
+        //
+        // ADR-0066 section 3.5a rule 4: the conversation identity's mailbox
+        // is then a PREDECESSOR's: it is read (hence signed for) only for
+        // 30 days after this device adopted the new key, and nothing is
+        // registered there. Past the window it is left alone.
+        val published = publishedAccountIdentity.get()
+        val conversation = accountIdentity.get()?.takeIf { published == null || predecessorMailboxStillRead(it) }
+        val identities = listOfNotNull(conversation, published, canonicalIdentity.get())
         for (identity in identities) {
             val (pseudonym, signer) = try {
                 val ffi = uniffi.lakko_ffi_uniffi.dsMailboxSigner(identity)
@@ -8844,6 +8960,25 @@ public class ChatRepository(
                     android.util.Log.w("ChatRepository", "ADR-0053: mailbox claim did not land", cause)
                 }
             }
+        }
+    }
+
+    /** Whether the mailbox of [predecessor] (one of this account's previous
+     *  identities) is inside its read window (ADR-0066 3.5a rule 4). An
+     *  unreadable record reads: mail already sent must not be lost to it. */
+    private fun predecessorMailboxStillRead(predecessor: Identity): Boolean {
+        val accountIdB64 = currentAccountIdB64.get() ?: keyPackageAccount.get()?.accountIdB64 ?: return true
+        return try {
+            val key = predecessor.signaturePublicKey()
+            val rows = me.lakko.app.auth.OwnPredecessorStore.onDevice(applicationContext).load(accountIdB64)
+            try {
+                val row = rows.firstOrNull { it.signaturePubkey.contentEquals(key) } ?: return true
+                me.lakko.app.reach.predecessorMailboxIsRead(row.supersededAtMs, System.currentTimeMillis())
+            } finally {
+                rows.forEach { it.zero() }
+            }
+        } catch (_: Throwable) {
+            true
         }
     }
 
@@ -10235,8 +10370,10 @@ public class ChatRepository(
             val mailbox = entry.secondArtifactMailboxB64 ?: continue
             val account = entry.secondArtifactAccountKeyB64 ?: continue
             try {
+                // ADR-0066 3.5a — the recorded key is what the leaf names;
+                // the grant is picked for the person's current key.
                 welcomeTargetAccounts[DsClient.pseudonymHex(java.util.Base64.getDecoder().decode(mailbox))] =
-                    java.util.Base64.getDecoder().decode(account)
+                    mailboxAccountKeyOf(java.util.Base64.getDecoder().decode(account))
             } catch (_: IllegalArgumentException) {
                 // A malformed entry re-publishes unsigned.
             }

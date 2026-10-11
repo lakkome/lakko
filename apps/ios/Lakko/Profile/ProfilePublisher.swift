@@ -67,18 +67,47 @@ final class ProfilePublisher {
         self.ports = ports
     }
 
+    /// What one publish did.
+    enum Outcome: Equatable {
+        /// The envelope went out.
+        case sent
+        /// There was nothing to send: the device can no longer send into the
+        /// group, or there is no profile to publish.
+        case skipped
+        /// The send was attempted and did not land.
+        case failed
+    }
+
     /// Publish into `groupIdHex` now (join / change). Best-effort: a failed
     /// send is logged and forgotten — the next trigger carries the profile.
-    func publishNow(groupIdHex: String) async {
-        guard ports.canSend(groupIdHex), let bytes = ports.envelope(groupIdHex) else { return }
+    /// The outcome is returned for the one caller that must not forget
+    /// (``publishToAllReporting(groupIdHexes:)``).
+    @discardableResult
+    func publishNow(groupIdHex: String) async -> Outcome {
+        guard ports.canSend(groupIdHex), let bytes = ports.envelope(groupIdHex) else { return .skipped }
         do {
             try await ports.send(groupIdHex, bytes)
             publishSequence &+= 1
             lastPublishSequence[groupIdHex] = publishSequence
             lastPublishedAtMs[groupIdHex] = ports.nowMs()
+            return .sent
         } catch {
             NSLog("ADR-0048 profile publish failed: \(error)")
+            return .failed
         }
+    }
+
+    /// ADR-0066 section 3.5a rule 3 — publish into every group in
+    /// `groupIdHexes` now and say which sends did NOT land, so a caller that
+    /// owes the re-send (the rotating device, whose new reach grants peers
+    /// have no other way to learn) can keep it owed. A group this device can
+    /// no longer send into is not a failure.
+    func publishToAllReporting(groupIdHexes: [String]) async -> [String] {
+        var failed: [String] = []
+        for groupIdHex in groupIdHexes where await publishNow(groupIdHex: groupIdHex) == .failed {
+            failed.append(groupIdHex)
+        }
+        return failed
     }
 
     /// Publish into every group in `groupIdHexes` now (profile change).

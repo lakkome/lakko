@@ -253,6 +253,10 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       name: "predecessor-mailbox-cursor",
       run: () => removeLocal(`lakko.contacts.predecessor-mailbox.v1.${accountIdB64}`),
     },
+    {
+      name: "predecessor-mailbox-adopted",
+      run: () => removeLocal(`lakko.contacts.predecessor-mailbox-adopted.v1.${accountIdB64}`),
+    },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },
     { name: "own-requests", run: () => clearOwnRequestsForAccount(accountIdB64) },

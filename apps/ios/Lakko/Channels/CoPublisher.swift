@@ -317,10 +317,12 @@ public enum CoPublisher {
                 // as its account), so its mailbox is the pseudonym of that key.
                 // ADR-0060 — written with the `reply` grant its attribution
                 // carried; the mailbox is closed to anything else.
-                let mailbox = try IdentityPseudonym.fromIdentity(pubkey: proposalRef).asBytes()
-                let auth = await MainActor.run {
-                    ReachCenter.shared.writeAuth(toAccountKey: proposalRef)
+                // ADR-0066 section 3.5a rule 1 — resolved before addressing.
+                let (current, auth) = await MainActor.run {
+                    (ReachCenter.shared.currentAccountKey(of: proposalRef),
+                     ReachCenter.shared.writeAuth(toAccountKey: proposalRef))
                 }
+                let mailbox = try IdentityPseudonym.fromIdentity(pubkey: current).asBytes()
                 _ = try await ds.publishMailbox(
                     pseudonym: mailbox,
                     payload: wrapEnvelope(kind: .welcome, body: added.welcome),

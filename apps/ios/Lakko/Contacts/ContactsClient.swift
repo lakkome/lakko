@@ -616,6 +616,13 @@ public final class ContactsClient {
         return (sig, x)
     }
 
+    /// ADR-0066 section 3.5a rule 1 — who a recipient's key is now, from the
+    /// proven-predecessor map this client's gate writes. (This account's own
+    /// keys are never the recipient of a request or an ack.)
+    func mailboxResolver() -> AccountKeyResolver {
+        AccountKeyResolver(proven: predecessors.load())
+    }
+
     // MARK: - Send
 
     /// Send a `ContactRequest` envelope to `@recipientUsername`,
@@ -706,6 +713,19 @@ public final class ContactsClient {
         introMessage: Data,
         reach: ContactRequestReach = .none
     ) async throws -> SendResult {
+        // ADR-0066 section 3.5a rule 1 — resolve before addressing. A bundle
+        // carried by a link or a search result may name a key its owner has
+        // since rotated away BY PROOF: the request then goes to the current
+        // key's mailbox, sealed to the current X25519 key, which only the
+        // verified directory bundle carries. A failed fetch refuses the send;
+        // the old mailbox is never the fallback.
+        var recipientSignaturePubkey = recipientSignaturePubkey
+        var recipientX25519Pubkey = recipientX25519Pubkey
+        if mailboxResolver().current(of: recipientSignaturePubkey) != recipientSignaturePubkey {
+            let current = try await resolveVerifiedBundle(accountId: recipientAccountId)
+            recipientSignaturePubkey = current.signaturePubkey
+            recipientX25519Pubkey = current.x25519Pubkey
+        }
         let published = try await composeAndPublishContactRequest(
             senderSigningSeed: senderSigningSeed,
             senderAccountId: senderAccountId,
@@ -743,6 +763,9 @@ public final class ContactsClient {
         let recipientPseudonym: Data
         let senderPseudonym: Data
         do {
+            // Both callers hand in the recipient's CURRENT key (a bundle the
+            // gate just verified, or one re-resolved above), so the mailbox
+            // of the key the envelope is sealed for is the current mailbox.
             recipientPseudonym = try IdentityPseudonym
                 .fromIdentity(pubkey: recipientSignaturePubkey).asBytes()
             senderPseudonym = try IdentityPseudonym
@@ -839,8 +862,12 @@ public final class ContactsClient {
     ) async throws -> PublishedAck {
         let senderMailbox: Data
         do {
+            // ADR-0066 section 3.5a rule 1 — the requester may have rotated
+            // its keys by proof since it asked: the ack goes to the mailbox
+            // of its current key.
             senderMailbox = try IdentityPseudonym
-                .fromIdentity(pubkey: originalRequest.fromPubkey).asBytes()
+                .fromIdentity(pubkey: mailboxResolver().current(of: originalRequest.fromPubkey))
+                .asBytes()
         } catch {
             throw ContactsError.wrap(error)
         }

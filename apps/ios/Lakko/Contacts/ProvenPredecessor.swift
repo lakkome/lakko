@@ -85,6 +85,9 @@ public struct ProvenPredecessors: Codable, Equatable {
 
     public var isEmpty: Bool { successor.isEmpty }
 
+    /// Every key recorded as superseded by proof (sorted, for a stable order).
+    public var predecessorKeysB64: [String] { successor.keys.sorted() }
+
     /// Record that `oldKeyB64` was superseded by `newKeyB64`, for
     /// `evidence`. Only a verified proof records anything; returns whether
     /// the map changed.

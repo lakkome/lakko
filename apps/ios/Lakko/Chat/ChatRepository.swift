@@ -1096,14 +1096,19 @@ public final class ChatRepository: ObservableObject {
             (recipientSignaturePubkey,
              recipientWriteAuth ?? ReachCenter.shared.writeAuth(toAccountKey: recipientSignaturePubkey))
         ]
+        // ADR-0066 section 3.5a rule 1 — each account key is resolved before
+        // its mailbox is derived: a contact stored under a key they have
+        // since rotated away by proof, and this account's own devices (whose
+        // bindings name the old key in Stage A), are written to at the
+        // mailbox of the CURRENT key.
         if devices.count > recipientDevices.count,
-           let own = ReachCenter.shared.ownAccountKey, own != recipientSignaturePubkey {
+           let own = ReachCenter.shared.ownAccountKey,
+           !ReachCenter.shared.keyResolver.samePerson(own, recipientSignaturePubkey) {
             targets.append((own, ReachCenter.shared.writeAuth(toAccountKey: own)))
         }
         for target in targets {
             do {
-                let pseudonym = try IdentityPseudonym
-                    .fromIdentity(pubkey: target.accountKey).asBytes()
+                let pseudonym = try resolvedMailbox(ofAccountKey: target.accountKey)
                 _ = try await dsClient.publishMailbox(
                     pseudonym: pseudonym,
                     payload: welcomeEnvelope,
@@ -2176,6 +2181,45 @@ public final class ChatRepository: ObservableObject {
         await profilePublisher.publishToAll(groupIdHexes: Array(groups.keys).sorted())
     }
 
+    /// The groups the rotation's profile re-send already reached in this
+    /// process, so a retry of the owed step sends only what is still missing.
+    private var rotationProfileResent: Set<String> = []
+
+    /// ADR-0066 section 3.5a rule 3 — the ROTATING device's step: the account
+    /// moved to the new mailbox, and the grants every peer holds open only
+    /// the old one. Re-send the own profile, which carries this
+    /// conversation's grants derived from the NEW seed, into every one-to-one
+    /// and group. Throws while any send has not landed (or the chat layer is
+    /// not up), so the rotation keeps the step owed and retries it; a group
+    /// that was reached is not sent to again by the retry.
+    ///
+    /// Call after the reach keys were registered on the new mailbox: a grant
+    /// handed out before that names a key the mailbox does not know yet.
+    public func resendProfileAfterKeyRotation() async throws {
+        guard state.bootstrapped else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        let owed = Array(groups.keys).sorted().filter { !rotationProfileResent.contains($0) }
+        let failed = await profilePublisher.publishToAllReporting(groupIdHexes: owed)
+        rotationProfileResent.formUnion(Set(owed).subtracting(failed))
+        guard failed.isEmpty else {
+            throw ChatError.argument("profile re-send after key rotation: \(failed.count) conversation(s) still owed")
+        }
+        rotationProfileResent = []
+        // The `fof` grant of the introduction records moved with the seed too.
+        await sendIntroductions()
+    }
+
+    /// ADR-0066 section 3.5a rule 3 — a KEPT device adopted the rotation: it
+    /// re-sends the profile too, through the throttled, jittered path (the
+    /// account's devices all adopt within moments of each other, and the
+    /// rotating device's own re-send is the one that is owed). Best effort.
+    public func resendProfileAfterAdoptingKeyRotation() {
+        for groupIdHex in Array(groups.keys).sorted() {
+            profilePublisher.noteGrowth(groupIdHex: groupIdHex)
+        }
+    }
+
     /// ADR-0048 §2 — republish the own profile (throttled, jittered) when the
     /// roster gained a key it did not have before.
     private func noteProfileGrowthIfMembershipGrew(
@@ -2998,11 +3042,12 @@ public final class ChatRepository: ObservableObject {
                     // ADR-0060 section 6 (amending ADR-0050 2.7) — the Welcome
                     // is addressed to the ACCOUNT mailbox of the leaf's owner,
                     // resolved through the leaf's device binding.
+                    // ADR-0066 section 3.5a rule 1 — the binding names the key
+                    // the leaf was bound under, which a proven rotation left
+                    // behind: the mailbox is the CURRENT key's.
                     let accountKey = try keyPackageAccountKey(keyPackage: keyPackageBytes)
                         ?? keyPackageSignatureKey(keyPackage: keyPackageBytes)
-                    recipientPseudonym = try IdentityPseudonym
-                        .fromIdentity(pubkey: accountKey)
-                        .asBytes()
+                    recipientPseudonym = try resolvedMailbox(ofAccountKey: accountKey)
                 } catch {
                     throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
                 }
@@ -3054,11 +3099,12 @@ public final class ChatRepository: ObservableObject {
                 // grant that reaches them (ADR-0060).
                 let welcomePublish: PublishResult
                 do {
+                    let mailbox = ReachCenter.shared.currentMailbox(for: prepared.recipientPseudonym)
                     welcomePublish = try await dsClient.publishMailbox(
-                        pseudonym: prepared.recipientPseudonym,
+                        pseudonym: mailbox,
                         payload: prepared.welcomeEnvelope,
                         writeAuth: ReachCenter.shared.writeAuth(
-                            toMailbox: prepared.recipientPseudonym, groupIdHex: groupIdHex)
+                            toMailbox: mailbox, groupIdHex: groupIdHex)
                     )
                 } catch {
                     throw ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: error)
@@ -6394,8 +6440,9 @@ public final class ChatRepository: ObservableObject {
             // recorded and resolved through the roster once the sweep merged
             // (``publishSweepWelcome``).
             welcomeMailbox: { [weak self] key in
-                if let accountKey = self?.resolveAddedAccountKey(record: record, leafKey: key) {
-                    return try IdentityPseudonym.fromIdentity(pubkey: accountKey).asBytes()
+                if let self, let accountKey = self.resolveAddedAccountKey(record: record, leafKey: key) {
+                    // ADR-0066 section 3.5a rule 1 — resolved before addressing.
+                    return try self.resolvedMailbox(ofAccountKey: accountKey)
                 }
                 return key
             },
@@ -7792,6 +7839,16 @@ public final class ChatRepository: ObservableObject {
         return senderKey != AuthorIdentity.own(group: record.group)
     }
 
+    /// ADR-0066 section 3.5a rule 1 — the mailbox of the person holding
+    /// `accountKey`: the key is resolved through the proven-predecessor
+    /// resolver first (this account's own old keys included), so a key left
+    /// behind by a PROVEN rotation addresses the current key's mailbox. An
+    /// unproven change is in no map and resolves to itself.
+    func resolvedMailbox(ofAccountKey accountKey: Data) throws -> Data {
+        try IdentityPseudonym
+            .fromIdentity(pubkey: ReachCenter.shared.currentAccountKey(of: accountKey)).asBytes()
+    }
+
     /// An added leaf's account key, when this device can tell before the
     /// merge: a pending `/g/` joiner's retained KeyPackage, or a KeyPackage it
     /// fetched itself.
@@ -7824,10 +7881,13 @@ public final class ChatRepository: ObservableObject {
     private func publishSweepWelcome(
         target: Data, bytes: Data, record: GroupRecord, groupIdHex: String
     ) async throws -> Int64 {
-        var pseudonym = target
+        // ADR-0066 section 3.5a rule 1 — a leaf resolved through the roster
+        // names the key it is BOUND under; a mailbox recorded earlier may be a
+        // predecessor's. Either way the write goes to the current key's.
+        var pseudonym = ReachCenter.shared.currentMailbox(for: target)
         if let members = try? record.group.members(),
            let hit = members.first(where: { $0.signaturePublicKey == target }) {
-            pseudonym = try IdentityPseudonym.fromIdentity(pubkey: hit.accountKey).asBytes()
+            pseudonym = try resolvedMailbox(ofAccountKey: hit.accountKey)
         }
         let dedupe = base64Encode(Data(SHA256.hash(data: bytes))) + "|" + base64Encode(pseudonym)
         guard sweepWelcomeWrites.insert(dedupe).inserted else { return 0 }
@@ -8402,7 +8462,10 @@ public final class ChatRepository: ObservableObject {
             if let secondB64 = entry.secondArtifactB64,
                let secondBytes = base64Decode(secondB64),
                let mailboxB64 = entry.secondArtifactMailboxB64,
-               let pseudonym = base64Decode(mailboxB64) {
+               let recorded = base64Decode(mailboxB64) {
+                // ADR-0066 section 3.5a rule 1 — the entry may have been
+                // recorded before the addressee's rotation was observed.
+                let pseudonym = ReachCenter.shared.currentMailbox(for: recorded)
                 // Welcome -> the new member's mailbox (NOT this device's group
                 // journal), so no echo re-arm — the committer never re-fetches
                 // it.

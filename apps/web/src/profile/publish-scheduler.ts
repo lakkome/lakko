@@ -68,12 +68,25 @@ export class ProfilePublishScheduler<Timer = unknown> {
 
   /** Trigger 1 — this device just joined `groupIdB64`. */
   joined(groupIdB64: string): Promise<void> {
-    return this.publishNow(groupIdB64, "join", 0);
+    return this.publishNow(groupIdB64, "join", 0).then(() => undefined);
   }
 
   /** Trigger 2 — the profile changed; publish into every listed group. */
   profileChanged(groupIdsB64: readonly string[]): Promise<void> {
     return Promise.all(groupIdsB64.map((g) => this.publishNow(g, "change", 0))).then(() => undefined);
+  }
+
+  /**
+   * Publish into every group now and answer the ones whose publish FAILED
+   * (ADR-0066 section 3.5a rule 3: the re-send after a key rotation is a
+   * step that can be owed, so its caller must learn the outcome). A failed
+   * one is retried by the scheduler exactly as any other.
+   */
+  async publishAll(groupIdsB64: readonly string[]): Promise<string[]> {
+    const results = await Promise.all(
+      groupIdsB64.map(async (g) => ({ g, ok: await this.publishNow(g, "change", 0) })),
+    );
+    return results.filter((r) => !r.ok).map((r) => r.g);
   }
 
   /** Trigger 3 — `groupIdB64` gained at least one member. */
@@ -120,8 +133,8 @@ export class ProfilePublishScheduler<Timer = unknown> {
     this.pending.set(groupIdB64, { timer, retries });
   }
 
-  private async publishNow(groupIdB64: string, reason: PublishReason, retries: number): Promise<void> {
-    if (this.stopped) return;
+  private async publishNow(groupIdB64: string, reason: PublishReason, retries: number): Promise<boolean> {
+    if (this.stopped) return false;
     // This publish covers anything a pending growth republish was waiting to
     // deliver.
     const waiting = this.pending.get(groupIdB64);
@@ -132,9 +145,11 @@ export class ProfilePublishScheduler<Timer = unknown> {
     this.lastPublishAt.set(groupIdB64, this.deps.now());
     try {
       await this.deps.publish(groupIdB64, reason);
+      return true;
     } catch (err) {
       this.deps.onError?.(groupIdB64, err);
       if (retries < MAX_RETRIES) this.schedule(groupIdB64, "retry", retries + 1);
+      return false;
     }
   }
 }

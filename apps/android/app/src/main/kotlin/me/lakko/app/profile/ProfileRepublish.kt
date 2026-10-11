@@ -135,6 +135,26 @@ public class ProfileRepublishScheduler(
         return delayMs
     }
 
+    /**
+     * ADR-0066 section 3.5a rule 3 - re-send the profile into every group of
+     * [groupIdHexes] and WAIT for each: `true` only when none failed, so the
+     * caller can keep the re-send owed. A group that took it counts as
+     * published for the growth throttle and is reported to [onSent].
+     */
+    public suspend fun publishAllAwaited(
+        groupIdHexes: Collection<String>,
+        onSent: (String) -> Unit = {},
+        attempt: suspend (groupIdHex: String) -> me.lakko.app.reach.ProfileResend,
+    ): Boolean =
+        me.lakko.app.reach.resendProfileToAll(
+            targets = groupIdHexes.toList(),
+            onSent = { groupIdHex ->
+                synchronized(lock) { lastPublishedAt[groupIdHex] = nowMs() }
+                onSent(groupIdHex)
+            },
+            send = attempt,
+        )
+
     /** Forget all per-group state (account switch / forget device). */
     public fun reset() {
         synchronized(lock) {

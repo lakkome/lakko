@@ -65,6 +65,12 @@ import { journalHex } from "../ds/access";
 import { rosterOf } from "../chat/client";
 import { reachSession, reachSessionSignal, reachVersionsTick } from "../reach/reach-service";
 import { foldProfileGrants } from "../reach/grant-intake";
+import {
+  installProfileResend,
+  owedProfileConversations,
+  type ResendConversation,
+} from "./rotation-resend";
+import { resolveAccountKeyHex } from "../contacts/address-resolver";
 import { ScopedDiscoveryClient, usernameCertKey } from "../reach/scoped-discovery";
 import { visibilitySetting } from "../reach/visibility-store";
 import { grantSignatureOf, recordGrantSignature } from "./grant-signatures";
@@ -353,10 +359,48 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     if (entry === undefined) return;
     // A group this device is no longer in can never carry another message.
     if (readIsActive(entry.group) === false) return;
+    // ADR-0060 / ADR-0066 section 3.5a rule 3 - what the grants composed
+    // below carry, read BEFORE composing: recorded only once the publish
+    // landed, so a conversation whose profile did not get out stays owed.
+    const account = accountId();
+    const signature = grantSignatureNow(groupIdB64);
     const envelope = await ownProfileEnvelope(groupIdB64);
     if (envelope === null) return;
     void reason;
     await publisher.broadcastControl(secrets, entry.group, envelope);
+    if (account !== null && signature !== null && grantSignatureNow(groupIdB64) === signature) {
+      recordGrantSignature(account, groupIdB64, signature);
+    }
+  }
+
+  /** The grant signature a profile into `groupIdB64` would carry now, or
+   *  `null` without a reach session or the group. */
+  function grantSignatureNow(groupIdB64: string): string | null {
+    const session = reachSession();
+    const entry = chats.get(groupIdB64);
+    if (session === null || entry === undefined) return null;
+    return session.profileGrantSignature(base64Decode(groupIdB64), isOneToOne(entry.group));
+  }
+
+  /** The conversations whose profile (and grants) is not published yet. */
+  function owedConversations(): string[] | null {
+    const account = accountId();
+    const session = reachSession();
+    const own = chats.accountIdentity();
+    if (account === null || session === null || own === null) return null;
+    // The reach session of ANOTHER key (it restarts after a rotation) would
+    // sign grants for the mailbox that was left.
+    if (session.accountKeyHex !== journalHex(own.signaturePublicKey)) return null;
+    const rows: ResendConversation[] = [];
+    for (const g of chats.groups()) {
+      rows.push({
+        groupIdB64: g.groupIdB64,
+        active: readIsActive(g.group) !== false,
+        publishedSignature: grantSignatureOf(account, g.groupIdB64),
+        currentSignature: session.profileGrantSignature(base64Decode(g.groupIdB64), isOneToOne(g.group)),
+      });
+    }
+    return owedProfileConversations(rows);
   }
 
   /**
@@ -383,6 +427,9 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       console.warn("[profile] request not published", err);
     }
   }
+
+  /** Conversations the grant-signature effect has a publish out for. */
+  const resendInFlight = new Set<string>();
 
   const scheduler = new ProfilePublishScheduler<ReturnType<typeof setTimeout>>({
     now: () => Date.now(),
@@ -435,17 +482,35 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     untrack(() => {
       const account = accountId();
       if (setting === null || session === null || account === null) return;
+      // The signature is recorded by `publishInto` once the publish landed
+      // (ADR-0066 section 3.5a rule 3): a conversation whose profile did not
+      // get out is due again the next time this runs.
       const due: string[] = [];
       for (const g of groups) {
         if (readIsActive(g.group) === false) continue;
         const signature = session.profileGrantSignature(base64Decode(g.groupIdB64), isOneToOne(g.group));
         if (grantSignatureOf(account, g.groupIdB64) === signature) continue;
-        recordGrantSignature(account, g.groupIdB64, signature);
+        if (resendInFlight.has(g.groupIdB64)) continue;
+        resendInFlight.add(g.groupIdB64);
         due.push(g.groupIdB64);
       }
-      if (due.length > 0) void scheduler.profileChanged(due);
+      if (due.length > 0) {
+        void scheduler.profileChanged(due).finally(() => {
+          for (const g of due) resendInFlight.delete(g);
+        });
+      }
     });
   });
+
+  // ADR-0066 section 3.5a rule 3 - the rotating device's `profile` step:
+  // send every owed profile now and answer how many are still owed.
+  installProfileResend(async () => {
+    const owed = owedConversations();
+    if (owed === null) return null;
+    if (owed.length > 0) await scheduler.publishAll(owed);
+    return owedConversations()?.length ?? null;
+  });
+  onCleanup(() => installProfileResend(null));
 
   // ADR-0048 section 4a — a name set on another device of this account was
   // adopted: re-read the own profile. Not republished into groups (the device
@@ -546,7 +611,10 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       if (session !== null && context !== undefined && entry !== undefined) {
         let senderHex: string;
         try {
-          senderHex = journalHex(base64Decode(senderKeyB64));
+          // ADR-0066 section 3.5a rule 2 - keyed on the PERSON: a leaf bound
+          // to a proven predecessor files under the account's current key
+          // (and this account's own other devices read as this account).
+          senderHex = resolveAccountKeyHex(journalHex(base64Decode(senderKeyB64)));
         } catch {
           return;
         }

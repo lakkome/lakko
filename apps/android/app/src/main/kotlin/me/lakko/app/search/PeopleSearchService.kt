@@ -221,7 +221,9 @@ public class PeopleSearchService(
     /** The DS reach check of a person's account mailbox with a grant wire. */
     private suspend fun reachCheckWith(identityPk: ByteArray, grantWireB64: String): Boolean {
         val grant = uniffi.lakko_ffi_uniffi.decodeReachGrant(Base64.getDecoder().decode(grantWireB64))
-        val mailbox = uniffi.lakko_ffi_uniffi.IdentityPseudonym.fromIdentity(identityPk).use { it.asBytes() }
+        // ADR-0066 3.5a rule 1: the person's CURRENT mailbox (a proven
+        // predecessor key resolves to its successor; nothing else does).
+        val mailbox = reach().mailboxOf(identityPk)
         return me.lakko.app.ds.DsClient().use { ds -> ds.checkReach(mailbox, me.lakko.app.ds.reachSigner(grant.seed)) }
     }
 

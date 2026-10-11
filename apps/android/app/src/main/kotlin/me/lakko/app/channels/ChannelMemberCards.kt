@@ -509,7 +509,8 @@ public object ChannelMemberCards {
             }
             verifiedGrants[cacheKey]?.let { return it }
             return try {
-                val mailbox = uniffi.lakko_ffi_uniffi.IdentityPseudonym.fromIdentity(accountKey).use { it.asBytes() }
+                // ADR-0066 3.5a rule 1: the person's CURRENT mailbox.
+                val mailbox = reach.mailboxOf(accountKey)
                 val ok = me.lakko.app.ds.DsClient().use { ds ->
                     ds.checkReach(mailbox, me.lakko.app.ds.reachSigner(grant.seed))
                 }

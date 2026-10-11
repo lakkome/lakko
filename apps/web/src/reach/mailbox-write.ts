@@ -27,7 +27,13 @@ import type { MailboxWriteAuth } from "../ds/client";
 import { journalHex, type ProofSigner } from "../ds/access";
 import { base64Decode } from "../auth/account-id";
 import { loadWasm } from "../wasm";
-import { bestGrantFor, delegationsFor, grantsInOrder, type HeldGrant } from "./received-grants";
+import { personKeysHex, resolveAccountKey } from "../contacts/address-resolver";
+import {
+  bestGrantForPerson,
+  delegationsForPerson,
+  grantsInOrderForPerson,
+  type HeldGrant,
+} from "./received-grants";
 import { reachSession, reachSignerForGrant, reachSignerForGrantWire } from "./reach-service";
 
 /** Which rule authorised a write. */
@@ -71,6 +77,16 @@ function released(kind: WriteAuthKind, signer: ProofSigner | null, delegation: s
 /** The account mailbox pseudonym of an account key. */
 export async function accountMailboxOf(accountKey: Uint8Array): Promise<Uint8Array> {
   const wasm = await loadWasm();
+  // ADR-0066 section 3.5a rule 1 - resolve before you address: a proven
+  // predecessor names the person's CURRENT key, and so their current
+  // mailbox. An unproven change is never resolved (`address-resolver.ts`).
+  return wasm.IdentityPseudonym.fromIdentity(resolveAccountKey(accountKey)).asBytes();
+}
+
+/** The mailbox of exactly this key, with no resolution: for READING a
+ *  mailbox this device holds the key of, never for addressing a person. */
+export async function mailboxOfExactKey(accountKey: Uint8Array): Promise<Uint8Array> {
+  const wasm = await loadWasm();
   return wasm.IdentityPseudonym.fromIdentity(accountKey).asBytes();
 }
 
@@ -102,17 +118,21 @@ export async function resolveWriteAuth(
   } = {},
 ): Promise<ResolvedWriteAuth> {
   const session = reachSession();
-  const targetHex = journalHex(targetAccountKey);
+  // ADR-0066 section 3.5a rules 1 and 2: the write goes to the CURRENT key's
+  // mailbox (the caller derives it with `accountMailboxOf`, which resolves
+  // the same way), and the grants are the person's, under any key they had.
+  const personHexes = personKeysHex(journalHex(targetAccountKey));
+  const targetHex = personHexes[0] ?? journalHex(targetAccountKey);
   const isOwnAccount = session !== null && session.accountKeyHex === targetHex;
   const kept =
     session === null
       ? null
-      : bestGrantFor(session.receivedGrants(), targetHex, {
+      : bestGrantForPerson(session.receivedGrants(), personHexes, {
           ...(options.scope === undefined ? {} : { scopeHex: journalHex(options.scope) }),
           allowMember: options.allowMember === true,
         });
-  const delegationHeader =
-    session === null ? null : await delegationHeaderFor(targetHex, session.accountKey);
+  const delegation = session === null ? null : await delegationFor(personHexes);
+  const delegationHeader = delegation?.header ?? null;
   const kind = chooseWriteAuth({
     isOwnAccount,
     hasExplicit: options.explicit !== undefined && options.explicit !== null,
@@ -139,7 +159,7 @@ export async function resolveWriteAuth(
     case "kept":
       return released(kind, await reachSignerForGrantWire(kept!.wireB64), null);
     case "delegation":
-      return released(kind, await session!.accountReachSigner(), delegationHeader);
+      return released(kind, await delegation!.signer(), delegationHeader);
     case "none":
       return released(kind, null, null);
   }
@@ -231,7 +251,9 @@ export async function writeWelcome<T>(
   write: (auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
 ): Promise<T> {
   const session = reachSession();
-  const targetHex = journalHex(targetAccountKey);
+  // ADR-0066 section 3.5a: resolved exactly as `resolveWriteAuth` does.
+  const personHexes = personKeysHex(journalHex(targetAccountKey));
+  const targetHex = personHexes[0] ?? journalHex(targetAccountKey);
   const isOwnAccount = session !== null && session.accountKeyHex === targetHex;
   const hasExplicit = options.explicit !== undefined && options.explicit !== null;
   if (isOwnAccount || hasExplicit) {
@@ -248,7 +270,7 @@ export async function writeWelcome<T>(
   }
   const candidates: WriteCandidate[] = [];
   if (session !== null) {
-    for (const held of grantsInOrder(session.receivedGrants(), targetHex, {
+    for (const held of grantsInOrderForPerson(session.receivedGrants(), personHexes, {
       scopeHex: journalHex(options.scope),
       allowMember: true,
     })) {
@@ -257,28 +279,37 @@ export async function writeWelcome<T>(
         resolve: async () => released("kept", await reachSignerForGrantWire(held.wireB64), null),
       });
     }
-    const delegationHeader = await delegationHeaderFor(targetHex, session.accountKey);
-    if (delegationHeader !== null) {
+    const delegation = await delegationFor(personHexes);
+    if (delegation !== null) {
       candidates.push({
         kind: "delegation",
-        resolve: async () => released("delegation", await session.accountReachSigner(), delegationHeader),
+        resolve: async () => released("delegation", await delegation.signer(), delegation.header),
       });
     }
   }
   return writeThroughCandidates(candidates, write);
 }
 
-/** The delegation header a kept committer-delegation envelope holds for
- *  our account key, newest envelope first; `null` when none does. */
-async function delegationHeaderFor(
-  addedHex: string,
-  ownAccountKey: Uint8Array,
-): Promise<string | null> {
+/**
+ * The delegation a kept committer-delegation envelope holds for one of this
+ * account's keys, for an add of the person `addedHexes` names (every key
+ * they have had), with the signer of the key it names.
+ *
+ * ADR-0066 section 3.5a: a proposer names the committer's account key as IT
+ * knows it. One that has observed this account's proven rotation names the
+ * current key; one that has not names the key the role table carries, the
+ * predecessor. So each own key this device holds the seed of is tried, the
+ * current one first, and the write is signed with the key that was named.
+ */
+async function delegationFor(
+  addedHexes: readonly string[],
+): Promise<{ readonly header: string; signer(): Promise<ProofSigner> } | null> {
   const session = reachSession();
   if (session === null) return null;
-  const envelopes = delegationsFor(session.receivedGrants(), addedHex);
+  const envelopes = delegationsForPerson(session.receivedGrants(), addedHexes);
   if (envelopes.length === 0) return null;
   const wasm = await loadWasm();
+  const delegates = session.delegateKeys();
   for (const held of envelopes) {
     let env;
     try {
@@ -287,8 +318,10 @@ async function delegationHeaderFor(
       continue;
     }
     try {
-      const header = wasm.committerDelegationFor(env, ownAccountKey);
-      if (header !== undefined) return header;
+      for (const delegate of delegates) {
+        const header = wasm.committerDelegationFor(env, delegate.accountKey);
+        if (header !== undefined) return { header, signer: () => delegate.signer() };
+      }
     } catch {
       /* a malformed envelope authorises nothing */
     } finally {

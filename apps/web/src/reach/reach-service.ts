@@ -37,6 +37,7 @@ import type {
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { DsClient, DsHttpError, DsNetworkError } from "../ds/client";
 import { journalHex } from "../ds/access";
+import { personKeysHex } from "../contacts/address-resolver";
 import { loadWasm, type Wasm } from "../wasm";
 import {
   REACH_CLASS_BYTE,
@@ -46,6 +47,7 @@ import {
   applyAcceptedDiff,
   applyVersionChecks,
   adoptReachState,
+  bindReachBook,
   bookHoldsNoVersionState,
   bumpVersion,
   decodeReachBook,
@@ -134,6 +136,7 @@ export class ReachSession {
   private scopes: () => ReachScopes = () => ({ groupIdsHex: [], channels: [] });
   private setting: () => WasmVisibilitySetting | null = () => null;
   private stopped = false;
+  private predecessor: { readonly accountKey: Uint8Array; readonly seed: Uint8Array } | null = null;
 
   private constructor(
     readonly accountIdB64: string,
@@ -165,6 +168,15 @@ export class ReachSession {
       loadReachRow(accountIdB64, "book"),
       loadReachRow(accountIdB64, "grants"),
     ]);
+    // ADR-0066 section 3.5, "Reach" - the registrations the book records
+    // were made on the mailbox of the key it was bound to. Under another key
+    // of this account (a rotation) they describe the mailbox that was left:
+    // forgotten here, so the first sync registers everything on the new one.
+    // The versions, the links, the open requests and the grants held for
+    // other people are kept. Nothing is sent to the old mailbox.
+    const loaded = decodeReachBook(bookJson);
+    const book = bindReachBook(loaded, journalHex(accountKey));
+    if (book !== loaded) await saveReachRow(accountIdB64, "book", encodeReachBook(book));
     return new ReachSession(
       accountIdB64,
       accountSeed.slice(),
@@ -173,7 +185,7 @@ export class ReachSession {
       wasm,
       options.ds ?? new DsClient(),
       options.now ?? (() => Date.now()),
-      decodeReachBook(bookJson),
+      book,
       decodeReceivedGrants(grantsJson),
     );
   }
@@ -186,6 +198,8 @@ export class ReachSession {
   stop(): void {
     this.stopped = true;
     this.accountSeed.fill(0);
+    this.predecessor?.seed.fill(0);
+    this.predecessor = null;
   }
 
   /** Where the sync reads the account's groups and channels from. */
@@ -230,6 +244,37 @@ export class ReachSession {
   }
 
   /**
+   * ADR-0066 section 3.5a - the account key the conversation leaves are
+   * still bound to after a proven rotation (the oldest predecessor this
+   * device holds), with a copy of its Ed25519 seed. A proposer that has not
+   * observed the rotation names THIS key in a committer delegation, so the
+   * committer must be able to sign as it. `null` forgets it. Nothing is ever
+   * registered or derived for a mailbox from this seed.
+   */
+  setPredecessor(predecessor: { readonly accountKey: Uint8Array; readonly seed: Uint8Array } | null): void {
+    this.predecessor?.seed.fill(0);
+    this.predecessor =
+      predecessor === null
+        ? null
+        : { accountKey: predecessor.accountKey.slice(), seed: predecessor.seed.slice() };
+  }
+
+  /** The own account keys a committer delegation may name, the current one
+   *  first, each with the reach signer of exactly that key. The caller frees
+   *  a signer it takes. */
+  delegateKeys(): { readonly accountKey: Uint8Array; signer(): Promise<import("../ds/access").ProofSigner> }[] {
+    const out = [{ accountKey: this.accountKey, signer: () => this.accountReachSigner() }];
+    const predecessor = this.predecessor;
+    if (predecessor !== null) {
+      out.push({
+        accountKey: predecessor.accountKey,
+        signer: () => Promise.resolve(this.wasm.DsProofSigner.forReach(predecessor.seed)),
+      });
+    }
+    return out;
+  }
+
+  /**
    * Seal this account's member card (ADR-0060 section 3): the profile bound
    * to the account by the account identity key's signature, which a reader
    * verifies before filing the card under the account. Here so the account
@@ -270,7 +315,11 @@ export class ReachSession {
    * profiles already sent).
    */
   profileGrantSignature(groupId: Uint8Array, oneToOne: boolean): string {
-    const parts = [`member:${this.currentVersion("member", groupId)}`];
+    // ADR-0066 section 3.5a rule 3 - the account key the grants are derived
+    // under is part of what was published: after a rotation every version is
+    // unchanged and every grant is another key, so every conversation needs
+    // the profile again. A prefix of the PUBLIC key; no key material.
+    const parts = [`key:${this.accountKeyHex.slice(0, 16)}`, `member:${this.currentVersion("member", groupId)}`];
     if (oneToOne) {
       parts.push(`contact:${this.currentVersion("contact")}`);
     } else {
@@ -829,7 +878,9 @@ export async function onContactRemoved(accountKey: Uint8Array): Promise<void> {
   const session = reachSession();
   if (session === null) return;
   try {
-    await session.updateReceivedGrants((g) => dropContactGrant(g, journalHex(accountKey)));
+    // ADR-0066 section 3.5a rule 2 - under every key the person has had.
+    const keys = personKeysHex(journalHex(accountKey));
+    await session.updateReceivedGrants((g) => keys.reduce((acc, hex) => dropContactGrant(acc, hex), g));
     await session.rotateOnContactRemoved();
   } catch (err) {
     // eslint-disable-next-line no-console

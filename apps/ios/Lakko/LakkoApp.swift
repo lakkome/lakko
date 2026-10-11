@@ -376,6 +376,12 @@ struct LakkoApp: App {
                     try? await KeyRotationChannels.handOverAll(
                         auth: auth, keyGeneration: secrets.session.keyGeneration)
                 }
+                // ADR-0066 section 3.5a rule 3 — once the reach keys are on
+                // the new mailbox, the profile (with grants for it) goes out
+                // again through the throttled publisher.
+                if await ReachCenter.shared.syncNow() {
+                    chat?.resendProfileAfterAdoptingKeyRotation()
+                }
                 NotificationCenter.default.post(name: .lakkoAccountKeysRotated, object: nil)
             }
         }

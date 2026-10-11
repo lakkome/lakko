@@ -119,6 +119,17 @@ public class ContactsRepository(
                     )
                 }
             },
+            // ADR-0066 section 3.5a rule 1 - mailboxes are addressed by the
+            // current key of the person (proven steps only).
+            mailboxKeyOf = { key ->
+                appContext?.let { ctx ->
+                    try {
+                        me.lakko.app.reach.ReachManager.get(ctx).mailboxAccountKey(key)
+                    } catch (_: Throwable) {
+                        null
+                    }
+                } ?: key
+            },
         )
     },
     /** Factory for the [me.lakko.app.discovery.DiscoveryClient] the invite-
@@ -1862,7 +1873,10 @@ public class ContactsRepository(
     /**
      * ADR-0066 part 3, Stage A - read the mailbox of each of this account's
      * own previous identities and join the groups its Welcomes invite this
-     * device to. Only Welcomes are acted on: a contact request sealed to a
+     * device to. Section 3.5a rule 4: senders that observed the rotation
+     * address the NEW mailbox, so this only catches what was sent before
+     * they did, and only for
+     * [me.lakko.app.reach.PREDECESSOR_MAILBOX_READ_MS] after adopting. Only Welcomes are acted on: a contact request sealed to a
      * previous key is left where it is (the sender's client re-fetches the
      * identity bundle and follows the proof). Best-effort; the cursor of
      * each mailbox only moves forward.
@@ -1875,8 +1889,13 @@ public class ContactsRepository(
             emptyList()
         }
         if (predecessors.isEmpty()) return
+        val nowMs = System.currentTimeMillis()
         try {
             for (previous in predecessors) {
+                // ADR-0066 section 3.5a rule 4 - read for 30 days after this
+                // device adopted the successor, then left for good. Nothing
+                // is ever written or registered there.
+                if (!me.lakko.app.reach.predecessorMailboxIsRead(previous.supersededAtMs, nowMs)) continue
                 try {
                     clientFactory().use { client ->
                         Identity.fromSeed(previous.phraseSeed).use { identity ->

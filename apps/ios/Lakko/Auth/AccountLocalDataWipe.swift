@@ -142,6 +142,7 @@ enum AccountLocalDataWipe {
         step("keys-rotated-notice") { KeysRotatedNoticeStore().clear(accountIdB64: accountIdB64) }
         step("predecessor-inbox-cursor") {
             PredecessorMailbox.CursorStore().clear(accountIdB64: accountIdB64)
+            PredecessorMailbox.AdoptionStore().clear(accountIdB64: accountIdB64)
         }
         // ADR-0066 section 1.1 — the recall record: the one step the staged
         // wipe skips.

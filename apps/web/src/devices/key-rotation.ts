@@ -29,8 +29,13 @@
  *   7. `journals`          the plain root transfer of every other journal the
  *                          account owns, and the registrars re-appointed.
  *   8. `channels`          the owner key of every channel the account owns.
- *   9. `reach`             the new mailbox and the reach keys.
- *  10. `backup`            the backup re-sealed under the new phrase.
+ *   9. `reach`             the new mailbox and the reach keys: every wanted
+ *                          key registered on the mailbox of the NEW key.
+ *  10. `profile`           the profile envelope, with grants for the new
+ *                          mailbox, re-sent to every one-to-one and group
+ *                          (ADR-0066 section 3.5a rule 3). Owed until every
+ *                          conversation has it.
+ *  11. `backup`            the backup re-sealed under the new phrase.
  *
  * A failure before `commit` changes nothing on the server: the device WAS
  * removed and the keys are unchanged. A failure after it resumes from the
@@ -55,6 +60,7 @@ export const ROTATION_STEPS = [
   "journals",
   "channels",
   "reach",
+  "profile",
   "backup",
 ] as const;
 export type RotationStep = (typeof ROTATION_STEPS)[number];
@@ -307,7 +313,7 @@ export interface RotationPorts {
   /** The remaining steps: each answers done or later and never throws for a
    *  refusal (a throw reads as later). */
   readonly publish: (
-    step: "key-package" | "device-group-root" | "journals" | "channels" | "reach" | "backup",
+    step: "key-package" | "device-group-root" | "journals" | "channels" | "reach" | "profile" | "backup",
     record: RotationOwed,
   ) => Promise<PublishVerdict>;
   /** The session is of a superseded generation. */

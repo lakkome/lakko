@@ -17,11 +17,12 @@
 import { createEffect, onCleanup, untrack, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64Decode } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
+import { setOwnAccountKeys } from "../contacts/address-resolver";
 import { useChats } from "../chat/ChatContext";
 import { journalHex } from "../ds/access";
 import { channelsState } from "../state/channels-state";
-import { reachSession, startReachSession, stopReachSession } from "./reach-service";
+import { reachSession, reachSessionSignal, startReachSession, stopReachSession } from "./reach-service";
 import { clearVisibility, loadVisibility, visibilitySetting } from "./visibility-store";
 import { clearJoinReplies } from "./join-replies";
 import { applyHeldServiceEnvelopes, clearHeldServiceEnvelopes } from "./service-envelope-intake";
@@ -35,6 +36,41 @@ export function ReachProvider(props: { children: JSX.Element }): JSX.Element {
     const s = auth.state();
     return s.kind === "session" ? s.account.accountId : null;
   };
+
+  // ADR-0066 section 3.5a - the own account's keys, for "resolve before you
+  // address" (another device of this account is bound to the predecessor
+  // key) and for the committer delegations that still name that key. Set
+  // synchronously, before the session below starts.
+  createEffect(() => {
+    const account = accountId();
+    const identity = chats.accountIdentity();
+    const predecessor = chats.predecessorAccountIdentity();
+    reachSessionSignal();
+    untrack(() => {
+      if (account === null || identity === null) {
+        setOwnAccountKeys(null);
+        return;
+      }
+      const currentKey = identity.signaturePublicKey;
+      const predecessorKey = predecessor === null ? null : predecessor.signaturePublicKey;
+      setOwnAccountKeys({
+        currentKeyB64: base64Encode(currentKey),
+        provenPredecessorsB64: predecessorKey === null ? [] : [base64Encode(predecessorKey)],
+      });
+      const session = reachSession();
+      if (session === null || session.accountKeyHex !== journalHex(currentKey)) return;
+      if (predecessor === null || predecessorKey === null) {
+        session.setPredecessor(null);
+        return;
+      }
+      const seed = predecessor.ed25519Seed;
+      try {
+        session.setPredecessor({ accountKey: predecessorKey, seed });
+      } finally {
+        seed.fill(0);
+      }
+    });
+  });
 
   let bound: string | null = null;
   createEffect(() => {

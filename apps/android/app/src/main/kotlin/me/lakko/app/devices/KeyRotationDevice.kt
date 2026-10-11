@@ -141,6 +141,16 @@ internal object KeyRotationDevice {
                 return reach.sync()
             }
 
+            override suspend fun resendProfile(): Boolean {
+                // ADR section 3.5a rule 3: every one-to-one and group holds
+                // grants for the OLD mailbox; the profile carrying the ones
+                // for the new mailbox goes out through the chat layer's
+                // profile publisher, awaited. No chat layer, or any
+                // conversation that did not take it, leaves the step owed.
+                val chats = chatRepository ?: return false
+                return chats.resendProfileAfterKeyChange()
+            }
+
             override suspend fun sealBackup(): Boolean {
                 // ADR section 3.5, "Backup": re-sealed under the new phrase
                 // and uploaded, awaited. A chat layer that is not ready

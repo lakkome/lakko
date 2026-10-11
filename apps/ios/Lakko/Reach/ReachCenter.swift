@@ -106,9 +106,101 @@ public final class ReachCenter: ObservableObject {
     private var syncTask: Task<Void, Never>?
     private var syncAgain = false
 
+    /// ADR-0066 section 3.5a — who an account key is NOW: the proven
+    /// predecessors of the people this account knows and this account's own
+    /// old keys. Every mailbox this type derives from an account key, and
+    /// every grant lookup, goes through it. Reloaded on activation, on a
+    /// re-key and whenever the proven-predecessor store changes.
+    public private(set) var keyResolver = AccountKeyResolver()
+    /// Where ``keyResolver`` is read from. The default reads the per-account
+    /// stores; tests inject their own.
+    var keyResolverProvider: @MainActor (_ accountIdB64: String, _ ownCurrentKey: Data?) -> AccountKeyResolver = {
+        accountIdB64, ownCurrentKey in
+        AccountKeyResolver(
+            proven: ProvenPredecessorStore(ownerAccountIdB64: accountIdB64).load(),
+            ownCurrentKey: ownCurrentKey,
+            ownPredecessorKeys: OwnAccountKeys.predecessorPublicKeys(accountIdB64: accountIdB64))
+    }
+    private var predecessorObserver: NSObjectProtocol?
+
     init(persistence: ReachPersistence = KeychainReachPersistence(), ds: ReachDsTransport = DsClient()) {
         self.persistence = persistence
         self.ds = ds
+    }
+
+    /// Re-read ``keyResolver`` (a proven rotation was recorded, or this
+    /// account adopted a rotation of its own keys). A change of who a key
+    /// belongs to can unblock a Welcome owed for lack of a key.
+    public func reloadKeyResolver() {
+        guard let accountIdB64 else {
+            keyResolver = AccountKeyResolver()
+            return
+        }
+        let next = keyResolverProvider(accountIdB64, ownAccountKey)
+        guard next != keyResolver else { return }
+        let before = keyResolver
+        keyResolver = next
+        // Tell the Welcome retry about every person whose current key moved.
+        for key in next.predecessorKeys where before.current(of: key) != next.current(of: key) {
+            onGrantKept?(next.current(of: key).base64EncodedString())
+        }
+    }
+
+    private func observePredecessors() {
+        guard predecessorObserver == nil else { return }
+        predecessorObserver = NotificationCenter.default.addObserver(
+            forName: ProvenPredecessorStore.changed, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reloadKeyResolver() }
+        }
+    }
+
+    // MARK: - Resolve before addressing (ADR-0066 section 3.5a rule 1)
+
+    /// The current account key of the person `accountKey` belongs to: itself
+    /// unless it was superseded BY PROOF (this account's own old keys
+    /// included). An unproven change is never resolved.
+    public func currentAccountKey(of accountKey: Data) -> Data {
+        keyResolver.current(of: accountKey)
+    }
+
+    /// The mailbox a write for the person holding `accountKey` goes to: the
+    /// mailbox of their current key.
+    public func mailbox(forAccountKey accountKey: Data) -> Data? {
+        MailboxAddress.pseudonym(forAccountKey: accountKey, resolver: keyResolver)
+    }
+
+    /// Re-address a mailbox pseudonym derived earlier (a Welcome recorded in
+    /// the ADR-0040 outbox before the rotation was observed): the mailbox of
+    /// the person's current key when `pseudonym` is a known predecessor's.
+    public func currentMailbox(for pseudonym: Data) -> Data {
+        MailboxAddress.current(of: pseudonym, resolver: keyResolver)
+    }
+
+    /// Every grant held for the person `accountKey` belongs to, whichever of
+    /// their keys each was filed under (rule 2): the newest of a class and
+    /// scope wins, exactly as ``ReachRules/merging(_:into:)`` decides for one
+    /// key.
+    private func heldForPerson(_ accountKey: Data) -> [ReachRules.HeldGrant] {
+        let keys = keyResolver.allKeys(of: accountKey).map { $0.base64EncodedString() }
+        if keys.count == 1 { return record.held[keys[0]] ?? [] }
+        // Oldest first, so the newest of a class and scope is merged last; at
+        // an equal stamp the grant filed under the nearer key (the current
+        // one last) is the newer.
+        let ranked = keys.reversed().enumerated().flatMap { rank, key in
+            (record.held[key] ?? []).map { (rank: rank, grant: $0) }
+        }.sorted { ($0.grant.storedAtMs, $0.rank) < ($1.grant.storedAtMs, $1.rank) }
+        return ranked.reduce(into: [ReachRules.HeldGrant]()) { out, entry in
+            out = ReachRules.merging(entry.grant, into: out)
+        }
+    }
+
+    /// The distinct people grants are held for, by current account key.
+    private func heldPeople() -> [Data] {
+        var seen = Set<Data>()
+        return record.held.keys.sorted().compactMap { Data(base64Encoded: $0) }
+            .map { keyResolver.current(of: $0) }
+            .filter { seen.insert($0).inserted }
     }
 
     // MARK: - Account lifecycle
@@ -149,6 +241,8 @@ public final class ReachCenter: ObservableObject {
             reachState = FfiReachState(entries: [], updatedAtMs: 0)
         }
         persist()
+        observePredecessors()
+        reloadKeyResolver()
         grantRevision &+= 1
     }
 
@@ -159,7 +253,10 @@ public final class ReachCenter: ObservableObject {
     /// filed under the contact, not under this account's key). What was
     /// registered was registered on the OLD mailbox: nothing is registered on
     /// the new one yet, so the next ``sync()`` registers everything there.
-    /// The old mailbox and its keys are left as they are.
+    /// The old mailbox and its keys are left as they are: nothing is ever
+    /// registered there again (section 3.5a rule 4). The grants handed out so
+    /// far open the OLD mailbox only; the profile re-send that carries the
+    /// new ones is the caller's step (rule 3).
     public func rekey(accountIdB64: String, accountIdentity: Identity) {
         guard self.accountIdB64 == accountIdB64, accountSeed != nil else {
             activate(accountIdB64: accountIdB64, accountIdentity: accountIdentity)
@@ -176,6 +273,8 @@ public final class ReachCenter: ObservableObject {
         record.registeredB64 = []
         record.registeredOpen = nil
         persist()
+        // The old key is this account's own predecessor from now on.
+        reloadKeyResolver()
         grantRevision &+= 1
     }
 
@@ -188,6 +287,7 @@ public final class ReachCenter: ObservableObject {
         ownAccountKey = nil
         mailboxSigner = nil
         mailboxPseudonym = nil
+        keyResolver = AccountKeyResolver()
         record = ReachRecord()
         reachState = FfiReachState(entries: [], updatedAtMs: 0)
         setting = defaultVisibilitySetting()
@@ -722,7 +822,12 @@ public final class ReachCenter: ObservableObject {
     ) -> Bool {
         guard isActive,
               ReachRules.keeps(grant, carrier: carrier, senderResolved: fromAccountKeyB64 != nil),
-              let key = fromAccountKeyB64 else { return false }
+              let receivedUnder = fromAccountKeyB64 else { return false }
+        // ADR-0066 section 3.5a rule 2 — filed for the PERSON: a grant that
+        // arrived from a leaf still bound to a proven predecessor key belongs
+        // to the account's current key.
+        let key = Data(base64Encoded: receivedUnder)
+            .map { keyResolver.current(of: $0).base64EncodedString() } ?? receivedUnder
         let scope: String? = (grant.class == .contact || grant.class == .reply) ? nil : scopeHex
         let held = ReachRules.HeldGrant(grant: grant, scopeHex: scope, storedAtMs: Self.nowMs())
         record.held[key] = ReachRules.merging(held, into: record.held[key] ?? [])
@@ -740,12 +845,28 @@ public final class ReachCenter: ObservableObject {
         _ reachClass: FfiReachClass, fromAccountKeyB64 key: String, scopeHex: String
     ) -> Bool {
         let name = ReachRules.className(reachClass)
-        guard var held = record.held[key],
-              held.contains(where: { $0.classRaw == name && $0.scopeHex == scopeHex }) else { return false }
-        held.removeAll { $0.classRaw == name && $0.scopeHex == scopeHex }
-        record.held[key] = held.isEmpty ? nil : held
-        persist()
-        return true
+        var withdrew = false
+        for personKey in personKeysB64(key) {
+            guard var held = record.held[personKey],
+                  held.contains(where: { $0.classRaw == name && $0.scopeHex == scopeHex }) else { continue }
+            held.removeAll { $0.classRaw == name && $0.scopeHex == scopeHex }
+            record.held[personKey] = held.isEmpty ? nil : held
+            withdrew = true
+        }
+        if withdrew { persist() }
+        return withdrew
+    }
+
+    /// Every key (base64) of the person `keyB64` belongs to, `keyB64` itself
+    /// when it does not decode.
+    private func personKeysB64(_ keyB64: String) -> [String] {
+        guard let key = Data(base64Encoded: keyB64) else { return [keyB64] }
+        return keyResolver.allKeys(of: key).map { $0.base64EncodedString() }
+    }
+
+    private func heldForPerson(b64 keyB64: String) -> [ReachRules.HeldGrant] {
+        guard let key = Data(base64Encoded: keyB64) else { return record.held[keyB64] ?? [] }
+        return heldForPerson(key)
     }
 
     /// Whether a grant of `reachClass` is held from the person with account
@@ -754,15 +875,16 @@ public final class ReachCenter: ObservableObject {
         _ reachClass: FfiReachClass, fromAccountKeyB64 key: String, scopeHex: String
     ) -> Bool {
         let name = ReachRules.className(reachClass)
-        return record.held[key]?.contains { $0.classRaw == name && $0.scopeHex == scopeHex } ?? false
+        return heldForPerson(b64: key).contains { $0.classRaw == name && $0.scopeHex == scopeHex }
     }
 
     /// Drop every grant held for a person (they were removed as a contact and
     /// left every shared group) — best effort; their rotation retires them
     /// anyway.
     public func dropHeld(accountKeyB64: String) {
-        guard record.held[accountKeyB64] != nil else { return }
-        record.held[accountKeyB64] = nil
+        let keys = personKeysB64(accountKeyB64).filter { record.held[$0] != nil }
+        guard !keys.isEmpty else { return }
+        for key in keys { record.held[key] = nil }
         persist()
     }
 
@@ -770,11 +892,15 @@ public final class ReachCenter: ObservableObject {
     /// `accountKey`: this account's own contact seed for its own mailbox, else
     /// the best grant held for them. `nil` when nothing is held — the write
     /// then goes unsigned, which only an Everyone mailbox stores.
+    ///
+    /// ADR-0066 section 3.5a — `accountKey` is resolved first: a proven
+    /// predecessor (this account's own old key included) is the person's
+    /// current key, and the write goes to ``mailbox(forAccountKey:)``.
     public func writeAuth(toAccountKey accountKey: Data, groupIdHex: String? = nil) -> DsMailboxWriteAuth? {
-        if let own = ownAccountKey, own == accountKey, let seed = ownContactSeed() {
+        if keyResolver.isOwn(accountKey) || accountKey == ownAccountKey, let seed = ownContactSeed() {
             return DsMailboxWriteAuth(reachSeed: seed)
         }
-        let held = record.held[accountKey.base64EncodedString()] ?? []
+        let held = heldForPerson(accountKey)
         guard let seed = ReachRules.writeSeed(from: held, groupIdHex: groupIdHex) else { return nil }
         return DsMailboxWriteAuth(reachSeed: seed)
     }
@@ -782,14 +908,17 @@ public final class ReachCenter: ObservableObject {
     /// ``writeAuth(toAccountKey:groupIdHex:)`` for a write addressed by its
     /// mailbox pseudonym alone (a Welcome recorded in the ADR-0040 outbox):
     /// this account's own mailbox, then any person a grant is held for, then a
-    /// committer delegation naming this account.
+    /// committer delegation naming this account. `pseudonym` is the mailbox
+    /// the write GOES to: a caller holding one derived earlier re-addresses it
+    /// first (``currentMailbox(for:)``).
     public func writeAuth(toMailbox pseudonym: Data, groupIdHex: String? = nil) -> DsMailboxWriteAuth? {
         if let own = ownAccountKey, Self.mailbox(of: own) == pseudonym, let seed = ownContactSeed() {
             return DsMailboxWriteAuth(reachSeed: seed)
         }
-        for (keyB64, held) in record.held {
-            guard let key = Data(base64Encoded: keyB64), Self.mailbox(of: key) == pseudonym,
-                  let seed = ReachRules.writeSeed(from: held, groupIdHex: groupIdHex) else { continue }
+        for person in heldPeople() {
+            guard Self.mailbox(of: person) == pseudonym,
+                  let seed = ReachRules.writeSeed(from: heldForPerson(person), groupIdHex: groupIdHex)
+            else { continue }
             return DsMailboxWriteAuth(reachSeed: seed)
         }
         return delegatedAuth(toMailbox: pseudonym)
@@ -807,9 +936,8 @@ public final class ReachCenter: ObservableObject {
             return ownContactSeed().map { [DsMailboxWriteAuth(reachSeed: $0)] } ?? []
         }
         var out: [DsMailboxWriteAuth] = []
-        for (keyB64, held) in record.held.sorted(by: { $0.key < $1.key }) {
-            guard let key = Data(base64Encoded: keyB64), Self.mailbox(of: key) == pseudonym else { continue }
-            out += ReachRules.writeSeeds(from: held, groupIdHex: groupIdHex)
+        for person in heldPeople() where Self.mailbox(of: person) == pseudonym {
+            out += ReachRules.writeSeeds(from: heldForPerson(person), groupIdHex: groupIdHex)
                 .map { DsMailboxWriteAuth(reachSeed: $0) }
         }
         if let delegated = delegatedAuth(toMailbox: pseudonym) { out.append(delegated) }
@@ -842,7 +970,7 @@ public final class ReachCenter: ObservableObject {
     /// signed with this account's own seed (the key the delegation names).
     private func delegatedAuth(toMailbox pseudonym: Data) -> DsMailboxWriteAuth? {
         guard let own = ownAccountKey, let seed = accountSeed else { return nil }
-        for envelope in delegations.values where Self.mailbox(of: envelope.addedAccountKey) == pseudonym {
+        for envelope in delegations.values where mailbox(forAccountKey: envelope.addedAccountKey) == pseudonym {
             if let header = try? committerDelegationFor(envelope: envelope, ownAccountKey: own) {
                 return DsMailboxWriteAuth(reachSeed: seed, delegationHeader: header)
             }
@@ -858,13 +986,20 @@ public final class ReachCenter: ObservableObject {
     public func composeDelegations(
         addedAccountKey: Data, candidateAccountKeys: [Data], groupIdHex: String?
     ) -> Data? {
+        // ADR-0066 section 3.5a rule 1 — the delegation is for the added
+        // person's CURRENT mailbox, so the envelope names their current key
+        // (the core refuses an envelope whose delegations name another
+        // mailbox than its key's); each committer candidate is named by its
+        // current key too, the key it signs the delegated write with.
+        let addedAccountKey = keyResolver.current(of: addedAccountKey)
         guard let issuer = heldSeed(
             forAccountKeyB64: addedAccountKey.base64EncodedString(), groupIdHex: groupIdHex),
               let mailbox = Self.mailbox(of: addedAccountKey) else { return nil }
         let expires = Self.nowMs() + ReachRules.delegationLifetimeMs
         var blobs: [Data] = []
         var seen = Set<Data>()
-        for candidate in candidateAccountKeys where seen.insert(candidate).inserted {
+        for candidate in candidateAccountKeys.map({ keyResolver.current(of: $0) })
+        where seen.insert(candidate).inserted {
             guard blobs.count < Int(maxCommitterDelegations()) else { break }
             var nonce = Data(count: 16)
             guard nonce.withUnsafeMutableBytes({
@@ -883,14 +1018,14 @@ public final class ReachCenter: ObservableObject {
 
     /// The account keys (b64) this device holds any grant for.
     public func heldAccountKeys() -> [String] {
-        Array(record.held.keys)
+        heldPeople().map { $0.base64EncodedString() }
     }
 
     /// The seed of the best grant held for the person with account key `key`
     /// (b64): what a proposer signs committer delegations with, and what local
     /// people search offers a request under.
     public func heldSeed(forAccountKeyB64 key: String, groupIdHex: String?) -> Data? {
-        ReachRules.writeSeed(from: record.held[key] ?? [], groupIdHex: groupIdHex)
+        ReachRules.writeSeed(from: heldForPerson(b64: key), groupIdHex: groupIdHex)
     }
 
 

@@ -39,7 +39,7 @@ final class KeyRotationPlanTests: XCTestCase {
         XCTAssertEqual(KeyRotationPlan.remaining(record(.announced)), [])
         XCTAssertEqual(
             KeyRotationPlan.remaining(record(.committed)),
-            [.discovery, .keyPackage, .deviceGroupRoot, .journals, .channels, .reach, .backup])
+            [.discovery, .keyPackage, .deviceGroupRoot, .journals, .channels, .reach, .profile, .backup])
     }
 
     func testAStepThatLandedIsNotOwedAgain() {
@@ -640,6 +640,7 @@ final class KeyRotationRunnerTests: XCTestCase {
             transferOwnedJournals: { try step("journals") },
             handOverChannels: { _ in try step("channels") },
             rekeyReach: { try step("reach") },
+            resendProfile: { try step("profile") },
             resealBackup: { try step("backup") },
             devicePhrase: { _ in world.phrase },
             dropFreshAuth: { world.droppedFreshAuth() },
@@ -662,7 +663,7 @@ final class KeyRotationRunnerTests: XCTestCase {
         XCTAssertEqual(
             world.events,
             ["remove", "own-pending", "announce", "commit", "adopt", "discovery", "keypackage", "dg-root",
-             "journals", "channels", "reach", "backup"])
+             "journals", "channels", "reach", "profile", "backup"])
         // The envelope left at the epoch the removal produced.
         XCTAssertEqual(world.sealedAt, [21])
         // This device's own copy was kept before the envelope left.
@@ -808,6 +809,182 @@ final class KeyRotationRunnerTests: XCTestCase {
         XCTAssertEqual(KeyRotationPlan.remaining(record), [.journals, .channels])
         XCTAssertTrue(world.events.contains("reach"))
         XCTAssertTrue(world.events.contains("backup"))
+    }
+
+    func testABackupThatDidNotUploadStaysOwedAndIsRetriedAlone() async throws {
+        let (runner, world, store) = try make()
+        world.failing = ["backup"]
+
+        let result = await runner.rotate(deviceId: target, attestation: nil)
+
+        XCTAssertEqual(result, .rotated(phrase: world.material.phrase), "the words wait only for the publish")
+        var record = try XCTUnwrap(store.load(accountIdB64: accountIdB64))
+        XCTAssertFalse(record.backupDone)
+        XCTAssertEqual(KeyRotationPlan.remaining(record), [.backup])
+        XCTAssertFalse(KeyRotationPlan.isComplete(record), "a rotation whose backup did not upload is not done")
+
+        // Still failing: still owed, and nothing else is run again.
+        let before = world.events.count
+        await runner.resumeOwed()
+        XCTAssertEqual(Array(world.events[before...]), ["backup"])
+        record = try XCTUnwrap(store.load(accountIdB64: accountIdB64))
+        XCTAssertEqual(KeyRotationPlan.remaining(record), [.backup])
+
+        world.failing = []
+        let beforeRetry = world.events.count
+        await runner.resumeOwed()
+
+        XCTAssertEqual(Array(world.events[beforeRetry...]), ["backup"], "only the owed step is retried")
+        // A record that became complete is dropped by the store.
+        if let after = store.load(accountIdB64: accountIdB64) {
+            XCTAssertTrue(after.backupDone)
+            XCTAssertEqual(KeyRotationPlan.remaining(after), [])
+        }
+        XCTAssertEqual(world.events.filter { $0 == "commit" }.count, 1, "never a second rotation")
+    }
+
+    func testABackupThatUploadedIsRecorded() async throws {
+        let (runner, world, store) = try make()
+
+        _ = await runner.rotate(deviceId: target, attestation: nil)
+
+        XCTAssertEqual(world.events.filter { $0 == "backup" }.count, 1)
+        if let record = store.load(accountIdB64: accountIdB64) {
+            XCTAssertTrue(record.backupDone)
+            XCTAssertFalse(KeyRotationPlan.remaining(record).contains(.backup))
+        }
+    }
+
+    // ADR-0066 section 3.5a rule 3 — the profile re-send is a step of the
+    // owed record: a send that did not land keeps it owed and is retried.
+
+    func testAProfileReSendThatDidNotLandStaysOwedAndIsRetriedAlone() async throws {
+        let (runner, world, store) = try make()
+        world.failing = ["profile"]
+
+        let result = await runner.rotate(deviceId: target, attestation: nil)
+
+        XCTAssertEqual(result, .rotated(phrase: world.material.phrase), "the words do not wait for it")
+        var record = try XCTUnwrap(store.load(accountIdB64: accountIdB64))
+        XCTAssertNotEqual(record.profileDone, true)
+        XCTAssertEqual(KeyRotationPlan.remaining(record), [.profile])
+        XCTAssertFalse(KeyRotationPlan.isComplete(record), "a rotation whose profile was not re-sent is not done")
+        XCTAssertTrue(world.events.contains("backup"), "a later step is not held back")
+
+        let before = world.events.count
+        await runner.resumeOwed()
+        XCTAssertEqual(Array(world.events[before...]), ["profile"], "still failing: only it is tried again")
+        record = try XCTUnwrap(store.load(accountIdB64: accountIdB64))
+        XCTAssertEqual(KeyRotationPlan.remaining(record), [.profile])
+
+        world.failing = []
+        let beforeRetry = world.events.count
+        await runner.resumeOwed()
+        XCTAssertEqual(Array(world.events[beforeRetry...]), ["profile"])
+        if let after = store.load(accountIdB64: accountIdB64) {
+            XCTAssertEqual(after.profileDone, true)
+            XCTAssertEqual(KeyRotationPlan.remaining(after), [])
+        }
+    }
+
+    func testTheProfileIsNotReSentBeforeTheReachKeysAreOnTheNewMailbox() async throws {
+        let (runner, world, store) = try make()
+        world.failing = ["reach"]
+
+        _ = await runner.rotate(deviceId: target, attestation: nil)
+
+        XCTAssertFalse(world.events.contains("profile"), "a grant must name a key the mailbox already knows")
+        XCTAssertEqual(
+            KeyRotationPlan.remaining(try XCTUnwrap(store.load(accountIdB64: accountIdB64))),
+            [.reach, .profile])
+
+        world.failing = []
+        let before = world.events.count
+        await runner.resumeOwed()
+        XCTAssertEqual(Array(world.events[before...]), ["reach", "profile"])
+    }
+
+    func testARecordWrittenBeforeTheProfileStepExistedOwesIt() throws {
+        var record = KeyRotationRecord(targetDeviceIdB64: "ZGV2", startedAtMs: 1)
+        record.phase = .committed
+        record.discoveryDone = true
+        record.keyPackageDone = true
+        record.deviceGroupRootDone = true
+        record.journalsDone = true
+        record.channelsDone = true
+        record.reachDone = true
+        record.backupDone = true
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as? [String: Any])
+        json["profile_done"] = nil
+        let old = try JSONDecoder().decode(
+            KeyRotationRecord.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(KeyRotationPlan.remaining(old), [.profile])
+    }
+
+    func testWithNoSnapshotTheBackupStaysOwedAndNothingIsUploaded() async throws {
+        let world = try World(seed: oldSeed, roster: [own, target])
+        let store = store()
+        var snapshot: Data?
+        var bootstrapped = true
+        var uploads: [(snapshot: Data, groups: [String])] = []
+        var all = ports(world)
+        all.resealBackup = {
+            try await KeyRotationBackup.reseal(
+                chatBootstrapped: bootstrapped,
+                snapshot: { snapshot },
+                knownGroupIdsHex: { ["aa"] },
+                upload: { taken, groups in uploads.append((taken, groups)) })
+        }
+        let runner = KeyRotationRunner(ports: all, store: store)
+
+        _ = await runner.rotate(deviceId: target, attestation: nil)
+
+        XCTAssertTrue(uploads.isEmpty, "an empty snapshot must never overwrite the server's copy")
+        XCTAssertEqual(KeyRotationPlan.remaining(try XCTUnwrap(store.load(accountIdB64: accountIdB64))), [.backup])
+
+        // An empty snapshot is no snapshot.
+        snapshot = Data()
+        await runner.resumeOwed()
+        XCTAssertTrue(uploads.isEmpty)
+        XCTAssertEqual(KeyRotationPlan.remaining(try XCTUnwrap(store.load(accountIdB64: accountIdB64))), [.backup])
+
+        // A snapshot from a chat layer that has not bootstrapped is not used.
+        snapshot = Data([1, 2, 3])
+        bootstrapped = false
+        await runner.resumeOwed()
+        XCTAssertTrue(uploads.isEmpty)
+        XCTAssertEqual(KeyRotationPlan.remaining(try XCTUnwrap(store.load(accountIdB64: accountIdB64))), [.backup])
+
+        bootstrapped = true
+        await runner.resumeOwed()
+        XCTAssertEqual(uploads.count, 1)
+        XCTAssertEqual(uploads.first?.snapshot, Data([1, 2, 3]))
+        XCTAssertEqual(uploads.first?.groups, ["aa"])
+        if let after = store.load(accountIdB64: accountIdB64) {
+            XCTAssertTrue(after.backupDone)
+        }
+    }
+
+    func testTheBackupStepThrowsWhatTheUploadThrewAndNamesWhyItDidNotRun() async {
+        do {
+            try await KeyRotationBackup.reseal(
+                chatBootstrapped: true, snapshot: { Data([9]) }, knownGroupIdsHex: { [] },
+                upload: { _, _ in throw Down() })
+            XCTFail("a failed upload must throw")
+        } catch { XCTAssertTrue(error is Down) }
+        do {
+            try await KeyRotationBackup.reseal(
+                chatBootstrapped: false, snapshot: { Data([9]) }, knownGroupIdsHex: { [] },
+                upload: { _, _ in XCTFail("no upload before the chat layer is ready") })
+            XCTFail("must throw")
+        } catch { XCTAssertEqual(error as? KeyRotationBackup.NotReady, .chatNotBootstrapped) }
+        do {
+            try await KeyRotationBackup.reseal(
+                chatBootstrapped: true, snapshot: { nil }, knownGroupIdsHex: { [] },
+                upload: { _, _ in XCTFail("no upload without a snapshot") })
+            XCTFail("must throw")
+        } catch { XCTAssertEqual(error as? KeyRotationBackup.NotReady, .noSnapshot) }
     }
 
     func testTheDirectoryRefusingTheProofFallsBackToTheAttestationAlone() async throws {

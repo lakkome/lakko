@@ -132,6 +132,15 @@ public class ContactsClient(
      * the gate refused, and never for a first observation.
      */
     private val onProvenRotation: (String, String, String) -> Unit = { _, _, _ -> },
+    /**
+     * ADR-0066 section 3.5a rule 1 - the account key whose mailbox is
+     * addressed for a person known by the given key: the key its PROVEN
+     * steps lead to, else the key itself (an unproven change is never
+     * followed). Production wires
+     * [me.lakko.app.reach.ReachManager.mailboxAccountKey]; the default is
+     * the identity (no step is known).
+     */
+    private val mailboxKeyOf: (ByteArray) -> ByteArray = { it },
 ) : AutoCloseable {
 
     override fun close() {
@@ -993,6 +1002,18 @@ public class ContactsClient(
         replyGrant: FfiReachGrant?,
         reach: DsReachAuth?,
     ): PublishedRequest {
+        // ADR-0066 3.5a rule 1 - resolve before addressing. A request is
+        // SEALED to the X25519 key published with [recipientSignaturePubkey],
+        // and a mailbox is read with the identity it belongs to, so a
+        // request can only go to the mailbox of the key it is sealed for.
+        // When that key is a proven predecessor the keys in hand are stale:
+        // nothing is sent (never to the old mailbox, never unopenable to the
+        // new one); the caller fetches the current bundle and sends again.
+        if (staleRecipientKey(recipientSignaturePubkey, mailboxKeyOf(recipientSignaturePubkey))) {
+            throw ContactsError.wrap(
+                IllegalStateException("the recipient's account keys were rotated; fetch their current keys"),
+            )
+        }
         // Recipient mailbox pseudonym = BLAKE3(domain || their pubkey).
         val recipientPseudonym =
             IdentityPseudonym.fromIdentity(recipientSignaturePubkey).use { it.asBytes() }
@@ -1078,8 +1099,10 @@ public class ContactsClient(
          *  ack into their closed mailbox. */
         reach: DsReachAuth? = null,
     ): PublishedAck {
+        // ADR-0066 3.5a rule 1 - the requester's CURRENT mailbox: an ack is
+        // signed, not sealed, so it follows a proven rotation of their keys.
         val senderMailbox =
-            IdentityPseudonym.fromIdentity(originalRequest.fromPubkey).use { it.asBytes() }
+            IdentityPseudonym.fromIdentity(mailboxKeyOf(originalRequest.fromPubkey)).use { it.asBytes() }
 
         val acceptedAtMs = System.currentTimeMillis().toULong()
 
@@ -1686,3 +1709,12 @@ internal fun readProofExpiresAtSecs(proofBytes: ByteArray): Long {
     }
     return value
 }
+
+/**
+ * ADR-0066 section 3.5a rule 1, for what is SEALED to a key: whether the
+ * key a contact request is about to be sealed for ([recipientKey]) is no
+ * longer the one the account is addressed by ([addressedKey], the resolver's
+ * answer). Pure.
+ */
+internal fun staleRecipientKey(recipientKey: ByteArray, addressedKey: ByteArray): Boolean =
+    !recipientKey.contentEquals(addressedKey)

@@ -116,6 +116,7 @@ describe("the rotation's order (ADR-0066 section 3.2)", () => {
       "journals",
       "channels",
       "reach",
+      "profile",
       "backup",
     ]);
     expect(last(h.saved)).toBeNull();
@@ -240,7 +241,7 @@ describe("the rotation's order (ADR-0066 section 3.2)", () => {
   it("after the commit a failure is a retry of exactly the steps that did not land", async () => {
     const h = harness({ later: ["journals"] });
     const out = await runRotation(newRotation(DEVICE, 1), h.ports, { grant: "g" });
-    expect(out).toEqual({ kind: "publishing", owed: ["journals", "channels", "reach", "backup"] });
+    expect(out).toEqual({ kind: "publishing", owed: ["journals", "channels", "reach", "profile", "backup"] });
     const record = last(h.saved) as RotationOwed;
     expect(record.attestationB64Url).toBe("ATT");
     expect(record.keyGeneration).toBe("3");
@@ -248,7 +249,23 @@ describe("the rotation's order (ADR-0066 section 3.2)", () => {
     expect(rotationWithholdsPhrase(record)).toBe(true);
     const again = harness();
     expect(await runRotation(record, again.ports, { grant: null })).toEqual({ kind: "complete" });
-    expect(again.calls).toEqual(["journals", "channels", "reach", "backup"]);
+    expect(again.calls).toEqual(["journals", "channels", "reach", "profile", "backup"]);
+  });
+
+  it("the profile re-send is a step: owed while a conversation has not got it, then retried (3.5a rule 3)", async () => {
+    const h = harness({ later: ["profile"] });
+    const out = await runRotation(newRotation(DEVICE, 1), h.ports, { grant: "g" });
+    // It runs after the reach keys are on the new mailbox and never before.
+    expect(h.calls.indexOf("profile")).toBe(h.calls.indexOf("reach") + 1);
+    expect(out).toEqual({ kind: "publishing", owed: ["profile", "backup"] });
+    const record = last(h.saved) as RotationOwed;
+    expect(record.done).not.toContain("profile");
+    // The words stay withheld and the record resumes by itself.
+    expect(rotationWithholdsPhrase(record)).toBe(true);
+    expect(rotationResumesByItself(record)).toBe(true);
+    const again = harness();
+    expect(await runRotation(record, again.ports, { grant: null })).toEqual({ kind: "complete" });
+    expect(again.calls).toEqual(["profile", "backup"]);
   });
 
   it("the directory: a proof the row no longer accepts is sent again WITHOUT the proof", async () => {

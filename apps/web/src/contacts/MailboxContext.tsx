@@ -67,6 +67,11 @@ import { useProfiles } from "../profile/ProfileContext";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { loadAccepted, upsertAccepted, type AcceptedContact } from "./local-store";
+import {
+  predecessorMailboxReadable,
+  readPredecessorAdoptedAtMs,
+  stampPredecessorAdoption,
+} from "./address-resolver";
 import { createPendingInbox, type FetchedRequest, type PendingInbox } from "./inbox-store";
 import { createMailboxPoller, type MailboxPoller } from "./mailbox-poller";
 
@@ -113,6 +118,16 @@ function readPredecessorMailboxCursor(accountIdB64: string): number {
 function writePredecessorMailboxCursor(accountIdB64: string, cursor: number): void {
   // A failed write throws, which holds the cursor: the rows come back.
   globalThis.localStorage?.setItem(predecessorCursorKey(accountIdB64), String(cursor));
+}
+
+/** Whether the predecessor mailbox of `accountIdB64` is still read (ADR-0066
+ *  section 3.5a rule 4). A device that holds a predecessor with no adoption
+ *  time stored (it adopted before the time was kept) starts its window now. */
+function predecessorMailboxStillRead(accountIdB64: string): boolean {
+  const now = Date.now();
+  const adoptedAtMs = readPredecessorAdoptedAtMs(accountIdB64);
+  if (adoptedAtMs === null) stampPredecessorAdoption(accountIdB64, now, false);
+  return predecessorMailboxReadable(adoptedAtMs, now);
 }
 
 const MailboxContext = createContext<MailboxApi>();
@@ -336,7 +351,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         // Long-poll the account mailbox (ADR-0060: the one inbound mailbox).
         // The predecessor's mailbox first, without holding the read open
         // (ADR-0066 section 3.5); then the long poll of the account's.
-        if (chats.predecessorAccountIdentity() !== null) {
+        // Rule 4 of section 3.5a: read only, for 30 days from the adoption,
+        // then left. Nothing is registered or written there.
+        if (chats.predecessorAccountIdentity() !== null && predecessorMailboxStillRead(accountIdB64)) {
           try {
             await predecessorPoller.poll(0, signal);
           } catch (err) {

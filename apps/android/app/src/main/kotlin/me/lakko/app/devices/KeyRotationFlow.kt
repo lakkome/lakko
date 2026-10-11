@@ -38,7 +38,9 @@ import me.lakko.app.auth.recallFinishAnswerLost
  *      kept; the old key becomes this account's predecessor);
  *   7. publish: the directory with the proof AND the attestation, this
  *      device's KeyPackage, the DeviceGroup journal's root, the journals of
- *      owned groups, owned channels, the mailbox and reach keys, the backup;
+ *      owned groups, owned channels, the mailbox and reach keys, the profile
+ *      re-sent to every conversation with the grants for the new mailbox
+ *      (section 3.5a rule 3), the backup;
  *   8. the new 12 words, withheld while the publish is owed.
  *
  * A failure before step 5 changes nothing on the server: the device WAS
@@ -93,6 +95,9 @@ public class KeyRotationOwed(
     public val channelsMoved: Boolean = false,
     public val reachRekeyed: Boolean = false,
     public val backupSealed: Boolean = false,
+    /** Section 3.5a rule 3: every conversation took the profile carrying
+     *  the grants for the new mailbox. */
+    public val profileResent: Boolean = false,
 ) {
     @Suppress("LongParameterList")
     public fun with(
@@ -114,10 +119,12 @@ public class KeyRotationOwed(
         channelsMoved: Boolean = this.channelsMoved,
         reachRekeyed: Boolean = this.reachRekeyed,
         backupSealed: Boolean = this.backupSealed,
+        profileResent: Boolean = this.profileResent,
     ): KeyRotationOwed = KeyRotationOwed(
         deviceIdB64Url, startedAtMs, epochBeforeRemoval, removalWon, prepared, announced, announcedAtEpoch,
         commitSent, committed, attestationB64, keyGeneration, adopted, identityPublished, publishWithoutProof,
         keyPackagePublished, deviceGroupRootMoved, journalsMoved, channelsMoved, reachRekeyed, backupSealed,
+        profileResent,
     )
 }
 
@@ -134,6 +141,7 @@ public enum class RotationStep {
     MoveJournals,
     MoveChannels,
     RekeyReach,
+    ResendProfile,
     SealBackup,
     Done,
 }
@@ -151,6 +159,7 @@ public fun nextRotationStep(owed: KeyRotationOwed): RotationStep = when {
     !owed.journalsMoved -> RotationStep.MoveJournals
     !owed.channelsMoved -> RotationStep.MoveChannels
     !owed.reachRekeyed -> RotationStep.RekeyReach
+    !owed.profileResent -> RotationStep.ResendProfile
     !owed.backupSealed -> RotationStep.SealBackup
     else -> RotationStep.Done
 }
@@ -435,6 +444,13 @@ public interface KeyRotationPorts : RotationAnnouncePort {
 
     public suspend fun rekeyReach(): Boolean
 
+    /**
+     * Section 3.5a rule 3: re-send the profile, with the grants for the new
+     * mailbox, to every one-to-one and group. `true` only once every
+     * conversation took it; `false` or a throw keeps the step owed.
+     */
+    public suspend fun resendProfile(): Boolean
+
     public suspend fun sealBackup(): Boolean
 
     /** The publish landed far enough for the words to be shown. */
@@ -714,9 +730,16 @@ public class KeyRotationRunner(
                 RotationStep.MoveJournals -> owed.journalsMoved
                 RotationStep.MoveChannels -> owed.channelsMoved
                 RotationStep.RekeyReach -> owed.reachRekeyed
+                RotationStep.ResendProfile -> owed.profileResent
                 else -> owed.backupSealed
             }
             if (done) continue
+            // The one dependency in the tail: the profile carries grants for
+            // the new mailbox, which exist only once the reach keys moved.
+            if (step == RotationStep.ResendProfile && !owed.reachRekeyed) {
+                if (firstPending == null) firstPending = step
+                continue
+            }
             onStep(rotationUiStep(step))
             val attestation = owed.attestationB64
             val generation = owed.keyGeneration
@@ -727,6 +750,7 @@ public class KeyRotationRunner(
                     RotationStep.MoveJournals -> ports.moveOwnedJournals()
                     RotationStep.MoveChannels -> ports.moveOwnedChannels()
                     RotationStep.RekeyReach -> ports.rekeyReach()
+                    RotationStep.ResendProfile -> ports.resendProfile()
                     else -> ports.sealBackup()
                 }
             }
@@ -740,6 +764,7 @@ public class KeyRotationRunner(
                 RotationStep.MoveJournals -> owed.with(journalsMoved = true)
                 RotationStep.MoveChannels -> owed.with(channelsMoved = true)
                 RotationStep.RekeyReach -> owed.with(reachRekeyed = true)
+                RotationStep.ResendProfile -> owed.with(profileResent = true)
                 else -> owed.with(backupSealed = true)
             }
             store.save(accountIdB64, owed)
@@ -803,6 +828,7 @@ public class KeyRotationRunner(
             RotationStep.MoveJournals,
             RotationStep.MoveChannels,
             RotationStep.RekeyReach,
+            RotationStep.ResendProfile,
             RotationStep.SealBackup,
         )
     }

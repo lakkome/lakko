@@ -119,7 +119,10 @@ enum ChannelMemberCards {
     ) async -> Bool? {
         let cacheKey = "\(authorAccountKey.base64EncodedString())|\(channelId)|\(grant.seed.base64EncodedString())"
         if let cached = verifiedGrants[cacheKey] { return cached }
-        guard let mailbox = ReachCenter.mailbox(of: authorAccountKey),
+        // ADR-0066 section 3.5a rule 1 — resolved before addressing.
+        guard let mailbox = await MainActor.run(body: {
+            ReachCenter.shared.mailbox(forAccountKey: authorAccountKey)
+        }),
               let ok = try? await DsClient().reachCheck(pseudonym: mailbox, reachSeed: grant.seed)
         else { return nil }
         verifiedGrants[cacheKey] = ok

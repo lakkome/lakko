@@ -71,6 +71,10 @@ public class ReachManager internal constructor(
     private val store: ReachDocStore,
     private val dsFactory: () -> DsClient = { DsClient() },
     private val ownProfiles: OwnProfileAccess? = null,
+    /** ADR-0066 section 3.5a - the proven key steps this account recorded
+     *  (its contacts' and its own), by the signed-in account id (standard
+     *  base64). Only a PROVEN step is ever in it. */
+    private val provenLinks: (ownerAccountIdB64: String) -> List<me.lakko.app.contacts.ProvenLink> = { emptyList() },
 ) {
     /** The own-profile store (ADR-0048 section 4a), keyed by the raw account
      *  id: the own name travels between the account's devices beside the
@@ -186,7 +190,15 @@ public class ReachManager internal constructor(
             // everything there. The old mailbox and its keys are left as
             // they are.
             doc = if (decision == ReachRekey.MOVE) {
-                doc.copy(registered = emptyList(), registeredOpen = null, registeredForKeyHex = boundKeyHex)
+                // Section 3.5a rule 3: the grants every conversation holds
+                // for this account open the OLD mailbox, so the profile is
+                // owed to all of them again, under this key.
+                doc.copy(
+                    registered = emptyList(),
+                    registeredOpen = null,
+                    registeredForKeyHex = boundKeyHex,
+                    profileResendOwedForKeyHex = boundKeyHex,
+                )
             } else {
                 doc.copy(registeredForKeyHex = boundKeyHex)
             }
@@ -215,6 +227,56 @@ public class ReachManager internal constructor(
 
     /** The bound account's signature public key, or `null`. */
     public fun ownAccountKey(): ByteArray? = binding.get()?.accountKey?.copyOf()
+
+    // -----------------------------------------------------------------
+    // ADR-0066 section 3.5a - the mailbox after a key rotation
+    // -----------------------------------------------------------------
+
+    private fun links(): List<me.lakko.app.contacts.ProvenLink> {
+        val b = binding.get() ?: return emptyList()
+        return try {
+            provenLinks(b.accountIdB64)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Rule 1 - the account key whose mailbox is addressed for a person known
+     * by [accountKey] (a leaf's binding, a stored contact row, this account's
+     * own conversation key): the key its PROVEN steps lead to, else the key
+     * itself. Every place that derives a mailbox from an account key goes
+     * through this (or [mailboxOf]) first.
+     */
+    public fun mailboxAccountKey(accountKey: ByteArray): ByteArray = addressedKey(accountKey, links())
+
+    /** [mailboxAccountKey] over lowercase hex. */
+    public fun mailboxAccountKeyHex(accountKeyHex: String): String = addressedKeyHex(accountKeyHex, links())
+
+    /** The mailbox pseudonym a write for the person known by [accountKey]
+     *  goes to: the CURRENT key's ([mailboxAccountKey]). */
+    public fun mailboxOf(accountKey: ByteArray): ByteArray =
+        uniffi.lakko_ffi_uniffi.IdentityPseudonym.fromIdentity(mailboxAccountKey(accountKey)).use { it.asBytes() }
+
+    /** Rule 2 - every key the person is filed under, current first. */
+    private fun personKeys(accountKey: ByteArray): List<String> = personKeysHex(reachHex(accountKey), links())
+
+    /** Rule 3 - whether the profile is still owed to the conversations
+     *  under the bound key. */
+    public fun profileResendOwed(): Boolean {
+        val b = binding.get() ?: return false
+        return doc.profileResendOwedForKeyHex == reachHex(b.accountKey)
+    }
+
+    /** Rule 3 - every conversation took the re-sent profile. */
+    public suspend fun profileResendDone() {
+        val b = binding.get() ?: return
+        lock.withLock {
+            if (binding.get() !== b || doc.profileResendOwedForKeyHex == null) return@withLock
+            doc = doc.copy(profileResendOwedForKeyHex = null)
+            store.save(b.accountIdB64, doc)
+        }
+    }
 
     // -----------------------------------------------------------------
     // The owner's keys
@@ -252,10 +314,12 @@ public class ReachManager internal constructor(
      *  them): retire every reply key waiting on them. */
     public fun retireRepliesTo(fromKey: ByteArray) {
         val b = binding.get() ?: return
-        val keyHex = reachHex(fromKey)
+        // ADR-0066 3.5a rule 2: the person, under whichever of their keys
+        // the request was addressed to.
+        val keysHex = personKeys(fromKey)
         scope.launch {
             lock.withLock {
-                val kept = doc.replies.filterNot { it.toKeyHex == keyHex }
+                val kept = doc.replies.filterNot { it.toKeyHex in keysHex }
                 if (kept.size == doc.replies.size) return@withLock
                 doc = doc.copy(replies = kept)
                 store.save(b.accountIdB64, doc)
@@ -924,7 +988,10 @@ public class ReachManager internal constructor(
 
     private suspend fun storeHeld(b: Binding, ownerKey: ByteArray, grant: FfiReachGrant, scopeHex: String) {
         val kind = grant.`class`.toKind()
-        val ownerHex = reachHex(ownerKey)
+        // ADR-0066 3.5a rule 2: filed for the PERSON, i.e. under the current
+        // key of the account, whichever key the leaf it arrived from names.
+        val currentOwner = mailboxAccountKey(ownerKey)
+        val ownerHex = reachHex(currentOwner)
         val scopeKey = if (kind == ReachKind.GROUP || kind == ReachKind.MEMBER || kind == ReachKind.CHANNEL) {
             scopeHex.lowercase()
         } else {
@@ -955,19 +1022,19 @@ public class ReachManager internal constructor(
             store.save(b.accountIdB64, doc)
             true
         }
-        if (changed) notifyGrantHeld(ownerKey)
+        if (changed) notifyGrantHeld(currentOwner)
     }
 
     /** Drop the grant of [kind] held for [ownerKey] at [scopeHex] (a member
      *  card that no longer carries its `channel` grant, ADR-0060 §3). */
     public suspend fun withdrawHeld(ownerKey: ByteArray, kind: ReachKind, scopeHex: String) {
         val b = binding.get() ?: return
-        val ownerHex = reachHex(ownerKey)
+        val ownerKeys = personKeys(ownerKey)
         val scopeKey = scopeHex.lowercase()
         lock.withLock {
             if (binding.get() !== b) return@withLock
             val kept = doc.held.filterNot {
-                it.ownerKeyHex == ownerHex && it.kind == kind.name && it.scopeHex == scopeKey
+                it.ownerKeyHex in ownerKeys && it.kind == kind.name && it.scopeHex == scopeKey
             }
             if (kept.size == doc.held.size) return@withLock
             doc = doc.copy(held = kept)
@@ -977,9 +1044,9 @@ public class ReachManager internal constructor(
 
     /** Whether a grant of [kind] is held for [ownerKey] at [scopeHex]. */
     public fun holdsHeld(ownerKey: ByteArray, kind: ReachKind, scopeHex: String): Boolean {
-        val ownerHex = reachHex(ownerKey)
+        val ownerKeys = personKeys(ownerKey)
         val scopeKey = scopeHex.lowercase()
-        return doc.held.any { it.ownerKeyHex == ownerHex && it.kind == kind.name && it.scopeHex == scopeKey }
+        return doc.held.any { it.ownerKeyHex in ownerKeys && it.kind == kind.name && it.scopeHex == scopeKey }
     }
 
     /**
@@ -1000,19 +1067,25 @@ public class ReachManager internal constructor(
     /** Drop every grant held for [ownerKey] (a contact removed). */
     public fun forgetHeld(ownerKey: ByteArray) {
         val b = binding.get() ?: return
-        val ownerHex = reachHex(ownerKey)
+        val ownerKeys = personKeys(ownerKey)
         scope.launch {
             lock.withLock {
-                doc = doc.copy(held = doc.held.filterNot { it.ownerKeyHex == ownerHex })
+                doc = doc.copy(held = doc.held.filterNot { it.ownerKeyHex in ownerKeys })
                 store.save(b.accountIdB64, doc)
             }
         }
     }
 
-    /** The grants held for [ownerKey], newest wire only. SECRET. */
+    /**
+     * The grants held for the person known by [ownerKey]. SECRET.
+     *
+     * ADR-0066 3.5a rule 2: found under the account's current key AND under
+     * every proven predecessor of it, the current key's first, so a grant
+     * filed before the key change was proven is still found and one issued
+     * for the new mailbox is tried before an older one of the same class.
+     */
     public fun heldFor(ownerKey: ByteArray): List<Pair<HeldGrantRef, FfiReachGrant>> {
-        val ownerHex = reachHex(ownerKey)
-        return doc.held.filter { it.ownerKeyHex == ownerHex }.mapNotNull { h ->
+        return heldForPerson(doc.held, personKeys(ownerKey)).mapNotNull { h ->
             val kind = runCatching { ReachKind.valueOf(h.kind) }.getOrNull() ?: return@mapNotNull null
             val grant = runCatching { uniffi.lakko_ffi_uniffi.decodeReachGrant(reachUnhex(h.grantHex)!!) }
                 .getOrNull() ?: return@mapNotNull null
@@ -1053,14 +1126,22 @@ public class ReachManager internal constructor(
         groupHex: String? = null,
     ): List<() -> DsReachAuth?> {
         val b = binding.get() ?: return emptyList()
-        if (ownerKey.contentEquals(b.accountKey)) {
+        // ADR-0066 3.5a rule 1: this account's own conversation key (a
+        // proven predecessor after a rotation) IS this account.
+        if (mailboxAccountKey(ownerKey).contentEquals(b.accountKey)) {
             return listOf({ grant(ReachKind.CONTACT)?.let { DsReachAuth(reachSigner(it.seed)) } })
         }
         val held = heldFor(ownerKey)
         val out = ArrayList<() -> DsReachAuth?>()
         for (ref in orderedWriteGrants(held.map { it.first }, purpose, groupHex?.lowercase())) {
-            val grant = held.first { it.first == ref }.second
-            out += { DsReachAuth(reachSigner(grant.seed)) }
+            // Rule 2: one class and scope may be held under the current key
+            // and under a predecessor; each is a candidate, the current
+            // key's first, and a `401` moves on to the next.
+            val seeds = held.filter { it.first == ref }.map { it.second.seed }
+            for ((index, seed) in seeds.withIndex()) {
+                if (seeds.take(index).any { it.contentEquals(seed) }) continue
+                out += { DsReachAuth(reachSigner(seed)) }
+            }
         }
         if (purpose == WritePurpose.WELCOME && groupHex != null) {
             out += {
@@ -1234,7 +1315,7 @@ public class ReachManager internal constructor(
                 )
                 store.save(b.accountIdB64, doc)
             }
-            notifyGrantHeld(decoded.addedAccountKey)
+            notifyGrantHeld(mailboxAccountKey(decoded.addedAccountKey))
         }
     }
 
@@ -1242,8 +1323,13 @@ public class ReachManager internal constructor(
      *  [addedAccountKey] in [groupHex], or `null`. */
     public fun delegationFor(groupHex: String, addedAccountKey: ByteArray): String? {
         val b = binding.get() ?: return null
-        val addedHex = reachHex(addedAccountKey)
-        for (d in doc.delegations.filter { it.groupHex == groupHex.lowercase() && it.addedAccountKeyHex == addedHex }) {
+        // ADR-0066 3.5a: a delegation names the added person by whichever of
+        // their keys the proposer knew; the current key's first.
+        val addedKeys = personKeys(addedAccountKey)
+        val forPerson = addedKeys.flatMap { key ->
+            doc.delegations.filter { it.groupHex == groupHex.lowercase() && it.addedAccountKeyHex == key }
+        }
+        for (d in forPerson) {
             val env = runCatching {
                 uniffi.lakko_ffi_uniffi.decodeCommitterDelegationEnvelope(reachUnhex(d.envelopeHex)!!)
             }.getOrNull() ?: continue
@@ -1269,12 +1355,16 @@ public class ReachManager internal constructor(
     ): ByteArray? {
         val contact = heldFor(addedAccountKey).firstOrNull { it.first.kind == ReachKind.CONTACT }?.second
             ?: return null
-        val mailbox = uniffi.lakko_ffi_uniffi.IdentityPseudonym.fromIdentity(addedAccountKey).use { it.asBytes() }
+        // ADR-0066 3.5a rule 1: the delegation opens the added person's
+        // CURRENT mailbox, and is signed to each candidate's current key
+        // (the key that candidate's device signs the write with).
+        val addedCurrent = mailboxAccountKey(addedAccountKey)
+        val mailbox = uniffi.lakko_ffi_uniffi.IdentityPseudonym.fromIdentity(addedCurrent).use { it.asBytes() }
         val expires = (nowMs + ttlMs).toULong()
         val max = uniffi.lakko_ffi_uniffi.maxCommitterDelegations().toInt()
         val blobs = candidateKeys.take(max).map { candidate ->
             val nonce = ByteArray(DELEGATION_NONCE_LEN).also(random::nextBytes)
-            uniffi.lakko_ffi_uniffi.signDelegationBlob(contact.seed, mailbox, candidate, expires, nonce)
+            uniffi.lakko_ffi_uniffi.signDelegationBlob(contact.seed, mailbox, mailboxAccountKey(candidate), expires, nonce)
         }
         if (blobs.isEmpty()) return null
         return uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
@@ -1332,6 +1422,7 @@ public class ReachManager internal constructor(
                 instance ?: ReachManager(
                     store = EncryptedReachDocStore(context),
                     ownProfiles = ContextOwnProfileAccess(context.applicationContext),
+                    provenLinks = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context.applicationContext)::load,
                 ).also { instance = it }
             }
 

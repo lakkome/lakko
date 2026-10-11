@@ -285,7 +285,9 @@ public final class ContactsRepository: ObservableObject {
                 try await factory().resolveVerifiedBundle(accountId: accountId).signaturePubkey
             },
             reachCheck: { accountKey, seed in
-                let mailbox = try IdentityPseudonym.fromIdentity(pubkey: accountKey).asBytes()
+                // ADR-0066 section 3.5a rule 1 — resolved before addressing.
+                let current = await MainActor.run { ReachCenter.shared.currentAccountKey(of: accountKey) }
+                let mailbox = try IdentityPseudonym.fromIdentity(pubkey: current).asBytes()
                 return try await DsClient().reachCheck(pseudonym: mailbox, reachSeed: seed)
             },
             verifyCertificate: { cert, lookupKey, accountId in
@@ -532,10 +534,11 @@ public final class ContactsRepository: ObservableObject {
                 refreshing: false,
                 lastError: welcomeJoinFailure ?? carriedJoinFailure
             )
-            // ADR-0066 Stage A — after a rotation of the account keys this
-            // account's conversation leaves stay bound to the OLD key, and a
-            // Welcome is addressed to the mailbox of the key a leaf's binding
-            // names: the old mailbox keeps receiving them.
+            // ADR-0066 section 3.5a rule 4 — after a rotation the account
+            // moved to the new mailbox at once; a sender that has not seen
+            // the proven change yet still writes to the old one, which is
+            // READ (never written to, nothing registered there) for 30 days
+            // after this device adopted, then left.
             await pollPredecessorMailboxes(accountIdB64: pollAccountIdB64)
         } catch {
             // A cancelled poll (the screen was left, the session ended, the
@@ -558,13 +561,15 @@ public final class ContactsRepository: ObservableObject {
     /// When the predecessor mailboxes were last read (unix ms), per process.
     private var lastPredecessorPollMs: Int64 = 0
 
-    /// ADR-0066 section 3.5 ("the old mailbox is read with the old key") —
-    /// read the mailbox of each of this account's own PREDECESSOR keys: the
-    /// Welcomes sealed to this account's leaves (whose bindings still name
-    /// the old key in Stage A) and the contact requests of people who have
-    /// not yet seen the new key. A short read with a cursor of its own, at
-    /// most once per ``PredecessorMailbox/pollIntervalMs``. Best effort: a
-    /// failure is logged and the next round reads again.
+    /// ADR-0066 section 3.5a rule 4 — read the mailbox of each of this
+    /// account's own PREDECESSOR keys: the Welcomes and contact requests of
+    /// people who have not yet seen the new key. Read only (the claim a first
+    /// read may make registers the access key, never a reach key), and only
+    /// for ``PredecessorMailbox/readWindowMs`` after this device adopted the
+    /// rotation that retired the key; after that the mailbox is left. A
+    /// short read with a cursor of its own, at most once per
+    /// ``PredecessorMailbox/pollIntervalMs``. Best effort: a failure is
+    /// logged and the next round reads again.
     private func pollPredecessorMailboxes(accountIdB64: String) async {
         let seeds = KeychainOwnPredecessorStore().load(accountIdB64: accountIdB64)
         guard !seeds.isEmpty else { return }
@@ -572,9 +577,13 @@ public final class ContactsRepository: ObservableObject {
         guard PredecessorMailbox.due(lastPollMs: lastPredecessorPollMs, nowMs: now) else { return }
         lastPredecessorPollMs = now
         let cursors = PredecessorMailbox.CursorStore()
+        let adoptions = PredecessorMailbox.AdoptionStore()
         for seed in seeds {
             guard let identity = try? Identity.fromSeed(seed: seed) else { continue }
             let keyB64 = base64Encode(identity.signaturePublicKey())
+            guard !PredecessorMailbox.readable(
+                keysB64: [keyB64], accountIdB64: accountIdB64, nowMs: now, adoptions: adoptions
+            ).isEmpty else { continue }
             do {
                 let result = try await clientFactory().pollStrangerInbox(
                     mySignaturePubkey: identity.signaturePublicKey(),

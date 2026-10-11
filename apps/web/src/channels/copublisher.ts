@@ -97,7 +97,7 @@ import {
 } from "../contacts/invite-link";
 import { parseGroupInviteSlug, splitGroupInviteLink } from "../contacts/group-invite";
 import { reachSession } from "../reach/reach-service";
-import { resolveWriteAuth } from "../reach/mailbox-write";
+import { accountMailboxOf, mailboxOfExactKey, resolveWriteAuth } from "../reach/mailbox-write";
 import { forgetJoinReply, joinReplyFor, rememberJoinReply } from "../reach/join-replies";
 import { journalHex } from "../ds/access";
 import { KeyedError } from "../l10n/keyed-error";
@@ -388,7 +388,6 @@ export async function approveCoPublisher(
   channelIdHex: string,
   apiBase?: string,
 ): Promise<void> {
-  const wasm = await loadWasm();
   const groupId = publisherGroup.groupId();
   // G-38 residual 3 — SERIALIZED per group against the 5 s interval poll above.
   // `approveExternalJoin` eagerly merges the Add into the shared provider, so
@@ -413,7 +412,9 @@ export async function approveCoPublisher(
       // way a direct add delivers one; never to the journal. ADR-0060
       // section 6: the mailbox is closed, so the write is signed under the
       // `reply` grant the joiner's attribution carried (kept by the poll).
-      const mailbox = wasm.IdentityPseudonym.fromIdentity(proposalRef).asBytes();
+      // ADR-0066 section 3.5a rule 1 - resolved to the joiner's CURRENT
+      // mailbox when the key named is a proven predecessor.
+      const mailbox = await accountMailboxOf(proposalRef);
       const write = await resolveWriteAuth(proposalRef, { explicit: joinReplyFor(proposalRef) });
       try {
         await ds.publishMailbox(mailbox, wrapEnvelope(KIND_WELCOME, added.welcome), write.auth);
@@ -545,22 +546,41 @@ export async function pollForCoPublishWelcome(
   existingSigningSeed?: Uint8Array,
 ): Promise<ChannelPublisherKeys | null> {
   const wasm = await loadWasm();
-  const mailbox = wasm.IdentityPseudonym.fromIdentity(joinerKey).asBytes();
+  // ADR-0066 section 3.5a - an owner that has observed this account's proven
+  // rotation writes the Welcome to the CURRENT mailbox; one that has not
+  // writes to the mailbox of `joinerKey` (after a rotation: the predecessor
+  // the PublisherGroup's provider is bound to). Both are this account's and
+  // both are read, the current one first. Reads only.
+  const mailboxes = [await accountMailboxOf(joinerKey)];
+  const exact = await mailboxOfExactKey(joinerKey);
+  if (journalHex(exact) !== journalHex(mailboxes[0] ?? exact)) mailboxes.push(exact);
   // Paged to the end: the Welcome is among the newest rows.
   const candidates: Uint8Array[] = [];
-  await scanJournal<never>(
-    (after, limit) => ds.fetchMailbox(mailbox, { after, limit, waitSecs: 0 }),
-    (m) => {
-      const rendezvous = wasm.welcomeRendezvousFor(m.payload, joinerKey);
-      if (rendezvous !== undefined) {
-        candidates.push(rendezvous);
-        return undefined;
-      }
-      const env = parseEnvelope(m.payload);
-      if (env.kind === KIND_WELCOME) candidates.push(env.body);
-      return undefined;
-    },
-  );
+  let scanned = 0;
+  let scanError: unknown = null;
+  for (const mailbox of mailboxes) {
+    try {
+      await scanJournal<never>(
+        (after, limit) => ds.fetchMailbox(mailbox, { after, limit, waitSecs: 0 }),
+        (m) => {
+          const rendezvous = wasm.welcomeRendezvousFor(m.payload, joinerKey);
+          if (rendezvous !== undefined) {
+            candidates.push(rendezvous);
+            return undefined;
+          }
+          const env = parseEnvelope(m.payload);
+          if (env.kind === KIND_WELCOME) candidates.push(env.body);
+          return undefined;
+        },
+      );
+      scanned += 1;
+    } catch (err) {
+      scanError = err;
+    }
+  }
+  // One mailbox that cannot be read (its 30 days are over, its signer is
+  // gone) must not hide the other; none read at all is the caller's error.
+  if (scanned === 0 && scanError !== null) throw scanError;
   // Newest first, and a Welcome sealed to a KeyPackage this device no longer
   // holds (or a Welcome for another group) is skipped rather than ending the
   // wait.

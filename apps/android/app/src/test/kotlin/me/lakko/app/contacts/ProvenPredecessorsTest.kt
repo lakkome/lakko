@@ -131,4 +131,17 @@ class ProvenPredecessorsTest {
             ProvenPredecessors.onChanged = null
         }
     }
+
+    // --- ADR-0066 section 3.5a rule 1, for what is sealed to a key ----------
+
+    @Test
+    fun `a contact request is never sent for a key that resolves to another`() {
+        val old = ByteArray(32) { 1 }
+        val current = ByteArray(32) { 2 }
+        // The key in hand is the current one (or nothing is known): send.
+        assertFalse(staleRecipientKey(current, current.copyOf()))
+        // The key in hand is a proven predecessor: the request would be
+        // sealed for a mailbox nobody is addressed at any more.
+        assertTrue(staleRecipientKey(old, current))
+    }
 }
