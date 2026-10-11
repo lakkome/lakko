@@ -393,6 +393,9 @@ pub enum ChangeReason {
     /// Raised to a rate the path was seen to carry
     /// ([`PathEstimator::note_carried`]).
     Carried,
+    /// Put back to what it was before a sender was switched off on the
+    /// SFU's word ([`PathEstimator::restore_after_idle`]).
+    SenderReturned,
 }
 
 impl ChangeReason {
@@ -405,6 +408,7 @@ impl ChangeReason {
             Self::Overuse => "overuse",
             Self::Loss => "loss",
             Self::Carried => "carried",
+            Self::SenderReturned => "sender-returned",
         }
     }
 }
@@ -1193,6 +1197,31 @@ impl PathEstimator {
         }
     }
 
+    /// A sender the publisher had switched off on the SFU's word is being
+    /// switched back on ([`crate::video_needed`]): the estimate is at
+    /// least `bps`, what it was when the sender was told to stop. Returns
+    /// whether it was raised.
+    ///
+    /// While the sender was off little arrived, and a cut made then (on
+    /// over-use, or on loss that lasted) was taken from that little: it
+    /// says nothing of whether the path carries the sender that is coming
+    /// back. So the old figure is taken again **on faith**, exactly as the
+    /// start value is: over-use within [`FAITH_WINDOW`] cuts it as usual
+    /// and marks the path as having refused it. The fast way back of an
+    /// episode of cuts is settled by it.
+    pub fn restore_after_idle(&mut self, bps: u64, now: Instant) -> bool {
+        let bps = as_f64(bps).min(as_f64(self.config.max_bps));
+        if bps <= self.estimate_bps {
+            return false;
+        }
+        self.set_estimate(bps, ChangeReason::SenderReturned);
+        self.faith_at = Some(now);
+        if self.restore_to.is_some_and(|restore| bps >= restore) {
+            self.restore_to = None;
+        }
+        true
+    }
+
     /// The current estimate, in bits per second.
     #[must_use]
     pub fn estimate_bps(&self) -> u64 {
@@ -1691,6 +1720,13 @@ impl SeqLossCounter {
         self.expected = self.expected.saturating_add(counted);
         self.received = self.received.saturating_add(1);
         false
+    }
+
+    /// Forget the stream `ssrc`: its next packet is the first of a stream,
+    /// whatever its sequence number, and counts no loss. For a sender that
+    /// was switched off on the SFU's word ([`crate::video_needed`]).
+    pub fn forget(&mut self, ssrc: u32) {
+        self.highest.remove(&ssrc);
     }
 
     /// `(expected, lost)` since the last call, and start over.
@@ -2606,6 +2642,75 @@ mod tests {
         );
     }
 
+    /// A publisher whose main sender is switched off on the SFU's word:
+    /// what arrives falls to a sixth and stays there for a minute. The
+    /// estimate does not follow it down, and a cut made in that minute is
+    /// undone the moment the sender is switched back on.
+    #[test]
+    fn an_idle_sender_does_not_lower_the_estimate_and_a_cut_while_idle_is_undone() {
+        let t0 = Instant::now();
+        let mut est = UplinkEstimator::new(config(1500, 5000), t0);
+        let ms = Duration::from_millis;
+        // 20 s at about 2.9 Mbit/s (three 1200-byte packets every 10 ms),
+        // send times as exact as arrivals: no queue, no over-use.
+        let mut at = t0;
+        for _ in 0..2000 {
+            at += ms(10);
+            for _ in 0..3 {
+                est.on_packet_sent_at(at, at + ms(20), PACKET_BYTES, false);
+            }
+        }
+        let before = est.estimate_bps();
+        assert!(before >= 2_500_000, "risen above what arrives: {before}");
+        // The main sender stops: one packet in six is left, for a minute.
+        for i in 0..6000u32 {
+            at += ms(10);
+            if i % 2 == 0 {
+                est.on_packet_sent_at(at, at + ms(20), PACKET_BYTES, false);
+            }
+        }
+        assert!(
+            est.estimate_bps() >= before,
+            "little arriving is not a reason to lower: {} < {before}",
+            est.estimate_bps()
+        );
+        assert_ne!(est.last_change(), ChangeReason::Overuse);
+        // A cut does happen while it is idle (the path hiccuped).
+        est.force_estimate(400_000);
+        assert_eq!(est.estimate_bps(), 400_000);
+        // Nothing to restore to below the estimate.
+        assert!(!est.restore_after_idle(300_000, at));
+        assert_eq!(est.estimate_bps(), 400_000);
+        // The sender is switched back on: the old figure at once.
+        assert!(est.restore_after_idle(before, at));
+        assert_eq!(est.estimate_bps(), before);
+        assert_eq!(est.last_change(), ChangeReason::SenderReturned);
+        // Never above the ceiling.
+        assert!(!est.restore_after_idle(before, at));
+        let mut capped = UplinkEstimator::new(config(1500, 2000), t0);
+        capped.force_estimate(500_000);
+        assert!(capped.restore_after_idle(9_000_000, t0));
+        assert_eq!(capped.estimate_bps(), 2_000_000);
+    }
+
+    #[test]
+    fn a_forgotten_stream_counts_no_loss_when_it_comes_back() {
+        let mut c = SeqLossCounter::new();
+        for seq in 0..10 {
+            assert!(!c.on_packet(1, seq));
+        }
+        assert_eq!(c.take_interval(), (10, 0));
+        c.forget(1);
+        // Back 500 sequence numbers on: the first packet of a stream.
+        for seq in 510..520 {
+            assert!(!c.on_packet(1, seq));
+        }
+        assert_eq!(c.take_interval(), (10, 0));
+        // Not forgotten, the same jump is 500 lost packets.
+        assert!(!c.on_packet(1, 1020));
+        assert_eq!(c.take_interval(), (501, 500));
+    }
+
     /// (f) Absurd input: zero and huge sizes, a send time that jumps at
     /// random, arrival times that go backwards. Nothing panics and the
     /// estimate stays inside its bounds.
@@ -2700,6 +2805,7 @@ mod tests {
         assert_eq!(ChangeReason::Overuse.as_str(), "overuse");
         assert_eq!(ChangeReason::Loss.as_str(), "loss");
         assert_eq!(ChangeReason::Carried.as_str(), "carried");
+        assert_eq!(ChangeReason::SenderReturned.as_str(), "sender-returned");
     }
 
     // ---- The same estimator on a path the SFU sends on ----

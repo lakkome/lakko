@@ -4683,8 +4683,80 @@ button.lk-call-chip:focus-visible {
   border-radius: var(--radius-md);
   overflow: hidden;
 }
-.lk-call-tile.pinnable {
+.lk-call-tile.pinned {
+  border-color: var(--accent);
+}
+/* The pin button of someone else's tile, top right (section 6.2); the same
+   round overlay button as the camera flip of the self view. It is the only
+   way to pin and to unpin: the tile itself is never the control. Out of
+   sight until the keyboard focus is on the tile or a tap on the tile brought
+   its controls up, and always there on the pinned tile, filled, so there is
+   always a visible way to unpin. */
+.lk-call-tile-pin-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  width: 32px;
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--call-bar-bg);
+  color: var(--call-ctl-on-fg);
   cursor: pointer;
+  opacity: 0;
+}
+/* A strip tile is small: a smaller button with a pointer, never under 24px. */
+.lk-call-tile-pin-btn.compact {
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+}
+.lk-call-tile.controls-shown .lk-call-tile-pin-btn,
+.lk-call-tile:focus-within .lk-call-tile-pin-btn,
+.lk-call-tile-pin-btn:focus-visible,
+.lk-call-tile-pin-btn[aria-pressed="true"] {
+  opacity: 1;
+}
+/* Hover only where there is one: on a touch screen it sticks after a tap. */
+@media (hover: hover) {
+  .lk-call-tile:hover .lk-call-tile-pin-btn {
+    opacity: 1;
+  }
+  .lk-call-tile-pin-btn:hover {
+    background: color-mix(in srgb, var(--call-bar-bg) 60%, var(--surface-fg));
+  }
+}
+.lk-call-tile-pin-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.lk-call-tile-pin-btn:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 2px;
+}
+/* A touch screen: the touch target size on every tile, and a button that is
+   not drawn takes no tap, so the first tap on a tile reaches the tile and
+   only brings the button up. */
+@media (hover: none) {
+  .lk-call-tile-pin-btn,
+  .lk-call-tile-pin-btn.compact {
+    width: 44px;
+    height: 44px;
+    pointer-events: none;
+  }
+  .lk-call-tile.controls-shown .lk-call-tile-pin-btn,
+  .lk-call-tile:focus-within .lk-call-tile-pin-btn,
+  .lk-call-tile-pin-btn:focus-visible,
+  .lk-call-tile-pin-btn[aria-pressed="true"] {
+    pointer-events: auto;
+  }
 }
 /* Section 7.3: the ring is drawn inside the tile edge, so a tile does not
    change size when someone starts to speak. An outline, because it paints

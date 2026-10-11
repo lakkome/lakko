@@ -461,6 +461,23 @@ pub enum ServerFrame {
         #[serde(deserialize_with = "deserialize_video_given")]
         given: Vec<VideoGiven>,
     },
+
+    /// Which of the receiving publisher's **own** camera senders somebody
+    /// is being sent, or is about to be sent (ADR-0070, "senders nobody
+    /// watches"). `false` means no subscriber is sent that track, so the
+    /// client may stop encoding and uploading it; `true` means the client
+    /// must be sending it. The light sender is always needed and is not in
+    /// the frame. Sent to a peer once it has declared its senders and then
+    /// whenever a value changes: `true` at once, `false` only after the
+    /// track has been unneeded for a while. Both fields are required; a
+    /// client that ignores the frame keeps every sender on, as before.
+    VideoNeeded {
+        /// The main (full size) camera sender.
+        main: bool,
+        /// The middle (half size) camera sender. Always `false` for a
+        /// publisher that declared no middle sender.
+        middle: bool,
+    },
 }
 
 impl ServerFrame {
@@ -481,6 +498,7 @@ impl ServerFrame {
             Self::SdpAnswer { .. } => "sdp-answer",
             Self::SdpOffer { .. } => "sdp-offer",
             Self::VideoGiven { .. } => "video-given",
+            Self::VideoNeeded { .. } => "video-needed",
         }
     }
 }
@@ -1287,6 +1305,57 @@ mod tests {
         assert!(encode_server_frame(&one(long)).is_err());
     }
 
+    #[test]
+    fn video_needed_round_trips_in_the_wire_shape() {
+        for (main, middle, wire) in [
+            (
+                true,
+                true,
+                r#"{"kind":"video-needed","main":true,"middle":true}"#,
+            ),
+            (
+                false,
+                true,
+                r#"{"kind":"video-needed","main":false,"middle":true}"#,
+            ),
+            (
+                true,
+                false,
+                r#"{"kind":"video-needed","main":true,"middle":false}"#,
+            ),
+            (
+                false,
+                false,
+                r#"{"kind":"video-needed","main":false,"middle":false}"#,
+            ),
+        ] {
+            let frame = ServerFrame::VideoNeeded { main, middle };
+            assert_eq!(encode_server_frame(&frame).expect("encode"), wire);
+            assert_eq!(decode_server_frame(wire).expect("decode"), frame);
+        }
+    }
+
+    #[test]
+    fn video_needed_requires_two_booleans() {
+        // A missing field, a field of another type and a null are refused:
+        // a client must never have to guess a default.
+        for bad in [
+            r#"{"kind":"video-needed"}"#,
+            r#"{"kind":"video-needed","main":true}"#,
+            r#"{"kind":"video-needed","middle":true}"#,
+            r#"{"kind":"video-needed","main":1,"middle":true}"#,
+            r#"{"kind":"video-needed","main":"true","middle":true}"#,
+            r#"{"kind":"video-needed","main":true,"middle":null}"#,
+            r#"{"kind":"video-needed","main":[true],"middle":false}"#,
+        ] {
+            assert!(decode_server_frame(bad).is_err(), "accepted {bad}");
+        }
+        // The frame is a server frame only.
+        assert!(
+            decode_client_frame(r#"{"kind":"video-needed","main":true,"middle":true}"#).is_err()
+        );
+    }
+
     // -- kind_str() drift guards (metric labels must match serde tags) -----
 
     /// `ServerFrame::kind_str()` must equal the serialized `kind` tag for
@@ -1325,6 +1394,10 @@ mod tests {
                     peer: "p".into(),
                     quality: VideoQuality::Middle,
                 }],
+            },
+            ServerFrame::VideoNeeded {
+                main: false,
+                middle: true,
             },
         ];
         for frame in &frames {

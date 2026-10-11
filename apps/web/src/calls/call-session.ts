@@ -65,8 +65,14 @@ import {
 import {
   attachReceiverSFrame,
   attachSenderSFrame,
+  coverEncodedStreams,
   isSFrameTransformSupported,
 } from "./sframe-transform";
+import {
+  sframePeerConnectionConfig,
+  sframeTransport,
+  sframeTransportLine,
+} from "./sframe-transport";
 
 /**
  * The three SFrame calls this session makes, injectable so a test can prove
@@ -392,6 +398,33 @@ export class CallSession {
    *  call refuses rather than sending anything unsealed (invariant #4). */
   private callKey: { readonly seed: Uint8Array; readonly localLeaf: number } | null = null;
 
+  /** Said once per call when a sender is found with no SFrame transform. */
+  private unsealedSenderWarned = false;
+
+  /**
+   * Insertable-streams browsers only (`./sframe-transport.ts`); nothing
+   * elsewhere. There a sender or receiver whose encoded streams were never
+   * taken passes no media, so after every step that can create a transceiver
+   * every receiver without a transform is given one, and a sender left
+   * without one is said out loud. Nothing here can let a frame through
+   * unsealed: an uncovered endpoint is silent, not plain.
+   */
+  private coverSFrame(): void {
+    if (sframeTransport() !== "encoded-streams") return;
+    const pc = this.pc;
+    const key = this.callKey;
+    if (pc === null || key === null) return;
+    const cover = coverEncodedStreams(pc, key.seed);
+    if (cover.unsealedSenders.length > 0 && !this.unsealedSenderWarned) {
+      this.unsealedSenderWarned = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `CallSession: ${cover.unsealedSenders.length} sender(s) have no SFrame transform; ` +
+          "their media does not flow",
+      );
+    }
+  }
+
   /** Logged once per session; see {@link armFrameDescriptor}. */
   private frameDescriptorWarned = false;
 
@@ -599,6 +632,7 @@ export class CallSession {
               type: "answer",
               sdp: parsed.sdp,
             });
+            this.coverSFrame();
             await this.applyQueuedCandidates();
             this.setState("connecting");
             // Answered: the ring clock is over, the connect clock starts now.
@@ -621,6 +655,7 @@ export class CallSession {
               sdp: parsed.sdp,
             });
             this.isSettingRemoteAnswerPending = false;
+            this.coverSFrame();
           } catch (err) {
             this.isSettingRemoteAnswerPending = false;
             // eslint-disable-next-line no-console
@@ -692,6 +727,7 @@ export class CallSession {
       const pc = this.pc;
       if (pc === null) return;
       await pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
+      this.coverSFrame();
       this.pendingOffer = null;
       await this.applyQueuedCandidates();
       if (this.state !== "ringing" || this.pc !== pc) return;
@@ -984,11 +1020,15 @@ export class CallSession {
     if (!this.sframe.supported()) {
       // eslint-disable-next-line no-console
       console.warn(
-        "CallSession: this browser has no RTCRtpScriptTransform — refusing the call (invariant #4)",
+        "CallSession: this browser can hand encoded frames to no worker " +
+          "(no RTCRtpScriptTransform, no createEncodedStreams): refusing the call (invariant #4)",
       );
       void this.endLocal("error");
       throw new Error("SFrame transform unsupported");
     }
+    // Which of the two interfaces carries this call's frames to the worker.
+    // eslint-disable-next-line no-console
+    console.info(sframeTransportLine());
     // Honour the picker-selected device at capture time: a non-null
     // `deviceId` becomes an `{ exact }` constraint, else a bare boolean
     // (OS default). A disabled kind stays `false`.
@@ -1017,13 +1057,17 @@ export class CallSession {
     // (the video track, if any). Audio-only callers ignore it.
     this.callbacks.onLocalStream?.(stream);
 
-    const pc = new RTCPeerConnection({
-      iceServers: await this.resolveIceServers(),
-      // P2P 1×1 uses native DTLS-SRTP. SFrame insertable
-      // streams land in 3b when an SFU sits between peers.
-      bundlePolicy: "max-bundle",
-      rtcpMuxPolicy: "require",
-    });
+    // Built through `sframePeerConnectionConfig`: on a browser that reaches
+    // the SFrame worker by `createEncodedStreams()` the connection has to be
+    // constructed for it (`./sframe-transport.ts`); elsewhere the
+    // configuration is unchanged.
+    const pc = new RTCPeerConnection(
+      sframePeerConnectionConfig({
+        iceServers: await this.resolveIceServers(),
+        bundlePolicy: "max-bundle",
+        rtcpMuxPolicy: "require",
+      }),
+    );
     this.pc = pc;
 
     // Renegotiate on a future local track change (piece B2b: addLocalVideo).
@@ -1211,6 +1255,7 @@ export class CallSession {
       // The other three sites arm the m-lines this browser SENDS on; this
       // one is the only site that arms the one it RECEIVES on.
       this.armFrameDescriptor(pc);
+      this.coverSFrame();
       await pc.setLocalDescription(); // implicit createAnswer
       const answerSdp = pc.localDescription?.sdp;
       if (answerSdp === undefined) return;

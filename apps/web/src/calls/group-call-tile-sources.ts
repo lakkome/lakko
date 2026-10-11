@@ -4,10 +4,10 @@
 /**
  * What the call screen asks a chat-group call about a person's pictures.
  *
- * The call screen takes five functions keyed by a roster participant id
+ * The call screen takes six functions keyed by a roster participant id
  * (`peer-<peer id>`): the person's main stream, their light companion, their
- * middle track, what the SFU says it gives of them, and a way for a tile to
- * say which picture it shows. The host answers them from the live call's
+ * middle track, what the SFU says it gives of them, a way for a tile to
+ * say which picture it shows, and the receiver that decodes their audio. The host answers them from the live call's
  * handle.
  *
  * They are built here, over "the handle now, or none", for one reason: the
@@ -22,6 +22,7 @@
  * Pure: no DOM, no Solid of its own; the accessors it is handed are.
  */
 
+import type { LevelReceiver } from "./audio-level";
 import type { VideoQuality } from "./video-wants";
 
 /** The part of a group call's handle the tiles read
@@ -33,6 +34,8 @@ export interface TileSourceHandle {
   readonly remoteVideoGiven: () => ReadonlyMap<string, VideoQuality>;
   readonly localStream: () => MediaStream | null;
   reportTileVideoQuality(tile: object, peerId: string, quality: VideoQuality | null): void;
+  /** The receiver that decodes a peer's audio, when the handle has one. */
+  remoteAudioReceiverFor?(peerId: string): LevelReceiver | undefined;
 }
 
 /** The five functions the call screen takes, and the local stream. */
@@ -47,6 +50,8 @@ export interface GroupCallTileSources {
     quality: VideoQuality | null,
   ) => void;
   readonly localStream: () => MediaStream | undefined;
+  /** The receiver that decodes a person's audio, for their sound level. */
+  readonly remoteAudioReceiverFor: (participantId: string) => LevelReceiver | undefined;
   /** Every remote stream, for the audio sinks. */
   readonly remoteStreamList: () => MediaStream[];
 }
@@ -80,6 +85,9 @@ export function groupCallTileSources(handle: () => TileSourceHandle | null): Gro
       handle()?.reportTileVideoQuality(tile, peerIdOfRosterId(id), quality);
     },
     localStream: () => handle()?.localStream() ?? undefined,
+    // Read on this device only, for the speaking ring and the large tile
+    // (`calls/speaking-monitor.ts`).
+    remoteAudioReceiverFor: (id) => handle()?.remoteAudioReceiverFor?.(peerIdOfRosterId(id)),
     remoteStreamList: () => {
       const h = handle();
       return h === null ? [] : [...h.remoteStreams().values()];

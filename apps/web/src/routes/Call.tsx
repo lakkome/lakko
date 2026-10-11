@@ -129,7 +129,10 @@ import {
   stripMetrics,
   stripPeople,
 } from "../calls/group-call-layout";
-import { SpeakingMonitor } from "../calls/speaking-monitor";
+import { SpeakingMonitor, type VoiceSource } from "../calls/speaking-monitor";
+import { TileControlsReveal } from "../calls/tile-controls-reveal";
+import { describeVoices, stageReason } from "../calls/voice-diagnostics";
+import type { LevelReceiver } from "../calls/audio-level";
 import { uiRules } from "../chat/ui-rules";
 import { paths } from "./paths";
 import { Icon } from "../ui/icons";
@@ -979,18 +982,37 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
    * the effect below starts the layer rule again on the picture that is
    * actually sent.
    */
-  const heavy = createMemo(() =>
-    heavyStreamForGiven(
+  /**
+   * What `heavy` last answered, as a plain value for the teardown to read.
+   *
+   * A cleanup must not read a memo. While Solid takes a subtree down inside
+   * the update that removed it, a memo read there that the same change made
+   * stale is brought up to date on the spot, and Solid first re-runs every
+   * stale owner above it: among them the very computation that is in the
+   * middle of taking this subtree down. It is then cleaned a second time
+   * under the first, and the outer pass fails ("Cannot read properties of
+   * null") with the update half applied. Seen as: pinning from the grid left
+   * the grid up and the screen no longer following the call, and a person on
+   * the large tile leaving the call left their tile in place.
+   */
+  let heavyNow: MediaStream | undefined;
+  const heavy = createMemo(() => {
+    heavyNow = heavyStreamForGiven(
       props.quality ?? "main",
       props.given,
       props.stream,
       props.middle,
       props.light !== undefined,
-    ),
-  );
-  const lightOnly = (): boolean => heavy() === undefined;
+    );
+    return heavyNow;
+  });
+  /** `live`: read the memo (and depend on it). Not `live`: the teardown's
+   *  read of the last answer. */
+  const heavyAt = (live: boolean): MediaStream | undefined => (live ? heavy() : heavyNow);
+  const lightOnly = (live = true): boolean => heavyAt(live) === undefined;
   tally.setHeavy(!lightOnly());
-  const heavyTrack = (): MediaStreamTrack | undefined => heavy()?.getVideoTracks()[0];
+  const heavyTrack = (live = true): MediaStreamTrack | undefined =>
+    heavyAt(live)?.getVideoTracks()[0];
   const lightTrack = (): MediaStreamTrack | undefined => props.light?.getVideoTracks()[0];
   /** The stream the light element plays; kept while that element is taken
    *  down after the companion went away (`calls/held.ts`). */
@@ -1003,8 +1025,8 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
   /** The rule is told of a light track only while it is the companion of a
    *  heavy one. Shown alone, the light stream is the tile's one picture and
    *  its frames are reported as that picture's. */
-  const tellLightAvailable = (): void => {
-    display.setLightAvailable(lightMounted() && !lightOnly(), clock());
+  const tellLightAvailable = (live = true): void => {
+    display.setLightAvailable(lightMounted() && !lightOnly(live), clock());
   };
 
   // The heavy picture was replaced (the tile asked for another, the SFU
@@ -1028,16 +1050,16 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
   );
 
   /** Whether the frames of the picture this tile shows can be observed. */
-  const observable = (): boolean =>
-    lightOnly()
+  const observable = (live = true): boolean =>
+    lightOnly(live)
       ? lightEl !== undefined && canWatchVideoFrames(lightEl, lightTrack)
-      : heavyEl !== undefined && canWatchVideoFrames(heavyEl, heavyTrack);
-  const report = (): void => {
-    if (!observable()) return;
+      : heavyEl !== undefined && canWatchVideoFrames(heavyEl, () => heavyTrack(live));
+  const report = (live = true): void => {
+    if (!observable(live)) return;
     shownLayerLedger.add(
       props.peerId,
       display.drain(),
-      tally.drain(clock(), lightShown() ? "light" : "full"),
+      tally.drain(clock(), lightShown(live) ? "light" : "full"),
     );
   };
 
@@ -1069,14 +1091,15 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);
       if (pageVisible()) display.tick(clock());
-      report();
+      // The teardown: no memo is read (see `heavyNow`).
+      report(false);
       display.dispose();
     });
   });
 
   /** Whether the light element is the one on top. */
-  const lightShown = (): boolean =>
-    lightOnly() ||
+  const lightShown = (live = true): boolean =>
+    lightOnly(live) ||
     coversHeavySwap(heavySwappedAt() !== null, lightMounted()) ||
     shown() === "light";
 
@@ -1110,7 +1133,9 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
             elRef={(el): void => {
               lightEl = el;
               setLightMounted(el !== undefined);
-              tellLightAvailable();
+              // `undefined` is the element's teardown: no memo is read there
+              // (see `heavyNow`).
+              tellLightAvailable(el !== undefined);
               sync();
             }}
             onFrame={(now): void => {
@@ -1246,6 +1271,12 @@ interface TileProps {
   participant: Participant;
   large: boolean;
   onPin?: (id: string) => void;
+  /** A strip tile: its pin button is drawn smaller with a pointer. */
+  compact?: boolean | undefined;
+  /** Whether this tile's controls were brought up by a tap (section 6.2). */
+  controlsShown?: boolean | undefined;
+  /** A tap on the tile itself, anywhere but a control on it. */
+  onTap?: ((id: string) => void) | undefined;
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
   remoteLightStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
   remoteMiddleStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
@@ -1343,6 +1374,16 @@ const ParticipantTile: Component<TileProps> = (props) => {
   const name = (): string =>
     props.participant.displayName ||
     (props.participant.isLocal ? t("call.participant.you") : t("call.participant.unnamed"));
+  // Section 6.2: pinning and unpinning happen only through the pin button
+  // in the corner of someone else's tile, on a grid tile, a strip tile and
+  // the stage tile alike. The tile itself is never the control: a press on
+  // it pinned people by accident. A tap on the tile only brings its controls
+  // up for a few seconds, which is how a touch screen, with no hover, gets
+  // to the button. This device's own tile has no pin button: it is never on
+  // the stage while anyone else is present.
+  const hasPinButton = (): boolean => !local && props.onPin !== undefined;
+  const pinAction = (): string =>
+    t(isPinned() ? "call.participant.unpin_a11y" : "call.participant.pin_a11y", { name: name() });
   return (
     <div
       class="lk-call-tile"
@@ -1350,13 +1391,14 @@ const ParticipantTile: Component<TileProps> = (props) => {
       classList={{
         large: props.large,
         speaking: props.participant.speaking,
-        pinnable: !props.participant.isLocal && props.onPin !== undefined,
+        pinned: isPinned(),
+        "controls-shown": hasPinButton() && props.controlsShown === true,
       }}
       data-tone={toneOf(participantId)}
+      data-tile-id={participantId}
       onClick={(): void => {
-        if (props.onPin !== undefined && !local) {
-          props.onPin(isPinned() ? "" : participantId);
-        }
+        // Reveals the controls and does nothing else.
+        if (hasPinButton()) props.onTap?.(participantId);
       }}
     >
       <Show
@@ -1432,6 +1474,26 @@ const ParticipantTile: Component<TileProps> = (props) => {
           </span>
         </Show>
       </div>
+
+      {/* The pin button, top right. The stylesheet shows it while the pointer
+          or the keyboard focus is on the tile, for a few seconds after a tap
+          on the tile, and always on the pinned tile, in its active state. */}
+      <Show when={hasPinButton()}>
+        <button
+          type="button"
+          class="lk-call-tile-pin-btn"
+          classList={{ compact: props.compact === true }}
+          aria-pressed={isPinned()}
+          aria-label={pinAction()}
+          title={pinAction()}
+          onClick={(event): void => {
+            event.stopPropagation();
+            props.onPin?.(participantId);
+          }}
+        >
+          <Icon name="pin" size={props.compact === true ? 14 : 16} />
+        </button>
+      </Show>
     </div>
   );
 };
@@ -1508,7 +1570,7 @@ const GroupArea: Component<{
   });
 
   // A horizontal swipe turns the page (section 4.5). A move that is mostly
-  // vertical, or short, is not a swipe, so a tap on a tile still pins it.
+  // vertical, or short, is not a swipe, so a press on a pin control still pins.
   let swipeFrom: { readonly x: number; readonly y: number } | null = null;
   let swiped = false;
   const onSwipeStart = (event: PointerEvent): void => {
@@ -1528,12 +1590,50 @@ const GroupArea: Component<{
   };
 
   const togglePin = (id: string): void => {
-    // The click that ends a swipe is not a tap on a tile.
+    // The click that ends a swipe is not a press.
     if (swiped) {
       swiped = false;
       return;
     }
-    callActions.pin(callState.pinnedId() === id ? null : id);
+    if (callState.pinnedId() === id) {
+      // Unpinning leaves the layout as it is: the large tile goes back to
+      // following the speaker.
+      callActions.pin(null);
+      return;
+    }
+    // A pin is asking to see the person large: it switches to Focus, and
+    // Focus is where an unpin leaves the screen.
+    // The layout first, so the tiles are rebuilt once, for Focus, and the
+    // pin then only moves the large tile.
+    callActions.setLayoutChoice("focus");
+    callActions.pin(id);
+  };
+
+  // The tile whose controls a tap brought up (section 6.2): one at a time,
+  // for a few seconds, gone on a press anywhere else.
+  const [revealedId, setRevealedId] = createSignal<string | null>(null);
+  const reveal = new TileControlsReveal(setRevealedId);
+  onCleanup(() => reveal.dispose());
+  onMount(() => {
+    const onPress = (event: Event): void => {
+      const target = event.target;
+      const tileEl = target instanceof Element ? target.closest("[data-tile-id]") : null;
+      reveal.pressBegan(tileEl?.getAttribute("data-tile-id") ?? null);
+    };
+    document.addEventListener("pointerdown", onPress, true);
+    onCleanup(() => document.removeEventListener("pointerdown", onPress, true));
+  });
+  const onTileTap = (id: string): void => {
+    // The click that ends a swipe is not a tap.
+    if (swiped) {
+      swiped = false;
+      return;
+    }
+    reveal.tap(id);
+  };
+  const onPinPressed = (id: string): void => {
+    togglePin(id);
+    reveal.hide();
   };
   // A tile is drawn for a person in the roster, and reads them through
   // `lastDefined`, never through the accessor a `<Show>` hands its child: a
@@ -1541,14 +1641,17 @@ const GroupArea: Component<{
   // holds them, and that accessor throws when read then, which stopped the
   // whole roster update half way (`calls/held.ts`). Which tiles exist is
   // decided by the lists of ids above, which follow the roster.
-  const tile = (id: string, large: boolean): JSX.Element => {
+  const tile = (id: string, large: boolean, compact = false): JSX.Element => {
     const person = lastDefined(() => personById(id));
     return (
       <Show when={person() !== undefined}>
         <ParticipantTile
           participant={person() as Participant}
           large={large}
-          onPin={togglePin}
+          onPin={onPinPressed}
+          compact={compact}
+          controlsShown={revealedId() === id}
+          onTap={onTileTap}
           remoteStreamFor={props.remoteStreamFor}
           remoteLightStreamFor={props.remoteLightStreamFor}
           remoteMiddleStreamFor={props.remoteMiddleStreamFor}
@@ -1641,7 +1744,8 @@ const GroupArea: Component<{
                 class="lk-call-cell"
                 style={{ width: `${strip().tileWidth}px`, height: `${strip().tileHeight}px` }}
               >
-                {tile(id, false)}
+                {/* A strip tile is small: its pin button is too. */}
+                {tile(id, false, true)}
               </div>
             )}
           </For>
@@ -1669,8 +1773,8 @@ const GroupArea: Component<{
  * Switch between the two group layouts, top right.
  *
  * It shows the layout a press leads to, not the one on screen. Pinning
- * someone already means Focus, so while a pin is up the button unpins and
- * returns to the grid rather than changing a choice the pin overrides.
+ * someone means Focus, so from Focus the button also unpins: a grid has no
+ * large tile for a pin to hold.
  */
 const LayoutSwitch: Component = () => {
   const kind = (): "grid" | "focus" =>
@@ -1862,6 +1966,11 @@ const Call: Component<{
   reportTileVideoQuality?: ReportTileVideoQuality | undefined;
   /** The local capture `MediaStream`, for the self-view. */
   localStream?: (() => MediaStream | undefined) | undefined;
+  /** SFU group-call only: resolve a roster participant id to the receiver
+   *  that decodes that person's audio. Their sound level is read from it on
+   *  this device (`calls/audio-level.ts`) for the speaking ring and the large
+   *  tile; without it the level is read from the stream being played. */
+  remoteAudioReceiverFor?: ((participantId: string) => LevelReceiver | undefined) | undefined;
   /** Copy the link to this call (`docs/ux/call-links.md` section 3). The
    *  `Invite` control exists only where this is given: a call in a
    *  conversation is reached through that conversation, not through a link. */
@@ -1991,31 +2100,74 @@ const Call: Component<{
     lastRemoteIds = remoteIds;
   });
 
-  // Who is speaking (`docs/ux/group-call-grid.md` section 7.3): read on this
-  // device from the audio it plays, for the ring on a tile and for the large
-  // tile in the Focus layout. A group call only; a one-to-one has one voice.
-  const speaking = new SpeakingMonitor((snapshot) => {
-    callActions.setSpeech(snapshot.speakingIds, {
-      activeSpeakerId: snapshot.activeSpeakerId,
-      lastSpokeAtMs: snapshot.lastSpokeAtMs,
-    });
-  });
+  // Who is speaking (`docs/ux/group-call-grid.md` sections 5.2 and 7.3): read
+  // on this device, for the ring on a tile and for the large tile in the
+  // Focus layout. A group call only; a one-to-one has one voice. One timer
+  // for the call screen, stopped when it is taken down.
+  const speaking = new SpeakingMonitor(
+    (snapshot) => {
+      callActions.setSpeech(snapshot.speakingIds, {
+        activeSpeakerId: snapshot.activeSpeakerId,
+        lastSpokeAtMs: snapshot.lastSpokeAtMs,
+      });
+    },
+    {
+      // Every two seconds, beside the call's other media lines: where each
+      // person's level came from, how loud, whether it counted; the floor;
+      // the large tile and why (`calls/voice-diagnostics.ts`).
+      onReport: (voices, floorId) => {
+        const rules = untrack(uiRules);
+        const people = untrack(callState.participants);
+        const pinned = untrack(callState.pinnedId);
+        const speech = untrack(callState.speech);
+        const layout = groupLayoutKind(untrack(callState.layoutChoice), pinned, people);
+        const onStage =
+          rules === null || layout !== "focus" ? null : stagePerson(rules, people, pinned, speech);
+        // eslint-disable-next-line no-console
+        console.info(
+          describeVoices(
+            "call media interval",
+            voices,
+            floorId,
+            onStage === null
+              ? null
+              : { id: onStage.id, reason: stageReason(onStage.id, people, pinned, speech) },
+            layout,
+          ),
+        );
+      },
+    },
+  );
   onCleanup(() => speaking.dispose());
-  const voiceStreams = createMemo(
-    () =>
+  const voices = createMemo(
+    (): VoiceSource[] =>
       props.group === true && props.embedded === true
         ? callState.participants().map((p) => ({
             id: p.id,
+            isLocal: p.isLocal,
+            micOn: p.micOn,
             stream: p.isLocal ? props.localStream?.() : props.remoteStreamFor?.(p.id),
+            receiver: p.isLocal ? undefined : props.remoteAudioReceiverFor?.(p.id),
           }))
         : [],
     undefined,
     {
       equals: (a, b) =>
-        a.length === b.length && a.every((x, i) => x.id === b[i]?.id && x.stream === b[i]?.stream),
+        a.length === b.length &&
+        a.every((x, i) => {
+          const y = b[i];
+          return (
+            y !== undefined &&
+            x.id === y.id &&
+            x.isLocal === y.isLocal &&
+            x.micOn === y.micOn &&
+            x.stream === y.stream &&
+            x.receiver === y.receiver
+          );
+        }),
     },
   );
-  createEffect(() => speaking.sync(voiceStreams()));
+  createEffect(() => speaking.sync(voices()));
 
   // ----- derived state ------------------------------------------------------
 
@@ -2149,6 +2301,12 @@ const Call: Component<{
   const wake = (): void => {
     setLastInteraction(Date.now());
   };
+  /** A press or a key: also the moment a browser lets an audio context
+   *  start, which the sound levels may need (`calls/speaking-monitor.ts`). */
+  const gesture = (): void => {
+    wake();
+    speaking.userGesture();
+  };
 
   const exit = (): void => {
     if (props.embedded === true) props.onExit?.();
@@ -2200,10 +2358,10 @@ const Call: Component<{
       data-notice={callState.notice() !== null ? "" : undefined}
       onPointerMove={wake}
       onPointerDown={(): void => {
-        wake();
+        gesture();
         if (callState.qualityPopoverOpen()) callActions.setQualityPopoverOpen(false);
       }}
-      onKeyDown={wake}
+      onKeyDown={gesture}
       onFocusIn={wake}
     >
       {/* Put the call away, top left — §4.5's web collapse affordance, and the

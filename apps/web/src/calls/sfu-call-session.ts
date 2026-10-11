@@ -117,10 +117,20 @@ import {
   CAMERA_COPY_KINDS,
   configureCopySender,
   removeCopySender,
-  setCopySenderActive,
   type CameraCopyKind,
   type CopySender,
 } from "./camera-sender";
+import {
+  CAMERA_SENDER_KINDS,
+  describeVideoNeededChange,
+  neededWord,
+  SenderActivity,
+  senderActive,
+  sendersActive,
+  type CameraSenderKind,
+  type SenderActivityNote,
+  type VideoNeeded,
+} from "./sender-activity";
 import {
   deltaOf,
   describeDeltas,
@@ -402,14 +412,23 @@ export class SfuCallSession {
     light: emptyCopySlot(),
     middle: emptyCopySlot(),
   };
-  /** Whether the middle sender's encoding was last asked to be active;
-   *  `null` before it was asked anything, and after a refusal (so the next
-   *  look asks again). */
-  private middleActiveAsked: boolean | null = null;
-  /** Serializes the `setParameters` calls that start and stop the middle
-   *  sender: a browser refuses one made while another is pending. */
-  private middleActiveChain: Promise<void> = Promise.resolve();
-  private middleActiveWarned = false;
+  /**
+   * The SFU's last `video-needed` frame (`sender-activity.ts`): which of this
+   * device's camera senders somebody is being sent. `null` before the first
+   * frame, which means every sender is needed.
+   */
+  private videoNeeded: VideoNeeded | null = null;
+  /**
+   * Keeps each camera sender's one encoding active or not, as
+   * {@link sendersActiveNow} says. One per sender, so the `setParameters`
+   * calls on a sender never overlap (a browser refuses one made while
+   * another is pending) and the last decision wins.
+   */
+  private readonly senderActivity: Record<CameraSenderKind, SenderActivity> = {
+    main: new SenderActivity("main"),
+    middle: new SenderActivity("middle"),
+    light: new SenderActivity("light"),
+  };
 
   /** The shared rules, once loaded (`connect()`). */
   private wasm: Awaited<ReturnType<typeof loadWasm>> | null = null;
@@ -458,6 +477,8 @@ export class SfuCallSession {
   /** The ids of the remote tracks that are light companions and middle
    *  tracks (`light-stream.ts`), so the media counters can say which receiver
    *  is which. */
+  /** The audio receiver of each remote peer, by peer id (`audioReceiverFor`). */
+  private readonly audioReceivers = new Map<string, RTCRtpReceiver>();
   private readonly copyTrackIds: Record<CameraCopyKind, Set<string>> = {
     light: new Set<string>(),
     middle: new Set<string>(),
@@ -491,6 +512,23 @@ export class SfuCallSession {
    */
   reportTileVideoQuality(tile: object, peerId: string, quality: VideoQuality | null): void {
     if (this.wantsBook.setTile(tile, peerId, quality)) this.wantsSender.changed();
+  }
+
+  /**
+   * The receiver that decodes `peerId`'s audio, or `undefined` before their
+   * audio track arrived and after it ended. The call screen reads the
+   * person's sound level from it (`audio-level.ts`), on this device, for the
+   * speaking ring and the large tile; nothing about it is sent anywhere.
+   */
+  audioReceiverFor(peerId: string): RTCRtpReceiver | undefined {
+    const receiver = this.audioReceivers.get(peerId);
+    if (receiver === undefined) return undefined;
+    // A track that ended (the peer left or stopped sending) has no level.
+    if (receiver.track?.readyState === "ended") {
+      this.audioReceivers.delete(peerId);
+      return undefined;
+    }
+    return receiver;
   }
 
   /** The picture of `peerId` this device asks the SFU for now. */
@@ -554,31 +592,90 @@ export class SfuCallSession {
   }
 
   /**
-   * Make the middle sender's encoding active or not, as {@link middleWanted}
-   * says now. `setParameters` only: the media line stays and nothing is
-   * renegotiated. Called on every change of the roster; a no-op when the
-   * encoding was already asked for what is wanted.
+   * The "camera is on" condition of the sender-activity decision: this
+   * device has a live camera track.
+   *
+   * Deliberately NOT `track.enabled`. The person turning the camera off is
+   * `track.enabled = false` on the camera and its clones, exactly as before
+   * this rule existed: the senders go on sending (black frames, at very
+   * little bitrate) and a viewer who joins meanwhile still gets its key
+   * frame. The SFU's own bookkeeping for a silent sender (no key frame
+   * request used up, no retransmission asked, no burst at its return) covers
+   * only a sender it told `false`; a sender this client silenced by itself
+   * would be an unannounced stop on the SFU's side. So the person's camera
+   * toggle and the SFU's word compose without touching each other: the
+   * toggle changes the tracks, the SFU's word changes the encodings, and a
+   * camera turned on while the SFU's last word was `false` finds that
+   * encoding still inactive and the light one active.
    */
-  private syncMiddleActive(): void {
-    const middle = this.copies.middle.sender;
-    if (middle === null) return;
-    const want = this.middleWanted();
-    if (this.middleActiveAsked === want) return;
-    this.middleActiveAsked = want;
-    this.middleActiveChain = this.middleActiveChain.then(async () => {
-      if (this.copies.middle.sender !== middle) return;
-      const ok = await setCopySenderActive(middle.sender, want);
-      if (ok || this.copies.middle.sender !== middle) return;
-      // Asked again at the next look (a roster change, or the counters tick).
-      if (this.middleActiveAsked === want) this.middleActiveAsked = null;
-      if (!this.middleActiveWarned) {
-        this.middleActiveWarned = true;
-        // eslint-disable-next-line no-console
-        console.warn(
-          `SfuCallSession: the middle camera sender could not be ${want ? "started" : "stopped"}`,
-        );
-      }
-    });
+  private cameraIsOn(): boolean {
+    const track = this.localStream?.getVideoTracks()[0];
+    return track !== undefined && track.readyState === "live";
+  }
+
+  /** This device's main camera sender, if it has one. */
+  private mainCameraSender(): RTCRtpSender | undefined {
+    const pc = this.pc;
+    return pc === null ? undefined : this.mainSenderOf(pc, "video");
+  }
+
+  /**
+   * Which camera senders encode and send now (`sender-activity.ts`): the
+   * camera is on, the sender exists, the people count allows the middle one,
+   * and the SFU's last word for the sender is not `false`.
+   */
+  private sendersActiveNow(): Record<CameraSenderKind, boolean> {
+    const main = this.mainCameraSender();
+    return sendersActive(
+      { cameraOn: this.cameraIsOn(), middleWanted: this.middleWanted(), needed: this.videoNeeded },
+      (kind) => (kind === "main" ? main !== undefined : this.copies[kind].sender !== null),
+    );
+  }
+
+  /**
+   * Make every camera sender's encoding active or not, as
+   * {@link sendersActiveNow} says now. `setParameters` only: the media lines,
+   * the SSRCs and the SFrame transforms stay and nothing is renegotiated.
+   *
+   * Called after everything that can change the answer or reset what the
+   * browser holds: a `video-needed` frame, a change of the roster, the
+   * camera turned off or on, a sender added, a track replaced (device
+   * switch, re-publish after an ended track), a renegotiation, and every
+   * counters tick (which is also when a refused switch-on is asked again).
+   * A no-op for a sender whose encoding already says so.
+   */
+  private syncSenderActivity(): void {
+    const main = this.mainCameraSender();
+    this.senderActivity.main.bind(main ?? null);
+    this.senderActivity.middle.bind(this.copies.middle.sender?.sender ?? null);
+    this.senderActivity.light.bind(this.copies.light.sender?.sender ?? null);
+    const active = this.sendersActiveNow();
+    for (const kind of CAMERA_SENDER_KINDS) {
+      const activity = this.senderActivity[kind];
+      if (activity.bound) activity.want(active[kind]);
+    }
+  }
+
+  /**
+   * A `video-needed` frame: the SFU's whole word replaces the last one, the
+   * senders follow at once, and one line says so when it changed which of
+   * them is active.
+   */
+  private onVideoNeededFrame(needed: VideoNeeded): void {
+    const before = this.sendersActiveNow();
+    this.videoNeeded = needed;
+    const line = describeVideoNeededChange(needed, before, this.sendersActiveNow());
+    if (line !== null) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    this.syncSenderActivity();
+  }
+
+  /** What the `send video` line says of one sender: the SFU's last word and
+   *  whether its encoding is asked to be active. */
+  private senderActivityNote(kind: CameraSenderKind): SenderActivityNote {
+    return { needed: neededWord(kind, this.videoNeeded), active: this.sendersActiveNow()[kind] };
   }
 
   /**
@@ -646,6 +743,7 @@ export class SfuCallSession {
         onSdpAnswer: (f): void => void this.onSdpAnswer(f),
         onSdpOffer: (f): void => this.onSdpOffer(f),
         onVideoGiven: (given): void => this.onVideoGivenFrame(given),
+        onVideoNeeded: (needed): void => this.onVideoNeededFrame(needed),
         onPong: (): void => {
           this.lastInboundMs = this.nowMs();
         },
@@ -758,6 +856,10 @@ export class SfuCallSession {
     // The copies follow the camera.
     this.setCopiesEnabled(on);
     this.setLocalCameraOn(on);
+    // The toggle is the tracks' `enabled`, as before; the encodings stay as
+    // the people count and the SFU's last word have them (asked again here
+    // in case this browser reset one).
+    this.syncSenderActivity();
   }
 
   /** Current mid-call camera-on lifecycle state (piece B). */
@@ -833,6 +935,7 @@ export class SfuCallSession {
     if (existing?.track != null && existing.track.readyState === "live") {
       existing.track.enabled = true;
       this.setCopiesEnabled(true);
+      this.syncSenderActivity();
       this.setVideoPublishState("live");
       // Camera is live again — tell peers (camera-off-cleanup).
       this.setLocalCameraOn(true);
@@ -1001,6 +1104,9 @@ export class SfuCallSession {
     if (kind === "video" && this.pc === pc && this.activeSeed !== null) {
       await this.followCamera(pc, newTrack, this.activeSeed, false);
     }
+    // A replaced track keeps the sender and its parameters; asked again all
+    // the same, in case this browser reset the encoding.
+    if (kind === "video") this.syncSenderActivity();
   }
 
   /** The copies' clones are enabled and disabled with the camera. */
@@ -1058,8 +1164,10 @@ export class SfuCallSession {
     await Promise.all(
       CAMERA_COPY_KINDS.map((kind) => this.followCameraWith(kind, pc, cameraTrack, seed, addMissing)),
     );
-    // The roster may have crossed three people while a copy was set up.
-    this.syncMiddleActive();
+    // The roster may have crossed three people, or the SFU's word may have
+    // changed, while a copy was set up; and a new or re-tracked sender is
+    // given its flag again.
+    this.syncSenderActivity();
   }
 
   /** {@link followCamera} for one copy. Runs up to the copy being added and
@@ -1101,9 +1209,17 @@ export class SfuCallSession {
     }
     if (!addMissing) return;
 
-    // The middle sender is created sending or not as the roster says now;
-    // the light one always sends.
-    const active = kind === "middle" ? this.middleWanted() : undefined;
+    // The middle sender is created sending or not as the roster and the SFU
+    // say now; the light one is created sending.
+    const active =
+      kind === "middle"
+        ? senderActive("middle", {
+            cameraOn: cameraTrack.readyState === "live",
+            exists: true,
+            middleWanted: this.middleWanted(),
+            needed: this.videoNeeded,
+          })
+        : undefined;
     const added = addCopySender(
       pc,
       cameraTrack,
@@ -1115,7 +1231,6 @@ export class SfuCallSession {
     const copy = added.copy;
     copy.track.enabled = cameraTrack.enabled;
     slot.sender = copy;
-    if (kind === "middle") this.middleActiveAsked = active ?? null;
     try {
       slot.transformId = attachSenderSFrame(copy.sender, {
         seed,
@@ -1149,7 +1264,6 @@ export class SfuCallSession {
     slot.sender = null;
     if (slot.transformId !== null) this.transformIds.delete(slot.transformId);
     slot.transformId = null;
-    if (kind === "middle") this.middleActiveAsked = null;
     removeCopySender(pc, copy);
   }
 
@@ -1255,13 +1369,19 @@ export class SfuCallSession {
     }
     if (this.pc !== pc) return;
     this.sayLocalCameraOnce();
-    // A start or stop of the middle sender the browser refused is asked again.
-    this.syncMiddleActive();
+    // A sender the browser refused to start is asked again, and a flag a
+    // renegotiation reset is put back.
+    this.syncSenderActivity();
     for (const line of describeDeltas("call media interval", deltaOf(this.mediaCountersLast, reading))) {
       // eslint-disable-next-line no-console
       console.info(line);
     }
-    for (const line of describeOutboundSenders("call media interval", reading.outboundVideoSenders)) {
+    for (const line of describeOutboundSenders(
+      "call media interval",
+      reading.outboundVideoSenders,
+      (kind) => this.senderActivityNote(kind),
+      CAMERA_SENDER_KINDS.filter((kind) => this.senderActivity[kind].bound),
+    )) {
       // eslint-disable-next-line no-console
       console.info(line);
     }
@@ -1335,6 +1455,7 @@ export class SfuCallSession {
       this.signaling.close();
       this.signaling = null;
     }
+    this.audioReceivers.clear();
     if (this.pc !== null) {
       try {
         this.pc.close();
@@ -1366,8 +1487,8 @@ export class SfuCallSession {
       slot.refusalWarned = false;
       this.copyTrackIds[kind].clear();
     }
-    this.middleActiveAsked = null;
-    this.middleActiveWarned = false;
+    this.videoNeeded = null;
+    for (const kind of CAMERA_SENDER_KINDS) this.senderActivity[kind].reset();
     // Nothing more is asked of the SFU, and the tiles of a later call start
     // from nothing.
     this.wantsSender.reset();
@@ -1538,6 +1659,11 @@ export class SfuCallSession {
           ids.delete(trackId);
         });
       }
+      // A peer's own audio: kept before the track is announced, so whoever
+      // hears of the track can already ask for its receiver.
+      if (role === "main" && ev.track.kind === "audio") {
+        this.audioReceivers.set(remoteStream.id, ev.receiver);
+      }
       this.callbacks.onRemoteTrack?.({
         streamId: remoteStream.id,
         track: ev.track,
@@ -1638,7 +1764,7 @@ export class SfuCallSession {
    * in it (again, whatever it is, after a join).
    */
   private onRosterChanged(joined: boolean): void {
-    this.syncMiddleActive();
+    this.syncSenderActivity();
     if (joined) this.wantsSender.resend();
     else this.wantsSender.changed();
   }
@@ -1758,6 +1884,8 @@ export class SfuCallSession {
       // to leave the right codec header in the clear (ADR-0071).
       syncSenderCodecs();
       this.coverSFrame(pc);
+      // A flag this negotiation reset on a sender is put back.
+      this.syncSenderActivity();
       // The initial publish (or a mid-call renegotiation) is now answered —
       // arm `onnegotiationneeded` for future local track changes (piece B).
       this.negotiationReady = true;
@@ -1882,6 +2010,7 @@ export class SfuCallSession {
           // The offer may have created transceivers: every receiver has its
           // streams taken (insertable-streams browsers only).
           this.coverSFrame(pc);
+          this.syncSenderActivity();
           const answerSdp = pc.localDescription?.sdp;
           if (answerSdp === undefined) {
             throw new Error("setLocalDescription produced no answer SDP");

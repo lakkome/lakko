@@ -15,6 +15,7 @@
  * owns `getStats()` and the timer.
  */
 
+import { describeSenderActivity, type SenderActivityNote } from "./sender-activity";
 import type { LayerDisplayCounters, TileFrameCounts } from "./layer-display";
 
 /**
@@ -334,26 +335,69 @@ export function describeGivenChanges(label: string, changes: readonly GivenChang
   );
 }
 
+/** What the diagnostics say of one sender's activity
+ *  (`sender-activity.ts`): the SFU's last word for it (`null`: none) and
+ *  whether its encoding is asked to be active. */
+export type OutboundActivity = SenderActivityNote;
+
+function activityTail(activity: OutboundActivity | undefined): string {
+  return activity === undefined ? "" : describeSenderActivity(activity);
+}
+
 /** One camera sender in one line, or `null` when there is none. The line
- *  ends with which sender it is: `sender=main`, `sender=middle` or
- *  `sender=light`. */
-export function describeOutbound(label: string, out: OutboundVideo | null): string | null {
+ *  names which sender it is (`sender=main`, `sender=middle` or
+ *  `sender=light`) and, when `activity` is given, ends with the SFU's last
+ *  word for it and whether its encoding is active: `needed=yes|no|-
+ *  active=yes|no`. */
+export function describeOutbound(
+  label: string,
+  out: OutboundVideo | null,
+  activity?: OutboundActivity,
+): string | null {
   if (out === null) return null;
   const size = out.frameWidth !== null && out.frameHeight !== null ? `${out.frameWidth}x${out.frameHeight}` : "-";
   return (
     `${label} send video mode=${out.scalabilityMode ?? "-"} size=${size}` +
     ` fps=${fixed(out.framesPerSecond, 0)} limited_by=${out.qualityLimitationReason ?? "-"}` +
-    ` sender=${out.sender}`
+    ` sender=${out.sender}` +
+    activityTail(activity)
   );
 }
 
 /** The camera, one line for each of its senders (main, middle, light). A sender
  *  the browser is sending nothing on reports no size and no frame rate
- *  (`-`). */
-export function describeOutboundSenders(label: string, senders: readonly OutboundVideo[]): string[] {
+ *  (`-`). `activityOf` adds each line's `needed=` and `active=`. A sender
+ *  named in `existing` that the browser reports no outbound stream for (some
+ *  engines drop the entry of an inactive encoding) still has its line, all
+ *  dashes, so a sender that was switched off does not vanish from the log. */
+export function describeOutboundSenders(
+  label: string,
+  senders: readonly OutboundVideo[],
+  activityOf?: (sender: CameraSenderName) => OutboundActivity | undefined,
+  existing: readonly CameraSenderName[] = [],
+): string[] {
   const lines: string[] = [];
+  const reported = new Set<CameraSenderName>();
   for (const sender of senders) {
-    const line = describeOutbound(label, sender);
+    reported.add(sender.sender);
+    const line = describeOutbound(label, sender, activityOf?.(sender.sender));
+    if (line !== null) lines.push(line);
+  }
+  for (const name of existing) {
+    if (reported.has(name)) continue;
+    const line = describeOutbound(
+      label,
+      {
+        sender: name,
+        scalabilityMode: null,
+        qualityLimitationReason: null,
+        frameWidth: null,
+        frameHeight: null,
+        framesPerSecond: null,
+        bytesSent: 0,
+      },
+      activityOf?.(name),
+    );
     if (line !== null) lines.push(line);
   }
   return lines;

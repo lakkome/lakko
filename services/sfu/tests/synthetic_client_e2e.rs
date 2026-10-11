@@ -9708,6 +9708,733 @@ async fn three_senders_and_the_subscribers_wants() {
 }
 
 // ============================================================
+// Senders nobody watches: the SFU tells a publisher which of its
+// camera senders somebody is being sent (`video-needed`)
+// ============================================================
+
+/// A publisher with three declared senders and two subscribers that both
+/// show the middle picture, through the production media task under
+/// server-side bitrate control.
+///
+/// - The publisher is first told `main: true, middle: true`, and, once
+///   nobody has wanted its main picture for
+///   `lakko_svc_sfu::video_needed::UNNEEDED_AFTER` (nobody ever names
+///   it: a subscriber that has said nothing counts for nothing),
+///   `main: false,
+///   middle: true`. It then stops writing its main sender, as a client
+///   does.
+/// - While the sender is off the SFU asks for nothing on it: no
+///   retransmission and no key frame.
+/// - One subscriber then asks for the main picture. The publisher is told
+///   `main: true` within [`NEEDED_TOLD_WITHIN`] and starts writing again,
+///   **with a delta frame first** (an encoder that kept its state; the
+///   harder case for the SFU). The SFU asks it for a key frame, and the
+///   subscriber's main track starts at the first packet of that key
+///   frame, within [`NEEDED_BACK_WITHIN`] of the request, on consecutive
+///   sequence numbers (it has no gap to ask a retransmission for, and is
+///   sent none).
+/// - The first REMB the publisher is sent after that is not lower than
+///   the last one before its sender was switched off.
+/// - While the main sender is off a third subscriber joins, says `light`
+///   the moment it is offered the tracks and `middle` 230 ms later: the
+///   publisher is told nothing because of it for the seconds until
+///   somebody names main, and the joiner is never sent a main packet.
+/// - The other subscriber's main track stays silent throughout, and every
+///   payload arrives byte for byte on the track of its sender.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    clippy::cast_possible_truncation,
+    clippy::print_stderr
+)]
+async fn a_sender_nobody_watches_is_switched_off_and_comes_back_at_a_key_frame() {
+    use lakko_svc_sfu::frame_descriptor::PacketDescriptor;
+    use lakko_svc_sfu::media::{LIGHT_STREAM_SUFFIX, MIDDLE_STREAM_SUFFIX};
+    use lakko_svc_sfu::protocol::{VideoQuality, VideoWant};
+    use lakko_svc_sfu::video_needed::UNNEEDED_AFTER;
+
+    /// How soon after a subscriber asks for a picture whose sender is off
+    /// the publisher has been told to switch it on. Chosen for this test:
+    /// the SFU decides within 20 ms and one loop pass; the rest is the
+    /// test's own loop.
+    const NEEDED_TOLD_WITHIN: Duration = Duration::from_millis(500);
+    /// How soon after that request the subscriber has the first packet
+    /// of a key frame on its main track: told, a delta frame, the SFU's
+    /// key frame request, the key frame.
+    const NEEDED_BACK_WITHIN: Duration = Duration::from_millis(1500);
+    // Both subscribers ask for the middle picture this many frames in.
+    const TO_MIDDLE: u64 = 25;
+    // How long the main sender stays off before one of them asks for
+    // main, and how long the run goes on afterwards, in frames.
+    const OFF_FRAMES: u64 = 150;
+    // A third subscriber joins this many frames after the main sender
+    // went off, says `light` the moment it is offered the tracks and
+    // `middle` this long after, as the web client does. A joiner counted
+    // as wanting main at any point would show as an early `main: true`.
+    const JOIN_FRAMES: u64 = 15;
+    const JOINER_SAYS_MIDDLE_AFTER: Duration = Duration::from_millis(230);
+    const BACK_FRAMES: u64 = 75;
+    const IN_FLIGHT: Duration = Duration::from_millis(300);
+
+    let call = "video-needed-call";
+    let peers = PeerRegistry::new();
+    let mut registered = register_subscribers(&peers, call, 4).await;
+    let (d_id, mut d_rx) = registered.pop().expect("registered");
+    let (a_id, mut a_rx) = registered.pop().expect("registered");
+    let (c_id, mut c_rx) = registered.pop().expect("registered");
+    let (b_id, mut b_rx) = registered.pop().expect("registered");
+    let (media_task, sfu_addr) = spawn_media_task_with_bitrate_control(
+        "127.0.0.1:0".parse().unwrap(),
+        None,
+        peers,
+        MediaTaskOptions {
+            diagnostics: None,
+            video_fec: false,
+            uplink_fallback: false,
+            protection: LossProtection::default(),
+            downlink_control: false,
+        },
+        BitrateControl::Server(EstimatorConfig::default()),
+    )
+    .await
+    .expect("UDP bind on loopback:0 succeeds");
+
+    let builder = || {
+        Rtc::builder().set_rtp_mode(true).set_extension(
+            GENERIC_FRAME_DESCRIPTOR_ID,
+            generic_frame_descriptor_extension(),
+        )
+    };
+    let mut a = SyntheticClient::build(builder().enable_raw_packets(true)).await;
+    let mut b = SyntheticClient::build(builder()).await;
+    let mut c = SyntheticClient::build(builder()).await;
+    // The one that joins later.
+    let mut d = SyntheticClient::build(builder()).await;
+    let mut d_joined_at: Option<Instant> = None;
+    let mut d_offers: Vec<String> = Vec::new();
+    let mut d_said_light: Option<Instant> = None;
+    let mut d_said_middle: Option<Instant> = None;
+
+    for (client, id) in [(&mut b, &b_id), (&mut c, &c_id)] {
+        let (offer, pending) = client.create_video_subscriber_offer();
+        let answer = media_task
+            .accept_offer(id.clone(), call.to_owned(), offer)
+            .await
+            .expect("SFU accepts a subscriber offer");
+        client
+            .accept_answer(pending, &answer)
+            .expect("the subscriber applies the SFU's answer");
+    }
+    let (a_offer, a_pending, pub_main, pub_light, pub_middle) =
+        a.create_three_sender_publisher_offer();
+    let a_answer = media_task
+        .accept_offer_with_copies(
+            a_id.clone(),
+            call.to_owned(),
+            a_offer,
+            vec![pub_light.to_string()],
+            vec![pub_middle.to_string()],
+        )
+        .await
+        .expect("SFU accepts A's offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    let layer = |mid: Mid, tag: u8, packets: u64, payload: usize, first_seq: u64| FbLayer {
+        rid: None,
+        mid: Some(mid),
+        tag,
+        packets,
+        payload,
+        next_seq: first_seq,
+        frames: Vec::new(),
+        want_key: true,
+    };
+    let mut layers = [
+        layer(pub_main, b'f', FB_F_PACKETS, FB_F_PAYLOAD, FB_F_FIRST_SEQ),
+        layer(pub_middle, b'm', 5, 800, 40_000),
+        layer(pub_light, b'q', FB_Q_PACKETS, FB_Q_PAYLOAD, FB_Q_FIRST_SEQ),
+    ];
+    // What the publisher was told, in order: (when, main, middle).
+    let mut told: Vec<(Instant, bool, bool)> = Vec::new();
+    // Whether the "client" is sending its main and its middle sender.
+    let mut sending = [true, true];
+
+    let frame_every = Duration::from_micros(1_000_000 / DIP_FPS);
+    let give_up = Instant::now() + Duration::from_secs(60);
+    let mut b_offers: Vec<String> = Vec::new();
+    let mut c_offers: Vec<String> = Vec::new();
+    let mut t0: Option<Instant> = None;
+    let mut ticks: u64 = 0;
+    let mut plis_handled = 0usize;
+    let mut to_middle_at: Option<Instant> = None;
+    // The tick the main sender was switched off at, and the one it was
+    // switched back on at.
+    let mut off_tick: Option<u64> = None;
+    let mut to_main_at: Option<Instant> = None;
+    let mut back_tick: Option<u64> = None;
+    let mut finish_at: Option<Instant> = None;
+    let mut bufs = [[0u8; 2048]; 3];
+    let mut dbuf = [0u8; 2048];
+
+    loop {
+        let now = Instant::now();
+        assert!(
+            now < give_up,
+            "the run did not finish: ticks={ticks} told={told:?} off_tick={off_tick:?} \
+             back_tick={back_tick:?}"
+        );
+        if finish_at.is_some_and(|at| now >= at) {
+            break;
+        }
+        for client in [&mut a, &mut b, &mut c] {
+            let _ = client.drain().await;
+        }
+        // A keyframe request on a media line makes the next frame of that
+        // sender a key frame, as an encoder does.
+        while plis_handled < a.keyframe_request_mids.len() {
+            let on = a.keyframe_request_mids[plis_handled];
+            plis_handled += 1;
+            for layer in &mut layers {
+                if layer.mid == Some(on) {
+                    layer.want_key = true;
+                }
+            }
+        }
+        // The publisher's own signaling: what the web client will do
+        // with the frame. A sender that is switched back on goes on from
+        // its next delta frame.
+        while let Ok(frame) = a_rx.try_recv() {
+            if let ServerFrame::VideoNeeded { main, middle } = frame {
+                told.push((Instant::now(), main, middle));
+                if sending[0] && !main {
+                    off_tick = Some(ticks);
+                }
+                if !sending[0] && main {
+                    back_tick = Some(ticks);
+                    layers[0].want_key = false;
+                }
+                sending = [main, middle];
+            }
+        }
+        for (client, id, rx, offers) in [
+            (&mut b, &b_id, &mut b_rx, &mut b_offers),
+            (&mut c, &c_id, &mut c_rx, &mut c_offers),
+        ] {
+            if !client.is_connected() {
+                continue;
+            }
+            while let Ok(frame) = rx.try_recv() {
+                if let ServerFrame::SdpOffer { sdp } = frame {
+                    let answer = client.answer_renegotiation(&sdp).expect("answers");
+                    media_task
+                        .accept_renegotiation_answer(id.clone(), answer)
+                        .await
+                        .expect("the SFU takes the answer");
+                    offers.push(sdp);
+                }
+            }
+        }
+        // The late joiner, once it has joined.
+        if d_joined_at.is_some() {
+            let _ = d.drain().await;
+            if d.is_connected() {
+                while let Ok(frame) = d_rx.try_recv() {
+                    if let ServerFrame::SdpOffer { sdp } = frame {
+                        let answer = d.answer_renegotiation(&sdp).expect("answers");
+                        media_task
+                            .accept_renegotiation_answer(d_id.clone(), answer)
+                            .await
+                            .expect("the SFU takes the answer");
+                        d_offers.push(sdp);
+                    }
+                }
+            }
+            let say = |quality: VideoQuality| {
+                media_task
+                    .set_video_wants(
+                        d_id.clone(),
+                        vec![VideoWant {
+                            peer: a_id.to_string(),
+                            quality,
+                        }],
+                    )
+                    .expect("the media task takes the wants");
+            };
+            if d_said_light.is_none() && !d_offers.is_empty() {
+                say(VideoQuality::Light);
+                d_said_light = Some(Instant::now());
+            }
+            if d_said_middle.is_none()
+                && d_said_light.is_some_and(|at| at.elapsed() >= JOINER_SAYS_MIDDLE_AFTER)
+            {
+                say(VideoQuality::Middle);
+                d_said_middle = Some(Instant::now());
+            }
+            while let Ok((len, src)) = d.socket.try_recv_from(&mut dbuf) {
+                d.feed_receive(&dbuf[..len], src, sfu_addr);
+                let _ = d.drain().await;
+            }
+            d.feed_timeout();
+        }
+        let tracks_of = |offers: &[String]| {
+            let mut mids: Vec<Mid> = Vec::new();
+            for (mid, stream) in offers.iter().flat_map(|sdp| video_msids(sdp)) {
+                if stream.starts_with(&a_id.to_string()) && !mids.contains(&mid) {
+                    mids.push(mid);
+                }
+            }
+            mids.len()
+        };
+        if t0.is_none()
+            && a.is_connected()
+            && b.is_connected()
+            && c.is_connected()
+            && tracks_of(&b_offers) >= 3
+            && tracks_of(&c_offers) >= 3
+        {
+            let mut api = a.rtc.direct_api();
+            let ready = layers.iter().all(|layer| {
+                layer
+                    .mid
+                    .and_then(|mid| api.stream_tx_by_mid(mid, None))
+                    .is_some_and(|stream| stream.rtx().is_some())
+            });
+            if ready {
+                t0 = Some(Instant::now() + Duration::from_millis(50));
+            }
+        }
+        if let Some(start) = t0 {
+            let due = start + frame_every * (ticks as u32);
+            if finish_at.is_none() && Instant::now() >= due {
+                if ticks == TO_MIDDLE {
+                    for id in [&b_id, &c_id] {
+                        media_task
+                            .set_video_wants(
+                                id.clone(),
+                                vec![VideoWant {
+                                    peer: a_id.to_string(),
+                                    quality: VideoQuality::Middle,
+                                }],
+                            )
+                            .expect("the media task takes the wants");
+                    }
+                    to_middle_at = Some(Instant::now());
+                }
+                if d_joined_at.is_none() && off_tick.is_some_and(|off| ticks == off + JOIN_FRAMES) {
+                    let (offer, pending) = d.create_video_subscriber_offer();
+                    let answer = media_task
+                        .accept_offer(d_id.clone(), call.to_owned(), offer)
+                        .await
+                        .expect("SFU accepts the joiner's offer");
+                    d.accept_answer(pending, &answer)
+                        .expect("the joiner applies the SFU's answer");
+                    d_joined_at = Some(Instant::now());
+                }
+                if to_main_at.is_none() && off_tick.is_some_and(|off| ticks == off + OFF_FRAMES) {
+                    media_task
+                        .set_video_wants(
+                            b_id.clone(),
+                            vec![VideoWant {
+                                peer: a_id.to_string(),
+                                quality: VideoQuality::Main,
+                            }],
+                        )
+                        .expect("the media task takes the wants");
+                    to_main_at = Some(Instant::now());
+                }
+                for (which, layer) in layers.iter_mut().enumerate() {
+                    // The light sender is always sent.
+                    if which < 2 && !sending[which] {
+                        continue;
+                    }
+                    let frame = layer.frames.len() as u64;
+                    let key = std::mem::take(&mut layer.want_key);
+                    let n = if key {
+                        layer.packets * FB_KEY_FACTOR
+                    } else {
+                        layer.packets
+                    };
+                    let rtp_time = 90_000 + (ticks * (90_000 / DIP_FPS)) as u32;
+                    let written = Instant::now();
+                    for i in 0..n {
+                        let mut ext = str0m::rtp::ExtensionValues::default();
+                        ext.user_values
+                            .set(PacketDescriptor(fb_descriptor(frame, key, i, n)));
+                        let seq = layer.next_seq;
+                        layer.next_seq += 1;
+                        let mut api = a.rtc.direct_api();
+                        let stream = api
+                            .stream_tx_by_mid(layer.mid.expect("offered"), None)
+                            .expect("send stream");
+                        stream
+                            .write_rtp(
+                                UPLINK_VP8_PT.into(),
+                                seq.into(),
+                                rtp_time,
+                                written,
+                                i + 1 == n,
+                                ext,
+                                true,
+                                fb_payload(layer.tag, frame, i, layer.payload),
+                            )
+                            .expect("A writes a packet");
+                    }
+                    layer.frames.push(FbFrame {
+                        key,
+                        n,
+                        at: written,
+                    });
+                }
+                ticks += 1;
+                if back_tick.is_some_and(|back| ticks >= back + BACK_FRAMES) {
+                    finish_at = Some(Instant::now() + Duration::from_millis(700));
+                }
+                a.feed_timeout();
+                let _ = a.drain().await;
+            }
+        }
+        for (client, buf) in [&mut a, &mut b, &mut c].into_iter().zip(bufs.iter_mut()) {
+            while let Ok((len, src)) = client.socket.try_recv_from(buf) {
+                client.feed_receive(&buf[..len], src, sfu_addr);
+                let _ = client.drain().await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        for client in [&mut a, &mut b, &mut c] {
+            let _ = client.drain().await;
+            client.feed_timeout();
+        }
+    }
+    let start = t0.expect("the publisher streamed");
+    let end = Instant::now();
+    let to_middle_at = to_middle_at.expect("the middle picture was asked for");
+    let to_main_at = to_main_at.expect("the main picture was asked for");
+    let ms = |at: Instant| at.saturating_duration_since(start).as_millis();
+    eprintln!(
+        "video-needed: the publisher was told (ms from the first frame, main, middle): {:?}; \
+         both wanted middle at {} ms, one wanted main at {} ms",
+        told.iter()
+            .map(|(at, m, d)| (ms(*at), *m, *d))
+            .collect::<Vec<_>>(),
+        ms(to_middle_at),
+        ms(to_main_at),
+    );
+
+    // What the publisher was told, and when.
+    assert_eq!(
+        told.iter().map(|(_, m, d)| (*m, *d)).collect::<Vec<_>>(),
+        vec![(true, true), (false, true), (true, true)],
+        "everything on first, main off after the delay, main on again"
+    );
+    let (off_at, on_at) = (told[1].0, told[2].0);
+    // Nobody ever named main: a subscriber that has said nothing counts
+    // for nothing heavy. So main has been unwanted since the publisher was
+    // first counted, which is a moment before this test read the first
+    // frame off its channel (hence the slack below the delay).
+    let waited = off_at.saturating_duration_since(told[0].0);
+    assert!(
+        waited + Duration::from_millis(500) >= UNNEEDED_AFTER
+            && waited < UNNEEDED_AFTER + Duration::from_secs(2),
+        "off is late, by the stated delay: {waited:?}"
+    );
+
+    // The late joiner: it joined while main was off, said light and then
+    // middle, and the publisher was told nothing because of it (the only
+    // `main: true` after the first is the one a subscriber asked for,
+    // checked just below: it came after that request).
+    let d_joined_at = d_joined_at.expect("the third subscriber joined");
+    let d_said_light = d_said_light.expect("it was offered the tracks and said light");
+    let d_said_middle = d_said_middle.expect("and then middle");
+    assert!(d_joined_at > off_at && d_said_middle < to_main_at);
+    let silent_for = to_main_at.saturating_duration_since(d_said_light);
+    assert!(
+        silent_for > Duration::from_secs(3),
+        "main stayed off for seconds after it joined: {silent_for:?}"
+    );
+    eprintln!(
+        "video-needed: a third subscriber joined {} ms after main went off, said light {} ms \
+         and middle {} ms after joining; main stayed off for {silent_for:?} more",
+        d_joined_at.saturating_duration_since(off_at).as_millis(),
+        d_said_light
+            .saturating_duration_since(d_joined_at)
+            .as_millis(),
+        d_said_middle
+            .saturating_duration_since(d_joined_at)
+            .as_millis(),
+    );
+    let told_after = on_at.saturating_duration_since(to_main_at);
+    assert!(
+        told_after <= NEEDED_TOLD_WITHIN,
+        "on is at once: told {told_after:?} after the request"
+    );
+    assert!(on_at >= to_main_at);
+
+    // The publisher's own side: what it wrote on its main sender.
+    let main_frames = &layers[0].frames;
+    let last_before = main_frames
+        .iter()
+        .rposition(|f| f.at < off_at)
+        .expect("main frames before it was switched off");
+    let first_after = last_before + 1;
+    let silent = main_frames[first_after]
+        .at
+        .saturating_duration_since(main_frames[last_before].at);
+    assert!(
+        main_frames[first_after].at >= on_at && silent > Duration::from_secs(2),
+        "the publisher wrote nothing on its main sender while it was off: {silent:?}"
+    );
+    assert!(
+        !main_frames[first_after].key,
+        "it came back with a delta frame, the harder case"
+    );
+    let key_after = main_frames[first_after..]
+        .iter()
+        .position(|f| f.key)
+        .map(|i| first_after + i)
+        .expect("a key frame after it was switched back on");
+
+    // Nothing was asked of the sender while it was off.
+    let (main_ssrc, _) = a.send_ssrcs(pub_main).expect("the main send stream");
+    let quiet_from = off_at + Duration::from_millis(500);
+    let nacked = a
+        .nacks_seen
+        .iter()
+        .filter(|(at, ssrc, _)| *ssrc == main_ssrc && *at >= quiet_from)
+        .count();
+    assert_eq!(
+        nacked, 0,
+        "no retransmission is asked of a sender that is off, or of its return"
+    );
+    let asked = |mid: Mid, from: Instant, until: Instant| {
+        a.keyframe_request_mids
+            .iter()
+            .zip(&a.keyframe_request_at)
+            .filter(|(m, at)| **m == mid && **at >= from && **at < until)
+            .count()
+    };
+    assert_eq!(
+        asked(pub_main, quiet_from, on_at),
+        0,
+        "no key frame is asked of a sender that is off"
+    );
+    assert!(
+        asked(pub_main, on_at, end) >= 1,
+        "the SFU asked for a key frame when the sender came back with a delta frame"
+    );
+    assert!(
+        asked(pub_main, on_at, end) <= 3,
+        "and not again and again: {}",
+        asked(pub_main, on_at, end)
+    );
+
+    // The subscribers' tracks.
+    let main_stream = a_id.to_string();
+    let middle_stream = format!("{a_id}{MIDDLE_STREAM_SUFFIX}");
+    let light_stream = format!("{a_id}{LIGHT_STREAM_SUFFIX}");
+    let mids_of = |offers: &[String]| -> (Mid, Mid, Mid) {
+        let find = |stream: &str| {
+            offers
+                .iter()
+                .flat_map(|sdp| video_msids(sdp))
+                .find(|(_, s)| s == stream)
+                .map(|(mid, _)| mid)
+                .expect("the track was offered")
+        };
+        (
+            find(&main_stream),
+            find(&middle_stream),
+            find(&light_stream),
+        )
+    };
+    let on = |client: &SyntheticClient, track: Mid, layer: &FbLayer| -> Vec<WantsGot> {
+        client
+            .rtp_got
+            .iter()
+            .zip(&client.rtp_got_at)
+            .zip(&client.rtp_got_track)
+            .filter(|(_, t)| **t == Some(track))
+            .map(|((got, at), _)| {
+                let pl = &got.payload;
+                assert!(pl.len() >= 7, "a media packet of this test");
+                assert_eq!(pl[0], layer.tag, "a packet on the track of another sender");
+                let frame = u64::from(u32::from_be_bytes([pl[1], pl[2], pl[3], pl[4]]));
+                let i = u64::from(u16::from_be_bytes([pl[5], pl[6]]));
+                assert_eq!(
+                    *pl,
+                    fb_payload(layer.tag, frame, i, layer.payload),
+                    "the payload arrives byte for byte as the publisher wrote it"
+                );
+                WantsGot {
+                    at: *at,
+                    seq: got.seq,
+                    frame,
+                    i,
+                }
+            })
+            .collect()
+    };
+    let count = |got: &[WantsGot], from: Instant, until: Instant| {
+        got.iter().filter(|p| p.at >= from && p.at < until).count()
+    };
+    let (b_main_mid, b_middle_mid, b_light_mid) = mids_of(&b_offers);
+    let (c_main_mid, c_middle_mid, c_light_mid) = mids_of(&c_offers);
+    let b_main = on(&b, b_main_mid, &layers[0]);
+    let b_middle = on(&b, b_middle_mid, &layers[1]);
+    let b_light = on(&b, b_light_mid, &layers[2]);
+    let c_main = on(&c, c_main_mid, &layers[0]);
+    let c_middle = on(&c, c_middle_mid, &layers[1]);
+    let c_light = on(&c, c_light_mid, &layers[2]);
+    assert_eq!(
+        b_main.len() + b_middle.len() + b_light.len(),
+        b.rtp_got.len(),
+        "nothing arrived anywhere else"
+    );
+    assert_eq!(
+        c_main.len() + c_middle.len() + c_light.len(),
+        c.rtp_got.len()
+    );
+
+    // While the main sender was off both showed the middle picture, and
+    // the light one flowed.
+    for (who, middle, light) in [("B", &b_middle, &b_light), ("C", &c_middle, &c_light)] {
+        assert!(
+            count(middle, off_at, to_main_at) > 100,
+            "{who}'s middle picture flows while the main sender is off"
+        );
+        assert!(count(light, off_at, to_main_at) > 40, "{who}'s light too");
+    }
+    // The late joiner is sent the middle and the light picture, and never
+    // a packet of the main one.
+    let (d_main_mid, d_middle_mid, d_light_mid) = mids_of(&d_offers);
+    let d_main = on(&d, d_main_mid, &layers[0]);
+    let d_middle = on(&d, d_middle_mid, &layers[1]);
+    let d_light = on(&d, d_light_mid, &layers[2]);
+    assert_eq!(
+        d_main.len() + d_middle.len() + d_light.len(),
+        d.rtp_got.len()
+    );
+    assert_eq!(d_main.len(), 0, "the joiner is never sent the main picture");
+    assert!(d_middle.len() > 100, "its middle picture flows");
+    assert!(d_light.len() > 40, "and its light one");
+    let first = d_middle.first().expect("checked");
+    assert!(
+        layers[1].frames[usize::try_from(first.frame).expect("fits")].key && first.i == 0,
+        "its middle track begins at the first packet of a key frame"
+    );
+
+    // The one that never asked for main is sent none after it went to
+    // the middle picture.
+    assert_eq!(count(&c_main, to_middle_at + IN_FLIGHT, end), 0);
+    assert!(count(&c_middle, on_at, end) > 100, "C's middle flows on");
+
+    // The one that asked: its main track starts at the first packet of
+    // the key frame the SFU asked for, within the stated time.
+    let resumed = b_main
+        .iter()
+        .find(|p| p.at >= to_main_at)
+        .expect("B's main track resumed");
+    assert_eq!(
+        (resumed.frame, resumed.i),
+        (key_after as u64, 0),
+        "B's main track starts at the first packet of the key frame"
+    );
+    let back_after = resumed.at.saturating_duration_since(to_main_at);
+    eprintln!(
+        "video-needed: told {told_after:?} after the request, first packet of the key frame \
+         at the subscriber {back_after:?} after it; {} delta frames went by first",
+        key_after - first_after
+    );
+    assert!(
+        back_after <= NEEDED_BACK_WITHIN,
+        "back within the stated time: {back_after:?}"
+    );
+    assert!(count(&b_main, on_at, end) > 200, "and flows from there");
+    assert_eq!(
+        count(&b_middle, to_main_at + IN_FLIGHT, end),
+        0,
+        "B's middle track stops"
+    );
+    // No sequence gap anywhere on it, and no retransmission was sent.
+    for pair in b_main.windows(2) {
+        assert_eq!(
+            pair[1].seq,
+            pair[0].seq.wrapping_add(1),
+            "B's main track runs on consecutive sequence numbers (frames {} and {})",
+            pair[0].frame,
+            pair[1].frame
+        );
+    }
+    let b_main_rtx = {
+        let mut api = b.rtc.direct_api();
+        let stream = api.stream_rx_by_mid(b_main_mid, None).expect("the stream");
+        stream.rtx().map(|rtx| *rtx)
+    };
+    let b_main_rtx = b_main_rtx.expect("the main track has a retransmission stream");
+    assert_eq!(
+        b.rtp_in.iter().filter(|p| p.ssrc == b_main_rtx).count(),
+        0,
+        "B asked for no retransmission on its main track and was sent none"
+    );
+
+    // The publisher's bitrate: what it is allowed after its sender is
+    // back is not less than before the sender was switched off.
+    let before = a
+        .rembs_seen
+        .iter()
+        .rev()
+        .find(|(at, _, _)| *at <= off_at)
+        .map(|(_, bps, _)| *bps)
+        .expect("a REMB before the sender was switched off");
+    // Counted from the subscriber's request, not from the moment this test
+    // read `main: true` off its channel: the REMB the SFU sends with that
+    // frame can reach the publisher's socket first.
+    let (after_at, after, _) = a
+        .rembs_seen
+        .iter()
+        .find(|(at, _, _)| *at >= to_main_at)
+        .cloned()
+        .expect("a REMB after the sender was switched back on");
+    let lowest_idle = a
+        .rembs_seen
+        .iter()
+        .filter(|(at, _, _)| *at >= off_at && *at < on_at)
+        .map(|(_, bps, _)| *bps)
+        .min()
+        .expect("REMBs while it was off");
+    eprintln!(
+        "video-needed: REMBs around the request for main, ms relative to it: {:?}",
+        a.rembs_seen
+            .iter()
+            .map(|(at, _, _)| if *at >= to_main_at {
+                i64::try_from(at.duration_since(to_main_at).as_millis()).unwrap_or(i64::MAX)
+            } else {
+                -i64::try_from(to_main_at.duration_since(*at).as_millis()).unwrap_or(i64::MAX)
+            })
+            .filter(|ms| ms.abs() < 1500)
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "video-needed: REMB before the sender went off {before}, lowest while off {lowest_idle}, \
+         first after main was asked for {after} ({:?} after)",
+        after_at.saturating_duration_since(to_main_at)
+    );
+    assert!(
+        after >= before,
+        "the REMB after resuming ({after}) is not lower than before ({before})"
+    );
+    assert!(
+        after_at.saturating_duration_since(to_main_at) <= Duration::from_millis(250),
+        "and it comes at once"
+    );
+    assert!(
+        lowest_idle >= before,
+        "an idle sender lowered the estimate: {lowest_idle} < {before}"
+    );
+}
+
+// ============================================================
 // ADR-0070 step 6: the SFU estimates a subscriber's downlink and
 // gives up the larger pictures first
 // ============================================================
@@ -9741,6 +10468,74 @@ struct RateLimitedLink {
     entered: Vec<(Instant, u32)>,
     /// Media datagrams that left the link: when they left, SSRC, bytes.
     passed: Vec<(Instant, u32, usize)>,
+    /// A mobile-like path in place of the fixed rate, and when its clock
+    /// started ([`MobileLink`]).
+    mobile: Option<(Instant, MobileLink)>,
+}
+
+/// A downlink that behaves like the mobile link of the live call of
+/// 2026-10-09 (two browsers on one laptop sharing one mobile link), as
+/// far as the SFU's log of that call shows it. **Every figure is chosen**
+/// to resemble that log, none is measured on a mobile network:
+///
+/// - the path carries `capacity_bps` when nobody else is on it;
+/// - its delay moves by itself: twice a second it climbs by
+///   `wave` over a tenth of a second and falls back over the next (the
+///   delay detector spoke of over-use 282 times in six and a half
+///   minutes on that call with no queue standing);
+/// - at each of `dips` the path carries `dip_bps` for `dip_for` and then
+///   all of it again (both directions of the mobile link showed a queue
+///   of 400 to 600 ms in the same second, five times in two minutes, and
+///   what was acknowledged then was a few hundred kbit/s);
+/// - from `shared_from` until `shared_until` a competing flow comes and
+///   goes: for `shared_on` the path carries `shared_bps` for this
+///   subscriber, then for `shared_off` all of it again (the other browser
+///   on the same link, whose own pictures came and went).
+#[derive(Clone, Copy)]
+struct MobileLink {
+    capacity_bps: u64,
+    wave: Duration,
+    dips: [Duration; 3],
+    dip_for: Duration,
+    dip_bps: u64,
+    shared_from: Duration,
+    shared_until: Duration,
+    shared_on: Duration,
+    shared_off: Duration,
+    shared_bps: u64,
+}
+
+impl MobileLink {
+    /// The rate the path carries for this subscriber at `at`.
+    fn rate_at(&self, t0: Instant, at: Instant) -> u64 {
+        let t = at.saturating_duration_since(t0);
+        if self
+            .dips
+            .iter()
+            .any(|from| t >= *from && t < *from + self.dip_for)
+        {
+            return self.dip_bps;
+        }
+        if t >= self.shared_from && t < self.shared_until {
+            let cycle = (self.shared_on + self.shared_off).as_millis().max(1);
+            let into = t.saturating_sub(self.shared_from).as_millis() % cycle;
+            if into < self.shared_on.as_millis() {
+                return self.shared_bps;
+            }
+        }
+        self.capacity_bps
+    }
+
+    /// The path's own delay at `at`, beyond its smallest.
+    fn wave_at(&self, t0: Instant, at: Instant) -> Duration {
+        let ms = at.saturating_duration_since(t0).as_millis() % 500;
+        let part = match ms {
+            0..=99 => ms,
+            100..=199 => 200 - ms,
+            _ => 0,
+        };
+        self.wave * u32::try_from(part).unwrap_or(0) / 100
+    }
 }
 
 impl RateLimitedLink {
@@ -9758,6 +10553,7 @@ impl RateLimitedLink {
             dropped: Vec::new(),
             entered: Vec::new(),
             passed: Vec::new(),
+            mobile: None,
         }
     }
 
@@ -9767,7 +10563,13 @@ impl RateLimitedLink {
             self.entered.push((at, rtp.ssrc));
         }
         let starts = at.max(self.next_free);
-        let leaves = match self.rate_bps {
+        // A mobile-like path: the rate is the one of the moment the
+        // datagram is served.
+        let rate_bps = match self.mobile {
+            Some((t0, mobile)) if at >= t0 => Some(mobile.rate_at(t0, starts)),
+            _ => self.rate_bps,
+        };
+        let leaves = match rate_bps {
             None => starts,
             Some(rate) => {
                 // What waits at the bottleneck is what it has not yet
@@ -9796,6 +10598,9 @@ impl RateLimitedLink {
         self.next_free = leaves;
         self.queued_bytes += bytes.len();
         let mut out = leaves + self.delay;
+        if let Some((t0, mobile)) = self.mobile {
+            out += mobile.wave_at(t0, leaves);
+        }
         if !self.jitter.is_zero() {
             self.rng = self.rng.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = self.rng;
@@ -9895,6 +10700,14 @@ struct DownlinkCase {
     /// The publishers' packets carry no frame descriptor (Firefox
     /// negotiates none): the SFU cannot see a key frame.
     no_descriptor: bool,
+    /// The subscriber's downlink is a [`MobileLink`] (in place of
+    /// `limit_bps`, which is then not looked at), the subscriber asks for
+    /// the **middle** picture of all three, as a tile of a four-person
+    /// call does, each publisher's middle sender moves between 400 and
+    /// 700 kbit/s as an encoder's does, and each publisher sends a key
+    /// frame on its middle and light senders every thirty seconds (what
+    /// the SFU's own request at the end of an uplink burst brings).
+    mobile: Option<&'static MobileLink>,
 }
 
 /// What a downlink run observed.
@@ -10366,6 +11179,7 @@ async fn run_downlink(case: DownlinkCase) -> DownlinkRun {
                             .map(|(index, peer)| VideoWant {
                                 peer: peer.clone(),
                                 quality: match (case.subscriber_keeps_asking, index) {
+                                    _ if case.mobile.is_some() => VideoQuality::Middle,
                                     (true, 1) => VideoQuality::Middle,
                                     (true, 2) => VideoQuality::Light,
                                     _ => VideoQuality::Main,
@@ -10376,6 +11190,7 @@ async fn run_downlink(case: DownlinkCase) -> DownlinkRun {
                     .expect("the media task takes the wants");
                 let start = Instant::now() + Duration::from_millis(50);
                 t0 = Some(start);
+                link.mobile = case.mobile.map(|mobile| (start, *mobile));
                 if let Some(after) = case.dip_after {
                     b.dip_in = Some(DipLoss {
                         from: start + after,
@@ -10412,14 +11227,45 @@ async fn run_downlink(case: DownlinkCase) -> DownlinkRun {
                         continue;
                     }
                     for tick in publisher.next_tick..=ticks {
+                        // A mobile case: a key frame on the middle and the
+                        // light sender every thirty seconds, each publisher
+                        // ten seconds after the one before it.
+                        let periodic_key = case.mobile.is_some()
+                            && tick > 0
+                            && (tick + 10 * DIP_FPS * index as u64) % (30 * DIP_FPS) == 0;
                         for layer in &mut publisher.layers {
                             let frame = layer.frames.len() as u64;
+                            if periodic_key && layer.tag != b'f' {
+                                layer.want_key = true;
+                            }
                             let key = std::mem::take(&mut layer.want_key);
-                            let n = if key {
-                                layer.packets * FB_KEY_FACTOR
+                            // And its middle sender's rate moves: four to
+                            // seven packets a frame, a step every eight
+                            // seconds, each publisher one step behind the
+                            // one before it (the three together 1.4 to
+                            // 1.9 Mbit/s).
+                            // Not while the competing flow comes and
+                            // goes: then every middle sender is at its
+                            // 500 kbit/s, so that what fits and what
+                            // does not is the path's doing alone.
+                            let moving = case.mobile.is_some_and(|mobile| {
+                                let at = frame_every * (tick as u32);
+                                at < mobile.shared_from || at >= mobile.shared_until
+                            });
+                            let packets = if moving && layer.tag == b'm' {
+                                const ROUND: [u64; 6] = [5, 6, 7, 6, 5, 4];
+                                ROUND[((tick / (8 * DIP_FPS)) as usize + index) % ROUND.len()]
                             } else {
                                 layer.packets
                             };
+                            // A key frame of a mobile case is six frames'
+                            // worth: 15 kB on the middle sender.
+                            let key_factor = if case.mobile.is_some() {
+                                2 * FB_KEY_FACTOR
+                            } else {
+                                FB_KEY_FACTOR
+                            };
+                            let n = if key { packets * key_factor } else { packets };
                             let rtp_time = 90_000 + (tick * (90_000 / DIP_FPS)) as u32;
                             let written = Instant::now();
                             for i in 0..n {
@@ -10667,7 +11513,10 @@ fn print_downlink_timeline(what: &str, run: &DownlinkRun) {
     );
     eprintln!(
         "{what}:   s | budget carried sending demand probing kbit/s | given M/m/l | probes \
-         started/carried, padding kB, cuts, standing queue ms, detector | handed main/middle/light pkts | link lost \
+         started/carried, padding kB, cuts, standing queue ms, detector, the limit kbit/s, the \
+         level from which sets are held while one that proved too large is waited out, the \
+         wait the next such set costs s, times the limit followed the set's cost | handed main/middle/light \
+         pkts | link lost \
          main/middle/light/light-rtx/other-rtx | SFU sent main/middle/light first \
          transmissions and retransmission-stream packets | the test's publishers: frames \
          written, the latest by ms"
@@ -10719,7 +11568,7 @@ fn print_downlink_timeline(what: &str, run: &DownlinkRun) {
             sample.map_or_else(
                 || "-".to_owned(),
                 |s| format!(
-                    "{}/{} {:>5} {} q{} {}",
+                    "{}/{} {:>5} {} q{} {} lim{} held{} wait{} f{}",
                     s.snap.probes_started,
                     s.snap.probes_carried,
                     s.snap.padding_bytes / 1000,
@@ -10727,7 +11576,13 @@ fn print_downlink_timeline(what: &str, run: &DownlinkRun) {
                     s.snap
                         .queue_ms
                         .map_or_else(|| "-".to_owned(), |q| q.to_string()),
-                    s.snap.detector
+                    s.snap.detector,
+                    kbps(s.snap.limit_bps),
+                    s.snap
+                        .held_from_level
+                        .map_or_else(|| "-".to_owned(), |l| l.to_string()),
+                    s.snap.too_large_wait_secs,
+                    s.snap.followed
                 )
             ),
             handed(DlRole::Main),
@@ -10837,6 +11692,7 @@ fn dl_narrow_case(delay: Duration, jitter: Duration) -> DownlinkCase {
         subscriber_keeps_asking: false,
         asking_stops_after: None,
         no_descriptor: false,
+        mobile: None,
     }
 }
 
@@ -10906,6 +11762,7 @@ async fn a_dip_on_an_unlimited_downlink_does_not_leave_the_subscriber_downgraded
         subscriber_keeps_asking: false,
         asking_stops_after: None,
         no_descriptor: false,
+        mobile: None,
     };
     let run = run_downlink_measured(what, case).await;
     print_downlink_timeline(what, &run);
@@ -11042,6 +11899,257 @@ async fn a_very_narrow_downlink_gets_everything_back_when_it_is_lifted() {
     assert!(
         back_after <= DL_BACK_WITHIN,
         "back {back_after:?} after the lift"
+    );
+}
+
+/// The mobile-like downlink of the oscillation test ([`MobileLink`];
+/// every figure chosen). Three phases:
+///
+/// - **0 to 90 s, a path that carries the set**: 4 Mbit/s (three middle
+///   pictures need about 2.9 with headroom and put about 2.6 on the
+///   wire), delay waves of 40 ms twice a second, and a dip to a tenth
+///   of that for 1.2 s at 20, 50 and 78 s.
+/// - **90 to 198 s, a path that does not**: a competing flow leaves this
+///   subscriber 2.2 Mbit/s for ten seconds and then all 4 for eight, six
+///   times over, and the publishers' rates stand still (0.5 Mbit/s a
+///   middle sender). Two middles put 1.9 Mbit/s on the wire and three
+///   2.4: three fit only while the competing flow is away.
+/// - **198 s to the end, the path as at first**, no dip.
+const DL_MOBILE: MobileLink = MobileLink {
+    capacity_bps: 4_000_000,
+    wave: Duration::from_millis(40),
+    dips: [
+        Duration::from_secs(20),
+        Duration::from_secs(50),
+        Duration::from_secs(78),
+    ],
+    dip_for: Duration::from_millis(1200),
+    dip_bps: 400_000,
+    shared_from: Duration::from_secs(90),
+    shared_until: Duration::from_secs(198),
+    shared_on: Duration::from_secs(10),
+    shared_off: Duration::from_secs(8),
+    shared_bps: 2_200_000,
+};
+/// How long the mobile-like run lasts.
+const DL_MOBILE_RUN: Duration = Duration::from_secs(275);
+/// The most a publisher's given quality may change per minute while the
+/// path carries the set (the first phase), the dips included: a dip takes
+/// the three middle pictures away once and they come back once, which is
+/// eighteen changes in 87 s (12.4 a minute) before anything else. Seen:
+/// 12.4 to 13.8.
+const DL_MOBILE_CHANGES_A: f64 = 16.0;
+/// And while a competing flow comes and goes (the second phase): a set
+/// that proved too large is tried again after a longer wait each time.
+/// Seen: 3.3 and 4.4.
+const DL_MOBILE_CHANGES_B: f64 = 7.0;
+/// Times anything may be taken away in the first phase: the three
+/// dips, and one more.
+const DL_MOBILE_TAKEN_A: usize = 4;
+/// Times anything may be taken away in the second phase (six rounds of
+/// the competing flow). Seen: 2 and 3.
+const DL_MOBILE_TAKEN_B: usize = 4;
+/// Three middles are given again this long after the path is its own
+/// again, at the latest: the longest wait a set that proved too large
+/// costs (`downlink_probe::TOO_LARGE_MAX_WAIT`, 60 s), a failed probe's
+/// 8 s and the probes themselves.
+const DL_MOBILE_BACK_WITHIN: Duration = Duration::from_secs(75);
+
+/// What a mobile-like run came to, per phase.
+struct DlMobilePhase {
+    /// Changes of a publisher's given quality, up and down.
+    ups: usize,
+    downs: usize,
+    /// Times something was taken away (downward changes less than a
+    /// second apart are one).
+    taken: usize,
+    /// Seconds with all three on middle.
+    full: f64,
+    secs: f64,
+}
+
+impl DlMobilePhase {
+    #[allow(clippy::cast_precision_loss)]
+    fn per_minute(&self) -> f64 {
+        (self.ups + self.downs) as f64 * 60.0 / self.secs.max(1.0)
+    }
+}
+
+/// The changes of what the subscriber was given between `from` and
+/// `until` after the publishers started.
+fn dl_mobile_phase(run: &DownlinkRun, from: Duration, until: Duration) -> DlMobilePhase {
+    use lakko_svc_sfu::protocol::VideoQuality;
+    let rank = |quality: VideoQuality| match quality {
+        VideoQuality::Light => 0,
+        VideoQuality::Middle => 1,
+        VideoQuality::Main => 2,
+    };
+    let (from, until) = (run.t0 + from, (run.t0 + until).min(run.ended_at));
+    let mut phase = DlMobilePhase {
+        ups: 0,
+        downs: 0,
+        taken: 0,
+        full: 0.0,
+        secs: until.saturating_duration_since(from).as_secs_f64(),
+    };
+    let mut last_down: Option<Instant> = None;
+    for (i, (at, set)) in run.given.iter().enumerate() {
+        let next = run.given.get(i + 1).map_or(run.ended_at, |(next, _)| *next);
+        if set.len() == 3 && set.iter().all(|(_, q)| *q == VideoQuality::Middle) {
+            let (a, b) = ((*at).max(from), next.min(until));
+            phase.full += b.saturating_duration_since(a).as_secs_f64();
+        }
+        if *at < from || *at >= until || i == 0 {
+            continue;
+        }
+        let (_, before) = &run.given[i - 1];
+        let mut down = false;
+        for (publisher, quality) in set {
+            let Some((_, was)) = before.iter().find(|(p, _)| p == publisher) else {
+                continue;
+            };
+            match rank(*quality).cmp(&rank(*was)) {
+                std::cmp::Ordering::Greater => phase.ups += 1,
+                std::cmp::Ordering::Less => {
+                    phase.downs += 1;
+                    down = true;
+                },
+                std::cmp::Ordering::Equal => {},
+            }
+        }
+        if down {
+            if last_down.map_or(true, |last| {
+                at.saturating_duration_since(last) >= Duration::from_secs(1)
+            }) {
+                phase.taken += 1;
+            }
+            last_down = Some(*at);
+        }
+    }
+    phase
+}
+
+/// On a downlink like the mobile link of the live call of 2026-10-09 the
+/// SFU holds a picture quality instead of giving it and taking it back
+/// every few seconds. The path: [`DL_MOBILE`]; the subscriber asks for
+/// the middle picture of three publishers whose rates move.
+///
+/// - While the path carries three middles they stay, the three dips
+///   apart: the delay waves, the publishers' moving rates and their key
+///   frames take nothing away.
+/// - While a competing flow comes and goes, the set that fits only when
+///   it is away is tried at longer and longer intervals, not at every
+///   chance.
+/// - A dip or the competing flow's return is answered at once: the
+///   light pictures lose no packet for it.
+/// - When the path is its own again, three middles are back within
+///   [`DL_MOBILE_BACK_WITHIN`], and from then on nothing is taken away:
+///   the publishers' rates go on moving, and a set that comes to cost
+///   more on a path that carries it is kept. (The build before the
+///   fourth round took a picture away there, 2.4 and 2.7 s into that
+///   phase in two runs of two, with no cut of the estimate, and gave it
+///   back 2 s later.)
+///
+/// What the bounds do not show: the same build before the fourth round
+/// stays within those of the first two phases on this model (it sat on
+/// one middle picture for 84 s of the second phase). See the README,
+/// "The fourth round".
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[ignore = "ADR-0070 step 6 acceptance: a run of nearly five minutes of a feature that is off by default; run by name"]
+#[allow(clippy::print_stderr, clippy::cast_precision_loss)]
+async fn a_mobile_like_downlink_holds_a_picture_instead_of_cycling() {
+    use lakko_svc_sfu::protocol::VideoQuality::Middle;
+
+    let what = "mobile-like downlink";
+    let case = DownlinkCase {
+        limit_bps: Some(DL_MOBILE.capacity_bps),
+        // A mobile network's queue is deep: two seconds.
+        queue_limit: usize::try_from(DL_MOBILE.capacity_bps / 8 * 2).expect("small"),
+        lift_after: Duration::from_secs(3600),
+        run_for: DL_MOBILE_RUN,
+        mobile: Some(&DL_MOBILE),
+        ..dl_narrow_case(Duration::from_millis(30), Duration::from_millis(5))
+    };
+    let run = run_downlink_measured(what, case).await;
+    print_downlink_timeline(what, &run);
+
+    let secs = |d: Duration| d.as_secs_f64();
+    let (a_until, b_until) = (DL_MOBILE.shared_from, DL_MOBILE.shared_until);
+    // The first three seconds are the start (nothing is known of the
+    // path and everything asked for is sent).
+    let a = dl_mobile_phase(&run, Duration::from_secs(3), a_until);
+    let b = dl_mobile_phase(&run, a_until, b_until);
+    let c = dl_mobile_phase(&run, b_until, DL_MOBILE_RUN);
+    let all_middle = vec![(0, Middle), (1, Middle), (2, Middle)];
+    let own_again = run.t0 + b_until;
+    let back = run
+        .given
+        .iter()
+        .enumerate()
+        .find(|(i, (at, set))| {
+            let until = run.given.get(i + 1).map_or(run.ended_at, |(next, _)| *next);
+            set == &all_middle && until > own_again && *at <= run.ended_at
+        })
+        .map(|(_, (at, _))| at.saturating_duration_since(own_again));
+    let light_lost = run
+        .link_dropped
+        .iter()
+        .filter(|(at, _, role, _)| *role == DlRole::Light && *at >= run.t0 + Duration::from_secs(3))
+        .count();
+    let light_holes = dl_light_holes(&run, run.t0 + Duration::from_secs(3), run.ended_at);
+    for (name, phase) in [
+        ("the path carries the set", &a),
+        ("a competing flow comes and goes", &b),
+        ("the path is its own again", &c),
+    ] {
+        eprintln!(
+            "{what}: {name}: {:.0} s, {} given and {} taken away ({:.1} changes a minute), \
+             something taken away {} times, all three on middle for {:.0} s",
+            phase.secs,
+            phase.ups,
+            phase.downs,
+            phase.per_minute(),
+            phase.taken,
+            phase.full
+        );
+    }
+    eprintln!(
+        "{what}: the link lost {light_lost} light datagrams after the first 3 s and the \
+         subscriber is missing {light_holes} light packets; three middles were back {:?} s after \
+         the path was its own again; padding {} kB",
+        back.map(|d| (secs(d) * 10.0).round() / 10.0),
+        run.padding_bytes / 1000
+    );
+
+    assert!(
+        a.per_minute() <= DL_MOBILE_CHANGES_A && a.taken <= DL_MOBILE_TAKEN_A,
+        "while the path carries the set: {:.1} changes a minute, taken away {} times",
+        a.per_minute(),
+        a.taken
+    );
+    assert!(
+        a.full >= a.secs * 0.6,
+        "while the path carries the set all three are on middle most of the time: {:.0} of {:.0} s",
+        a.full,
+        a.secs
+    );
+    assert!(
+        b.per_minute() <= DL_MOBILE_CHANGES_B && b.taken <= DL_MOBILE_TAKEN_B,
+        "while a competing flow comes and goes: {:.1} changes a minute, taken away {} times",
+        b.per_minute(),
+        b.taken
+    );
+    assert_eq!(
+        c.taken, 0,
+        "nothing is taken away once the path is its own again ({} changes down)",
+        c.downs
+    );
+    assert_eq!(light_lost, 0, "the link loses no light datagram");
+    assert_eq!(light_holes, 0, "and the subscriber misses no light packet");
+    let back = back.expect("three middles are given again when the path is its own");
+    assert!(
+        back <= DL_MOBILE_BACK_WITHIN,
+        "three middles back {back:?} after the path was its own again"
     );
 }
 
@@ -11427,6 +12535,7 @@ async fn a_subscriber_on_an_unlimited_downlink_is_never_downgraded() {
         subscriber_keeps_asking: false,
         asking_stops_after: None,
         no_descriptor: false,
+        mobile: None,
     };
     let run = run_downlink_measured(what, case).await;
     print_downlink_timeline(what, &run);
@@ -11501,6 +12610,7 @@ async fn downlink_control_switched_off_changes_nothing() {
         subscriber_keeps_asking: false,
         asking_stops_after: None,
         no_descriptor: false,
+        mobile: None,
     }))
     .await;
     print_downlink_timeline("downlink control off", &run);

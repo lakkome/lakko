@@ -1010,6 +1010,10 @@
       "text": "Participant {number}",
       "comment": "Name of a call participant this device cannot identify. {number} tells two such participants apart, in the order they joined."
     },
+    "call.participant.pin_a11y": {
+      "text": "Pin {name}",
+      "comment": "Name and tooltip of the pin button on another person's tile in a group call: pressing it keeps that person in the large spot. {name} is the person's name."
+    },
     "call.participant.pinned": {
       "text": "Pinned",
       "comment": "Tooltip of the pin icon on the call tile that was pinned to the large spot."
@@ -1025,6 +1029,10 @@
     "call.participant.unnamed": {
       "text": "Participant",
       "comment": "Name on a call tile or the call screen for a person the device cannot name."
+    },
+    "call.participant.unpin_a11y": {
+      "text": "Unpin {name}",
+      "comment": "Name and tooltip of the pin button on the pinned person's tile in a group call: pressing it lets the large spot follow the speaker again. {name} is the person's name."
     },
     "call.participant.you": {
       "text": "You",

@@ -42,6 +42,8 @@ interface Voice {
   speaking: boolean;
   /** Since when the ring has been on without a break, or `null`. */
   speakingSince: number | null;
+  /** The last reading with sound while the ring was on, or `null`. */
+  lastSoundAt: number | null;
 }
 
 /** What the tracker reports after a sample. */
@@ -64,7 +66,7 @@ export class SpeakingTracker {
   public sample(id: string, level: number, nowMs: number): void {
     let v = this.voices.get(id);
     if (v === undefined) {
-      v = { soundSince: null, silenceSince: null, speaking: false, speakingSince: null };
+      v = { soundSince: null, silenceSince: null, speaking: false, speakingSince: null, lastSoundAt: null };
       this.voices.set(id, v);
     }
     if (Number.isFinite(level) && level >= SPEAKING_LEVEL) {
@@ -74,14 +76,31 @@ export class SpeakingTracker {
         v.speaking = true;
         v.speakingSince = v.soundSince;
       }
+      if (v.speaking) v.lastSoundAt = nowMs;
     } else {
       v.soundSince = null;
       v.silenceSince ??= nowMs;
       if (v.speaking && nowMs - v.silenceSince >= RING_OFF_MS) {
         v.speaking = false;
         v.speakingSince = null;
+        v.lastSoundAt = null;
       }
     }
+  }
+
+  /**
+   * The person is muted: their ring goes off at once and they give up the
+   * floor at the next snapshot. A muted person is never speaking, whatever a
+   * level reading says.
+   */
+  public silence(id: string): void {
+    const v = this.voices.get(id);
+    if (v === undefined) return;
+    v.soundSince = null;
+    v.silenceSince = null;
+    v.speaking = false;
+    v.speakingSince = null;
+    v.lastSoundAt = null;
   }
 
   /** Forget people who are no longer in the call. */
@@ -98,26 +117,42 @@ export class SpeakingTracker {
   /**
    * The state after the samples so far.
    *
-   * `order` is the roster order, which breaks the tie when two people reach
-   * the onset in the same reading.
+   * `candidates` are the people who can hold the floor, in roster order,
+   * which breaks the tie when two reach the onset in the same reading. This
+   * device's own person is NOT one of them: the floor exists for the large
+   * tile, which never shows the own tile while anyone else is present, and a
+   * floor held by the own microphone (the person talking, or the room heard
+   * through it) kept everyone else from taking it, so the large tile never
+   * moved to the person speaking. The ring is for everyone sampled, the own
+   * tile included.
    */
-  public snapshot(order: readonly string[], nowMs: number): SpeakingSnapshot {
+  public snapshot(candidates: readonly string[], nowMs: number): SpeakingSnapshot {
     const speakingIds = new Set<string>();
     for (const [id, v] of this.voices) if (v.speaking) speakingIds.add(id);
 
-    const qualifies = (id: string): boolean => {
+    /** The ring is on: enough to keep a floor already held. */
+    const stillSpeaking = (id: string): boolean => this.voices.get(id)?.speaking === true;
+    /**
+     * Enough to take the floor: the speech itself has lasted the onset. The
+     * time the ring stays on after the last sound does not count, or a
+     * 0.8-second sound would grow into a 1.5-second one by standing still.
+     */
+    const earned = (id: string): boolean => {
       const v = this.voices.get(id);
       return (
         v !== undefined &&
         v.speaking &&
         v.speakingSince !== null &&
-        nowMs - v.speakingSince >= FLOOR_ONSET_MS
+        v.lastSoundAt !== null &&
+        v.lastSoundAt - v.speakingSince >= FLOOR_ONSET_MS
       );
     };
     // Whoever holds the floor keeps it while they keep speaking; otherwise it
-    // goes to the first person in roster order who has earned it.
-    if (this.floor === null || !qualifies(this.floor)) {
-      this.floor = order.find(qualifies) ?? null;
+    // goes to the first candidate in roster order who has earned it. When the
+    // holder stops and nobody has, the floor is empty and `lastSpokeAtMs`
+    // still names them, which is what keeps the large tile on them.
+    if (this.floor === null || !candidates.includes(this.floor) || !stillSpeaking(this.floor)) {
+      this.floor = candidates.find(earned) ?? null;
     }
     if (this.floor !== null) {
       this.lastSpoke = { ...this.lastSpoke, [this.floor]: nowMs };

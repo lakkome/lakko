@@ -40,6 +40,7 @@ pub mod stream_map;
 pub mod uplink_estimate;
 pub mod uplink_fallback;
 pub mod video_fec;
+pub mod video_needed;
 
 use std::sync::Arc;
 

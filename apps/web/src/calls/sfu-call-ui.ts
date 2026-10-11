@@ -97,6 +97,10 @@ export interface SfuCallUiHandle {
   /** A tile says which picture of a peer it shows, or `null` when it stops
    *  (`video-wants.ts`); the session asks the SFU accordingly. */
   reportTileVideoQuality(tile: object, peerId: string, quality: VideoQuality | null): void;
+  /** The receiver that decodes a peer's audio, for the sound level the call
+   *  screen reads on this device (`audio-level.ts`); `undefined` before
+   *  their audio arrived. */
+  remoteAudioReceiverFor(peerId: string): RTCRtpReceiver | undefined;
   /** Reactive local capture stream (null until publish). The view binds it
    *  to the local self-preview tile (mirrored), the group analog of the
    *  1×1 `localStream`. */
@@ -398,6 +402,8 @@ export function createSfuCallUi(
     remoteVideoGiven,
     reportTileVideoQuality: (tile, peerId, quality): void =>
       session.reportTileVideoQuality(tile, peerId, quality),
+    remoteAudioReceiverFor: (peerId): RTCRtpReceiver | undefined =>
+      session.audioReceiverFor(peerId),
     localStream,
     videoPublishState,
     connect: (): Promise<void> => session.connect(),

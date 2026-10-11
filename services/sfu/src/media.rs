@@ -174,7 +174,7 @@ use thiserror::Error;
 
 use crate::burst_keyframe::{Arrived, BurstEnd, BurstEnds};
 use crate::downlink_allocation::{self, DownlinkAllocation};
-use crate::downlink_probe::{DownlinkProbe, ProbeOutcome, PROBE_DURATION};
+use crate::downlink_probe::{DownlinkProbe, ProbeOutcome, PROBE_DURATION, TOO_LARGE_WITHIN};
 use crate::fec_receive::{self, FecReceiver, MutableExtensions};
 use crate::fec_send::{FecSender, Generated};
 use crate::frame_descriptor::{self, FrameDescriptor, PacketDescriptor};
@@ -190,6 +190,7 @@ use crate::uplink_estimate::{
 };
 use crate::uplink_fallback::{self, UplinkFallback};
 use crate::video_fec;
+use crate::video_needed::{self, Needed, VideoNeeded, Wanted};
 
 /// Stable identifier for a media peer. One-to-one with
 /// [`crate::peer::PeerId`] — the signaling-layer
@@ -735,6 +736,52 @@ enum Gate {
     },
 }
 
+/// One heavy camera sender (main or middle) of a publisher that is told
+/// which of its senders are needed ([`crate::video_needed`]), by the mid
+/// it arrives on.
+#[derive(Debug, Clone, Copy, Default)]
+struct HeavySender {
+    /// The SSRC its packets last arrived on.
+    ssrc: Option<Ssrc>,
+    /// When its last packet arrived.
+    last_arrival: Option<Instant>,
+    /// The publisher was told this sender is not needed, and no packet
+    /// has arrived on it since it was told it is needed again (or it has
+    /// not been told so yet): silence on it is the SFU's own doing.
+    expect_silence: bool,
+    /// It has gone silent while silence was expected
+    /// ([`video_needed::IDLE_QUIET`]): its loss books are closed. Cleared
+    /// by its next packet.
+    idle: bool,
+    /// When it last came back from being idle.
+    returned_at: Option<Instant>,
+    /// The rate last measured on it while it was flowing, and when.
+    last_rate: Option<(u64, Instant)>,
+}
+
+/// What a publisher has been told of its senders, and what follows from
+/// it for the senders themselves ([`crate::video_needed`]).
+#[derive(Debug, Default)]
+struct SenderNeeds {
+    /// What it was told, and since when each sender has been unneeded.
+    tracker: VideoNeeded,
+    /// Its heavy senders, by mid. At most [`MAX_TRACK_METERS`] entries.
+    senders: HashMap<Mid, HeavySender>,
+    /// The publisher's bitrate estimate when a sender of its was first
+    /// told to stop: what the estimate is put back to when one is told
+    /// to start again. `None` while every sender is needed.
+    estimate_before_idle: Option<u64>,
+}
+
+/// What became of one pass of [`MediaPeer::drive_video_needed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NeededChange {
+    /// What the publisher is to be told now.
+    pub(crate) needed: Needed,
+    /// How many subscribers want each of its heavy pictures.
+    pub(crate) wanted: Wanted,
+}
+
 /// How long a track that is waiting to begin at a key frame
 /// ([`Forwarding::start_at_key_frame`]) waits before the publisher is
 /// asked again. Chosen, as [`FALLBACK_KEYFRAME_RETRY`] is: a key frame
@@ -1242,6 +1289,10 @@ pub struct MediaPeer {
     /// mid: what a subscriber's allocation takes the track to cost. Only
     /// kept under downlink control. At most [`MAX_TRACK_METERS`] entries.
     track_meters: HashMap<Mid, LayerBitrateMeter>,
+    /// Which of the camera senders THIS (publishing) peer has somebody is
+    /// being sent, what it was told of that, and which of them have gone
+    /// idle on the SFU's word ([`crate::video_needed`]).
+    needs: SenderNeeds,
 }
 
 /// How many publishers a subscriber's video wants name at each quality
@@ -1594,7 +1645,10 @@ pub const PLAYOUT_DELAY_EXTENSION_ID: u8 = 5;
 
 /// What the SFU does to carry video through a burst of loss
 /// ([ADR-0070](../../../docs/adr/0070-call-media-through-a-loss-burst.md)
-/// steps 3 and 4). The default is everything on.
+/// steps 3 and 4), and one switch of the same shape that is not about loss
+/// ([`Self::video_needed`]). The default is everything on.
+// Four independent on/off switches, each an environment variable.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LossProtection {
     /// Send every packet of a light companion track to a subscriber a
@@ -1616,6 +1670,13 @@ pub struct LossProtection {
     /// packets of that burst ([`crate::burst_keyframe`];
     /// `LAKKO_SFU_BURST_KEYFRAME`, on unless set to `0`).
     pub burst_keyframe: bool,
+    /// Tell a publisher which of its camera senders somebody is being
+    /// sent, so it can stop the others ([`crate::video_needed`];
+    /// `LAKKO_SFU_VIDEO_NEEDED`, on unless set to `0`). Not a matter of
+    /// loss; it rides here because it is a switch of the same shape,
+    /// decided per peer. Off, no `video-needed` frame is ever sent and
+    /// nothing below it is touched.
+    pub video_needed: bool,
 }
 
 impl Default for LossProtection {
@@ -1625,6 +1686,7 @@ impl Default for LossProtection {
             light_nack_retry: Some(LIGHT_NACK_RETRY),
             playout_delay: true,
             burst_keyframe: true,
+            video_needed: true,
         }
     }
 }
@@ -1639,6 +1701,7 @@ impl LossProtection {
             light_nack_retry: None,
             playout_delay: false,
             burst_keyframe: false,
+            video_needed: false,
         }
     }
 }
@@ -1819,6 +1882,17 @@ const DOWNLINK_PAD_MIN_BYTES: usize = 200;
 /// See [`DOWNLINK_PAD_MIN_BYTES`].
 const DOWNLINK_PAD_PACKETS_PER_PASS: usize = 64;
 
+/// A set that the path took away soon after it was given proved too
+/// large only when the path still carries a good part of it: the cut
+/// left the estimate at no less than one part in this many of what the
+/// set put on the wire. Below that the path has collapsed under whatever
+/// was being sent (a stall of a radio link: seen at 130 to 715 kbit/s
+/// under sets of 1.5 to 2 Mbit/s on the live call of 2026-10-09), which
+/// says nothing of the set, and the set is tried again as soon as the
+/// path is quiet. Chosen: a set one step too large overshoots a path
+/// that carried the set before it by less than twice.
+const DOWNLINK_COLLAPSE_DEN: u64 = 2;
+
 /// How often a subscriber's allocation is run. A downgrade therefore
 /// follows a fallen estimate within this. Chosen.
 const DOWNLINK_ALLOCATION_INTERVAL: Duration = Duration::from_millis(100);
@@ -1966,6 +2040,19 @@ struct Downlink {
     /// Media bytes written to this subscriber (first transmissions), for
     /// the log: what is being sent.
     sent: LayerBitrateMeter,
+    /// The path itself lowered the estimate since the allocation last
+    /// ran ([`Self::cut_kept`]): what is being given may then stand above
+    /// the estimate, and that is the path's word, not a cost that grew.
+    lowered_since_run: bool,
+    /// When something was last given (a publisher moved up), how large
+    /// the set then was ([`downlink_allocation::set_level`]) and what it
+    /// put on the wire: taken away again by the path within
+    /// [`TOO_LARGE_WITHIN`], that set proved too large.
+    last_up: Option<(Instant, u64, u64)>,
+    /// Times the limit was raised to what the set being given had come
+    /// to cost on a quiet path ([`Self::follow_what_is_carried`]), for
+    /// the log.
+    followed: u64,
 }
 
 impl Downlink {
@@ -2024,6 +2111,9 @@ impl Downlink {
             budget_bps: None,
             carried_bps: None,
             sent: LayerBitrateMeter::new(now),
+            lowered_since_run: false,
+            last_up: None,
+            followed: 0,
         }
     }
 
@@ -2123,13 +2213,27 @@ impl Downlink {
         if !calm || self.recent.is_empty() || self.probe.is_running() {
             return None;
         }
+        // Nor into a clump of media that is going out this moment (a key
+        // frame, a publisher's frames arriving together): the probe would
+        // be given up at once and the next would wait
+        // [`crate::downlink_probe::PROBE_AFTER_TROUBLE`] for nothing. The
+        // next run of the allocation is a tenth of a second away. (Seen
+        // on a live call, 2026-10-09: two probes of four after a dip
+        // ended `disturbed` within 3 and 8 ms of starting.)
+        if self.clump_being_written(now) {
+            return None;
+        }
         // The most important publisher's next track first. Once a probe
         // has failed the path is known to be short somewhere, and the
         // cheapest move that may be tried now goes first: otherwise a
         // move the path cannot carry would be retried for ever in front
         // of a cheaper one that failed once.
+        // A set that proved too large a moment ago, and every larger one,
+        // is not tried while its wait runs.
+        let held = self.probe.held_from(now);
         let mut steps = downlink_allocation::next_steps(publishers, given)
             .into_iter()
+            .filter(|step| held.map_or(true, |held| step.level < held))
             .filter(|step| self.probe.can_start_toward(step.need_bps, now));
         let step = if self.probe.failed_bps().is_some() {
             steps.min_by_key(|step| step.need_bps)?
@@ -2261,11 +2365,22 @@ impl Downlink {
     /// and never less than what is steadily being written with a
     /// quarter to spare (an estimate below what cannot be given up, the
     /// light tracks, would make all of it a clump).
+    ///
+    /// While a probe runs it is the rate being tried, when that is more:
+    /// the probe asks whether the path carries that rate, and a clump is
+    /// what would stand in the queue of a path that does. (Seen on a
+    /// live call, 2026-10-09: after a dip had put the estimate at
+    /// 130 kbit/s with 0.5 Mbit/s of light pictures being written, the
+    /// model drained at 0.6 Mbit/s and every key frame of a light
+    /// picture was a clump: of four probes toward 1.4 to 1.7 Mbit/s
+    /// three were given up as `disturbed`, one of them after its path
+    /// had carried 1.46 of 1.74.)
     fn written_model_bps(&self, now: Instant) -> u64 {
         let written = self.sent.bitrate_bps_at(now);
         self.estimator
             .estimate_bps()
             .max(written.saturating_add(written / 4))
+            .max(self.probe.target_bps().unwrap_or(0))
             .max(1)
     }
 
@@ -2502,6 +2617,87 @@ impl Downlink {
         self.apply_ceiling();
         self.kept_cut_at = Some(now);
         self.virtual_bits = 0;
+        self.lowered_since_run = true;
+    }
+
+    /// Whether the path is quiet at `now`: the feedback of the last
+    /// moments shows no queue standing, by the delay as it is and beyond
+    /// what the SFU's own sending explains; no cut waits to be borne
+    /// out; and the path has lowered nothing for
+    /// [`DOWNLINK_QUIET_AFTER_TROUBLE`]. A path whose feedback says too
+    /// little to tell is not quiet.
+    fn path_is_quiet(&self, now: Instant) -> bool {
+        !self.cut_pending
+            && self.queue_since.is_none()
+            && self.raw_queue_since.is_none()
+            && self
+                .standing_queue()
+                .is_some_and(|queue| queue < DOWNLINK_STANDING_QUEUE)
+            && self.last_trouble.map_or(true, |at| {
+                now.saturating_duration_since(at) >= DOWNLINK_QUIET_AFTER_TROUBLE
+            })
+    }
+
+    /// The set being given puts `wire_bps` on the wire, and that has
+    /// come to be more than the estimate with nothing wrong on the path:
+    /// the limit and the estimate follow it up (with a tenth to spare).
+    ///
+    /// The limit is what the path has said of itself, and a path that is
+    /// carrying a set with no queue standing is saying that it carries
+    /// it. The limit used to be raised by a carried probe alone, to a
+    /// tenth over what the set tried then needed; a publisher's rate
+    /// moves by more than that (its encoder climbing after a cut of its
+    /// own, a key frame for a viewer that joined), and when the cost of
+    /// the set passed the limit the allocation took a picture away "to
+    /// fit the budget" on a path that was carrying it, and a probe gave
+    /// it back a second or three later. (Seen on a live call,
+    /// 2026-10-09: two of a subscriber's eleven real downgrades, with
+    /// no cut of the estimate anywhere near.)
+    ///
+    /// This is the downlink's form of the uplink rule "the estimate
+    /// rises whenever no queue stands" (`PathEstimator::confirming`):
+    /// what may rise without a probe is bounded by what is in fact being
+    /// sent and carried, never by arithmetic. A path that does not carry
+    /// the grown set shows a queue, the cut is kept, and the picture
+    /// goes at once as before. Not when the path itself has just lowered
+    /// the estimate (`lowered`): then the estimate stands below the set
+    /// on purpose.
+    fn follow_what_is_carried(&mut self, wire_bps: u64, lowered: bool, now: Instant) {
+        if lowered || self.limit_bps.is_none() || !self.estimator.has_arrivals() {
+            return;
+        }
+        if wire_bps <= self.estimator.estimate_bps() || !self.path_is_quiet(now) {
+            return;
+        }
+        let room = wire_bps.saturating_add(wire_bps / 10);
+        self.limit_bps = self.limit_bps.map(|limit| limit.max(room));
+        self.apply_ceiling();
+        self.estimator.note_carried(room);
+        self.followed = self.followed.saturating_add(1);
+    }
+
+    /// The log's note of a cut of the estimate made just now from
+    /// `before`, with the queue as the delay shows it and beyond what
+    /// the SFU's own sending explains.
+    fn cut_note(
+        &mut self,
+        raw_queue: Option<Duration>,
+        queue: Option<Duration>,
+        before: u64,
+        now: Instant,
+    ) -> EstimateCut {
+        let millis = |queue: Duration| u64::try_from(queue.as_millis()).unwrap_or(0);
+        EstimateCut {
+            reason: self.estimator.last_change().as_str(),
+            to_bps: self.estimator.estimate_bps(),
+            standing_queue_ms: raw_queue.map(millis),
+            beyond_sending_ms: queue.map(millis),
+            taken_back: false,
+            held_at_steady: false,
+            arriving_bps: self.estimator.arriving_latest_bps(),
+            sending_bps: self.sent.bitrate_bps_at(now),
+            from_bps: before,
+        }
     }
 
     /// Take the subscriber's feedback on packets the SFU sent it: when
@@ -2600,14 +2796,7 @@ impl Downlink {
         if !lowered {
             return false;
         }
-        let mut note = EstimateCut {
-            reason: self.estimator.last_change().as_str(),
-            to_bps: self.estimator.estimate_bps(),
-            standing_queue_ms: raw_queue.map(|queue| u64::try_from(queue.as_millis()).unwrap_or(0)),
-            beyond_sending_ms: queue.map(|queue| u64::try_from(queue.as_millis()).unwrap_or(0)),
-            taken_back: false,
-            held_at_steady: false,
-        };
+        let mut note = self.cut_note(raw_queue, queue, before, now);
         if let Some(floor) = shadow {
             // The probe's doing: the estimate is as it was before it.
             self.estimator.note_carried(floor);
@@ -2633,9 +2822,132 @@ impl Downlink {
         !note.taken_back
     }
 
+    /// Judge the probes that ended since the last run: one the path
+    /// carried raises the limit and the estimate to its rate and a tenth
+    /// and vouches for that rate for [`DOWNLINK_PROVEN_FOR`]; one that
+    /// failed puts the limit just under its rate; one given up for a
+    /// clump changes nothing. Returns them.
+    fn judge_probes(&mut self, now: Instant) -> Vec<ProbeOutcome> {
+        let outcomes = std::mem::take(&mut self.outcomes);
+        for outcome in &outcomes {
+            if outcome.carried() {
+                // The path carried more than is being sent and no queue
+                // grew: whatever delay stands on it now is the path's
+                // own, not a queue.
+                self.rebase_queue();
+                // And it carries at least this: the limit moves up to it
+                // (with a tenth to spare, since what a set needs is
+                // measured and moves from second to second).
+                let room = outcome.target_bps.saturating_add(outcome.target_bps / 10);
+                self.limit_bps = self.limit_bps.map(|limit| limit.max(room));
+                self.apply_ceiling();
+                // The estimate takes the same tenth: the set is given
+                // when what it needs is within the budget, and what it
+                // needs has moved by the time the probe ends. (Seen on a
+                // live call, 2026-10-09: probes toward 872, 966 and
+                // 1084 kbit/s carried one after the other, the set
+                // needing a little more than the last probe's rate each
+                // time, before a middle picture was given; of thirteen
+                // carried probes two gave nothing and five gave half a
+                // second late, when the estimate had risen by itself.)
+                // What the set puts on the wire must still be within the
+                // probe's rate.
+                self.estimator.note_carried(room);
+                // A cut in this probe's shadow is taken back to what the
+                // probe has just shown, not to the estimate from before
+                // it.
+                if let Some((floor, _)) = self.probe_floor.as_mut() {
+                    *floor = (*floor).max(self.estimator.estimate_bps());
+                }
+                self.proven = Some((outcome.target_bps, now));
+                self.probes_carried = self.probes_carried.saturating_add(1);
+            } else if outcome.failure == Some(crate::downlink_probe::ProbeFailure::Disturbed) {
+                // Given up for a clump of media: nothing was learnt.
+            } else {
+                // The path does not carry this rate: the estimate stays
+                // under it until a probe says otherwise.
+                let under = outcome.target_bps.saturating_sub(1);
+                self.limit_bps = Some(self.limit_bps.map_or(under, |l| l.min(under)));
+                self.apply_ceiling();
+            }
+        }
+        outcomes
+    }
+
+    /// A set that the path takes away again soon after it was given
+    /// proved too large, and the next try at it waits longer each time
+    /// ([`crate::downlink_probe::DownlinkProbe::on_given_taken_back`]);
+    /// one that stays [`TOO_LARGE_WITHIN`] has proved it fits. Not when
+    /// the path collapsed under it ([`DOWNLINK_COLLAPSE_DEN`]): that is
+    /// not the set's doing. `changes` are this run's, `set` how large the
+    /// set now given is and what it puts on the wire, `budget_bps` the
+    /// estimate the run was made on. Returns the level that proved too
+    /// large in this run and the wait it costs.
+    fn note_given_and_taken(
+        &mut self,
+        changes: &[GivenChange],
+        set: (u64, u64),
+        budget_bps: Option<u64>,
+        now: Instant,
+    ) -> Option<(u64, Duration)> {
+        let rank = downlink_allocation::rank;
+        let up = changes.iter().any(|c| rank(c.to) > rank(c.from));
+        let taken = changes
+            .iter()
+            .any(|c| matches!(c.why, "path-cut" | "over-budget"));
+        let mut too_large = None;
+        if up {
+            self.last_up = Some((now, set.0, set.1));
+        } else if taken {
+            if let Some((at, level, wire)) = self.last_up.take() {
+                let soon = now.saturating_duration_since(at) < TOO_LARGE_WITHIN;
+                let collapsed =
+                    budget_bps.map_or(true, |budget| budget < wire / DOWNLINK_COLLAPSE_DEN);
+                if soon && !collapsed {
+                    too_large = Some((level, self.probe.on_given_taken_back(level, now)));
+                }
+            }
+        }
+        if let Some((at, level, _)) = self.last_up {
+            if now.saturating_duration_since(at) >= TOO_LARGE_WITHIN {
+                self.probe.on_given_held(level);
+                self.last_up = None;
+            }
+        }
+        too_large
+    }
+
+    /// What the set being given now puts on the wire, as the allocation
+    /// will take it: a publisher it has not met is on its light track.
+    fn wire_now(&self, publishers: &[downlink_allocation::Publisher<MediaPeerId>]) -> u64 {
+        let current: Vec<VideoQuality> = publishers
+            .iter()
+            .map(|p| {
+                downlink_allocation::smaller(
+                    p.wanted,
+                    self.allocation
+                        .given(&p.publisher)
+                        .unwrap_or(VideoQuality::Light),
+                )
+            })
+            .collect();
+        downlink_allocation::wire_bps(publishers, &current)
+    }
+
     /// What the path has been seen to carry, as of `now`: the rate of a
     /// probe that was just carried, or what is arriving on a quiet path.
     fn carried_bps(&mut self, now: Instant) -> Option<u64> {
+        // Nothing vouches for a larger set while a queue stands on the
+        // path or a cut waits to be borne out, not even a probe that has
+        // just been carried: if the queue goes, the probe's word is
+        // still good for [`DOWNLINK_PROVEN_FOR`]; if it stays, the set
+        // would have been given into it. (Seen on a live call,
+        // 2026-10-09: a middle picture given half a second after its
+        // probe, with a queue of 98 ms standing, and taken away a second
+        // later at 270 ms.)
+        if self.raw_queue_since.is_some() || self.cut_pending {
+            return None;
+        }
         let proven = self
             .proven
             .filter(|(_, at)| now.saturating_duration_since(*at) <= DOWNLINK_PROVEN_FOR)
@@ -2684,6 +2996,51 @@ pub struct GivenChange {
     pub to: VideoQuality,
     /// What the subscriber asks for.
     pub wanted: VideoQuality,
+    /// Why, as a stable label for the log
+    /// ([`MediaPeer::run_downlink`]). Down: `wants` (the subscriber asks
+    /// for less), `path-cut` (the path lowered
+    /// the estimate under what the set puts on the wire), `over-budget`
+    /// (the set came to cost more than the estimate with no cut),
+    /// `importance` (the subscriber changed its order), `first-listed`
+    /// (a publisher met while the budget is known starts at its light
+    /// picture: nothing was taken from the viewer). Up: `probe` (a probe
+    /// was just carried), `quiet-path` (what is arriving covers the
+    /// set).
+    pub why: &'static str,
+}
+
+/// The change of what a publisher is given that `entry` amounts to, if
+/// any, with why: `why_up` when it moved up; down, `first-listed` for a
+/// publisher met for the first time (given what was asked for it is no
+/// change; given less it is one, though nothing was taken from the
+/// viewer), `wants` when the subscriber asks for less, else `why_down`.
+fn given_change(
+    wanted: VideoQuality,
+    entry: &downlink_allocation::Given<MediaPeerId>,
+    why_up: &'static str,
+    why_down: &'static str,
+) -> Option<GivenChange> {
+    let rank = downlink_allocation::rank;
+    let from = entry.previous.unwrap_or(wanted);
+    if from == entry.given {
+        return None;
+    }
+    let why = if rank(entry.given) > rank(from) {
+        why_up
+    } else if entry.previous.is_none() {
+        "first-listed"
+    } else if rank(wanted) < rank(from) {
+        "wants"
+    } else {
+        why_down
+    };
+    Some(GivenChange {
+        publisher: entry.publisher.clone(),
+        from,
+        to: entry.given,
+        wanted,
+        why,
+    })
 }
 
 /// What one run of a subscriber's allocation came to
@@ -2705,6 +3062,19 @@ pub struct DownlinkRun {
     /// The `video-given` set to send the subscriber, when it is to be
     /// told: the set changed, or it sent a `video-wants`.
     pub tell: Option<Vec<VideoGiven>>,
+    /// What the set given after this run puts on the wire, and what it
+    /// needs with its headroom.
+    pub wire_bps: u64,
+    /// See `wire_bps`.
+    pub need_bps: u64,
+    /// The queue standing on the path at this run, milliseconds.
+    pub queue_ms: Option<u64>,
+    /// A set proved too large in this run (it was given and the path
+    /// took it away again within
+    /// [`crate::downlink_probe::TOO_LARGE_WITHIN`]): how large it was
+    /// ([`downlink_allocation::set_level`]), and how long the next try
+    /// at a set that large or larger waits.
+    pub too_large: Option<(u64, Duration)>,
 }
 
 /// One cut of a subscriber's downlink estimate, for the log.
@@ -2728,6 +3098,15 @@ pub struct EstimateCut {
     /// sent steadily until then; it is made if the queue goes on
     /// standing.
     pub held_at_steady: bool,
+    /// What the feedback acknowledged as arriving over the last half
+    /// second at the cut; `None` when too little did.
+    pub arriving_bps: Option<u64>,
+    /// The media the SFU was writing to the subscriber then (first
+    /// transmissions). Beside `arriving_bps` it says whether the path
+    /// was short of what was sent or the cut was made on something else.
+    pub sending_bps: u64,
+    /// The estimate before the cut.
+    pub from_bps: u64,
 }
 
 /// One line of a subscriber's downlink for the diagnostics interval
@@ -2768,6 +3147,18 @@ pub struct DownlinkSnapshot {
     pub middle: usize,
     /// Publishers given their light track alone.
     pub light: usize,
+    /// What the path has said of itself: the estimate's ceiling. `None`
+    /// until it has.
+    pub limit_bps: Option<u64>,
+    /// While a set that proved too large is waited out: the level from
+    /// which sets are held ([`downlink_allocation::set_level`]: one per
+    /// middle picture, six per main one).
+    pub held_from_level: Option<u64>,
+    /// The wait the next set that proves too large will cost, seconds.
+    pub too_large_wait_secs: u64,
+    /// Times the limit followed the cost of the set being given up on a
+    /// quiet path.
+    pub followed: u64,
 }
 
 /// Who decides a publisher's bitrate
@@ -3172,6 +3563,7 @@ impl MediaPeer {
             playout: HashMap::new(),
             downlink: downlink_control.then(|| Box::new(Downlink::new(now))),
             track_meters: HashMap::new(),
+            needs: SenderNeeds::default(),
         }
     }
 
@@ -4492,10 +4884,35 @@ impl MediaPeer {
     /// asked at `now`. A track that has been asked
     /// [`START_KEYFRAME_REQUESTS`] times stops waiting instead and
     /// starts at the next packet.
-    pub(crate) fn due_resume_keyframes(&mut self, now: Instant) -> Vec<OpenedTrack> {
+    ///
+    /// A track whose source is in `idle` (publisher and publisher mid of
+    /// a sender that is switched off on the SFU's word,
+    /// [`crate::video_needed`]) is not asked for and uses up none of its
+    /// requests: no packet can arrive until the publisher has switched
+    /// the sender back on, and giving the wait up meanwhile would start
+    /// the track at whatever packet comes first. It is asked for at once
+    /// when the sender is back.
+    pub(crate) fn due_resume_keyframes(
+        &mut self,
+        now: Instant,
+        idle: &[(MediaPeerId, Mid)],
+    ) -> Vec<OpenedTrack> {
         let mut due = Vec::new();
         for entry in &mut self.tracks_out {
             if !matches!(entry.state, TrackOutState::Open(_)) {
+                continue;
+            }
+            if idle
+                .iter()
+                .any(|(peer, mid)| *peer == entry.source_peer && *mid == entry.source_mid)
+            {
+                if let Gate::Resuming {
+                    asked, requests, ..
+                } = &mut entry.forwarding.gate
+                {
+                    *asked = None;
+                    *requests = 0;
+                }
                 continue;
             }
             let rid = entry.forwarding.active_rid.or(entry.chosen_rid);
@@ -5607,10 +6024,23 @@ impl MediaPeer {
         {
             self.track_meters.clear();
         }
-        self.track_meters
+        let meter = self
+            .track_meters
             .entry(packet.mid)
-            .or_insert_with(|| LayerBitrateMeter::new(now))
-            .record(packet.payload.len() + RTP_FIXED_HEADER_LEN, now);
+            .or_insert_with(|| LayerBitrateMeter::new(now));
+        meter.record(packet.payload.len() + RTP_FIXED_HEADER_LEN, now);
+        // What a heavy sender costs while it flows is remembered for the
+        // time it is switched off ([`Self::heavy_rate_bps`]). Not right
+        // after it came back: the meter's window still holds the silence.
+        let rate = meter.bitrate_bps_cost_at(now);
+        if let Some(sender) = self.needs.senders.get_mut(&packet.mid) {
+            let settled = sender.returned_at.map_or(true, |at| {
+                now.saturating_duration_since(at) >= video_needed::RATE_SETTLE
+            });
+            if rate > 0 && settled {
+                sender.last_rate = Some((rate, now));
+            }
+        }
     }
 
     /// The rate arriving on the track `mid` this peer publishes, bits per
@@ -5620,6 +6050,47 @@ impl MediaPeer {
         self.track_meters
             .get(&mid)
             .map_or(0, |meter| meter.bitrate_bps_cost_at(now))
+    }
+
+    /// What the heavy camera sender on `mid` (main or middle, by `role`)
+    /// costs a subscriber that is given it, bits per second
+    /// ([`crate::video_needed`]).
+    ///
+    /// While the sender flows that is the rate arriving on it
+    /// ([`Self::track_rate_bps`]). A sender that is switched off on the
+    /// SFU's word, or has just been switched back on, has no rate to
+    /// measure, and "costs nothing" would make giving it look free. It
+    /// is then taken to cost what was last measured on it, for
+    /// [`video_needed::RATE_MEMORY`], and after that the nominal rate of
+    /// its role ([`video_needed::NOMINAL_MAIN_BPS`],
+    /// [`video_needed::NOMINAL_MIDDLE_BPS`]); never zero, and never less
+    /// than what is arriving. A sender the publisher was never told to
+    /// stop is measured as before: zero until its first packets.
+    fn heavy_rate_bps(&self, mid: Mid, role: TrackRole, now: Instant) -> u64 {
+        let measured = self.track_rate_bps(mid, now);
+        let Some(sender) = self.needs.senders.get(&mid) else {
+            return measured;
+        };
+        let settling = sender
+            .returned_at
+            .is_some_and(|at| now.saturating_duration_since(at) < video_needed::RATE_SETTLE);
+        let off = sender.expect_silence || sender.idle || settling;
+        if !off || self.downlink.is_none() {
+            return measured;
+        }
+        if measured > 0 && !sender.idle && !settling {
+            // Told to stop and still sending: it costs what arrives.
+            return measured;
+        }
+        let nominal = match role {
+            TrackRole::Middle => video_needed::NOMINAL_MIDDLE_BPS,
+            TrackRole::Main | TrackRole::LightCompanion => video_needed::NOMINAL_MAIN_BPS,
+        };
+        let remembered = sender
+            .last_rate
+            .filter(|(_, at)| now.saturating_duration_since(*at) <= video_needed::RATE_MEMORY)
+            .map_or(nominal, |(bps, _)| bps);
+        remembered.max(measured)
     }
 
     /// What the tracks this peer publishes cost at `now`
@@ -5635,6 +6106,7 @@ impl MediaPeer {
                     rates.light_bps = rates.light_bps.saturating_add(rate);
                 },
                 (MediaKind::Video, TrackRole::Middle) => {
+                    let rate = self.heavy_rate_bps(track.mid, TrackRole::Middle, now);
                     rates.middle_bps = rates.middle_bps.saturating_add(rate);
                 },
                 (MediaKind::Video, TrackRole::Main) => {
@@ -5647,12 +6119,312 @@ impl MediaPeer {
                             rates.light_bps = rates.light_bps.saturating_add(*light);
                             rates.main_bps = rates.main_bps.saturating_add(*heaviest);
                         },
-                        _ => rates.main_bps = rates.main_bps.saturating_add(rate),
+                        _ => {
+                            let rate = self.heavy_rate_bps(track.mid, TrackRole::Main, now);
+                            rates.main_bps = rates.main_bps.saturating_add(rate);
+                        },
                     }
                 },
             }
         }
         rates
+    }
+
+    /// Whether THIS (subscribing) peer wants the main and the middle
+    /// picture of `publisher`, for the count that decides which of the
+    /// publisher's senders are needed ([`crate::video_needed`]).
+    /// `publisher_has_middle` says whether the publisher has a middle
+    /// sender at all.
+    ///
+    /// Only by what the peer **said**: the entry for the publisher in its
+    /// latest `video-wants`. Not by what it is being forwarded at the
+    /// moment (which this does not change) and not by what downlink
+    /// control gives. A peer that holds no video track of the publisher
+    /// wants nothing. Otherwise:
+    ///
+    /// - **`middle`**: it wants middle and never main, also while its
+    ///   middle track is still being negotiated or is not open: the
+    ///   middle picture is what it will be sent. Only of a publisher
+    ///   that has no middle sender at all does it want main (that is
+    ///   what such a subscriber is sent, for good).
+    /// - **`main`**: it wants main, when it has a main track of the
+    ///   publisher in any state; and, under downlink control, middle
+    ///   too, which is what its allocation falls back to and has to know
+    ///   the cost of.
+    /// - **`light`**: neither.
+    /// - **not named, or no `video-wants` ever**: neither. Such a peer is
+    ///   still *forwarded* the main track when it flows (the forwarding
+    ///   default is unchanged), but it switches nobody's sender on:
+    ///   somebody joining a call must not make every publisher start its
+    ///   main sender before it has said what it shows.
+    pub(crate) fn heavy_wanted_of(
+        &self,
+        publisher: &MediaPeerId,
+        publisher_has_middle: bool,
+    ) -> (bool, bool) {
+        let has = |role: Option<TrackRole>| {
+            self.tracks_out.iter().any(|t| {
+                t.source_peer == *publisher
+                    && t.kind == MediaKind::Video
+                    && role.map_or(true, |role| t.role == role)
+            })
+        };
+        if !has(None) {
+            return (false, false);
+        }
+        match self.video_wants.get(publisher).copied() {
+            Some(VideoQuality::Middle) if publisher_has_middle => (false, true),
+            Some(VideoQuality::Middle) => (has(Some(TrackRole::Main)), false),
+            Some(VideoQuality::Main) => (
+                has(Some(TrackRole::Main)),
+                has(Some(TrackRole::Middle)) && self.downlink.is_some(),
+            ),
+            Some(VideoQuality::Light) | None => (false, false),
+        }
+    }
+
+    /// Whether THIS (publishing) peer is told which of its camera senders
+    /// are needed: the switch is on and it declared a light track in an
+    /// offer, which is what a client that sends its camera on separate
+    /// senders does. A publisher of one video track, and one that sends
+    /// simulcast, is never told anything.
+    #[must_use]
+    pub fn told_video_needed(&self) -> bool {
+        self.protection.video_needed && self.light_mid.is_some()
+    }
+
+    /// What THIS (publishing) peer was last told of its senders; `None`
+    /// before the first frame.
+    #[must_use]
+    pub fn video_needed_told(&self) -> Option<Needed> {
+        self.needs.tracker.told()
+    }
+
+    /// The last `video-needed` frame could not be queued for THIS peer:
+    /// it is produced again at the next pass.
+    pub(crate) fn video_needed_not_delivered(&mut self) {
+        self.needs.tracker.forget_told();
+    }
+
+    /// The role of the heavy camera sender THIS peer publishes on `mid`:
+    /// `Middle` for its declared middle track, `Main` for any other
+    /// video track of one encoding that is not its light track. `None`
+    /// for audio, the light track, a simulcast track and an unknown mid.
+    fn heavy_sender_role(&self, mid: Mid) -> Option<TrackRole> {
+        let track = self.tracks_in.iter().find(|t| t.mid == mid)?;
+        if track.kind != MediaKind::Video || track.simulcast || track.light {
+            return None;
+        }
+        Some(track.role())
+    }
+
+    /// Whether THIS peer was last told that its sender of `role` is
+    /// needed. A peer that was told nothing is sending everything.
+    fn told_needed(&self, role: TrackRole) -> bool {
+        self.needs.tracker.told().map_or(true, |told| match role {
+            TrackRole::Middle => told.middle,
+            TrackRole::Main | TrackRole::LightCompanion => told.main,
+        })
+    }
+
+    /// One pass of "senders nobody watches" for THIS (publishing) peer
+    /// ([`crate::video_needed`]): `wanted` is how many subscribers want
+    /// each of its heavy pictures right now.
+    ///
+    /// - A sender the peer was told to stop that has sent nothing for
+    ///   [`video_needed::IDLE_QUIET`] is taken for **idle**: what was
+    ///   missing on it is no longer asked for, and its stream is
+    ///   forgotten by the two burst detectors and the loss counter of
+    ///   the bitrate estimate, so neither the stop nor the return reads
+    ///   as loss.
+    /// - When what the peer is to be told has changed, it is returned
+    ///   for the caller to send. A sender told to stop is marked as
+    ///   expected to go silent and the bitrate estimate of that moment
+    ///   is remembered; a sender told to start again has the estimate
+    ///   put back to it at once
+    ///   ([`crate::uplink_estimate::PathEstimator::restore_after_idle`])
+    ///   and a REMB sent with the next clock tick.
+    ///
+    /// `None`, and nothing done, for a peer that is not told
+    /// ([`Self::told_video_needed`]).
+    pub(crate) fn drive_video_needed(
+        &mut self,
+        wanted: Wanted,
+        now: Instant,
+    ) -> Option<NeededChange> {
+        if !self.told_video_needed() {
+            return None;
+        }
+        self.mark_idle_senders(now);
+        let before = self.needs.tracker.told();
+        let needed = self
+            .needs
+            .tracker
+            .update(wanted, self.middle_mid.is_some(), now)?;
+        let heavy: Vec<(Mid, TrackRole)> = self
+            .tracks_in
+            .iter()
+            .filter_map(|t| self.heavy_sender_role(t.mid).map(|role| (t.mid, role)))
+            .collect();
+        let on = |role: TrackRole| match role {
+            TrackRole::Middle => needed.middle,
+            TrackRole::Main | TrackRole::LightCompanion => needed.main,
+        };
+        let mut stopped = false;
+        for (mid, role) in &heavy {
+            if on(*role) {
+                continue;
+            }
+            stopped = true;
+            if !self.needs.senders.contains_key(mid) && self.needs.senders.len() >= MAX_TRACK_METERS
+            {
+                self.needs.senders.clear();
+            }
+            self.needs.senders.entry(*mid).or_default().expect_silence = true;
+        }
+        let started =
+            before.is_some_and(|was| (!was.main && needed.main) || (!was.middle && needed.middle));
+        if let Some(uplink) = self.uplink.as_mut() {
+            if started {
+                if let Some(bps) = self.needs.estimate_before_idle {
+                    if uplink.estimator.restore_after_idle(bps, now) {
+                        tracing::info!(
+                            origin = %self.id,
+                            estimate_kbps = uplink.estimator.estimate_bps() / 1000,
+                            "media: a publisher's bitrate estimate was put back as a sender is switched on again"
+                        );
+                    }
+                }
+                // Whatever the figure, the publisher hears it now.
+                uplink.last_remb = None;
+            }
+            if stopped {
+                let estimate = uplink.estimator.estimate_bps();
+                let kept = self.needs.estimate_before_idle.unwrap_or(0);
+                self.needs.estimate_before_idle = Some(kept.max(estimate));
+            } else {
+                self.needs.estimate_before_idle = None;
+            }
+        }
+        Some(NeededChange { needed, wanted })
+    }
+
+    /// Take the heavy senders that were told to stop and have sent
+    /// nothing for [`video_needed::IDLE_QUIET`] for idle
+    /// ([`Self::drive_video_needed`]).
+    fn mark_idle_senders(&mut self, now: Instant) {
+        let gone: Vec<(Mid, Option<Ssrc>)> = self
+            .needs
+            .senders
+            .iter()
+            .filter(|(_, sender)| {
+                sender.expect_silence
+                    && !sender.idle
+                    && sender.last_arrival.map_or(true, |at| {
+                        now.saturating_duration_since(at) >= video_needed::IDLE_QUIET
+                    })
+            })
+            .map(|(mid, sender)| (*mid, sender.ssrc))
+            .collect();
+        for (mid, ssrc) in gone {
+            if let Some(sender) = self.needs.senders.get_mut(&mid) {
+                sender.idle = true;
+            }
+            self.burst_ends.forget((mid, None));
+            if let Some(ssrc) = ssrc {
+                self.uplink_bursts.forget(*ssrc);
+                if let Some(uplink) = self.uplink.as_mut() {
+                    uplink.loss.forget(*ssrc);
+                }
+            }
+            let given_up = self.give_up_missing(mid, None);
+            tracing::info!(
+                origin = %self.id,
+                mid = ?mid,
+                given_up,
+                "media: a sender nobody is being sent has stopped"
+            );
+        }
+    }
+
+    /// The mids of the heavy senders of THIS (publishing) peer that are
+    /// idle: switched off on the SFU's word, nothing arriving.
+    pub(crate) fn idle_senders(&self) -> Vec<Mid> {
+        self.needs
+            .senders
+            .iter()
+            .filter(|(_, sender)| sender.idle)
+            .map(|(mid, _)| *mid)
+            .collect()
+    }
+
+    /// Whether the heavy sender on `mid` of THIS peer is idle.
+    #[must_use]
+    pub fn sender_idle(&self, mid: Mid) -> bool {
+        self.needs.senders.get(&mid).is_some_and(|s| s.idle)
+    }
+
+    /// One video packet THIS peer published has arrived: note it against
+    /// its sender ([`crate::video_needed`]). Called before the packet is
+    /// handed to the loss counter and the burst detectors.
+    ///
+    /// The first packet of a sender that was idle is its **return**. The
+    /// packets its sequence numbers skipped are not asked for (a sender
+    /// that was off sent none), the count of key frame requests that got
+    /// no answer starts again (they were asked of a sender that was
+    /// off), and unless the packet itself begins a key frame the
+    /// publisher is asked for one, so every subscriber of the track has
+    /// a picture to start from. Header fields only.
+    pub(crate) fn note_sender_arrival(&mut self, packet: &RelayPacket, now: Instant) {
+        if packet.kind != MediaKind::Video || packet.rid.is_some() || !self.told_video_needed() {
+            return;
+        }
+        let Some(role) = self.heavy_sender_role(packet.mid) else {
+            return;
+        };
+        let told_on = self.told_needed(role);
+        if !self.needs.senders.contains_key(&packet.mid)
+            && self.needs.senders.len() >= MAX_TRACK_METERS
+        {
+            self.needs.senders.clear();
+        }
+        let sender = self.needs.senders.entry(packet.mid).or_default();
+        let returned = sender.idle;
+        let moved = sender.ssrc.is_some_and(|ssrc| ssrc != packet.ssrc);
+        sender.ssrc = Some(packet.ssrc);
+        sender.last_arrival = Some(now);
+        sender.idle = false;
+        if told_on {
+            sender.expect_silence = false;
+        }
+        if !returned {
+            return;
+        }
+        sender.returned_at = Some(now);
+        if moved {
+            // A sender that came back on another SSRC is a new stream to
+            // every book already.
+            return;
+        }
+        let key = (packet.mid, None);
+        let given_up = self.give_up_missing(packet.mid, None);
+        self.unanswered_keyframe_requests.remove(&key);
+        let key_frame = packet.starts_independent_frame;
+        let asked = told_on
+            && !key_frame
+            && !packet.blind
+            && !packet.is_fec()
+            && self.request_keyframe_limited(packet.mid, None, now);
+        tracing::info!(
+            origin = %self.id,
+            mid = ?packet.mid,
+            role = role.as_str(),
+            needed = told_on,
+            first_packet_starts_key_frame = key_frame,
+            key_frame_asked = asked,
+            given_up,
+            "media: a sender that had stopped is sending again"
+        );
     }
 
     /// The publishers this (subscribing) peer has an open downstream
@@ -5861,6 +6633,11 @@ impl MediaPeer {
     ///   given up is paused with the next packet, a track given back
     ///   resumes at a key frame its publisher is asked for by
     ///   [`drive_video_wants`].
+    /// - Before that, the limit follows what the set being given has come
+    ///   to cost on a quiet path ([`Downlink::follow_what_is_carried`]);
+    ///   after it, a set that the path took away again soon after it was
+    ///   given is noted as too large
+    ///   ([`Downlink::note_given_and_taken`]).
     /// - If someone is still given less than asked for, the next larger
     ///   set is tried on the path: a probe starts toward what that set
     ///   needs, when one may ([`crate::downlink_probe`]).
@@ -5885,38 +6662,12 @@ impl MediaPeer {
         if let Some(outcome) = downlink.probe.poll(now) {
             downlink.outcomes.push(outcome);
         }
-        let outcomes = std::mem::take(&mut downlink.outcomes);
-        for outcome in &outcomes {
-            if outcome.carried() {
-                // The path carried more than is being sent and no queue
-                // grew: whatever delay stands on it now is the path's
-                // own, not a queue.
-                downlink.rebase_queue();
-                // And it carries at least this: the limit moves up to it
-                // (with a tenth to spare, since what a set needs is
-                // measured and moves from second to second).
-                let room = outcome.target_bps.saturating_add(outcome.target_bps / 10);
-                downlink.limit_bps = downlink.limit_bps.map(|limit| limit.max(room));
-                downlink.apply_ceiling();
-                downlink.estimator.note_carried(outcome.target_bps);
-                // A cut in this probe's shadow is taken back to what the
-                // probe has just shown, not to the estimate from before
-                // it.
-                if let Some((floor, _)) = downlink.probe_floor.as_mut() {
-                    *floor = (*floor).max(downlink.estimator.estimate_bps());
-                }
-                downlink.proven = Some((outcome.target_bps, now));
-                downlink.probes_carried = downlink.probes_carried.saturating_add(1);
-            } else if outcome.failure == Some(crate::downlink_probe::ProbeFailure::Disturbed) {
-                // Given up for a clump of media: nothing was learnt.
-            } else {
-                // The path does not carry this rate: the estimate stays
-                // under it until a probe says otherwise.
-                let under = outcome.target_bps.saturating_sub(1);
-                downlink.limit_bps = Some(downlink.limit_bps.map_or(under, |l| l.min(under)));
-                downlink.apply_ceiling();
-            }
-        }
+        let outcomes = downlink.judge_probes(now);
+
+        // What is being given now, as the allocation will take it: a
+        // publisher it has not met starts at its light track.
+        let lowered = std::mem::take(&mut downlink.lowered_since_run);
+        downlink.follow_what_is_carried(downlink.wire_now(publishers), lowered, now);
 
         let budget_bps = downlink
             .estimator
@@ -5926,10 +6677,26 @@ impl MediaPeer {
         downlink.note_steady(now);
         downlink.budget_bps = budget_bps;
         downlink.carried_bps = carried_bps;
+        let proven = downlink
+            .proven
+            .is_some_and(|(_, at)| now.saturating_duration_since(at) <= DOWNLINK_PROVEN_FOR);
 
-        let given = downlink
-            .allocation
-            .allocate(budget_bps, carried_bps, publishers);
+        let given = downlink.allocation.allocate_within(
+            budget_bps,
+            carried_bps,
+            downlink.probe.held_from(now),
+            publishers,
+        );
+        let why_up = if proven { "probe" } else { "quiet-path" };
+        let why_down = if lowered {
+            "path-cut"
+        } else if downlink.allocation.over_budget() {
+            "over-budget"
+        } else if downlink.allocation.reordered() {
+            "importance"
+        } else {
+            "other"
+        };
         let mut changes = Vec::new();
         let mut set: Vec<VideoGiven> = Vec::new();
         let mut regate = false;
@@ -5939,17 +6706,7 @@ impl MediaPeer {
                 .insert(entry.publisher.clone(), entry.given)
                 .unwrap_or(publisher.wanted);
             regate |= before != entry.given;
-            // A publisher met for the first time and given what was
-            // asked for is no change; one given less is.
-            let from = entry.previous.unwrap_or(publisher.wanted);
-            if from != entry.given {
-                changes.push(GivenChange {
-                    publisher: entry.publisher.clone(),
-                    from,
-                    to: entry.given,
-                    wanted: publisher.wanted,
-                });
-            }
+            changes.extend(given_change(publisher.wanted, entry, why_up, why_down));
             let has_video = publisher.main_bps.is_some()
                 || publisher.middle_bps.is_some()
                 || publisher.light_bps.is_some();
@@ -5968,6 +6725,15 @@ impl MediaPeer {
             .retain(|id, _| given.iter().any(|g| g.publisher == *id));
 
         let qualities: Vec<VideoQuality> = given.iter().map(|g| g.given).collect();
+        let wire_bps = downlink_allocation::wire_bps(publishers, &qualities);
+        let need_bps = downlink_allocation::need_bps(publishers, &qualities);
+
+        let level = downlink_allocation::set_level(&qualities);
+        let too_large = downlink.note_given_and_taken(&changes, (level, wire_bps), budget_bps, now);
+        let queue_ms = downlink
+            .standing_queue()
+            .map(|queue| u64::try_from(queue.as_millis()).unwrap_or(u64::MAX));
+
         let probe_started_bps = if budget_bps.is_some() {
             downlink.start_probe(publishers, &qualities, now)
         } else {
@@ -5991,6 +6757,10 @@ impl MediaPeer {
             cuts,
             changes,
             tell,
+            wire_bps,
+            need_bps,
+            queue_ms,
+            too_large,
         }
     }
 
@@ -6014,6 +6784,10 @@ impl MediaPeer {
                 .standing_queue()
                 .map(|queue| u64::try_from(queue.as_millis()).unwrap_or(u64::MAX)),
             detector: downlink.estimator.state().as_str(),
+            limit_bps: downlink.limit_bps,
+            held_from_level: downlink.probe.held_from(now),
+            too_large_wait_secs: downlink.probe.too_large_wait().as_secs(),
+            followed: downlink.followed,
             ..DownlinkSnapshot::default()
         };
         for quality in downlink.given.values() {
@@ -6646,6 +7420,9 @@ pub struct MediaRouter {
     /// step 6, `LAKKO_SFU_DOWNLINK_CONTROL`); `false` until set, and
     /// without effect unless the SFU also decides publishers' bitrate.
     downlink_control: bool,
+    /// When [`drive_video_needed`] last ran; `None` makes it run at the
+    /// next pass whatever the time.
+    video_needed_ran: Option<Instant>,
 }
 
 impl MediaRouter {
@@ -7537,6 +8314,8 @@ fn take_video_wants(router: &mut MediaRouter, subscriber: &MediaPeerId, wants: &
         light = count.light,
         "media: subscriber's video wants changed"
     );
+    // A sender that is wanted again is told so at the next pass.
+    router.video_needed_ran = None;
     drive_video_wants(router, Instant::now());
 }
 
@@ -7570,9 +8349,20 @@ fn declare_middle_tracks(peer: &mut MediaPeer, middle_mids: &[String]) {
 /// owed and goes out when the window ends. Returns how many requests went
 /// out in this pass.
 pub(crate) fn drive_video_wants(router: &mut MediaRouter, now: Instant) -> usize {
+    // Senders that are switched off on the SFU's word: a track that
+    // resumes from one waits without being asked for.
+    let idle: Vec<(MediaPeerId, Mid)> = router
+        .peers()
+        .iter()
+        .flat_map(|peer| {
+            peer.idle_senders()
+                .into_iter()
+                .map(|mid| (peer.id().clone(), mid))
+        })
+        .collect();
     let mut due: Vec<OpenedTrack> = Vec::new();
     for sub in router.peers_mut() {
-        due.extend(sub.due_resume_keyframes(now));
+        due.extend(sub.due_resume_keyframes(now, &idle));
     }
     due.iter()
         .filter(|track| {
@@ -7591,6 +8381,8 @@ pub(crate) fn drive_video_wants(router: &mut MediaRouter, now: Instant) -> usize
 /// Neither is a track the subscriber is not being sent (ADR-0070 step 5):
 /// a paused one needs no key frame, and a resuming one is asked for by
 /// [`drive_video_wants`].
+/// Nor is a track whose sender is idle on the SFU's word
+/// ([`crate::video_needed`]).
 fn request_keyframes_for_opened(
     router: &mut MediaRouter,
     subscriber: &MediaPeerId,
@@ -7605,6 +8397,15 @@ fn request_keyframes_for_opened(
             .peer_mut(subscriber)
             .is_some_and(|sub| sub.track_paused(&track.source_peer, track.source_mid, track.role));
         if not_sent {
+            continue;
+        }
+        // A sender that is switched off on the SFU's word cannot answer;
+        // it is asked at its return unless it comes back with a key frame
+        // ([`MediaPeer::note_sender_arrival`]).
+        let idle = router
+            .peer_mut(&track.source_peer)
+            .is_some_and(|publisher| publisher.sender_idle(track.source_mid));
+        if idle {
             continue;
         }
         let layout = router
@@ -7773,6 +8574,11 @@ async fn run_media_loop(
         // runs before the two: a track it gives back is asked for its key
         // frame by `drive_video_wants` in this same pass.
         let padding = run_downlink_control(&mut router, &peers, now).await;
+        // Senders nobody watches: each publisher is told which of its
+        // camera senders somebody is being sent, and a sender that went
+        // idle on that word is marked before the resume requests below
+        // look at it.
+        run_video_needed(&mut router, &peers, now).await;
         let start_requests =
             drive_two_track_delivery(&mut router, now) + drive_video_wants(&mut router, now);
         // A packet written to a peer, or a keyframe request queued on one,
@@ -8126,6 +8932,22 @@ fn note_playout_delays(router: &MediaRouter, ledger: &mut FanoutLedger) {
     }
 }
 
+/// Note, for each heavy camera sender of a publisher that is told which
+/// of its senders are needed, what it was last told
+/// ([`crate::video_needed`]).
+fn note_video_needed(router: &MediaRouter, ledger: &mut FanoutLedger) {
+    for peer in router.peers() {
+        if !peer.told_video_needed() || peer.video_needed_told().is_none() {
+            continue;
+        }
+        for track in peer.tracks_in() {
+            if let Some(role) = peer.heavy_sender_role(track.mid) {
+                ledger.note_needed(peer.id(), track.mid, peer.told_needed(role));
+            }
+        }
+    }
+}
+
 /// Run bitrate control for every publisher: loss intervals and REMB (see
 /// [`MediaPeer::drive_uplink`]). Returns how many peers a REMB was
 /// requested for. Does nothing under [`BitrateControl::Client`].
@@ -8144,6 +8966,7 @@ fn log_diagnostics_if_due(router: &mut MediaRouter, ledger: &mut FanoutLedger, n
         log_downlinks(router, now);
         note_uplink_fallback_states(router, ledger);
         note_playout_delays(router, ledger);
+        note_video_needed(router, ledger);
     }
     ledger.flush_if_due(now);
 }
@@ -8167,6 +8990,9 @@ fn log_downlink_run(subscriber: &MediaPeerId, run: &DownlinkRun) {
             taken_back = cut.taken_back,
             beyond_sending_ms = ?cut.beyond_sending_ms,
             held_at_steady = cut.held_at_steady,
+            from_kbps = cut.from_bps / 1000,
+            arriving_kbps = ?cut.arriving_bps.map(|bps| bps / 1000),
+            sending_kbps = cut.sending_bps / 1000,
             "media: the estimate of a subscriber's downlink was lowered"
         );
     }
@@ -8188,7 +9014,17 @@ fn log_downlink_run(subscriber: &MediaPeerId, run: &DownlinkRun) {
             carried_kbps = outcome.carried_bps / 1000,
             padding_bytes = outcome.padding_bytes,
             held_back_bytes = outcome.held_back_bytes,
+            standing_queue_ms = ?run.queue_ms,
             "media: a probe of a subscriber's downlink ended"
+        );
+    }
+    if let Some((level, wait)) = run.too_large {
+        tracing::info!(
+            %subscriber,
+            level,
+            need_kbps = run.need_bps / 1000,
+            wait_secs = wait.as_secs(),
+            "media: a set given to a subscriber's downlink proved too large"
         );
     }
     for change in &run.changes {
@@ -8210,6 +9046,10 @@ fn log_downlink_run(subscriber: &MediaPeerId, run: &DownlinkRun) {
             wanted = change.wanted.as_str(),
             budget_kbps = ?run.budget_bps.map(|bps| bps / 1000),
             carried_kbps = ?run.carried_bps.map(|bps| bps / 1000),
+            why = change.why,
+            wire_kbps = run.wire_bps / 1000,
+            need_kbps = run.need_bps / 1000,
+            standing_queue_ms = ?run.queue_ms,
             "media: what a subscriber is given of a publisher's video changed"
         );
     }
@@ -8336,6 +9176,103 @@ async fn send_video_given(peers: &PeerRegistry, frames: Vec<(MediaPeerId, Server
     }
 }
 
+/// How often [`drive_video_needed`] runs at most, unless a subscriber's
+/// wants just changed. Chosen: the media loop passes once per datagram,
+/// and counting every publisher's subscribers that often buys nothing; a
+/// sender that is needed again is still told within one frame interval.
+const VIDEO_NEEDED_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Tell every publisher which of its camera senders somebody is being
+/// sent ([`crate::video_needed`], [`MediaPeer::drive_video_needed`]):
+/// count, per publisher that is told at all, the subscribers that want
+/// its main and its middle picture ([`MediaPeer::heavy_wanted_of`]), mark
+/// the senders that went idle, and return the `video-needed` frames to
+/// send, each with the publisher it is for. One line is logged per
+/// change. Does nothing, and returns nothing, when it last ran less than
+/// [`VIDEO_NEEDED_INTERVAL`] ago, and for publishers with the switch off
+/// (`LAKKO_SFU_VIDEO_NEEDED=0`).
+pub(crate) fn drive_video_needed(
+    router: &mut MediaRouter,
+    now: Instant,
+) -> Vec<(MediaPeerId, ServerFrame)> {
+    let due = router.video_needed_ran.map_or(true, |at| {
+        now.saturating_duration_since(at) >= VIDEO_NEEDED_INTERVAL
+    });
+    if !due {
+        return Vec::new();
+    }
+    router.video_needed_ran = Some(now);
+    if !router.peers().iter().any(MediaPeer::told_video_needed) {
+        return Vec::new();
+    }
+    let counted: Vec<(MediaPeerId, Wanted)> = router
+        .peers()
+        .iter()
+        .filter(|publisher| publisher.told_video_needed())
+        .map(|publisher| {
+            let mut wanted = Wanted::default();
+            for sub in router.peers() {
+                if sub.id() == publisher.id() {
+                    continue;
+                }
+                let (main, middle) =
+                    sub.heavy_wanted_of(publisher.id(), publisher.middle_mid().is_some());
+                wanted.main += usize::from(main);
+                wanted.middle += usize::from(middle);
+            }
+            (publisher.id().clone(), wanted)
+        })
+        .collect();
+    let mut frames = Vec::new();
+    for (id, wanted) in counted {
+        let Some(change) = router
+            .peer_mut(&id)
+            .and_then(|publisher| publisher.drive_video_needed(wanted, now))
+        else {
+            continue;
+        };
+        tracing::info!(
+            publisher = %id,
+            main = change.needed.main,
+            middle = change.needed.middle,
+            want_main = change.wanted.main,
+            want_middle = change.wanted.middle,
+            "media: which of a publisher's camera senders are needed changed"
+        );
+        frames.push((
+            id,
+            ServerFrame::VideoNeeded {
+                main: change.needed.main,
+                middle: change.needed.middle,
+            },
+        ));
+    }
+    frames
+}
+
+/// One pass of "senders nobody watches" in the media loop:
+/// [`drive_video_needed`], and each frame that came of it sent to its
+/// publisher on its signaling socket. A frame that cannot be queued is
+/// produced again at the next run.
+async fn run_video_needed(router: &mut MediaRouter, peers: &PeerRegistry, now: Instant) {
+    for (peer_id, frame) in drive_video_needed(router, now) {
+        let queued = match peers.peer(&peer_id).await {
+            Some(peer) => peer
+                .outbound
+                .as_ref()
+                .is_some_and(|tx| tx.try_send(frame).is_ok()),
+            None => false,
+        };
+        if !queued {
+            // Tried again at the next run, [`VIDEO_NEEDED_INTERVAL`] on.
+            tracing::trace!(peer = %peer_id, "media: video-needed frame not queued");
+            if let Some(publisher) = router.peer_mut(&peer_id) {
+                publisher.video_needed_not_delivered();
+            }
+        }
+    }
+}
+
 /// One line per subscriber per diagnostics interval under downlink
 /// control (ADR-0070 step 6): the budget, what the path was seen to
 /// carry, what is being sent and what the SFU would like to send, how
@@ -8362,6 +9299,10 @@ fn log_downlinks(router: &MediaRouter, now: Instant) {
             cuts = snap.cuts,
             standing_queue_ms = ?snap.queue_ms,
             detector = snap.detector,
+            limit_kbps = ?snap.limit_bps.map(|bps| bps / 1000),
+            held_from_level = ?snap.held_from_level,
+            too_large_wait_secs = snap.too_large_wait_secs,
+            followed = snap.followed,
             "media: subscriber downlink over the last interval"
         );
     }
@@ -8543,6 +9484,10 @@ async fn drain_outputs(
                         // size before the packet is consumed (ADR-0068).
                         let seen = MediaPeer::uplink_seen(&packet);
                         if let Some(packet) = peer.relay_packet(packet) {
+                            // A sender that was switched off on the SFU's
+                            // word and is back is noted first: its
+                            // return is not loss to anything below.
+                            peer.note_sender_arrival(&packet, now);
                             peer.observe_uplink(seen, &packet);
                             let rebuilt = peer.fec_receive(&packet, received, now);
                             for packet in std::iter::once(packet).chain(rebuilt) {
@@ -8815,6 +9760,11 @@ pub(crate) struct OriginTally {
     /// interval (`full` / `fallback`); `None` for a track without
     /// simulcast layers.
     pub(crate) uplink: Option<&'static str>,
+    /// Whether the publisher was last told that somebody is being sent
+    /// this sender ([`crate::video_needed`]); `None` for a stream its
+    /// publisher is told nothing of (audio, the light track, simulcast,
+    /// a publisher that declared no senders, the switch off).
+    pub(crate) needed: Option<bool>,
 }
 
 /// Per-destination fanout bookkeeping, logged and reset on a fixed
@@ -8963,6 +9913,23 @@ impl FanoutLedger {
         }
     }
 
+    /// Note whether the publisher was told that the heavy sender
+    /// `(origin, mid)` is needed, for its line at the flush. A sender
+    /// that is not needed gets its line even when nothing arrived on it
+    /// in the interval: that silence is the point.
+    pub(crate) fn note_needed(&mut self, origin: &MediaPeerId, mid: Mid, needed: bool) {
+        if needed {
+            if let Some(tally) = self.per_origin.get_mut(&(origin.clone(), mid)) {
+                tally.needed = Some(true);
+            }
+        } else {
+            self.per_origin
+                .entry((origin.clone(), mid))
+                .or_default()
+                .needed = Some(false);
+        }
+    }
+
     /// `true` once a full interval has passed since the last flush.
     pub(crate) fn is_due(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.last_flush) >= self.every
@@ -8989,6 +9956,7 @@ impl FanoutLedger {
                 fec_packets = t.fec_packets,
                 recovered = t.recovered,
                 uplink = t.uplink.unwrap_or("not-simulcast"),
+                needed = t.needed.map_or("not-told", |needed| if needed { "yes" } else { "no" }),
                 "media: publisher stream over the last interval"
             );
             lines += 1;
@@ -11180,7 +12148,7 @@ mod tests {
         let mut sub = three_track_subscriber("pub");
         sub.set_video_wants(&[want("pub", VideoQuality::Light)]);
         sub.set_video_wants(&[]);
-        assert_eq!(sub.due_resume_keyframes(t0).len(), 1, "asked once");
+        assert_eq!(sub.due_resume_keyframes(t0, &[]).len(), 1, "asked once");
         assert!(sub.track_paused(&source, Mid::from(MAIN_MID), TrackRole::Main));
         let blind = RelayPacket {
             blind: true,
@@ -11194,7 +12162,7 @@ mod tests {
         assert!(!sub.track_paused(&source, Mid::from(MAIN_MID), TrackRole::Main));
         // Flowing: the publisher is not asked again for the resume.
         assert!(sub
-            .due_resume_keyframes(t0 + Duration::from_secs(10))
+            .due_resume_keyframes(t0 + Duration::from_secs(10), &[])
             .is_empty());
     }
 
@@ -11590,6 +12558,7 @@ mod tests {
                 fec_packets: 0,
                 recovered: 0,
                 uplink: None,
+                needed: None,
             }
         );
 
@@ -11912,6 +12881,7 @@ mod tests {
                 fec_packets: 1,
                 recovered: 0,
                 uplink: None,
+                needed: None,
             }
         );
 
@@ -14362,7 +15332,7 @@ mod tests {
         assert!(sub.track_paused(&pid("pub"), Mid::from(MIDDLE_MID), TrackRole::Middle));
         // Nothing was paused and wanted again: nobody is asked for a key
         // frame, and an empty set changes nothing.
-        assert!(sub.due_resume_keyframes(Instant::now()).is_empty());
+        assert!(sub.due_resume_keyframes(Instant::now(), &[]).is_empty());
         assert_eq!(sub.set_video_wants(&[]), VideoWantsCount::default());
         assert_eq!(taken(&mut sub, "pub", false), (true, false, true));
     }
@@ -14396,7 +15366,7 @@ mod tests {
         sub.set_video_wants(&[want("pub", VideoQuality::Light)]);
         assert_eq!(sub.video_quality_for(&pid("pub")), VideoQuality::Light);
         assert_eq!(taken(&mut sub, "pub", true), (false, false, true));
-        assert!(sub.due_resume_keyframes(t0).is_empty());
+        assert!(sub.due_resume_keyframes(t0, &[]).is_empty());
 
         // Main, named: as with no wants.
         let mut sub = three_track_subscriber("pub");
@@ -14459,13 +15429,13 @@ mod tests {
             MediaForward::NotWanted
         );
         assert!(
-            sub.due_resume_keyframes(t0).is_empty(),
+            sub.due_resume_keyframes(t0, &[]).is_empty(),
             "paused, not resuming"
         );
 
         // Wanted again: the publisher is asked at once, on the main track.
         sub.set_video_wants(&[]);
-        let due = sub.due_resume_keyframes(t0);
+        let due = sub.due_resume_keyframes(t0, &[]);
         assert_eq!(due.len(), 1);
         assert_eq!(
             (due[0].source_peer.clone(), due[0].source_mid, due[0].role),
@@ -14473,9 +15443,13 @@ mod tests {
         );
         // Not again before the retry interval, then again after it.
         assert!(sub
-            .due_resume_keyframes(t0 + Duration::from_millis(500))
+            .due_resume_keyframes(t0 + Duration::from_millis(500), &[])
             .is_empty());
-        assert_eq!(sub.due_resume_keyframes(t0 + START_KEYFRAME_RETRY).len(), 1);
+        assert_eq!(
+            sub.due_resume_keyframes(t0 + START_KEYFRAME_RETRY, &[])
+                .len(),
+            1
+        );
 
         // Packets that do not begin a key frame are still dropped.
         assert_eq!(
@@ -14492,7 +15466,7 @@ mod tests {
         assert!(!sub.track_paused(&source, Mid::from(MAIN_MID), TrackRole::Main));
         assert!(sub.tracks_out[0].forwarding.rebase_next);
         assert!(sub
-            .due_resume_keyframes(t0 + Duration::from_secs(10))
+            .due_resume_keyframes(t0 + Duration::from_secs(10), &[])
             .is_empty());
     }
 
@@ -14542,7 +15516,7 @@ mod tests {
         let mut asked = 0;
         let mut at = t0;
         for _ in 0..u32::from(START_KEYFRAME_REQUESTS) + 3 {
-            asked += sub.due_resume_keyframes(at).len();
+            asked += sub.due_resume_keyframes(at, &[]).len();
             at += START_KEYFRAME_RETRY;
         }
         assert_eq!(asked, usize::from(START_KEYFRAME_REQUESTS));
@@ -14564,7 +15538,7 @@ mod tests {
         assert_eq!((count.middle, count.light), (1, 1));
         assert_eq!(sub.video_quality_for(&pid("pub")), VideoQuality::Main);
         assert_eq!(taken(&mut sub, "pub", false), (true, false, true));
-        assert!(sub.due_resume_keyframes(Instant::now()).is_empty());
+        assert!(sub.due_resume_keyframes(Instant::now(), &[]).is_empty());
         // Asked of a peer it has no middle track of: main, as documented.
         assert_eq!(
             sub.video_quality_for(&pid("someone-else")),
@@ -14595,7 +15569,7 @@ mod tests {
         assert_eq!(taken(&mut sub, "b", true), (false, false, true));
         assert_eq!(taken(&mut sub, "a", false), (false, false, true));
         assert_eq!(taken(&mut sub, "a", true), (true, false, true));
-        let due = sub.due_resume_keyframes(Instant::now());
+        let due = sub.due_resume_keyframes(Instant::now(), &[]);
         assert!(due.is_empty(), "the track has started: {due:?}");
     }
 
@@ -15501,6 +16475,8 @@ mod tests {
         // ceiling), without a limit that would bind in these tests.
         downlink.limit_bps = Some(DOWNLINK_CEILING_BPS);
         downlink.estimator.force_estimate(bps);
+        // Brought down as the path brings it down.
+        downlink.lowered_since_run = true;
     }
 
     /// Say that `sub`'s path was just seen to carry `bps`.
@@ -15893,9 +16869,11 @@ mod tests {
             .push(outcome(failed, None));
         let run = sub.run_downlink(&input, at + Duration::from_millis(100));
         let budget = run.budget_bps.expect("known");
-        assert!(
-            budget >= failed && budget <= failed + failed / 10,
-            "{budget}"
+        assert_eq!(
+            budget,
+            failed + failed / 10,
+            "with the tenth: the set is given when what it needs is within the budget, and \
+             what it needs has moved by the time the probe ends"
         );
     }
 
@@ -15991,6 +16969,7 @@ mod tests {
                 from: VideoQuality::Main,
                 to: VideoQuality::Light,
                 wanted: VideoQuality::Main,
+                why: "path-cut",
             }]
         );
         assert_eq!(
@@ -16027,7 +17006,7 @@ mod tests {
         assert_eq!(run.changes[0].to, VideoQuality::Middle);
         assert_eq!(sub.video_quality_given(&pid("pub")), VideoQuality::Middle);
         assert_eq!(taken(&mut sub, "pub", false), (false, false, true));
-        let due = sub.due_resume_keyframes(later);
+        let due = sub.due_resume_keyframes(later, &[]);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].role, TrackRole::Middle);
         assert_eq!(taken(&mut sub, "pub", true), (false, true, true));
@@ -16158,6 +17137,279 @@ mod tests {
             .push_back((Mid::from("7"), 102, 1200));
         let soon = trouble + PROBE_FIRST_RETRY.saturating_sub(Duration::from_millis(1));
         assert_eq!(sub.run_downlink(&input, soon).probe_started_bps, None);
+    }
+
+    /// A set that comes to cost more than the estimate on a quiet path
+    /// is kept: the path is carrying it, and the limit follows. With a
+    /// queue standing the same growth takes the picture away, as before.
+    /// (Live call, 2026-10-09: a middle picture taken away with no cut
+    /// of the estimate anywhere near, the budget standing at a tenth
+    /// over what a probe had tried a minute earlier.)
+    #[test]
+    fn a_set_that_comes_to_cost_more_on_a_quiet_path_is_kept() {
+        let t0 = Instant::now();
+        let mut sub = downlink_peer("sub", "call");
+        add_three_tracks(&mut sub, "pub");
+        let mut input = [downlink_input("pub", VideoQuality::Middle)];
+        let _ = sub.run_downlink(&input, t0);
+        feed_in_reports(&mut sub, t0, 400, |_| Some(20));
+        let at = t0 + Duration::from_secs(2);
+        let wire = DL_LIGHT_BPS + DL_MIDDLE_BPS;
+        {
+            let downlink = sub.downlink.as_mut().expect("on");
+            downlink.limit_bps = Some(wire + 10_000);
+            downlink.apply_ceiling();
+        }
+        let run = sub.run_downlink(&input, at);
+        assert_eq!(run.budget_bps, Some(wire + 10_000));
+        assert!(run.changes.is_empty());
+
+        // The publisher's encoder climbs by a third.
+        input[0].middle_bps = Some(DL_MIDDLE_BPS * 4 / 3);
+        let grown = DL_LIGHT_BPS + DL_MIDDLE_BPS * 4 / 3;
+        let run = sub.run_downlink(&input, at + Duration::from_millis(100));
+        assert!(run.changes.is_empty(), "nothing is taken away: {run:?}");
+        assert_eq!(run.wire_bps, grown);
+        assert_eq!(run.budget_bps, Some(grown + grown / 10));
+        let snap = sub.downlink_snapshot(at).expect("on");
+        assert_eq!(snap.limit_bps, Some(grown + grown / 10));
+        assert_eq!(snap.followed, 1);
+        // Once it fits, nothing follows any further.
+        let run = sub.run_downlink(&input, at + Duration::from_millis(200));
+        assert_eq!(run.budget_bps, Some(grown + grown / 10));
+        assert_eq!(sub.downlink_snapshot(at).expect("on").followed, 1);
+
+        // It doubles while a queue stands on the path: that is not a
+        // path carrying it.
+        input[0].middle_bps = Some(DL_MIDDLE_BPS * 2);
+        sub.downlink.as_mut().expect("on").raw_queue_since = Some(at);
+        let run = sub.run_downlink(&input, at + Duration::from_millis(300));
+        assert_eq!(run.changes.len(), 1, "{run:?}");
+        assert_eq!(run.changes[0].to, VideoQuality::Light);
+        assert_eq!(run.changes[0].why, "over-budget");
+        assert_eq!(sub.downlink_snapshot(at).expect("on").followed, 1);
+    }
+
+    /// The limit does not follow a set the path itself has just put the
+    /// estimate under, nor a path whose feedback says nothing.
+    #[test]
+    fn the_limit_does_not_follow_a_set_the_path_has_just_cut_under() {
+        let t0 = Instant::now();
+        let mut sub = downlink_peer("sub", "call");
+        add_three_tracks(&mut sub, "pub");
+        let input = [downlink_input("pub", VideoQuality::Middle)];
+        let _ = sub.run_downlink(&input, t0);
+        feed_in_reports(&mut sub, t0, 400, |_| Some(20));
+        let at = t0 + Duration::from_secs(2);
+        let _ = sub.run_downlink(&input, at);
+        // The path lowers the estimate to the light picture alone (the
+        // helper says so as a kept cut does), on feedback that shows no
+        // queue.
+        {
+            let downlink = sub.downlink.as_mut().expect("on");
+            downlink.limit_bps = Some(DOWNLINK_CEILING_BPS);
+            downlink.estimator.force_estimate(DL_LIGHT_BPS);
+            downlink.lowered_since_run = true;
+            assert!(downlink.path_is_quiet(at));
+        }
+        let run = sub.run_downlink(&input, at + Duration::from_millis(100));
+        assert_eq!(run.changes.len(), 1);
+        assert_eq!(run.changes[0].why, "path-cut");
+        assert_eq!(run.budget_bps, Some(DL_LIGHT_BPS));
+        assert_eq!(sub.downlink_snapshot(at).expect("on").followed, 0);
+
+        // A path that says nothing (no feedback at all) is not quiet.
+        let mut silent = downlink_peer("silent", "call");
+        assert!(!silent
+            .downlink
+            .as_mut()
+            .expect("on")
+            .path_is_quiet(t0 + Duration::from_secs(60)));
+    }
+
+    /// Nothing is given into a queue: while one stands, or a cut waits
+    /// to be borne out, not even a probe that was just carried vouches
+    /// for a larger set; when the queue has gone, it does.
+    #[test]
+    fn nothing_is_given_while_a_queue_stands() {
+        let t0 = Instant::now();
+        let mut sub = downlink_peer("sub", "call");
+        add_three_tracks(&mut sub, "pub");
+        let input = [downlink_input("pub", VideoQuality::Middle)];
+        let middle = DL_LIGHT_BPS + downlink_allocation::with_headroom(DL_MIDDLE_BPS);
+        let _ = sub.run_downlink(&input, t0);
+        known_budget(&mut sub, DL_LIGHT_BPS, t0);
+        let _ = sub.run_downlink(&input, t0 + Duration::from_secs(1));
+        assert_eq!(sub.video_quality_given(&pid("pub")), VideoQuality::Light);
+        sub.downlink
+            .as_mut()
+            .expect("on")
+            .estimator
+            .note_carried(middle * 2);
+
+        let later = t0 + Duration::from_secs(5);
+        carried(&mut sub, middle, later);
+        sub.downlink.as_mut().expect("on").raw_queue_since = Some(later);
+        let run = sub.run_downlink(&input, later);
+        assert_eq!(run.carried_bps, None);
+        assert!(run.changes.is_empty(), "a queue stands");
+        {
+            let downlink = sub.downlink.as_mut().expect("on");
+            downlink.raw_queue_since = None;
+            downlink.cut_pending = true;
+        }
+        let run = sub.run_downlink(&input, later + Duration::from_millis(100));
+        assert!(run.changes.is_empty(), "a cut is pending");
+        sub.downlink.as_mut().expect("on").cut_pending = false;
+        let run = sub.run_downlink(&input, later + Duration::from_millis(200));
+        assert_eq!(run.carried_bps, Some(middle));
+        assert_eq!(run.changes.len(), 1);
+        assert_eq!(
+            (run.changes[0].to, run.changes[0].why),
+            (VideoQuality::Middle, "probe")
+        );
+    }
+
+    /// A set that the path takes away again soon after it was given
+    /// proved too large: the next try at it waits, longer each time, and
+    /// no proof gives it in the meantime; a set that stays puts the wait
+    /// back to the first.
+    #[test]
+    fn a_set_taken_away_soon_after_it_was_given_waits_longer_each_time() {
+        use crate::downlink_probe::{TOO_LARGE_FIRST_WAIT, TOO_LARGE_WITHIN};
+
+        let t0 = Instant::now();
+        let mut sub = downlink_peer("sub", "call");
+        add_three_tracks(&mut sub, "pub");
+        let input = [downlink_input("pub", VideoQuality::Middle)];
+        let middle = DL_LIGHT_BPS + downlink_allocation::with_headroom(DL_MIDDLE_BPS);
+        let _ = sub.run_downlink(&input, t0);
+        known_budget(&mut sub, DL_LIGHT_BPS, t0);
+        let _ = sub.run_downlink(&input, t0 + Duration::from_secs(1));
+
+        // Given on proof, and taken away by the path `after` later.
+        let give = |sub: &mut MediaPeer, at: Instant| {
+            sub.downlink
+                .as_mut()
+                .expect("on")
+                .estimator
+                .note_carried(middle * 2);
+            carried(sub, middle, at);
+            sub.run_downlink(&input, at)
+        };
+        // The path lowers the estimate to `bps`, under what the light and
+        // the middle picture put on the wire (650 kbit/s).
+        let take_to = |sub: &mut MediaPeer, bps: u64, at: Instant| {
+            known_budget(sub, bps, at);
+            sub.run_downlink(&input, at)
+        };
+        let take = |sub: &mut MediaPeer, at: Instant| take_to(sub, 400_000, at);
+        let mut at = t0 + Duration::from_secs(5);
+        for wait in [10u64, 20, 40, 60, 60] {
+            let run = give(&mut sub, at);
+            assert_eq!(run.changes.len(), 1, "given after the wait: {run:?}");
+            assert_eq!(run.changes[0].to, VideoQuality::Middle);
+            at += Duration::from_secs(3);
+            let run = take(&mut sub, at);
+            assert_eq!(run.changes[0].why, "path-cut");
+            assert_eq!(
+                run.too_large,
+                Some((1, Duration::from_secs(wait))),
+                "taken away three seconds after it was given"
+            );
+            let snap = sub.downlink_snapshot(at).expect("on");
+            assert_eq!(snap.held_from_level, Some(1), "one middle picture");
+            // No proof gives it while the wait runs, and no probe starts
+            // toward it.
+            sub.downlink
+                .as_mut()
+                .expect("on")
+                .recent
+                .push_back((Mid::from("7"), 100, 1200));
+            let soon = at + Duration::from_millis(wait * 1000 - 100);
+            let run = give(&mut sub, soon);
+            assert!(run.changes.is_empty(), "held for {wait} s: {run:?}");
+            assert_eq!(run.probe_started_bps, None);
+            at += Duration::from_secs(wait);
+        }
+
+        // Given once more, and this time it stays: the wait is the first
+        // again, and a path that takes it away a minute later proved
+        // nothing against it.
+        let run = give(&mut sub, at);
+        assert_eq!(run.changes.len(), 1);
+        let held = at + TOO_LARGE_WITHIN;
+        let _ = sub.run_downlink(&input, held);
+        let snap = sub.downlink_snapshot(held).expect("on");
+        assert_eq!(snap.too_large_wait_secs, TOO_LARGE_FIRST_WAIT.as_secs());
+        // (Nothing to copy as padding from here on: no probe starts, and
+        // the rest is about what is given on proof.)
+        sub.downlink.as_mut().expect("on").recent.clear();
+        let run = take(&mut sub, held + Duration::from_secs(40));
+        assert_eq!(run.changes.len(), 1);
+        assert_eq!(run.too_large, None, "a set that had stayed");
+
+        // And a path that collapses under a set three seconds after it
+        // was given (the estimate at the light picture alone, less than
+        // half of what the set put on the wire) says nothing of the set.
+        let again = held + Duration::from_secs(60);
+        let run = give(&mut sub, again);
+        assert_eq!(run.changes.len(), 1);
+        let run = take_to(&mut sub, DL_LIGHT_BPS, again + Duration::from_secs(3));
+        assert_eq!(run.changes[0].why, "path-cut");
+        assert_eq!(run.too_large, None, "a stall of the path");
+        let snap = sub.downlink_snapshot(again).expect("on");
+        assert_eq!(snap.held_from_level, None);
+    }
+
+    /// A probe does not start into a clump of media, and while it runs a
+    /// clump is measured against the rate being tried, not against an
+    /// estimate that a dip left far below the path.
+    #[test]
+    fn a_clump_is_measured_against_the_rate_a_probe_tries() {
+        use crate::downlink_probe::ProbeFailure;
+
+        let t0 = Instant::now();
+        let mut sub = downlink_peer("sub", "call");
+        add_three_tracks(&mut sub, "pub");
+        let input = [downlink_input("pub", VideoQuality::Middle)];
+        let middle = DL_LIGHT_BPS + downlink_allocation::with_headroom(DL_MIDDLE_BPS);
+        let _ = sub.run_downlink(&input, t0);
+        known_budget(&mut sub, DL_LIGHT_BPS, t0);
+        let _ = sub.run_downlink(&input, t0 + Duration::from_secs(1));
+        let at = t0 + Duration::from_secs(4);
+        {
+            let downlink = sub.downlink.as_mut().expect("on");
+            downlink.recent.push_back((Mid::from("7"), 100, 1200));
+            // A key frame of the light picture is going out: 1200 bytes
+            // are 64 ms at the estimate of 150 kbit/s.
+            downlink.note_written(1200, at);
+            assert!(downlink.clump_being_written(at));
+        }
+        let run = sub.run_downlink(&input, at);
+        assert_eq!(run.probe_started_bps, None, "not into a clump");
+        let start = at + Duration::from_millis(200);
+        let run = sub.run_downlink(&input, start);
+        assert_eq!(run.probe_started_bps, Some(middle), "once it has gone");
+
+        let downlink = sub.downlink.as_mut().expect("on");
+        // 4000 bytes at once: 213 ms at the estimate, 43 ms at the
+        // 750 kbit/s the probe tries.
+        let key = start + Duration::from_millis(300);
+        downlink.note_written(4000, key);
+        downlink.give_probe_up_on_a_clump(key);
+        assert!(
+            downlink.probe.is_running(),
+            "not a clump at the probe's rate"
+        );
+        // And 8000 more on top: 128 ms at that rate.
+        downlink.note_written(8000, key);
+        downlink.give_probe_up_on_a_clump(key);
+        assert!(!downlink.probe.is_running());
+        assert_eq!(
+            downlink.outcomes.last().and_then(|o| o.failure),
+            Some(ProbeFailure::Disturbed)
+        );
     }
 
     /// The middle picture is never sent in place of one that is not
@@ -16375,7 +17627,7 @@ mod tests {
         // middle track has stopped.
         let sub = router.peer_mut(&pid("sub")).expect("there");
         assert_eq!(taken(sub, "c", false), (false, false, true));
-        let due = sub.due_resume_keyframes(after);
+        let due = sub.due_resume_keyframes(after, &[]);
         assert!(due
             .iter()
             .any(|track| track.source_peer == pid("c") && track.role == TrackRole::Main));
@@ -16412,6 +17664,854 @@ mod tests {
         assert!(
             !client.peer_or_insert(pid("c"), now).downlink_control(),
             "not when the client decides its bitrate"
+        );
+    }
+    // ---- Senders nobody watches (`video-needed`) ----
+
+    /// A publisher that declared a light sender, and a middle one when
+    /// `middle`, with a receive stream on each of its video mids.
+    fn needed_publisher(name: &str, middle: bool, mut peer: MediaPeer) -> MediaPeer {
+        peer.set_call_id("call".to_owned());
+        let mids: &[&str] = if middle {
+            &[MAIN_MID, LIGHT_MID, MIDDLE_MID]
+        } else {
+            &[MAIN_MID, LIGHT_MID]
+        };
+        peer.light_mid = Some(Mid::from(LIGHT_MID));
+        if middle {
+            peer.middle_mid = Some(Mid::from(MIDDLE_MID));
+        }
+        for (i, mid) in mids.iter().enumerate() {
+            let mid = Mid::from(*mid);
+            let ssrc: Ssrc = (0x1000 + u32::try_from(i).expect("fits")).into();
+            {
+                let mut api = peer.rtc.direct_api();
+                api.declare_media(mid, MediaKind::Video);
+                api.expect_stream_rx(ssrc, None, mid, None);
+            }
+            peer.register_local_track_in(mid, MediaKind::Video);
+        }
+        assert_eq!(peer.id(), &pid(name));
+        peer
+    }
+
+    /// A subscriber named `name` with `publisher`'s tracks open.
+    fn needed_subscriber(name: &str, publisher: &str, middle: bool) -> MediaPeer {
+        let mut sub = peer_in_call(name, "call");
+        if middle {
+            add_three_tracks(&mut sub, publisher);
+        } else {
+            for (mid, role) in [
+                (MAIN_MID, TrackRole::Main),
+                (LIGHT_MID, TrackRole::LightCompanion),
+            ] {
+                assert!(sub.observe_remote_track_in(pid(publisher), video_track_in(mid, role)));
+            }
+            open_all(&mut sub);
+            sub.apply_video_wants();
+        }
+        sub
+    }
+
+    /// Run [`drive_video_needed`] at `at`, whatever the time since it
+    /// last ran, and return what each publisher is told.
+    fn needed_at(router: &mut MediaRouter, at: Instant) -> Vec<(MediaPeerId, bool, bool)> {
+        router.video_needed_ran = None;
+        drive_video_needed(router, at)
+            .into_iter()
+            .map(|(id, frame)| match frame {
+                ServerFrame::VideoNeeded { main, middle } => (id, main, middle),
+                other => panic!("expected video-needed, got {other:?}"),
+            })
+            .collect()
+    }
+
+    fn set_wants(router: &mut MediaRouter, sub: &str, wants: &[VideoWant]) {
+        take_video_wants(router, &pid(sub), wants);
+    }
+
+    #[test]
+    fn the_need_rule_counts_only_what_a_subscriber_named() {
+        let source = pid("pub");
+        // (what the subscriber asked for, downlink control) -> (main, middle)
+        let cases = [
+            // Nothing said: nothing heavy, with or without downlink control.
+            (None, false, (false, false)),
+            (None, true, (false, false)),
+            (Some(VideoQuality::Main), false, (true, false)),
+            (Some(VideoQuality::Middle), false, (false, true)),
+            (Some(VideoQuality::Light), false, (false, false)),
+            // Under downlink control the middle picture is what a main
+            // one falls back to: it stays needed.
+            (Some(VideoQuality::Main), true, (true, true)),
+            (Some(VideoQuality::Middle), true, (false, true)),
+            (Some(VideoQuality::Light), true, (false, false)),
+        ];
+        for (asked, downlink, expected) in cases {
+            let mut sub = if downlink {
+                downlink_peer("sub", "call")
+            } else {
+                peer_in_call("sub", "call")
+            };
+            add_three_tracks(&mut sub, "pub");
+            if let Some(quality) = asked {
+                sub.set_video_wants(&[want("pub", quality)]);
+            }
+            assert_eq!(
+                sub.heavy_wanted_of(&source, true),
+                expected,
+                "asked {asked:?}, downlink control {downlink}"
+            );
+            // Another publisher's senders are not this one's business.
+            assert_eq!(sub.heavy_wanted_of(&pid("other"), true), (false, false));
+        }
+
+        // A set that does not name the publisher is silence about it.
+        let mut sub = three_track_subscriber("pub");
+        sub.set_video_wants(&[want("pub", VideoQuality::Main)]);
+        assert_eq!(sub.heavy_wanted_of(&source, true), (true, false));
+        sub.set_video_wants(&[want("someone-else", VideoQuality::Main)]);
+        assert_eq!(sub.heavy_wanted_of(&source, true), (false, false));
+        // The forwarding default is what it was: main, when it flows.
+        assert_eq!(sub.video_quality_for(&source), VideoQuality::Main);
+        assert_eq!(taken(&mut sub, "pub", false), (true, false, true));
+
+        // The wish, not what downlink control gives: a subscriber given
+        // the light picture alone still wants what it asked for.
+        let mut sub = downlink_peer("sub", "call");
+        add_three_tracks(&mut sub, "pub");
+        sub.set_video_wants(&[want("pub", VideoQuality::Main)]);
+        sub.downlink
+            .as_mut()
+            .expect("on")
+            .given
+            .insert(source.clone(), VideoQuality::Light);
+        sub.apply_video_wants();
+        assert_eq!(sub.video_quality_given(&source), VideoQuality::Light);
+        assert_eq!(sub.heavy_wanted_of(&source, true), (true, true));
+
+        // A publisher without a middle sender: asking for middle is asking
+        // for main, for good, and nothing wants a sender that is not there.
+        let mut sub = needed_subscriber("sub", "pub", false);
+        sub.set_video_wants(&[want("pub", VideoQuality::Middle)]);
+        assert_eq!(sub.heavy_wanted_of(&source, false), (true, false));
+    }
+
+    #[test]
+    fn a_subscriber_that_named_middle_counts_for_middle_only_while_it_negotiates() {
+        let source = pid("pub");
+        let mut sub = peer_in_call("sub", "call");
+        for (mid, role) in [
+            (MAIN_MID, TrackRole::Main),
+            (LIGHT_MID, TrackRole::LightCompanion),
+            (MIDDLE_MID, TrackRole::Middle),
+        ] {
+            assert!(sub.observe_remote_track_in(source.clone(), video_track_in(mid, role)));
+        }
+        assert_eq!(sub.heavy_wanted_of(&source, true), (false, false));
+
+        // It names middle before any of its tracks is open: middle, and
+        // not main, though main is what it would be forwarded meanwhile.
+        sub.set_video_wants(&[want("pub", VideoQuality::Middle)]);
+        assert_eq!(sub.video_quality_for(&source), VideoQuality::Main);
+        assert_eq!(sub.heavy_wanted_of(&source, true), (false, true));
+        // The main and the light track open first, the middle one is
+        // still being negotiated: the same.
+        for entry in &mut sub.tracks_out {
+            entry.state = if entry.role == TrackRole::Middle {
+                TrackOutState::Negotiating(Mid::new())
+            } else {
+                TrackOutState::Open(Mid::new())
+            };
+        }
+        sub.apply_video_wants();
+        assert_eq!(sub.video_quality_for(&source), VideoQuality::Main);
+        assert_eq!(sub.heavy_wanted_of(&source, true), (false, true));
+        // What it is forwarded in the meantime is unchanged: main.
+        assert_eq!(
+            sub.forward_packet(&source, &video_packet_on(MAIN_MID, 1, false)),
+            MediaForward::NoWriter
+        );
+        open_all(&mut sub);
+        sub.apply_video_wants();
+        assert_eq!(sub.heavy_wanted_of(&source, true), (false, true));
+        // The middle track's entry has not even arrived on the subscriber.
+        let mut early = peer_in_call("early", "call");
+        assert!(early.observe_remote_track_in(
+            source.clone(),
+            video_track_in(LIGHT_MID, TrackRole::LightCompanion)
+        ));
+        early.set_video_wants(&[want("pub", VideoQuality::Middle)]);
+        assert_eq!(early.heavy_wanted_of(&source, true), (false, true));
+    }
+
+    #[test]
+    fn a_joiner_that_says_light_then_middle_never_switches_main_on() {
+        let t0 = Instant::now();
+        let mut router = idle_router(t0);
+        let _ = main_goes_idle(&mut router, t0);
+        let ms = Duration::from_millis;
+        // Somebody joins: the tracks are in its list, then offered.
+        let arrival = t0 + video_needed::UNNEEDED_AFTER + Duration::from_secs(5);
+        let mut joiner = peer_in_call("joiner", "call");
+        for (mid, role) in [
+            (MAIN_MID, TrackRole::Main),
+            (LIGHT_MID, TrackRole::LightCompanion),
+            (MIDDLE_MID, TrackRole::Middle),
+        ] {
+            assert!(joiner.observe_remote_track_in(pid("pub"), video_track_in(mid, role)));
+        }
+        router.add_peer(joiner);
+        assert!(needed_at(&mut router, arrival).is_empty());
+        for entry in &mut router.peer_mut(&pid("joiner")).expect("there").tracks_out {
+            entry.state = TrackOutState::Negotiating(Mid::new());
+        }
+        // In the millisecond of the offer it says light for everyone, and
+        // 230 ms later middle; its tracks open at some point in between.
+        set_wants(&mut router, "joiner", &[want("pub", VideoQuality::Light)]);
+        assert!(needed_at(&mut router, arrival).is_empty());
+        open_all(router.peer_mut(&pid("joiner")).expect("there"));
+        assert!(needed_at(&mut router, arrival + ms(100)).is_empty());
+        set_wants(&mut router, "joiner", &[want("pub", VideoQuality::Middle)]);
+        let mut at = arrival + ms(230);
+        while at < arrival + Duration::from_secs(30) {
+            assert!(
+                needed_at(&mut router, at).is_empty(),
+                "the publisher is told nothing: main stays off, middle was on"
+            );
+            at += ms(250);
+        }
+        assert_eq!(
+            find_peer(&router, "pub").video_needed_told(),
+            Some(Needed {
+                main: false,
+                middle: true
+            })
+        );
+        // Naming main is what switches it on, in the same pass.
+        set_wants(&mut router, "joiner", &[want("pub", VideoQuality::Main)]);
+        assert_eq!(needed_at(&mut router, at), vec![(pid("pub"), true, true)]);
+    }
+
+    #[test]
+    fn a_silent_subscriber_never_switches_a_sender_on() {
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        router.add_peer(needed_publisher(
+            "pub",
+            true,
+            MediaPeer::new(pid("pub"), t0),
+        ));
+        // A subscriber that never sends `video-wants`, from the start.
+        router.add_peer(needed_subscriber("silent", "pub", true));
+        assert_eq!(needed_at(&mut router, t0), vec![(pid("pub"), true, true)]);
+        let off = t0 + video_needed::UNNEEDED_AFTER;
+        assert_eq!(
+            needed_at(&mut router, off),
+            vec![(pid("pub"), false, false)]
+        );
+        // Another one joins, under downlink control, and stays silent too.
+        let mut second = downlink_peer("second", "call");
+        add_three_tracks(&mut second, "pub");
+        router.add_peer(second);
+        let mut at = off;
+        while at < off + Duration::from_secs(120) {
+            assert!(
+                needed_at(&mut router, at).is_empty(),
+                "silence switches nothing on"
+            );
+            at += Duration::from_secs(1);
+        }
+        // What it is forwarded is what there is: its main track is not
+        // paused, so main the moment main flows, and the light track.
+        let silent = router.peer_mut(&pid("silent")).expect("there");
+        assert_eq!(taken(silent, "pub", false), (true, false, true));
+        // Its first word switches the sender on at once.
+        set_wants(&mut router, "silent", &[want("pub", VideoQuality::Middle)]);
+        assert_eq!(needed_at(&mut router, at), vec![(pid("pub"), false, true)]);
+    }
+
+    #[test]
+    fn a_publisher_is_told_true_first_false_after_the_delay_and_true_at_once() {
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        router.add_peer(needed_publisher(
+            "pub",
+            true,
+            MediaPeer::new(pid("pub"), t0),
+        ));
+        router.add_peer(needed_subscriber("s1", "pub", true));
+        router.add_peer(needed_subscriber("s2", "pub", true));
+        set_wants(&mut router, "s1", &[want("pub", VideoQuality::Middle)]);
+        set_wants(&mut router, "s2", &[want("pub", VideoQuality::Middle)]);
+
+        // The first word: everything on, though nobody wants main.
+        assert_eq!(needed_at(&mut router, t0), vec![(pid("pub"), true, true)]);
+        assert_eq!(
+            find_peer(&router, "pub").video_needed_told(),
+            Some(Needed {
+                main: true,
+                middle: true
+            })
+        );
+        // Nothing more until the delay is over.
+        let almost = t0 + video_needed::UNNEEDED_AFTER.saturating_sub(Duration::from_millis(1));
+        assert!(needed_at(&mut router, almost).is_empty());
+        let off = t0 + video_needed::UNNEEDED_AFTER;
+        assert_eq!(needed_at(&mut router, off), vec![(pid("pub"), false, true)]);
+        assert!(needed_at(&mut router, off + Duration::from_secs(60)).is_empty());
+
+        // One subscriber goes to the speaker view: told in the same pass.
+        let back = off + Duration::from_secs(90);
+        set_wants(&mut router, "s1", &[want("pub", VideoQuality::Main)]);
+        assert_eq!(router.video_needed_ran, None, "the next pass runs it");
+        assert_eq!(
+            drive_video_needed(&mut router, back)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![(
+                pid("pub"),
+                ServerFrame::VideoNeeded {
+                    main: true,
+                    middle: true
+                }
+            )]
+        );
+        // Both go to the light picture: both senders off, after the delay.
+        set_wants(&mut router, "s1", &[want("pub", VideoQuality::Light)]);
+        set_wants(&mut router, "s2", &[want("pub", VideoQuality::Light)]);
+        assert!(needed_at(&mut router, back + Duration::from_secs(1)).is_empty());
+        assert_eq!(
+            needed_at(
+                &mut router,
+                back + Duration::from_secs(1) + video_needed::UNNEEDED_AFTER
+            ),
+            vec![(pid("pub"), false, false)]
+        );
+    }
+
+    #[test]
+    fn the_pass_is_throttled_unless_wants_changed() {
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        router.add_peer(needed_publisher(
+            "pub",
+            true,
+            MediaPeer::new(pid("pub"), t0),
+        ));
+        assert_eq!(drive_video_needed(&mut router, t0).len(), 1);
+        router
+            .peer_mut(&pid("pub"))
+            .expect("there")
+            .video_needed_not_delivered();
+        let soon = t0 + VIDEO_NEEDED_INTERVAL.saturating_sub(Duration::from_millis(1));
+        assert!(drive_video_needed(&mut router, soon).is_empty());
+        // The frame that was not delivered is produced again.
+        assert_eq!(
+            drive_video_needed(&mut router, t0 + VIDEO_NEEDED_INTERVAL).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_publisher_without_a_middle_sender_is_never_told_middle() {
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        router.add_peer(needed_publisher(
+            "pub",
+            false,
+            MediaPeer::new(pid("pub"), t0),
+        ));
+        router.add_peer(needed_subscriber("sub", "pub", false));
+        assert_eq!(needed_at(&mut router, t0), vec![(pid("pub"), true, false)]);
+        // Asked for middle of a publisher that has none: main it is.
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Middle)]);
+        let later = t0 + video_needed::UNNEEDED_AFTER * 3;
+        assert!(needed_at(&mut router, later).is_empty());
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Light)]);
+        assert!(needed_at(&mut router, later).is_empty());
+        assert_eq!(
+            needed_at(&mut router, later + video_needed::UNNEEDED_AFTER),
+            vec![(pid("pub"), false, false)]
+        );
+    }
+
+    #[test]
+    fn a_subscriber_that_left_no_longer_counts() {
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        router.add_peer(needed_publisher(
+            "pub",
+            true,
+            MediaPeer::new(pid("pub"), t0),
+        ));
+        router.add_peer(needed_subscriber("grid", "pub", true));
+        router.add_peer(needed_subscriber("speaker", "pub", true));
+        set_wants(&mut router, "grid", &[want("pub", VideoQuality::Middle)]);
+        set_wants(&mut router, "speaker", &[want("pub", VideoQuality::Main)]);
+        assert_eq!(needed_at(&mut router, t0), vec![(pid("pub"), true, true)]);
+        // The speaker view keeps main on for as long as it is there.
+        let long = t0 + video_needed::UNNEEDED_AFTER * 5;
+        assert!(needed_at(&mut router, long).is_empty());
+        assert!(router.remove_peer(&pid("speaker")));
+        assert!(needed_at(&mut router, long).is_empty(), "off is late");
+        assert_eq!(
+            needed_at(&mut router, long + video_needed::UNNEEDED_AFTER),
+            vec![(pid("pub"), false, true)]
+        );
+        // And with the last subscriber gone, the middle one too.
+        assert!(router.remove_peer(&pid("grid")));
+        let alone = long + video_needed::UNNEEDED_AFTER * 2;
+        assert!(needed_at(&mut router, alone).is_empty());
+        assert_eq!(
+            needed_at(&mut router, alone + video_needed::UNNEEDED_AFTER),
+            vec![(pid("pub"), false, false)]
+        );
+        // A newcomer that names main switches it back on at once.
+        let mut joiner = peer_in_call("joiner", "call");
+        assert!(
+            joiner.observe_remote_track_in(pid("pub"), video_track_in(MAIN_MID, TrackRole::Main))
+        );
+        router.add_peer(joiner);
+        let arrival = alone + video_needed::UNNEEDED_AFTER * 2;
+        assert!(
+            needed_at(&mut router, arrival).is_empty(),
+            "it has said nothing"
+        );
+        set_wants(&mut router, "joiner", &[want("pub", VideoQuality::Main)]);
+        assert_eq!(
+            needed_at(&mut router, arrival),
+            vec![(pid("pub"), true, false)]
+        );
+    }
+
+    #[test]
+    fn with_the_switch_off_or_no_declared_senders_nothing_is_ever_told() {
+        let t0 = Instant::now();
+        let off = MediaPeer::with_downlink_control(
+            pid("pub"),
+            t0,
+            None,
+            false,
+            BitrateControl::Client,
+            LossProtection {
+                video_needed: false,
+                ..LossProtection::default()
+            },
+            false,
+        );
+        let mut router = MediaRouter::new();
+        router.add_peer(needed_publisher("pub", true, off));
+        // A publisher of one video track that declared nothing.
+        let mut plain = publisher_with_video("plain", "call", &[MAIN_MID]);
+        plain.register_local_track_in(Mid::from(MAIN_MID), MediaKind::Video);
+        router.add_peer(plain);
+        let mut sub = needed_subscriber("sub", "pub", true);
+        open_video_track(&mut sub, &pid("plain"), Mid::from(MAIN_MID));
+        router.add_peer(sub);
+        set_wants(
+            &mut router,
+            "sub",
+            &[
+                want("pub", VideoQuality::Light),
+                want("plain", VideoQuality::Light),
+            ],
+        );
+        for secs in [0, 1, 11, 60, 600] {
+            assert!(needed_at(&mut router, t0 + Duration::from_secs(secs)).is_empty());
+        }
+        for name in ["pub", "plain"] {
+            let peer = find_peer(&router, name);
+            assert!(!peer.told_video_needed());
+            assert_eq!(peer.video_needed_told(), None);
+            assert!(peer.idle_senders().is_empty());
+        }
+        // And a packet of theirs is noted against nothing.
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        publisher.note_sender_arrival(&video_packet_on(MAIN_MID, 1, false), t0);
+        assert!(publisher.needs.senders.is_empty());
+    }
+
+    /// Bring `pub`'s main sender to idle: told `false`, then silent.
+    /// Returns the moment it was taken for idle.
+    fn main_goes_idle(router: &mut MediaRouter, t0: Instant) -> Instant {
+        set_wants(router, "sub", &[want("pub", VideoQuality::Middle)]);
+        assert_eq!(needed_at(router, t0), vec![(pid("pub"), true, true)]);
+        let off = t0 + video_needed::UNNEEDED_AFTER;
+        // The sender is still flowing when it is told to stop.
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        for i in 0..20u64 {
+            let at = t0
+                + video_needed::UNNEEDED_AFTER.saturating_sub(Duration::from_millis(200))
+                + Duration::from_millis(10 * i);
+            let packet = RelayPacket {
+                arrival: at,
+                ..video_packet_on(MAIN_MID, 100 + i, i == 0)
+            };
+            publisher.note_sender_arrival(&packet, at);
+            publisher.observe_uplink_burst(&packet);
+            publisher.observe_burst_end(&packet);
+        }
+        assert_eq!(needed_at(router, off), vec![(pid("pub"), false, true)]);
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        assert!(
+            !publisher.sender_idle(Mid::from(MAIN_MID)),
+            "not yet silent"
+        );
+        let idle = off + video_needed::IDLE_QUIET;
+        assert!(needed_at(router, idle).is_empty());
+        assert!(find_peer(router, "pub").sender_idle(Mid::from(MAIN_MID)));
+        idle
+    }
+
+    fn idle_router(t0: Instant) -> MediaRouter {
+        let mut router = MediaRouter::new();
+        router.add_peer(needed_publisher(
+            "pub",
+            true,
+            MediaPeer::new(pid("pub"), t0),
+        ));
+        router.add_peer(needed_subscriber("sub", "pub", true));
+        router
+    }
+
+    #[test]
+    fn a_sender_told_to_stop_that_goes_on_sending_is_never_idle() {
+        let t0 = Instant::now();
+        let mut router = idle_router(t0);
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Middle)]);
+        let _ = needed_at(&mut router, t0);
+        let off = t0 + video_needed::UNNEEDED_AFTER;
+        assert_eq!(needed_at(&mut router, off), vec![(pid("pub"), false, true)]);
+        // A client that ignores the frame: a packet every 30 ms.
+        for i in 0..200u64 {
+            let at = off + Duration::from_millis(30 * i);
+            let publisher = router.peer_mut(&pid("pub")).expect("there");
+            publisher.note_sender_arrival(&video_packet_on(MAIN_MID, 100 + i, false), at);
+            assert!(needed_at(&mut router, at).is_empty());
+            assert!(!find_peer(&router, "pub").sender_idle(Mid::from(MAIN_MID)));
+        }
+        // The middle and the light sender were never expected to stop.
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        assert!(!publisher.sender_idle(Mid::from(MIDDLE_MID)));
+        assert!(!publisher.sender_idle(Mid::from(LIGHT_MID)));
+    }
+
+    #[test]
+    fn going_idle_and_coming_back_is_no_burst_and_no_loss() {
+        let t0 = Instant::now();
+        let mut router = idle_router(t0);
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Middle)]);
+        assert_eq!(needed_at(&mut router, t0), vec![(pid("pub"), true, true)]);
+        let off = t0 + video_needed::UNNEEDED_AFTER;
+        assert_eq!(needed_at(&mut router, off), vec![(pid("pub"), false, true)]);
+        // The sender runs on for a moment, and two packets are lost
+        // right before it stops (under the share of an interval that is
+        // a burst by itself: that rule is not what is tested here).
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        let mut last = off;
+        for seq in (100..140u64).chain([142]) {
+            last = off + Duration::from_millis(seq - 100);
+            let packet = RelayPacket {
+                arrival: last,
+                ..video_packet_on(MAIN_MID, seq, false)
+            };
+            publisher.note_sender_arrival(&packet, last);
+            publisher.observe_uplink_burst(&packet);
+            publisher.observe_burst_end(&packet);
+        }
+        assert_eq!(publisher.uplink_bursts.open_holes(), 2);
+        assert!(publisher.burst_ends.in_burst((Mid::from(MAIN_MID), None)));
+        // Still within the quiet time: not idle, the books stand.
+        let nearly = last + video_needed::IDLE_QUIET.saturating_sub(Duration::from_millis(1));
+        assert!(needed_at(&mut router, nearly).is_empty());
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        assert!(!publisher.sender_idle(Mid::from(MAIN_MID)));
+        assert_eq!(publisher.uplink_bursts.open_holes(), 2);
+        // Silent for the quiet time: idle, and its books are closed.
+        let idle = last + video_needed::IDLE_QUIET;
+        assert!(needed_at(&mut router, idle).is_empty());
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        assert!(publisher.sender_idle(Mid::from(MAIN_MID)));
+        assert_eq!(publisher.uplink_bursts.open_holes(), 0);
+        assert_eq!(publisher.burst_ends.open_holes(), 0);
+        assert!(!publisher.burst_ends.in_burst((Mid::from(MAIN_MID), None)));
+        assert!(!publisher.poll_uplink_burst(idle + Duration::from_secs(1)));
+        assert!(publisher
+            .poll_burst_ends(idle + Duration::from_secs(5))
+            .is_empty());
+
+        // A minute later it is switched back on, 300 sequence numbers on.
+        let back = idle + Duration::from_secs(60);
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Main)]);
+        assert_eq!(needed_at(&mut router, back), vec![(pid("pub"), true, true)]);
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        assert!(
+            publisher.sender_idle(Mid::from(MAIN_MID)),
+            "idle until its first packet"
+        );
+        for i in 0..60u64 {
+            let at = back + Duration::from_millis(100 + 10 * i);
+            let packet = RelayPacket {
+                arrival: at,
+                ..video_packet_on(MAIN_MID, 425 + i, i == 0)
+            };
+            publisher.note_sender_arrival(&packet, at);
+            publisher.observe_uplink_burst(&packet);
+            publisher.observe_burst_end(&packet);
+            assert!(!publisher.sender_idle(Mid::from(MAIN_MID)));
+            assert!(!publisher.poll_uplink_burst(at), "no burst at packet {i}");
+        }
+        assert_eq!(publisher.uplink_bursts.open_holes(), 0);
+        assert!(!publisher.burst_ends.in_burst((Mid::from(MAIN_MID), None)));
+        assert!(publisher
+            .poll_burst_ends(back + Duration::from_secs(10))
+            .is_empty());
+        assert!(drive_burst_keyframes(&mut router, back + Duration::from_secs(10)).is_empty());
+        // The sender is no longer expected to be silent.
+        let sender = find_peer(&router, "pub").needs.senders[&Mid::from(MAIN_MID)];
+        assert!(!sender.expect_silence && !sender.idle);
+        assert!(sender.returned_at.is_some());
+    }
+
+    #[test]
+    fn a_resuming_track_waits_for_an_idle_sender_without_giving_up() {
+        let t0 = Instant::now();
+        let mut router = idle_router(t0);
+        let idle = main_goes_idle(&mut router, t0);
+        let main = Mid::from(MAIN_MID);
+        // Key frame requests that went unanswered while it was off.
+        router
+            .peer_mut(&pid("pub"))
+            .expect("there")
+            .unanswered_keyframe_requests
+            .insert((main, None), KEYFRAME_UNANSWERED_MAX);
+
+        // The subscriber wants main again; the publisher is told at once.
+        let again = idle + Duration::from_secs(30);
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Main)]);
+        assert_eq!(
+            needed_at(&mut router, again),
+            vec![(pid("pub"), true, true)]
+        );
+        // For ten seconds the client does not switch the sender on. The
+        // track neither asks nor uses up its requests nor starts at any
+        // packet.
+        let mut at = again;
+        while at < again + Duration::from_secs(10) {
+            assert_eq!(drive_video_wants(&mut router, at), 0);
+            at += Duration::from_millis(250);
+        }
+        let sub = router.peer_mut(&pid("sub")).expect("there");
+        assert!(sub.track_paused(&pid("pub"), main, TrackRole::Main));
+        match sub.tracks_out[0].forwarding.gate {
+            Gate::Resuming {
+                requests,
+                any_packet,
+                ..
+            } => assert!(requests == 0 && !any_packet),
+            other => panic!("expected a resuming track, got {other:?}"),
+        }
+        // A delta packet arrives first (an encoder that kept its state):
+        // the sender is back, the count of unanswered requests starts
+        // again, the publisher is asked for a key frame, and the track
+        // does not start at that packet.
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        publisher.note_sender_arrival(&video_packet_on(MAIN_MID, 500, false), at);
+        assert!(!publisher.sender_idle(main));
+        assert_eq!(
+            publisher.unanswered_keyframe_requests.get(&(main, None)),
+            Some(&1),
+            "the old count is gone and the request at the return counts one"
+        );
+        assert_eq!(
+            publisher.last_keyframe_request.get(&(main, None)),
+            Some(&at)
+        );
+        let sub = router.peer_mut(&pid("sub")).expect("there");
+        assert_eq!(
+            sub.forward_packet(&pid("pub"), &video_packet_on(MAIN_MID, 500, false)),
+            MediaForward::NotWanted
+        );
+        // From here on the wait is counted as before.
+        let due = sub.due_resume_keyframes(at, &[]);
+        assert_eq!(due.len(), 1, "asked at once now that the sender is back");
+        // The key frame starts the track on the stream's next number.
+        assert_eq!(
+            sub.forward_packet(&pid("pub"), &video_packet_on(MAIN_MID, 501, true)),
+            MediaForward::NoWriter
+        );
+        assert!(!sub.track_paused(&pid("pub"), main, TrackRole::Main));
+    }
+
+    #[test]
+    fn a_sender_that_returns_with_a_key_frame_is_not_asked_for_one() {
+        let t0 = Instant::now();
+        let mut router = idle_router(t0);
+        let idle = main_goes_idle(&mut router, t0);
+        let main = Mid::from(MAIN_MID);
+        let again = idle + Duration::from_secs(5);
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Main)]);
+        let _ = needed_at(&mut router, again);
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        let before = publisher.last_keyframe_request.get(&(main, None)).copied();
+        publisher.note_sender_arrival(&video_packet_on(MAIN_MID, 500, true), again);
+        assert_eq!(
+            publisher.last_keyframe_request.get(&(main, None)).copied(),
+            before
+        );
+        assert!(!publisher.sender_idle(main));
+    }
+
+    #[test]
+    fn an_idle_sender_costs_its_last_rate_then_a_nominal_one_never_nothing() {
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        let mut publisher = downlink_publisher("pub", "call");
+        for (i, mid) in [MAIN_MID, LIGHT_MID, MIDDLE_MID].iter().enumerate() {
+            let ssrc: Ssrc = (0x1000 + u32::try_from(i).expect("fits")).into();
+            let mut api = publisher.rtc.direct_api();
+            api.declare_media(Mid::from(*mid), MediaKind::Video);
+            api.expect_stream_rx(ssrc, None, Mid::from(*mid), None);
+        }
+        router.add_peer(publisher);
+        let mut sub = downlink_peer("sub", "call");
+        add_three_tracks(&mut sub, "pub");
+        router.add_peer(sub);
+        // Under downlink control the middle sender stays needed while
+        // main is wanted, so the light picture is what switches both off.
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Light)]);
+        let _ = needed_at(&mut router, t0);
+        // While it flows: what arrives, and that is remembered.
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        for mid in [MAIN_MID, MIDDLE_MID] {
+            let packet = video_packet_on(mid, 1, false);
+            publisher.note_sender_arrival(&packet, t0);
+            publisher.record_track_packet(&packet, t0);
+        }
+        let flowing = publisher.published_rates(t0);
+        assert_eq!(
+            (flowing.main_bps, flowing.middle_bps, flowing.light_bps),
+            (DL_MAIN_BPS, DL_MIDDLE_BPS, DL_LIGHT_BPS)
+        );
+        let off = t0 + video_needed::UNNEEDED_AFTER;
+        assert_eq!(
+            needed_at(&mut router, off),
+            vec![(pid("pub"), false, false)]
+        );
+        let idle = off + video_needed::IDLE_QUIET;
+        let _ = needed_at(&mut router, idle);
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        assert!(publisher.sender_idle(Mid::from(MAIN_MID)));
+        assert!(publisher.sender_idle(Mid::from(MIDDLE_MID)));
+
+        // The meters have run dry: the cost is the remembered rate.
+        let dry = idle + Duration::from_secs(20);
+        assert_eq!(publisher.track_rate_bps(Mid::from(MAIN_MID), dry), 0);
+        let rates = publisher.published_rates(dry);
+        assert_eq!(rates.main_bps, DL_MAIN_BPS);
+        assert_eq!(rates.middle_bps, DL_MIDDLE_BPS);
+        // Past the memory: the nominal rate of each role.
+        let stale = t0 + video_needed::RATE_MEMORY + Duration::from_secs(30);
+        let rates = publisher.published_rates(stale);
+        assert_eq!(rates.main_bps, video_needed::NOMINAL_MAIN_BPS);
+        assert_eq!(rates.middle_bps, video_needed::NOMINAL_MIDDLE_BPS);
+        assert_eq!(rates.light_bps, 0, "a light sender is measured as before");
+
+        // Switched back on: for the first two seconds the meter still
+        // holds the silence, and the cost stays the nominal one.
+        let back = stale + Duration::from_secs(1);
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Main)]);
+        assert_eq!(needed_at(&mut router, back), vec![(pid("pub"), true, true)]);
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        let packet = video_packet_on(MAIN_MID, 900, true);
+        publisher.note_sender_arrival(&packet, back);
+        publisher.record_track_packet(&packet, back);
+        let rates = publisher.published_rates(back + Duration::from_millis(500));
+        assert_eq!(rates.main_bps, video_needed::NOMINAL_MAIN_BPS);
+        // A publisher that is told nothing is measured as before: zero.
+        let mut plain = downlink_peer("plain", "call");
+        plain.register_local_track_in(Mid::from(MAIN_MID), MediaKind::Video);
+        assert_eq!(plain.published_rates(t0).main_bps, 0);
+    }
+
+    #[test]
+    fn the_estimate_cut_while_a_sender_was_off_is_put_back_when_it_is_told_on() {
+        let t0 = Instant::now();
+        let server = MediaPeer::with_downlink_control(
+            pid("pub"),
+            t0,
+            None,
+            false,
+            BitrateControl::Server(EstimatorConfig::default()),
+            LossProtection::default(),
+            false,
+        );
+        let mut router = MediaRouter::new();
+        router.add_peer(needed_publisher("pub", true, server));
+        router.add_peer(needed_subscriber("sub", "pub", true));
+        let estimate = |router: &MediaRouter| {
+            find_peer(router, "pub")
+                .uplink
+                .as_ref()
+                .expect("server-side")
+                .estimator
+                .estimate_bps()
+        };
+        let before = estimate(&router);
+        let idle = main_goes_idle(&mut router, t0);
+        assert_eq!(estimate(&router), before, "going idle lowers nothing");
+        assert_eq!(
+            find_peer(&router, "pub").needs.estimate_before_idle,
+            Some(before)
+        );
+        // The path hiccups while little is arriving, and the estimate is
+        // cut to a fraction of that little.
+        let publisher = router.peer_mut(&pid("pub")).expect("there");
+        let uplink = publisher.uplink.as_mut().expect("server-side");
+        uplink.estimator.force_estimate(300_000);
+        uplink.last_remb = Some((idle, 300_000));
+        assert_eq!(estimate(&router), 300_000);
+
+        // Told to switch main back on: the old figure, and a REMB at the
+        // next tick whatever was last sent.
+        let back = idle + Duration::from_secs(40);
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Main)]);
+        assert_eq!(needed_at(&mut router, back), vec![(pid("pub"), true, true)]);
+        assert_eq!(estimate(&router), before);
+        let publisher = find_peer(&router, "pub");
+        assert_eq!(publisher.uplink.as_ref().expect("on").last_remb, None);
+        assert_eq!(publisher.needs.estimate_before_idle, None);
+    }
+
+    #[test]
+    fn the_publisher_stream_line_says_whether_the_sender_is_needed() {
+        let t0 = Instant::now();
+        let mut router = idle_router(t0);
+        let mut ledger = FanoutLedger::new(Duration::from_secs(5), t0);
+        // Nothing told yet: nothing noted.
+        ledger.record_origin(&pid("pub"), &video_packet_on(MAIN_MID, 1, false));
+        note_video_needed(&router, &mut ledger);
+        assert_eq!(
+            ledger.per_origin[&(pid("pub"), Mid::from(MAIN_MID))].needed,
+            None
+        );
+        let _ = main_goes_idle(&mut router, t0);
+        let mut ledger = FanoutLedger::new(Duration::from_secs(5), t0);
+        ledger.record_origin(&pid("pub"), &video_packet_on(MIDDLE_MID, 1, false));
+        ledger.record_origin(&pid("pub"), &video_packet_on(LIGHT_MID, 1, false));
+        note_video_needed(&router, &mut ledger);
+        // The idle main sender has a line though nothing arrived on it.
+        let main = ledger.per_origin[&(pid("pub"), Mid::from(MAIN_MID))];
+        assert_eq!((main.packets, main.needed), (0, Some(false)));
+        assert_eq!(
+            ledger.per_origin[&(pid("pub"), Mid::from(MIDDLE_MID))].needed,
+            Some(true)
+        );
+        assert_eq!(
+            ledger.per_origin[&(pid("pub"), Mid::from(LIGHT_MID))].needed,
+            None,
+            "the light sender is always needed and is told nothing"
         );
     }
 }

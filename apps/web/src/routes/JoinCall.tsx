@@ -81,6 +81,8 @@ import { useCallHost, type CallHostApi } from "../calls/CallHostContext";
 import { callIdHex } from "../calls/call-signaling-dispatch";
 import { hexKey } from "../calls/multi-joiner-election";
 import { linkCallOccupiesSlot, type LinkCallPhase } from "../calls/link-call-host";
+import { linkJoinRefusal, showsGuestQuestion } from "../calls/link-join-gate";
+import { isSFrameTransformSupported } from "../calls/sframe-transform";
 import { paths } from "./paths";
 import { PublicLayout } from "../ui/PublicLayout";
 import { t } from "../l10n";
@@ -274,9 +276,22 @@ export default function JoinCall() {
     setBusyMessage(null);
     const mine = hostSlot();
     if (mine !== null && linkCallOccupiesSlot(mine.phase)) return;
-    // Refuse before minting a guest account for a call that could not start.
+    // Refuse before minting a guest account for a call that could not start
+    // (`calls/link-join-gate.ts`): a visitor must not be left holding an
+    // account, and be asked whether to keep it, for a call that never began.
     const busy = callHost.callBusyMessage(d.isOwner ? "start" : "join");
-    if (busy !== null) {
+    const refusal = linkJoinRefusal({
+      canEncryptMedia: isSFrameTransformSupported(),
+      busy: busy !== null,
+    });
+    if (refusal === "no-media-encryption") {
+      // Invariant #4: a browser that cannot encrypt call media gets no call.
+      // Said here, before the account, the token and the microphone.
+      setError(() => t("call.error.no_media_encryption"));
+      setLocalPhase("error");
+      return;
+    }
+    if (refusal === "busy") {
       setBusyMessage(busy);
       return;
     }
@@ -562,7 +577,7 @@ export default function JoinCall() {
                 failed, they stopped waiting, or the page was reloaded after
                 the call) can still be asked the question: this page is the
                 only screen a guest has. */}
-            <Show when={auth.isGuest() && (phase() === "idle" || phase() === "error")}>
+            <Show when={showsGuestQuestion({ isGuest: auth.isGuest(), phase: phase() })}>
               <div class="lk-guest-offer-after">
                 <GuestAccountOffer />
               </div>

@@ -101,6 +101,7 @@ vi.mock("../wasm", async () => {
     },
     middleSenderWanted: (people: number): boolean => real.middleSenderWanted(people),
     parseSfuVideoGiven: (json: string): string[] => real.parseSfuVideoGiven(json),
+    parseSfuVideoNeeded: (json: string): Uint8Array => real.parseSfuVideoNeeded(json),
     composeSfuSdpAnswer: (sdp: string): string => JSON.stringify({ kind: "sdp-answer", sdp }),
     composeSfuIceCandidate: (): string => "{}",
     composeSfuPing: (): string => "{}",
@@ -814,9 +815,9 @@ describe("the media counters", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       const lines = info.mock.calls.map((c) => String(c[0]));
       expect(lines.filter((l) => l.includes(" send video "))).toEqual([
-        "call media interval send video mode=L1T3 size=1280x720 fps=30 limited_by=- sender=main",
-        "call media interval send video mode=- size=640x360 fps=30 limited_by=- sender=middle",
-        "call media interval send video mode=- size=320x180 fps=30 limited_by=- sender=light",
+        "call media interval send video mode=L1T3 size=1280x720 fps=30 limited_by=- sender=main needed=- active=yes",
+        "call media interval send video mode=- size=640x360 fps=30 limited_by=- sender=middle needed=- active=no",
+        "call media interval send video mode=- size=320x180 fps=30 limited_by=- sender=light needed=- active=yes",
       ]);
       const senderLine = lines.find((l) => l.includes(" sender encoded="));
       expect(senderLine).toContain("sender encoded=180 pkts=700");
@@ -1552,5 +1553,292 @@ describe("the video the SFU gives", () => {
     session.hangUp();
     expect(session.videoGivenOf("a")).toBeUndefined();
     expect(seen.at(-1)).toEqual({});
+  });
+});
+
+// ---- Senders nobody watches (`video-needed`) -------------------------------
+
+/** The SFU says which of this device's camera senders somebody is sent. */
+function videoNeeded(main: boolean, middle: boolean): void {
+  sockets[0]?.onmessage?.({ data: JSON.stringify({ kind: "video-needed", main, middle }) });
+}
+
+describe("senders nobody watches", () => {
+  /** A call of three (so the middle sender sends), published and answered. */
+  async function inCallOfThree(): Promise<{ session: SfuCallSession; pc: FakePc }> {
+    hooks.welcomeRoster = ["a", "b"];
+    const call = await connected();
+    await answer();
+    return call;
+  }
+
+  it("leaves every sender sending until the SFU says otherwise", async () => {
+    const { pc } = await inCallOfThree();
+    expect(encodingActive(pc.main()) ?? true).toBe(true);
+    expect(encodingActive(pc.middles()[0])).toBe(true);
+    expect(encodingActive(pc.lights()[0]) ?? true).toBe(true);
+    // The first frame says true for everything: nothing to change.
+    videoNeeded(true, true);
+    await flush();
+    expect(activeChanges(pc.main())).toEqual([]);
+    expect(activeChanges(pc.lights()[0])).toEqual([]);
+  });
+
+  it("stops the main sender on false and starts it at once on true, with setParameters alone", async () => {
+    const { pc } = await inCallOfThree();
+    const main = pc.main();
+    const transceivers = [...pc.getTransceivers()];
+    const offers = hooks.offers.length;
+    const seals = hooks.attaches.length;
+
+    videoNeeded(false, true);
+    await flush();
+    expect(encodingActive(main)).toBe(false);
+    expect(encodingActive(pc.middles()[0])).toBe(true);
+
+    videoNeeded(true, true);
+    await flush();
+    expect(encodingActive(main)).toBe(true);
+    expect(activeChanges(main)).toEqual([false, true]);
+
+    // Same transceivers, same tracks, no offer, no new seal.
+    expect(pc.getTransceivers()).toEqual(transceivers);
+    expect(pc.removed).toEqual([]);
+    expect(main?.sender.replaced).toEqual([]);
+    expect(main?.sender.track?.enabled).toBe(true);
+    expect(main?.sender.params.encodings[0]?.["scalabilityMode"]).toBe("L1T3");
+    expect(hooks.offers).toHaveLength(offers);
+    expect(hooks.attaches).toHaveLength(seals);
+  });
+
+  it("stops and starts the middle sender by the SFU's word, and never the light one", async () => {
+    const { pc } = await inCallOfThree();
+    videoNeeded(false, false);
+    await flush();
+    expect(encodingActive(pc.main())).toBe(false);
+    expect(encodingActive(pc.middles()[0])).toBe(false);
+    expect(encodingActive(pc.lights()[0]) ?? true).toBe(true);
+    videoNeeded(false, true);
+    await flush();
+    expect(encodingActive(pc.middles()[0])).toBe(true);
+    expect(encodingActive(pc.main())).toBe(false);
+    expect(activeChanges(pc.lights()[0])).toEqual([]);
+  });
+
+  it("ends at the last word under a rapid true, false, true", async () => {
+    const { pc } = await inCallOfThree();
+    videoNeeded(false, true);
+    videoNeeded(true, true);
+    videoNeeded(false, true);
+    videoNeeded(true, true);
+    await flush();
+    expect(encodingActive(pc.main()) ?? true).toBe(true);
+    videoNeeded(true, true);
+    videoNeeded(false, true);
+    await flush();
+    expect(encodingActive(pc.main())).toBe(false);
+  });
+
+  it("keeps the people count over the SFU's word for the middle sender", async () => {
+    const { pc } = await connected();
+    await answer();
+    welcome(["a"]);
+    await flush();
+    // Two people: not sent, whatever the SFU says.
+    videoNeeded(true, true);
+    await flush();
+    expect(encodingActive(pc.middles()[0])).toBe(false);
+    // Three people, and the SFU's last word for it is false: still not sent.
+    videoNeeded(true, false);
+    peerJoined("b");
+    await flush();
+    expect(encodingActive(pc.middles()[0])).toBe(false);
+    // Needed: sent.
+    videoNeeded(true, true);
+    await flush();
+    expect(encodingActive(pc.middles()[0])).toBe(true);
+    // Back to two people: stopped though it is needed.
+    peerLeft("b");
+    await flush();
+    expect(encodingActive(pc.middles()[0])).toBe(false);
+  });
+
+  it("leaves the person's camera toggle as it was: the tracks, not the encodings", async () => {
+    const { session, pc } = await inCallOfThree();
+    session.setCameraEnabled(false);
+    await flush();
+    expect(pc.main()?.sender.track?.enabled).toBe(false);
+    expect(pc.lights()[0]?.sender.track?.enabled).toBe(false);
+    expect(activeChanges(pc.main())).toEqual([]);
+    expect(activeChanges(pc.middles()[0])).toEqual([]);
+    expect(activeChanges(pc.lights()[0])).toEqual([]);
+  });
+
+  it("finds the main encoding still off when the camera is turned on after the SFU said false", async () => {
+    const { session, pc } = await inCallOfThree();
+    session.setCameraEnabled(false);
+    videoNeeded(false, true);
+    await flush();
+    expect(encodingActive(pc.main())).toBe(false);
+
+    await session.publishVideo();
+    await flush();
+    expect(pc.main()?.sender.track?.enabled).toBe(true);
+    expect(encodingActive(pc.main())).toBe(false);
+    expect(encodingActive(pc.lights()[0]) ?? true).toBe(true);
+    expect(pc.lights()[0]?.sender.track?.enabled).toBe(true);
+
+    // And it starts the moment somebody wants it.
+    videoNeeded(true, true);
+    await flush();
+    expect(encodingActive(pc.main())).toBe(true);
+  });
+
+  it("puts the flag back after a device switch", async () => {
+    const { session, pc } = await inCallOfThree();
+    videoNeeded(false, false);
+    await flush();
+    const main = pc.main();
+    const middle = pc.middles()[0];
+    // A browser that reset the parameters when the track was replaced.
+    if (main !== undefined) main.sender.params = { encodings: [{}] };
+    if (middle !== undefined) middle.sender.params = { encodings: [{}] };
+    await session.switchVideoInput("back-camera");
+    await flush();
+    expect(pc.main()).toBe(main);
+    expect(encodingActive(main)).toBe(false);
+    expect(encodingActive(middle)).toBe(false);
+    expect(encodingActive(pc.lights()[0]) ?? true).toBe(true);
+  });
+
+  it("puts the flag back after a renegotiation that reset it", async () => {
+    const { pc } = await inCallOfThree();
+    videoNeeded(false, true);
+    await flush();
+    const main = pc.main();
+    if (main !== undefined) main.sender.params = { encodings: [{}] };
+    await negotiate(pc);
+    await answer();
+    expect(encodingActive(main)).toBe(false);
+  });
+
+  it("keeps the flag over a re-publish after the camera track ended", async () => {
+    const { session, pc } = await inCallOfThree();
+    videoNeeded(false, true);
+    await flush();
+    const main = pc.main();
+    const sender = main?.sender;
+    sender?.track?.stop();
+    await session.publishVideo();
+    await flush();
+    // The same sender took the new camera in place.
+    expect(sender?.replaced).toHaveLength(1);
+    expect(sender?.track?.readyState).toBe("live");
+    expect(sender?.params.encodings[0]?.["active"]).toBe(false);
+    expect(encodingActive(pc.lights()[0]) ?? true).toBe(true);
+    videoNeeded(true, true);
+    await flush();
+    expect(sender?.params.encodings[0]?.["active"]).toBe(true);
+  });
+
+  it("gives a camera turned on mid-call the SFU's last word", async () => {
+    const { session, pc } = await connected({ media: { audio: true, video: false } });
+    await answer();
+    welcome(["a", "b"]);
+    await flush();
+    // (An SFU tells only a publisher that declared a light sender; a word
+    // held from before the camera is applied to the senders when they come.)
+    videoNeeded(false, false);
+    await session.publishVideo();
+    await flush();
+    expect(encodingActive(pc.main())).toBe(false);
+    expect(encodingActive(pc.middles()[0])).toBe(false);
+    expect(encodingActive(pc.lights()[0]) ?? true).toBe(true);
+  });
+
+  it("leaves a sender sending when the browser refuses to stop it, and says so once", async () => {
+    const { pc } = await inCallOfThree();
+    browser.refusesActiveChange = true;
+    const refusals = (): unknown[][] =>
+      warn.mock.calls.filter((c: unknown[]) => String(c[0]).includes("main camera sender could not be stopped"));
+    videoNeeded(false, true);
+    await flush();
+    expect(encodingActive(pc.main()) ?? true).toBe(true);
+    expect(refusals()).toHaveLength(1);
+    videoNeeded(false, true);
+    videoNeeded(false, false);
+    await flush();
+    expect(encodingActive(pc.main()) ?? true).toBe(true);
+    expect(refusals()).toHaveLength(1);
+  });
+
+  it("ignores a malformed frame with one warning and keeps the last good word", async () => {
+    const { pc } = await inCallOfThree();
+    videoNeeded(false, true);
+    await flush();
+    sockets[0]?.onmessage?.({ data: JSON.stringify({ kind: "video-needed", main: true }) });
+    await flush();
+    expect(encodingActive(pc.main())).toBe(false);
+    expect(
+      warn.mock.calls.filter((c: unknown[]) => String(c[0]).includes("malformed video-needed frame")),
+    ).toHaveLength(1);
+  });
+
+  it("touches no sender once the call has ended", async () => {
+    const { session, pc } = await inCallOfThree();
+    videoNeeded(false, true);
+    await flush();
+    const main = pc.main();
+    const calls = main?.sender.setParametersCalls.length;
+    const socket = sockets[0];
+    session.hangUp();
+    // A frame that was already on its way.
+    expect(() =>
+      socket?.onmessage?.({ data: JSON.stringify({ kind: "video-needed", main: true, middle: true }) }),
+    ).not.toThrow();
+    await flush();
+    expect(main?.sender.setParametersCalls).toHaveLength(calls ?? -1);
+  });
+
+  it("says one line when the word changes what is active, and names it in the send lines", async () => {
+    vi.useFakeTimers();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      hooks.welcomeRoster = ["a", "b"];
+      const session = new SfuCallSession(config({ nowMs: () => 0 }));
+      const connecting = session.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      await connecting;
+      const pc = pcs[0];
+      if (pc === undefined) throw new Error("no peer connection");
+      const needLines = (): string[] =>
+        info.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("call video needed"));
+
+      videoNeeded(true, true);
+      expect(needLines()).toEqual([]);
+      videoNeeded(false, true);
+      videoNeeded(false, true);
+      expect(needLines()).toEqual([
+        "call video needed main=no middle=yes active main=no middle=yes light=yes",
+      ]);
+
+      // The browser reports the light and the middle sender only: the main
+      // one, switched off, still has its line.
+      pc.stats = new Map<string, Record<string, unknown>>([
+        ["OD", { id: "OD", type: "outbound-rtp", kind: "video", frameWidth: 640, frameHeight: 360, framesPerSecond: 30 }],
+        ["OL", { id: "OL", type: "outbound-rtp", kind: "video", frameWidth: 320, frameHeight: 180, framesPerSecond: 30 }],
+      ]);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const lines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes(" send video "));
+      expect(lines).toEqual([
+        "call media interval send video mode=- size=640x360 fps=30 limited_by=- sender=middle needed=yes active=yes",
+        "call media interval send video mode=- size=320x180 fps=30 limited_by=- sender=light needed=- active=yes",
+        "call media interval send video mode=- size=- fps=- limited_by=- sender=main needed=no active=no",
+      ]);
+      session.hangUp();
+    } finally {
+      info.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });

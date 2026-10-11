@@ -50,6 +50,29 @@
 //!   one. After the path itself lowered the estimate, no probe starts for
 //!   [`PROBE_AFTER_TROUBLE`]. After a probe that was carried the next
 //!   (toward the set after) may start after [`PROBE_AFTER_SUCCESS`].
+//! - **A set that proved too large waits longer each time.** A probe is
+//!   a second; a path may carry a rate for a second and not for ten (a
+//!   competing flow that comes and goes, a radio link). A set that was
+//!   given and **taken away again by the path** within
+//!   [`TOO_LARGE_WITHIN`] of being given has proved too large
+//!   ([`DownlinkProbe::on_given_taken_back`]): that set and every larger
+//!   one is held ([`DownlinkProbe::held_from`]) for
+//!   [`TOO_LARGE_FIRST_WAIT`], and each time it happens again the wait
+//!   doubles, up to [`TOO_LARGE_MAX_WAIT`]: 10, 20, 40, 60, 60 s. A set
+//!   that large or larger that has stayed for [`TOO_LARGE_WITHIN`] puts
+//!   the wait back to the first ([`DownlinkProbe::on_given_held`]), and
+//!   so do [`TOO_LARGE_FORGOTTEN_AFTER`] without a set proving too
+//!   large. Which set is which is the caller's **level**
+//!   ([`crate::downlink_allocation::set_level`]: which pictures, not
+//!   what they cost at the moment; the rate a set needs moves by a fifth
+//!   from one second to the next, and a wait kept by rate let the same
+//!   set through when it happened to be cheap). A smaller set
+//!   is not held. What this costs: a path that widens just after a set
+//!   was taken away is found when the wait is over, 60 s at the worst.
+//!   A probe that *fails* is not this: nothing was given, the viewer saw
+//!   nothing, and its retry stays at 5 s, then 8 s. Nor is a path that
+//!   collapsed under the set (a stall): the caller does not report that
+//!   (`media.rs`, `DOWNLINK_COLLAPSE_DEN`).
 //!
 //! Every constant is **chosen, not measured**.
 
@@ -151,6 +174,24 @@ pub const PROBE_BELOW_FAILED_DEN: u64 = 5;
 
 /// The wait before the next probe after one that was carried. Chosen.
 pub const PROBE_AFTER_SUCCESS: Duration = Duration::from_millis(500);
+
+/// A set that the path takes away again within this long of its being
+/// given has proved too large; one that stays this long has proved it
+/// fits. Chosen: on the live call of 2026-10-09 the sets that did not
+/// last were gone after 1 and 9 to 11 s, the ones that lasted stood
+/// 57 s and more.
+pub const TOO_LARGE_WITHIN: Duration = Duration::from_secs(20);
+/// The wait before the next probe toward a rate that proved too large,
+/// the first time. Chosen.
+pub const TOO_LARGE_FIRST_WAIT: Duration = Duration::from_secs(10);
+/// The longest that wait grows to by doubling: 10, 20, 40, 60 s. Chosen:
+/// a viewer on a path that cannot hold a set sees it tried once a minute
+/// at the most, and a path that has widened is found within a minute.
+pub const TOO_LARGE_MAX_WAIT: Duration = Duration::from_secs(60);
+/// A set that proves too large this long after the last one that did is
+/// the first again: what a path did five minutes ago says little of it
+/// now. Chosen.
+pub const TOO_LARGE_FORGOTTEN_AFTER: Duration = Duration::from_secs(300);
 
 /// Why a probe failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,6 +376,14 @@ pub struct DownlinkProbe {
     /// rate or more, and when a probe toward less may start.
     failed_bps: Option<u64>,
     below_allowed: Option<Instant>,
+    /// The lowest level of a set that proved too large (given, and taken
+    /// away again by the path soon after), and until when sets of that
+    /// level or more are held.
+    too_large: Option<(u64, Instant)>,
+    /// The wait the next such set costs, and when the last one proved
+    /// too large.
+    too_large_wait: Duration,
+    too_large_at: Option<Instant>,
 }
 
 impl Default for DownlinkProbe {
@@ -345,6 +394,9 @@ impl Default for DownlinkProbe {
             next_allowed: None,
             failed_bps: None,
             below_allowed: None,
+            too_large: None,
+            too_large_wait: TOO_LARGE_FIRST_WAIT,
+            too_large_at: None,
         }
     }
 }
@@ -398,6 +450,56 @@ impl DownlinkProbe {
                 .failed_bps
                 .is_some_and(|failed| is_below(target_bps, failed))
             && self.below_allowed.map_or(true, |at| now >= at)
+    }
+
+    /// A set of `level` (the caller's measure of how large a set is)
+    /// was given and the path took it away again within
+    /// [`TOO_LARGE_WITHIN`]: it proved too large. Sets of that level or
+    /// more are held for the wait this returns, which doubles each time
+    /// up to [`TOO_LARGE_MAX_WAIT`]. While a wait runs, the lowest level
+    /// that proved too large is the one held.
+    pub fn on_given_taken_back(&mut self, level: u64, now: Instant) -> Duration {
+        if self
+            .too_large_at
+            .is_some_and(|at| now.saturating_duration_since(at) >= TOO_LARGE_FORGOTTEN_AFTER)
+        {
+            self.too_large_wait = TOO_LARGE_FIRST_WAIT;
+        }
+        self.too_large_at = Some(now);
+        let wait = self.too_large_wait;
+        self.too_large_wait = (wait * 2).min(TOO_LARGE_MAX_WAIT);
+        let (level, until) = match self.too_large {
+            Some((held, until)) if now < until => (held.min(level), until.max(now + wait)),
+            _ => (level, now + wait),
+        };
+        self.too_large = Some((level, until));
+        wait
+    }
+
+    /// A set of `level` has stayed for [`TOO_LARGE_WITHIN`]: the path
+    /// carries it. If that is the level that proved too large, or more,
+    /// it is forgotten and the wait is the first again.
+    pub fn on_given_held(&mut self, level: u64) {
+        if self.too_large.map_or(true, |(held, _)| level >= held) {
+            self.too_large = None;
+            self.too_large_wait = TOO_LARGE_FIRST_WAIT;
+        }
+    }
+
+    /// While a set that proved too large is being waited out: the level
+    /// from which sets are held (not tried, and not given on any proof).
+    /// `None` when nothing is held.
+    #[must_use]
+    pub fn held_from(&self, now: Instant) -> Option<u64> {
+        self.too_large
+            .filter(|(_, until)| now < *until)
+            .map(|(level, _)| level)
+    }
+
+    /// The wait the next set that proves too large will cost.
+    #[must_use]
+    pub const fn too_large_wait(&self) -> Duration {
+        self.too_large_wait
     }
 
     /// Start a probe toward `target_bps` (at most [`PROBE_MAX_BPS`])
@@ -1225,5 +1327,74 @@ mod tests {
             .expect("judged");
         assert_eq!(outcome.failure, Some(ProbeFailure::NoFeedback));
         assert_eq!(outcome.carried_bps, 0);
+    }
+
+    /// A set that was given and taken away again waits 10, 20, 40, 60
+    /// and 60 s for its next try; a smaller set is not held; and a set
+    /// that stays puts the wait back.
+    #[test]
+    fn a_set_that_proved_too_large_waits_longer_each_time() {
+        let t0 = Instant::now();
+        let mut probe = DownlinkProbe::new();
+        let level = 3;
+        let mut now = t0;
+        for expected in [10u64, 20, 40, 60, 60] {
+            let wait = probe.on_given_taken_back(level, now);
+            assert_eq!(wait, Duration::from_secs(expected));
+            assert_eq!(probe.held_from(now), Some(level));
+            assert_eq!(
+                probe.held_from(now + ms(expected * 1000 - 1)),
+                Some(level),
+                "to the last millisecond"
+            );
+            now += wait;
+            assert_eq!(probe.held_from(now), None, "after {expected} s");
+        }
+        // The hold is the caller's to apply; a probe may start whenever
+        // its own waits allow.
+        assert!(probe.can_start_toward(TARGET, t0));
+        // A smaller set that stays says nothing of the larger one.
+        probe.on_given_held(level - 1);
+        assert_eq!(probe.too_large_wait(), TOO_LARGE_MAX_WAIT);
+        // The set itself stays: forgotten.
+        probe.on_given_held(level);
+        assert_eq!(probe.too_large_wait(), TOO_LARGE_FIRST_WAIT);
+        assert_eq!(
+            probe.on_given_taken_back(level, now),
+            TOO_LARGE_FIRST_WAIT,
+            "and the next time is the first again"
+        );
+        // Five minutes with nothing proving too large: the first again.
+        assert_eq!(
+            probe.on_given_taken_back(level, now + ms(20_000)),
+            ms(20_000)
+        );
+        let almost = now + ms(19_999) + TOO_LARGE_FORGOTTEN_AFTER;
+        assert_eq!(probe.on_given_taken_back(level, almost), ms(40_000));
+        assert_eq!(
+            probe.on_given_taken_back(level, almost + TOO_LARGE_FORGOTTEN_AFTER),
+            TOO_LARGE_FIRST_WAIT
+        );
+    }
+
+    /// While one wait runs, a smaller set that also proves too large
+    /// lowers the level held and never shortens the wait.
+    #[test]
+    fn the_smallest_set_that_proved_too_large_is_the_one_held() {
+        let t0 = Instant::now();
+        let mut probe = DownlinkProbe::new();
+        assert_eq!(probe.on_given_taken_back(3, t0), ms(10_000));
+        assert_eq!(probe.on_given_taken_back(2, t0 + ms(3000)), ms(20_000));
+        assert_eq!(probe.held_from(t0 + ms(22_999)), Some(2));
+        assert_eq!(probe.held_from(t0 + ms(23_000)), None);
+        // A failed probe and this memory are two things: the failure's
+        // own wait still runs when nothing is held.
+        let mut probe = DownlinkProbe::new();
+        assert!(probe.start(TARGET, t0));
+        let outcome = probe.on_trouble(t0 + ms(100)).expect("ended");
+        assert!(!outcome.carried());
+        assert_eq!(probe.held_from(t0 + ms(200)), None);
+        assert_eq!(probe.too_large_wait(), TOO_LARGE_FIRST_WAIT);
+        assert!(!probe.can_start_toward(TARGET, t0 + ms(200)));
     }
 }

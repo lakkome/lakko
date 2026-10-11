@@ -385,6 +385,10 @@ export const callActions = {
    *  starts and the in-chat group membership is known). */
   setParticipants(list: Participant[]): void {
     setParticipants(list);
+    // A pin names a person; with the person gone it names nobody
+    // (`docs/ux/group-call-grid.md` section 6.2).
+    const pinned = pinnedId();
+    if (pinned !== null && !list.some((p) => p.id === pinned)) setPinnedId(null);
   },
   /** Append a participant (Add MLS commit observed). */
   participantJoined(p: Participant): void {
@@ -482,7 +486,10 @@ export const callActions = {
   /** Pin a remote participant to the big tile. Pass `null` to
    *  resume "follow active speaker". */
   pin(id: string | null): void {
-    setPinnedId(id);
+    // Only someone else who is in the call can be pinned; anything else is
+    // "nobody pinned", so a stale or empty id never sits in the store.
+    const person = id === null ? undefined : participants().find((p) => p.id === id);
+    setPinnedId(person !== undefined && !person.isLocal ? person.id : null);
   },
   /** Show / hide the participant-list drawer. */
   setParticipantListOpen(open: boolean): void {

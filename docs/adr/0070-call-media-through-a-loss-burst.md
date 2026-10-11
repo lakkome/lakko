@@ -494,3 +494,169 @@ Neither model publisher is a browser: which of the two a Chrome sender on
 a path it has just cut its rate on resembles is what the next live call
 has to show (the time from a burst's end to `uplink-burst-end` in the SFU
 log, and the viewers' stall counters).
+
+## Note, 2026-10-09: step 6 on its first live call
+
+**Measured on a live call that day** (18:28 to 18:35 UTC, four browsers
+on the test stack, `LAKKO_SFU_DOWNLINK_CONTROL=1`; from the SFU's log):
+on the two browsers that shared one mobile link the allocation cycled.
+One of them was moved from a middle picture to its light one 13 times
+and back 13 times in six and a half minutes and spent 89 of its last
+287 s on less than it asked for; the other 7 and 7. The two browsers on
+a Wi-Fi: 2 and 2, and none. On a synthetic rate-limited link the same
+build settles and stays (the third round above).
+
+What the 13 were, by the log (the README's "The fourth round" has every
+timestamp):
+
+- 2 were no downgrade: a publisher listed for the first time starts at
+  its light picture and the line read "from middle".
+- 6 were the mobile link itself stalling: a queue of 103 to 627 ms on
+  the downlink and, in the same seconds, of 88 to 857 ms on the same two
+  browsers' uplinks. Five times in two minutes. One of the six came a
+  second after a picture had been given with a queue already standing.
+- 3 came with no cut of the estimate at all, on a path with nothing
+  wrong: twice the set being given had come to cost more than a budget
+  pinned at an old limit (a fourth person joining; the publishers' rates
+  climbing), once the allocation, re-sharing what the set needed at
+  every run, moved the budget to a more important publisher whose track
+  had come to cost less for a moment (which took a picture and gave
+  none).
+- 2 followed a clump the SFU itself forwarded when another publisher's
+  uplink burst ended (with the key frame the SFU asks for since the note
+  above), on a link two subscribers share, so that each one's model of
+  its own sending explained half of the queue.
+
+None was a cut on delay variation: the detector spoke 292 times on that
+subscriber and 282 cuts were taken back for want of a queue; the ten
+kept had 103 to 597 ms standing. And the way back was slow for reasons
+of its own: probes given up as `disturbed` within milliseconds because
+a key frame of a light picture counted as a clump against an estimate a
+stall had left at 130 kbit/s, and three probes carried in a row before
+one picture was given, the budget standing exactly at each probe's rate
+while the set had come to need a little more.
+
+**Decided and built** (SFU only; host-tested; not deployed, not on a
+call since):
+
+- **The limit follows the set being given.** When what that set puts on
+  the wire has come to more than the estimate on a quiet path (no queue,
+  no cut pending, nothing lowered for 3 s), limit and estimate go to 1.1
+  times it. A path that is carrying a set says so; this is the
+  downlink's form of the uplink's "the estimate rises whenever no queue
+  stands", bounded by what is in fact being sent. A set is taken away by
+  the path's word (a kept cut, lasting loss) and by nothing else.
+- **A set that fits is kept as it is.** The allocation re-shares only
+  when the subscriber changes its order of importance.
+- **Nothing is given while a queue stands** or a cut is pending.
+- **A carried probe leaves the estimate a tenth above its rate**, as it
+  left the limit.
+- **A clump is measured against the rate a probe tries**, and no probe
+  starts while one is going out.
+- **A set that proved too large waits longer each time.** Given, and
+  taken away again by the path within 20 s: that set and every larger
+  one is not tried, and not given on any proof, for 10 s, then 20, 40
+  and 60 s every time. A set is which pictures it holds (one per middle
+  picture, six per main one), not what they cost at the moment: the
+  rate one set needs moved by a fifth with the publishers' encoders. A
+  set that stays 20 s, or five minutes without one proving too large,
+  puts the wait back to 10 s; a smaller set is not held. A failed probe is not this and keeps its 5 s, then 8 s. Nor is
+  a path that collapsed under the set (the cut left the estimate under
+  half of what the set put on the wire): that is a stall, it says
+  nothing of the set, and the pictures come back as fast as the probes
+  allow. The first build of the rule counted every taking-away and, on
+  the model, made three one-second dips cost 70 s of waiting. What
+  step 6 said of the way back ("climbs back within 15 s of the limit
+  lifting") therefore holds for a set that was never given and taken
+  back; one that was is found when its wait ends, **60 s at the worst**.
+  All constants chosen.
+- **A stall is still answered at once**, by everything the cut calls
+  for. Holding the middle pictures through the first second of a stall
+  was considered and not built: on a path that has really narrowed it is
+  a second more of queue in front of the light pictures.
+- The log lines carry why a picture moved (`why`), what the set costs,
+  and on every cut what was arriving and being sent.
+
+**Measured on a model** of that link (one test,
+`a_mobile_like_downlink_holds_a_picture_instead_of_cycling`; every
+figure of the model chosen to resemble the log, none measured on a
+mobile network; synthetic `str0m` clients, one subscriber on the link):
+the build before (two runs) took a picture away with no cut of the
+estimate once in each run and let 7 of 19 and 9 of 21 carried probes end
+without giving anything; the build after did neither in any of three
+runs (a fourth, without the log, took nothing away once the path was
+its own). After each of three 1.2 s dips to a tenth of the path the three
+middle pictures were back in 5.4 to 6.9 s in eleven cases of twelve
+(before: 6.4 to 12.2 s); no light packet was lost in any run of either build. The
+model does **not** show the longer waits curing a cycle: while a
+competing flow came and went, both builds took pictures away two or
+three times in 108 s and then sat on the smallest set that held; in an
+earlier form of the model the build before changed 16 times in that
+phase and the final build 13, one run each. That rule rests on its unit
+tests and on the two places in the call's log, not on a measured
+difference. The five step-6 tests, each alone, three times: 15 of 15,
+no attempt discarded. Figures, per run, in the README.
+
+**What remains weak**: after a stall the pictures come back one probe
+at a time (5.4 to 6.9 s on the model); a set that cannot be held is still
+tried once a minute; two subscribers behind one link disturb each
+other's probes and each other's clump model, and the SFU does not know
+they share a path; both mobile browsers were sending a main picture
+nobody was being sent, over the uplink of the link that stalled; and
+none of this has been on a call. The step-6 tests remain `#[ignore]`d
+and the switch remains off by default.
+
+## Note, 2026-10-11: senders nobody watches (`video-needed`)
+
+On the live call of 2026-10-09 every tile showed the middle picture while
+every browser uploaded its main sender to nobody. The maintainer decided
+the SFU tells each publisher which of its camera senders somebody is being
+sent, so the client can stop the others. Built the same day on the SFU, the
+wire crate and both FFI surfaces; host-tested; **no client reads the frame
+yet** and nothing was run against a browser.
+
+- **Frame.** `ServerFrame::VideoNeeded { main, middle }`
+  (`{"kind":"video-needed","main":false,"middle":true}`), to a publisher
+  about its own senders. The light sender is always needed and is not in
+  it. Only a publisher that declared a light sender is told.
+- **Rule** (`services/sfu/src/video_needed.rs`, `MediaPeer::heavy_wanted_of`).
+  A sender is needed only while some subscriber has **named** the
+  publisher at that quality in its latest `video-wants`: `main` for main
+  (and, under downlink control, for middle too, which is what its
+  allocation falls back to); `middle` for middle and never for main, also
+  while that subscriber's middle track is still being negotiated. A
+  subscriber that sent no `video-wants`, or whose set does not name the
+  publisher, counts for nothing heavy (maintainer's decision, same day,
+  after a first build that counted silence as `main`: a sixth person
+  joining a call of five would have made five publishers start a 720p
+  encoder). What the SFU forwards to such a subscriber is unchanged, so
+  it sees the light track only when a publisher's main sender is off; a
+  client that does not speak `video-wants` is not supported with the
+  switch on. `true` is sent at once; `false` after 10 s unwanted without
+  a break, so the first frame says `true`. A publisher without a middle
+  sender is always told `middle: false`.
+- **Around an idle sender** (told to stop, then silent for 300 ms). A track
+  resuming from it waits without using up its key frame requests; at its
+  return the SFU asks for a key frame unless the first packet begins one;
+  no retransmission is asked of it; its stream is forgotten by both burst
+  detectors and the estimate's loss counter, so neither the stop nor the
+  return is a burst; the publisher's bitrate estimate is put back to what
+  it was when the sender was told to stop, and a REMB sent; downlink
+  control takes an idle sender to cost its last measured rate for 60 s,
+  then 2.5 Mbit/s (main) or 500 kbit/s (middle), never zero.
+- **Switch.** `LAKKO_SFU_VIDEO_NEEDED=0` turns it off; on by default.
+- **Tests.** Unit tests of the rule and of each item above, and one
+  end-to-end test through the production media task
+  (`a_sender_nobody_watches_is_switched_off_and_comes_back_at_a_key_frame`;
+  observed: told off 9.8 s after the publisher's first frame, nobody
+  having named main; a third subscriber joining with `light` then `middle`
+  caused no frame; told on 3 to 4 ms after a subscriber named main, the
+  key frame at that viewer 84 to 88 ms after its request).
+- **Open.** The web client (it has to act on the frame). A publisher that
+  declares no light sender is told nothing, which is every client that is
+  not on the three-sender contract of step 5. What a browser does when a
+  sender is switched back on (a key frame first or not, the same sequence
+  numbers or not, how fast its own allocation gives the sender its rate)
+  is not known from this work. All constants chosen, none measured.
+  Details and the client contract: `services/sfu/README.md`, "Senders
+  nobody watches".

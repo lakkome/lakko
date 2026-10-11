@@ -3,119 +3,408 @@
 
 /**
  * Reads the sound level of each person's audio in a group call and feeds
- * `SpeakingTracker` (`docs/ux/group-call-grid.md` section 7.3).
+ * `SpeakingTracker` (`docs/ux/group-call-grid.md` sections 5.2, 7.3 and 10).
  *
- * The level is read from the `MediaStream` the browser plays: audio that has
- * already been received, decrypted and decoded on this device. Nothing here
- * reaches the network, and the call server is never asked who is speaking.
+ * Every level is measured on this device from audio it has already received,
+ * decrypted and decoded. Nothing here reaches the network, and the call
+ * server is never asked who is speaking.
  *
- * One `AnalyserNode` per person, read ten times a second. A browser that
- * refuses an `AudioContext`, or leaves it suspended, simply yields no levels:
- * no ring is drawn and the large tile falls back to the roster order, which
- * is the call as it was before this existed.
+ * Where a level comes from, per person:
+ *
+ *  - **Someone else**: the receiver that decodes their audio
+ *    (`audio-level.ts`): its synchronization sources where the engine puts a
+ *    level on them, else its `inbound-rtp` statistics. Only when a receiver
+ *    offers neither, or the call hands over none, an `AnalyserNode` on the
+ *    stream the browser plays.
+ *  - **This device's own microphone**: an `AnalyserNode` on the captured
+ *    stream. It has no receiver.
+ *
+ * The receiver comes first because it depends on nothing but the peer
+ * connection. The analyser needs an `AudioContext` the browser lets run, and
+ * a decoded remote stream it agrees to feed into one; where either is
+ * refused it reads silence without an error, and silence is exactly "nobody
+ * is speaking".
+ *
+ * One timer for the call, ten readings a second, stopped by `dispose`. A
+ * statistics reading is a promise: at most one is under way per person, and
+ * at most `MAX_STATS_READS_PER_TICK` are started per reading, in turn, so a
+ * call of fifty people costs what a call of eight does.
  */
 
+import { ReceiverLevelReader, type LevelPath, type LevelReceiver } from "./audio-level";
 import { rmsLevel, SpeakingTracker, type SpeakingSnapshot } from "./speaking";
+import type { VoiceReport } from "./voice-diagnostics";
 
 /** How often the levels are read. */
-const SAMPLE_INTERVAL_MS = 100;
+export const SAMPLE_INTERVAL_MS = 100;
+/** The most statistics readings started in one tick. Chosen, not measured. */
+export const MAX_STATS_READS_PER_TICK = 8;
 
-interface Tap {
-  readonly stream: MediaStream;
-  readonly source: MediaStreamAudioSourceNode;
-  readonly analyser: AnalyserNode;
-  readonly buffer: Float32Array<ArrayBuffer>;
+/** One person of the call, as the monitor needs them. */
+export interface VoiceSource {
+  readonly id: string;
+  /** This device's own person: their ring is drawn, the floor is not theirs. */
+  readonly isLocal: boolean;
+  /** A muted person is never speaking. */
+  readonly micOn: boolean;
+  /** The stream their sound is played from (or, for this device, captured to). */
+  readonly stream: MediaStream | undefined;
+  /** The receiver that decodes their audio, where the call has one. */
+  readonly receiver?: LevelReceiver | undefined;
 }
 
-/** Watches the streams it is given until `dispose`. */
-export class SpeakingMonitor {
-  private readonly tracker = new SpeakingTracker();
-  private readonly taps = new Map<string, Tap>();
-  private context: AudioContext | null = null;
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private order: readonly string[] = [];
+/** Reads the level of one stream; `close` releases it. */
+export interface StreamLevelTap {
+  /** The level now, or `null` while the tap cannot hear anything (its audio
+   *  context is not running). Never a made-up silence. */
+  read(): number | null;
+  close(): void;
+}
 
-  public constructor(private readonly onSnapshot: (snapshot: SpeakingSnapshot) => void) {}
+/** How many readings one diagnostics report covers (2 seconds). */
+export const REPORT_EVERY_TICKS = 20;
 
-  /**
-   * The people of the call and the stream each one's sound arrives on, in
-   * roster order. Call it whenever either changes.
-   */
-  public sync(people: readonly { readonly id: string; readonly stream: MediaStream | undefined }[]): void {
-    this.order = people.map((p) => p.id);
-    const present = new Set(this.order);
-    for (const [id, tap] of this.taps) {
-      const now = people.find((p) => p.id === id)?.stream;
-      if (now !== tap.stream) this.drop(id);
+/** What the monitor takes from its surroundings; the defaults are the
+ *  browser's, a test hands in its own. */
+export interface SpeakingMonitorDeps {
+  readonly nowMs?: () => number;
+  /** Start the one timer; returns what stops it. */
+  readonly every?: (ms: number, run: () => void) => () => void;
+  /** Open a level tap on a stream, or `null` when this browser cannot. */
+  readonly openTap?: (stream: MediaStream) => StreamLevelTap | null;
+  /** Release whatever `openTap` shares between taps. */
+  readonly closeTaps?: () => void;
+  /** The person did something: let whatever `openTap` needs a gesture for
+   *  start. */
+  readonly resumeTaps?: () => void;
+  /** Told every `REPORT_EVERY_TICKS` readings what each person's level was
+   *  over them, and who holds the floor. Diagnostics only. */
+  readonly onReport?: (voices: readonly VoiceReport[], floorId: string | null) => void;
+  /** Told once whenever the source of a person's level changes. */
+  readonly onPath?: (id: string, path: LevelPath | "analyser") => void;
+}
+
+interface Voice {
+  source: VoiceSource;
+  reader: ReceiverLevelReader | null;
+  readerOf: LevelReceiver | null;
+  tap: StreamLevelTap | null;
+  tapOf: MediaStream | null;
+  path: LevelPath | "analyser" | null;
+  /** Readings in a row that had no source at all. */
+  sourceless: number;
+  /** For the diagnostics report: the last source, the loudest level and
+   *  whether the ring was on, since the last report. */
+  reportPath: LevelPath | "analyser";
+  reportPeak: number | null;
+  reportSpeaking: boolean;
+}
+
+/** After this many readings without any source, say so once (3 seconds). */
+const SOURCELESS_TICKS_BEFORE_SAYING = 30;
+
+/**
+ * `AnalyserNode` taps over one shared `AudioContext`.
+ *
+ * A context the browser has not let start (`suspended`: made outside a
+ * gesture, or put to sleep) feeds its analysers nothing, and an analyser fed
+ * nothing reads zeros without an error. Zeros look exactly like a quiet
+ * person, so a tap answers `null` unless the context is `running`, the
+ * context is asked to resume on every gesture the call screen sees, and its
+ * state is written to the console whenever it changes.
+ */
+export function browserTaps(
+  say: (line: string) => void = (line): void => {
+    console.info(line);
+  },
+): Pick<Required<SpeakingMonitorDeps>, "openTap" | "closeTaps" | "resumeTaps"> {
+  let context: AudioContext | null = null;
+  let said: string | null = null;
+  const sayState = (): void => {
+    const state = context === null ? "none" : context.state;
+    if (state === said) return;
+    said = state;
+    say(`[call] sound level audio context: ${state}`);
+  };
+  const resume = (): void => {
+    const ctx = context;
+    if (ctx === null || ctx.state === "running" || ctx.state === "closed") return;
+    void ctx
+      .resume()
+      .catch(() => undefined)
+      .then(sayState);
+  };
+  const ensure = (): AudioContext | null => {
+    if (context !== null) return context;
+    if (typeof AudioContext === "undefined") {
+      sayState();
+      return null;
     }
-    this.tracker.keepOnly(present);
-    for (const p of people) {
-      if (p.stream === undefined || this.taps.has(p.id)) continue;
-      if (p.stream.getAudioTracks().length === 0) continue;
-      const ctx = this.ensureContext();
-      if (ctx === null) return;
-      try {
-        const source = ctx.createMediaStreamSource(p.stream);
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 512;
-        source.connect(analyser);
-        this.taps.set(p.id, {
-          stream: p.stream,
-          source,
-          analyser,
-          buffer: new Float32Array(new ArrayBuffer(analyser.fftSize * 4)),
-        });
-      } catch (err) {
-        console.warn("[call] could not read a sound level", err);
-      }
-    }
-    if (this.taps.size > 0 && this.timer === null) {
-      this.timer = setInterval(() => this.tick(), SAMPLE_INTERVAL_MS);
-    }
-  }
-
-  /** Stop reading and release the audio graph. */
-  public dispose(): void {
-    if (this.timer !== null) clearInterval(this.timer);
-    this.timer = null;
-    for (const id of [...this.taps.keys()]) this.drop(id);
-    const ctx = this.context;
-    this.context = null;
-    if (ctx !== null) void ctx.close().catch(() => undefined);
-  }
-
-  private ensureContext(): AudioContext | null {
-    if (this.context !== null) return this.context;
-    if (typeof AudioContext === "undefined") return null;
     try {
-      this.context = new AudioContext();
-      // A context made outside a gesture starts suspended in some browsers;
-      // the call was started by one, so this normally succeeds at once.
-      void this.context.resume().catch(() => undefined);
-      return this.context;
+      const ctx = new AudioContext();
+      context = ctx;
+      ctx.addEventListener?.("statechange", sayState);
+      sayState();
+      // Made outside a gesture it may start suspended; `resumeTaps` asks
+      // again on every gesture.
+      resume();
+      return ctx;
     } catch (err) {
       console.warn("[call] no audio context for sound levels", err);
       return null;
     }
+  };
+  return {
+    openTap: (stream) => {
+      const ctx = ensure();
+      if (ctx === null) return null;
+      try {
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 512;
+        source.connect(analyser);
+        const buffer = new Float32Array(new ArrayBuffer(analyser.fftSize * 4));
+        return {
+          read: () => {
+            // Not running: nothing is heard, which is not the same as silence.
+            if (ctx.state !== "running") return null;
+            analyser.getFloatTimeDomainData(buffer);
+            return rmsLevel(buffer);
+          },
+          close: () => {
+            try {
+              source.disconnect();
+            } catch {
+              // Already gone with its stream.
+            }
+          },
+        };
+      } catch (err) {
+        console.warn("[call] could not read a sound level", err);
+        return null;
+      }
+    },
+    resumeTaps: resume,
+    closeTaps: () => {
+      const ctx = context;
+      context = null;
+      if (ctx !== null) void ctx.close().catch(() => undefined);
+    },
+  };
+}
+
+/** Watches the people it is given until `dispose`. */
+export class SpeakingMonitor {
+  private readonly tracker = new SpeakingTracker();
+  private readonly voices = new Map<string, Voice>();
+  private readonly nowMs: () => number;
+  private readonly every: (ms: number, run: () => void) => () => void;
+  private readonly openTap: (stream: MediaStream) => StreamLevelTap | null;
+  private readonly closeTaps: () => void;
+  private readonly resumeTaps: () => void;
+  private readonly onReport: ((voices: readonly VoiceReport[], floorId: string | null) => void) | null;
+  private ticksSinceReport = 0;
+  private readonly onPath: (id: string, path: LevelPath | "analyser") => void;
+  private stopTimer: (() => void) | null = null;
+  /** Everyone, in roster order. */
+  private order: readonly string[] = [];
+  /** Where the next tick starts handing out statistics readings. */
+  private statsCursor = 0;
+
+  public constructor(
+    private readonly onSnapshot: (snapshot: SpeakingSnapshot) => void,
+    deps: SpeakingMonitorDeps = {},
+  ) {
+    this.nowMs = deps.nowMs ?? ((): number => Date.now());
+    this.every =
+      deps.every ??
+      ((ms, run): (() => void) => {
+        const timer = setInterval(run, ms);
+        return (): void => clearInterval(timer);
+      });
+    const taps = deps.openTap === undefined ? browserTaps() : null;
+    this.openTap = deps.openTap ?? (taps as NonNullable<typeof taps>).openTap;
+    this.closeTaps = deps.closeTaps ?? taps?.closeTaps ?? ((): void => undefined);
+    this.resumeTaps = deps.resumeTaps ?? taps?.resumeTaps ?? ((): void => undefined);
+    this.onReport = deps.onReport ?? null;
+    this.onPath =
+      deps.onPath ??
+      ((id, path): void => {
+        // One line per person per change of source, for the call's console:
+        // which of the three ways this browser took.
+        console.info(`[call] sound level of ${id}: ${path}`);
+      });
   }
 
-  private drop(id: string): void {
-    const tap = this.taps.get(id);
-    if (tap === undefined) return;
-    try {
-      tap.source.disconnect();
-    } catch {
-      // Already gone with its stream.
+  /**
+   * The people of the call, in roster order. Call it whenever a person, a
+   * stream, a receiver or a mute changes.
+   */
+  public sync(people: readonly VoiceSource[]): void {
+    this.order = people.map((p) => p.id);
+    const present = new Set(this.order);
+    for (const [id, voice] of this.voices) {
+      if (!present.has(id)) {
+        voice.tap?.close();
+        this.voices.delete(id);
+      }
     }
-    this.taps.delete(id);
+    this.tracker.keepOnly(present);
+    for (const p of people) {
+      let voice = this.voices.get(p.id);
+      if (voice === undefined) {
+        voice = {
+          source: p,
+          reader: null,
+          readerOf: null,
+          tap: null,
+          tapOf: null,
+          path: null,
+          sourceless: 0,
+          reportPath: "none",
+          reportPeak: null,
+          reportSpeaking: false,
+        };
+        this.voices.set(p.id, voice);
+      }
+      voice.source = p;
+      const receiver = p.isLocal ? undefined : p.receiver;
+      if ((receiver ?? null) !== voice.readerOf) {
+        voice.readerOf = receiver ?? null;
+        voice.reader = receiver === undefined ? null : new ReceiverLevelReader(receiver);
+      }
+      if (voice.tap !== null && voice.tapOf !== (p.stream ?? null)) {
+        voice.tap.close();
+        voice.tap = null;
+        voice.tapOf = null;
+      }
+      if (!p.micOn) this.tracker.silence(p.id);
+    }
+    if (this.voices.size > 0 && this.stopTimer === null) {
+      this.stopTimer = this.every(SAMPLE_INTERVAL_MS, () => this.tick());
+    } else if (this.voices.size === 0 && this.stopTimer !== null) {
+      this.stopTimer();
+      this.stopTimer = null;
+    }
   }
 
-  private tick(): void {
-    const now = Date.now();
-    for (const [id, tap] of this.taps) {
-      tap.analyser.getFloatTimeDomainData(tap.buffer);
-      this.tracker.sample(id, rmsLevel(tap.buffer), now);
+  /**
+   * The person did something on the call screen (a press, a key). A browser
+   * lets an audio context start only on such a gesture, so this is when a
+   * suspended one is asked again.
+   */
+  public userGesture(): void {
+    this.resumeTaps();
+  }
+
+  /** Stop reading and release the audio graph. */
+  public dispose(): void {
+    this.stopTimer?.();
+    this.stopTimer = null;
+    for (const voice of this.voices.values()) voice.tap?.close();
+    this.voices.clear();
+    this.closeTaps();
+  }
+
+  /** The level of the stream the person is played from; `null` when there
+   *  is none to read or the tap cannot hear (never a made-up silence). */
+  private tapLevel(voice: Voice): number | null {
+    const stream = voice.source.stream;
+    if (stream === undefined) return null;
+    if (voice.tap === null) {
+      // A stream can gain its audio track after its video one; look again
+      // on every reading until it has one.
+      if (stream.getAudioTracks().length === 0) return null;
+      voice.tap = this.openTap(stream);
+      voice.tapOf = stream;
+      if (voice.tap === null) return null;
     }
-    this.onSnapshot(this.tracker.snapshot(this.order, now));
+    return voice.tap.read();
+  }
+
+  /** One reading of everyone. Public for a test to drive; the timer calls it. */
+  public tick(): void {
+    const now = this.nowMs();
+    const ids = this.order;
+    let budget = MAX_STATS_READS_PER_TICK;
+    let nextCursor = this.statsCursor;
+    for (let step = 0; step < ids.length; step += 1) {
+      const index = (this.statsCursor + step) % ids.length;
+      const id = ids[index] as string;
+      const voice = this.voices.get(id);
+      if (voice === undefined) continue;
+      if (!voice.source.micOn) {
+        this.tracker.silence(id);
+        voice.reportPath = "none";
+        continue;
+      }
+      let level: number | null = null;
+      let path: LevelPath | "analyser" = "none";
+      const reader = voice.reader;
+      if (reader !== null) {
+        level = reader.level(now);
+        path = reader.path;
+        if (reader.needsStats && !reader.statsInFlight && budget > 0) {
+          budget -= 1;
+          nextCursor = (index + 1) % ids.length;
+          void reader.readStats(now);
+        }
+      }
+      // No receiver, or one that offers no level either way: the stream.
+      if (level === null && (reader === null || reader.unsupported)) {
+        level = this.tapLevel(voice);
+        if (level !== null) path = "analyser";
+      }
+      // Say where a person's level comes from when that changes, and say
+      // once when a few seconds have passed with no source at all.
+      if (path === "none") {
+        voice.sourceless += 1;
+        if (voice.sourceless === SOURCELESS_TICKS_BEFORE_SAYING && voice.path !== "none") {
+          voice.path = "none";
+          this.onPath(id, "none");
+        }
+      } else {
+        voice.sourceless = 0;
+        if (path !== voice.path) {
+          voice.path = path;
+          this.onPath(id, path);
+        }
+      }
+      voice.reportPath = path;
+      if (level !== null) voice.reportPeak = Math.max(voice.reportPeak ?? 0, level);
+      this.tracker.sample(id, level ?? 0, now);
+    }
+    this.statsCursor = budget === 0 ? nextCursor : 0;
+    const candidates = ids.filter((id) => this.voices.get(id)?.source.isLocal !== true);
+    const snapshot = this.tracker.snapshot(candidates, now);
+    for (const id of snapshot.speakingIds) {
+      const voice = this.voices.get(id);
+      if (voice !== undefined) voice.reportSpeaking = true;
+    }
+    this.onSnapshot(snapshot);
+    this.ticksSinceReport += 1;
+    if (this.ticksSinceReport >= REPORT_EVERY_TICKS) {
+      this.ticksSinceReport = 0;
+      this.report(snapshot.activeSpeakerId);
+    }
+  }
+
+  /** Hand the diagnostics of the readings since the last report over. */
+  private report(floorId: string | null): void {
+    const voices: VoiceReport[] = [];
+    for (const id of this.order) {
+      const voice = this.voices.get(id);
+      if (voice === undefined) continue;
+      voices.push({
+        id,
+        isLocal: voice.source.isLocal,
+        path: voice.source.micOn ? voice.reportPath : "none",
+        peak: voice.reportPeak,
+        speaking: voice.reportSpeaking,
+      });
+      voice.reportPeak = null;
+      voice.reportSpeaking = false;
+    }
+    this.onReport?.(voices, floorId);
   }
 }

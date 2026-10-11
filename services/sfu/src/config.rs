@@ -179,6 +179,12 @@ pub struct Config {
     /// frame when a burst on one of its video streams has ended
     /// unrepaired). See [`crate::media::LossProtection`],
     /// [`crate::playout_delay`] and [`crate::burst_keyframe`].
+    ///
+    /// The same structure carries one more switch of the same shape,
+    /// `LAKKO_SFU_VIDEO_NEEDED` (on unless set to `0`): a publisher is
+    /// told in a `video-needed` frame which of its camera senders
+    /// somebody is being sent, so it can stop the others
+    /// ([`crate::video_needed`]). Off, no such frame is ever sent.
     pub protection: LossProtection,
     /// Who decides a publisher's bitrate (`LAKKO_SFU_BITRATE_CONTROL`,
     /// ADR-0068): unset, empty or `client` is the client's own
@@ -273,6 +279,7 @@ impl Config {
             light_duplicate: parse_switch_default_on("LAKKO_SFU_LIGHT_DUPLICATE")?,
             playout_delay: parse_switch_default_on("LAKKO_SFU_PLAYOUT_DELAY")?,
             burst_keyframe: parse_switch_default_on("LAKKO_SFU_BURST_KEYFRAME")?,
+            video_needed: parse_switch_default_on("LAKKO_SFU_VIDEO_NEEDED")?,
             ..LossProtection::default()
         };
         let bitrate_control = parse_bitrate_control()?;
@@ -640,6 +647,20 @@ mod tests {
             assert!(!cfg.burst_keyframe && cfg.light_duplicate && cfg.playout_delay);
         });
         with_env(&[jwks, ("LAKKO_SFU_BURST_KEYFRAME", "no")], || {
+            assert!(Config::from_env().is_err());
+        });
+        // And so is telling a publisher which senders are watched.
+        with_env(&[jwks], || {
+            assert!(Config::from_env().unwrap().protection.video_needed);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_VIDEO_NEEDED", "1")], || {
+            assert!(Config::from_env().unwrap().protection.video_needed);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_VIDEO_NEEDED", "0")], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(!cfg.video_needed && cfg.burst_keyframe && cfg.light_duplicate);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_VIDEO_NEEDED", "off")], || {
             assert!(Config::from_env().is_err());
         });
     }

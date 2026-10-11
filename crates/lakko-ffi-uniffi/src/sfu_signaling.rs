@@ -171,6 +171,16 @@ pub enum SfuServerFrame {
         /// One entry per publisher.
         given: Vec<SfuVideoGiven>,
     },
+    /// Which of this publisher's own camera senders somebody is being
+    /// sent, or is about to be sent. `false`: nobody is, the client may
+    /// stop encoding and uploading that sender; `true`: it must be
+    /// sending it. The light sender is always needed and is not here.
+    VideoNeeded {
+        /// The main (full size) camera sender.
+        main: bool,
+        /// The middle (half size) camera sender.
+        middle: bool,
+    },
 }
 
 /// One entry of [`SfuServerFrame::VideoGiven`]: the picture of one
@@ -231,6 +241,7 @@ impl From<ServerFrame> for SfuServerFrame {
                     })
                     .collect(),
             },
+            ServerFrame::VideoNeeded { main, middle } => Self::VideoNeeded { main, middle },
         }
     }
 }
@@ -534,6 +545,27 @@ mod tests {
         // Out of bounds, as the wire crate refuses it.
         assert!(parse_sfu_server_frame(
             r#"{"kind":"video-given","given":[{"peer":"","quality":"main"}]}"#.to_owned()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn video_needed_parses_into_typed_frame() {
+        for (main, middle) in [(true, true), (false, true), (true, false), (false, false)] {
+            let json = format!(r#"{{"kind":"video-needed","main":{main},"middle":{middle}}}"#);
+            match parse_sfu_server_frame(json).expect("parses") {
+                SfuServerFrame::VideoNeeded { main: m, middle: d } => {
+                    assert_eq!((m, d), (main, middle));
+                },
+                _ => panic!("expected VideoNeeded"),
+            }
+        }
+        // Both flags are required, and they are booleans.
+        assert!(
+            parse_sfu_server_frame(r#"{"kind":"video-needed","main":true}"#.to_owned()).is_err()
+        );
+        assert!(parse_sfu_server_frame(
+            r#"{"kind":"video-needed","main":1,"middle":0}"#.to_owned()
         )
         .is_err());
     }

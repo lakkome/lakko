@@ -2979,6 +2979,7 @@ export function CallHostView(): JSX.Element {
             remoteVideoGivenFor={groupTiles.remoteVideoGivenFor}
             reportTileVideoQuality={groupTiles.reportTileVideoQuality}
             localStream={groupTiles.localStream}
+            remoteAudioReceiverFor={groupTiles.remoteAudioReceiverFor}
           />
         </Show>
         {/* One hidden sink per remote stream, keyed by stream identity, so
@@ -3045,6 +3046,9 @@ export function CallHostView(): JSX.Element {
           }}
           localStream={(): MediaStream | undefined =>
             internals.linkHandle()?.localStream() ?? undefined
+          }
+          remoteAudioReceiverFor={(participantId) =>
+            internals.linkHandle()?.remoteAudioReceiverFor(participantId)
           }
         />
       </Show>

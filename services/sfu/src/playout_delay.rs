@@ -306,6 +306,15 @@ impl UplinkBursts {
     pub fn open_holes(&self) -> usize {
         self.streams.values().map(|s| s.holes.len()).sum()
     }
+
+    /// Forget the stream `ssrc`: its sender was switched off on the SFU's
+    /// word ([`crate::video_needed`]). A packet missing when it stopped is
+    /// no burst, and its first packet after it is switched back on starts
+    /// the stream afresh, whatever its sequence number.
+    pub fn forget(&mut self, ssrc: u32) {
+        self.streams.remove(&ssrc);
+        self.loss.forget(ssrc);
+    }
 }
 
 /// Detects bursts of loss on one subscriber's downlink from what the

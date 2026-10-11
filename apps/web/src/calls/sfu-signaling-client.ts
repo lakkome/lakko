@@ -38,6 +38,12 @@ import {
   VIDEO_GIVEN_MALFORMED_WARNING,
   type VideoGivenEntry,
 } from "./video-given";
+import {
+  claimsVideoNeeded,
+  readVideoNeededFrame,
+  VIDEO_NEEDED_MALFORMED_WARNING,
+  type VideoNeeded,
+} from "./sender-activity";
 
 // ---- Typed server frames ------------------------------------------
 
@@ -136,6 +142,15 @@ export interface SfuSignalingCallbacks {
    * `video-wants`. A malformed frame never reaches this.
    */
   onVideoGiven?(given: readonly VideoGivenEntry[]): void;
+  /**
+   * Which of this device's own camera senders somebody is being sent
+   * (`sender-activity.ts`): the whole state each time, the last frame wins.
+   * `false` for a sender: stop encoding and sending on it; `true`: send it.
+   * The light sender is always needed and is not named. Sent only to a
+   * publisher that declared a light sender. A malformed frame never reaches
+   * this.
+   */
+  onVideoNeeded?(needed: VideoNeeded): void;
   onPong?(frame: SfuPong): void;
   onServerError?(frame: SfuErrorFrame): void;
   /** A malformed / unknown-kind frame the shared validator rejected.
@@ -345,6 +360,11 @@ export class SfuSignalingClient {
       if (claimsVideoGiven(raw)) {
         // eslint-disable-next-line no-console
         console.warn(VIDEO_GIVEN_MALFORMED_WARNING);
+      } else if (claimsVideoNeeded(raw)) {
+        // A `video-needed` frame without both booleans: ignored, with one
+        // warning. The senders stay as the last good frame left them.
+        // eslint-disable-next-line no-console
+        console.warn(VIDEO_NEEDED_MALFORMED_WARNING);
       }
       this.callbacks.onParseError?.(raw, err);
       return;
@@ -360,6 +380,21 @@ export class SfuSignalingClient {
       }
       try {
         this.callbacks.onVideoGiven?.(given);
+      } catch {
+        // A handler's failure never reaches the socket's message handler.
+      }
+      return;
+    }
+    if (kind === "video-needed") {
+      // Read through the shared helper, not from the untrusted `JSON.parse`.
+      const needed = readVideoNeededFrame(wasm, raw);
+      if (needed === null) {
+        // eslint-disable-next-line no-console
+        console.warn(VIDEO_NEEDED_MALFORMED_WARNING);
+        return;
+      }
+      try {
+        this.callbacks.onVideoNeeded?.(needed);
       } catch {
         // A handler's failure never reaches the socket's message handler.
       }

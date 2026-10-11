@@ -299,18 +299,49 @@ strip are off screen for section 7.4.
 
 ### 6.2 Pin and unpin
 
-- **A tap on a tile pins it; a tap on the pinned tile unpins it.** Pinning
-  switches to Focus with that tile on the stage and shows a pin glyph on it.
-  The earlier version of this section took the tap away because on a video call
-  a tap brings the controls back; on the group screen the controls never hide
-  (`calls.md` section 4), so the tap is free, and a tile menu holding one item
-  was a second step for nothing. A swipe that turns the page is not a tap.
+The maintainer's decisions, 2026-10-11, after a live five-person call in which
+nobody could find how to pin.
+
+**One rule on every client: pinning and unpinning happen only through the
+pin button.** A tile is never itself the pin control, in the grid, in the
+strip or on the stage: a press anywhere on a tile pinned people by accident.
+
+**Three states.** *Nobody pinned*: the stage follows the speaker (6.1).
+*Pinned*: the stage holds that person whoever speaks. *The pinned person
+leaves*: the pin is cleared and the stage goes back to the speaker; the
+layout stays as it is.
+
+**The control.**
+
+- **The button.** Every other person's tile has a round pin button in its top
+  right corner, in the style of the other tile overlays: on grid tiles, on
+  strip tiles and on the stage tile. On the pinned tile it is **always**
+  shown, filled, and a press on it unpins.
+- **Web, with a pointer.** The button is shown while the pointer or the
+  keyboard focus is on the tile. It is at least 32 px; on a strip tile it may
+  be smaller, never under 24 px. A keyboard reaches it with Tab.
+- **Touch (iOS, Android, and the web on a touch screen).** There is no hover,
+  so a tap on any tile, grid or strip, shows that tile's controls for about
+  3 seconds: the pin button in the same corner, 44 pt. That tap does nothing
+  else; in particular it never pins. A tap anywhere else, or the time running
+  out, hides them. Tapping the button pins. On iOS and Android the staged
+  pinned tile carries a persistent `Pinned` chip with the same glyph, and a
+  tap on the chip unpins. Nothing needs a long press.
+
+**What a pin does.**
+
+- Pinning from the grid switches to Focus with that person on the stage.
+  Unpinning leaves the layout as it is: Focus stays, and the stage returns to
+  the speaker. The layout button still leads back to the grid, and from Focus
+  it unpins too.
 - **One pin at a time.** Pinning someone else moves the pin.
-- **Unpin**: a tap on the pinned tile, or the layout button. After unpinning,
-  the layout goes back to what it was before the pin.
-- A pin is local. Nobody else learns that you pinned them.
-- If the pinned person leaves, the pin is cleared and the layout returns to what
-  it was.
+- A pin is local to the viewer. Nobody else learns that they were pinned.
+- Pinning asks the call server for the larger picture of that person
+  (section 7.6: the pinned person or the stage counts as the large tile).
+- This device's own tile has no pin button: it is never on the stage while
+  anyone else is present (5.3).
+- The button is named from the catalog, `Pin Anna` / `Unpin Anna`, and
+  reports its pressed state. A swipe that turns the page is not a tap.
 
 ### 6.3 Screen share (receiving)
 
@@ -573,7 +604,7 @@ camera off with a bad signal, which is the confusion 7.4 exists to prevent.
   unresolved people are told apart by tone colour. They are **not numbered**:
   `Participant 3` becomes wrong the moment someone before them leaves.
 - **Long names**: truncated in the strip; the full name is in the spoken label and
-  the tile menu's title.
+  the pin button's name.
 - **Text size**: at the largest accessibility text sizes the strip grows to two
   lines at most and the minimum tile width of 4.2 drops a column. The strip never
   covers more than a third of the tile.
@@ -605,7 +636,7 @@ camera off with a bad signal, which is the confusion 7.4 exists to prevent.
 | 4.4: `Peer` is the last-resort name | `Participant`, with a person glyph instead of initials | `Participant` is what the clients already render, and `Peer` is a protocol word the design system's copy rules keep off the screen |
 | 4.3: no `Reconnecting...` on a group call | Reconnecting and Rejoining exist, once the transport can resume (section 8) | Section 8 is a target; `calls.md` 4.3 stays true until the transport changes |
 | 9: screen sharing out of scope | Receiving a share is designed here; sending stays out | The grid had to decide where a share goes; deciding it later means moving tiles again |
-| (Built behaviour, not text) a tap on a tile pins it | A tap shows the controls; pinning is in the tile's menu or a double-tap | On touch, a tap on a video surface already means "show me the controls" everywhere else |
+| (Built behaviour, not text) a tap on a tile pins it | Only the pin button on the tile pins and unpins (section 6.2); a tap on a tile, on touch, only shows the tile's controls, the pin button among them | A press anywhere on a tile that silently pinned it was not found by anyone looking for how to pin, and pinned people by accident |
 
 `calls.md` section 4.4 will point to this document for the grid; that edit is
 not made in this change.
@@ -618,7 +649,8 @@ not made in this change.
   `pinned`, `sharing screen`. For example: `Anna, speaking, camera off, poor
   connection`. Your own tile starts with `You,`.
 - The tile's actions (Pin / Unpin) are exposed as accessibility actions (iOS
-  custom actions, Android `customActions`, web menu button), so no gesture is the
+  custom actions, Android `customActions`) and, on the web, are the pin button
+  of section 6.2, a real button in the keyboard order, so no gesture is the
   only way in.
 - **Speaker changes are not announced**: in a busy call that is a constant
   stream. The label updates, so moving to a tile reads the current state. Joins,
@@ -628,8 +660,8 @@ not made in this change.
   connection and pause each have a glyph; *left* has a word.
 - **Reduced motion** (all three platforms' system setting): no slides, no pulse,
   cross-fades only (4.4, 5.2, 7.3).
-- **Touch targets**: tiles are targets in their own right; the web `⋯` button and
-  page-dot buttons are at least 44 × 44 even when drawn smaller. Page dots on the
+- **Touch targets**: on a touch screen the pin button and the page-dot
+  buttons are at least 44 × 44 even when drawn smaller. Page dots on the
   natives are one 44 pt high hit area split left / right.
 - **Focus order** (keyboard, switch control): status line, layout switch, tiles
   in reading order of the current page, page indicator, control bar.
@@ -645,7 +677,7 @@ Platform idiom, and only this:
 
 | | iOS | Android | Web |
 |---|---|---|---|
-| Tile menu | Long press (context menu) | Long press (dropdown) | `⋯` on hover / focus, right-click |
+| Pin control (6.2) | Tap the tile (grid or strip), then its pin button; `Pinned` chip unpins | Tap the tile (grid or strip), then its pin button; `Pinned` chip unpins | Pin button on hover / focus; on a touch screen, tap the tile, then its pin button |
 | Change page | Swipe | Swipe | Edge arrows, `Page Up` / `Page Down`, dot buttons |
 | Layout switch | Overflow menu (Compact) / top-right button (Regular) | Same | Top-right button |
 | Pin feedback | Light haptic | Light haptic | None |

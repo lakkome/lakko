@@ -40,7 +40,11 @@ fn to_err(e: lakko_sfu_proto::SfuProtoError) -> JsError {
 /// Validate an inbound server frame off the `lakko-sfu-v1`
 /// WebSocket and return its `kind` discriminator (kebab-case:
 /// `"welcome"`, `"peer-joined"`, `"peer-left"`, `"signal-relay"`,
-/// `"error"`, `"pong"`, `"sdp-answer"`, `"sdp-offer"`, `"video-given"`).
+/// `"error"`, `"pong"`, `"sdp-answer"`, `"sdp-offer"`, `"video-given"`,
+/// `"video-needed"`).
+/// A `video-needed` frame carries two required booleans, `main` and
+/// `middle`: which of this publisher's own camera senders somebody is
+/// being sent (`parseSfuVideoNeeded`).
 /// A `video-given` frame (ADR-0070 step 6) carries `given`, a list of
 /// `{ peer, quality }` with `quality` one of `"main"`, `"middle"`,
 /// `"light"`: what this subscriber is being sent of each publisher's
@@ -60,8 +64,32 @@ pub fn validate_sfu_server_frame(json: &str) -> Result<String, JsError> {
         ServerFrame::SdpAnswer { .. } => "sdp-answer",
         ServerFrame::SdpOffer { .. } => "sdp-offer",
         ServerFrame::VideoGiven { .. } => "video-given",
+        ServerFrame::VideoNeeded { .. } => "video-needed",
     };
     Ok(kind.to_string())
+}
+
+/// The two flags of a `video-needed` server frame as a two-byte array
+/// `[main, middle]`, each `1` (somebody is being sent, or is about to be
+/// sent, that camera sender of this publisher: keep it encoding) or `0`
+/// (nobody is: the client may stop encoding and uploading it). The light
+/// sender is always needed and is not in the frame. Throws when the JSON
+/// is not a valid `video-needed` frame.
+#[wasm_bindgen(js_name = "parseSfuVideoNeeded")]
+pub fn parse_sfu_video_needed(json: &str) -> Result<Vec<u8>, JsError> {
+    video_needed_flags(json).map_err(|e| JsError::new(&e))
+}
+
+/// [`parse_sfu_video_needed`] without the `JsError`, so a host test can
+/// run it.
+fn video_needed_flags(json: &str) -> Result<Vec<u8>, String> {
+    match decode_server_frame(json).map_err(|e| e.to_string())? {
+        ServerFrame::VideoNeeded { main, middle } => Ok(vec![u8::from(main), u8::from(middle)]),
+        other => Err(format!(
+            "expected a video-needed frame, got {}",
+            other.kind_str()
+        )),
+    }
 }
 
 /// The `given` list of a `video-given` server frame (ADR-0070 step 6) as
@@ -261,6 +289,27 @@ mod tests {
             r#"{"kind":"video-given","given":[{"peer":"","quality":"main"}]}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn video_needed_validates_and_flattens() {
+        let frame = |main: bool, middle: bool| {
+            format!(r#"{{"kind":"video-needed","main":{main},"middle":{middle}}}"#)
+        };
+        assert_eq!(
+            validate_sfu_server_frame(&frame(true, false)).expect("ok"),
+            "video-needed"
+        );
+        assert_eq!(video_needed_flags(&frame(true, true)).expect("ok"), [1, 1]);
+        assert_eq!(video_needed_flags(&frame(false, true)).expect("ok"), [0, 1]);
+        assert_eq!(video_needed_flags(&frame(true, false)).expect("ok"), [1, 0]);
+        assert_eq!(
+            video_needed_flags(&frame(false, false)).expect("ok"),
+            [0, 0]
+        );
+        assert!(video_needed_flags(r#"{"kind":"pong","nonce":1}"#).is_err());
+        assert!(video_needed_flags(r#"{"kind":"video-needed","main":true}"#).is_err());
+        assert!(video_needed_flags(r#"{"kind":"video-needed","main":1,"middle":0}"#).is_err());
     }
 
     // The unknown-kind / malformed rejection path constructs a

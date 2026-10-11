@@ -603,6 +603,16 @@ export class MultiJoinerCall {
     return this.remoteVideoGiven().get(peerId);
   }
 
+  /** Look up a roster participant id (`peer-<id>`) to the receiver that
+   *  decodes that person's audio, for the sound level the call screen reads
+   *  on this device (`audio-level.ts`). */
+  remoteAudioReceiverFor(participantId: string): RTCRtpReceiver | undefined {
+    const peerId = participantId.startsWith(PEER_PREFIX)
+      ? participantId.slice(PEER_PREFIX.length)
+      : participantId;
+    return this.session.audioReceiverFor(peerId);
+  }
+
   /** A tile says which picture of a peer it shows, or `null` when it stops
    *  (`video-wants.ts`); the session asks the SFU accordingly. */
   reportTileVideoQuality(tile: object, peerId: string, quality: VideoQuality | null): void {

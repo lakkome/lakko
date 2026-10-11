@@ -107,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
             light_duplicate = cfg.protection.light_duplicate,
             playout_delay = cfg.protection.playout_delay,
             burst_keyframe = cfg.protection.burst_keyframe,
+            video_needed = cfg.protection.video_needed,
             downlink_control = cfg.downlink_control,
             "media: UDP socket bound; routing task spawned; ICE host candidate advertised"
         );

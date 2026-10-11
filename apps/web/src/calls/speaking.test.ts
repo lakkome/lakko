@@ -81,6 +81,85 @@ describe("the floor", () => {
   });
 });
 
+describe("this device's own voice", () => {
+  // Seen on a live five-person call: the large tile never moved to the
+  // person speaking. The roster starts with this device's own person, and
+  // its microphone (the person talking, or the room heard through it) took
+  // the floor and kept everyone else from it.
+  it("draws its ring and never holds the floor against someone else", () => {
+    const t = new SpeakingTracker();
+    const candidates = ["b", "c"];
+    for (let now = 0; now <= 10_000; now += 100) {
+      t.sample("me", LOUD, now);
+      t.sample("b", 0, now);
+      t.sample("c", LOUD, now);
+    }
+    const snap = t.snapshot(candidates, 10_000);
+    expect(snap.speakingIds.has("me")).toBe(true);
+    expect(snap.activeSpeakerId).toBe("c");
+    expect(Object.keys(snap.lastSpokeAtMs)).toEqual(["c"]);
+  });
+
+  it("leaves the floor empty when only this device speaks", () => {
+    const t = new SpeakingTracker();
+    feed(t, "me", LOUD, 0, 5_000);
+    expect(t.snapshot(["b"], 5_000).activeSpeakerId).toBeNull();
+  });
+});
+
+describe("a muted person", () => {
+  it("loses the ring at once and gives up the floor, whatever the level says", () => {
+    const t = new SpeakingTracker();
+    feed(t, "a", LOUD, 0, FLOOR_ONSET_MS + 500);
+    expect(t.snapshot(ORDER, FLOOR_ONSET_MS + 500).activeSpeakerId).toBe("a");
+    t.silence("a");
+    const snap = t.snapshot(ORDER, FLOOR_ONSET_MS + 600);
+    expect(snap.speakingIds.has("a")).toBe(false);
+    expect(snap.activeSpeakerId).toBeNull();
+    // They held the floor, so the stage still remembers them.
+    expect(snap.lastSpokeAtMs.a).toBeGreaterThan(0);
+  });
+
+  it("has to earn the ring again after unmuting", () => {
+    const t = new SpeakingTracker();
+    feed(t, "a", LOUD, 0, 1_000);
+    t.silence("a");
+    t.sample("a", LOUD, 1_100);
+    expect(t.snapshot(ORDER, 1_100).speakingIds.has("a")).toBe(false);
+    t.sample("a", LOUD, 1_100 + RING_ON_MS);
+    expect(t.snapshot(ORDER, 1_100 + RING_ON_MS).speakingIds.has("a")).toBe(true);
+  });
+});
+
+describe("several people", () => {
+  it("hands the floor to the next speaker only once the holder has stopped", () => {
+    const t = new SpeakingTracker();
+    const order = ["a", "b", "c"];
+    let now = 0;
+    const run = (levels: Record<string, number>, forMs: number): string | null => {
+      const until = now + forMs;
+      let active: string | null = null;
+      for (; now <= until; now += 100) {
+        for (const id of order) t.sample(id, levels[id] ?? 0, now);
+        active = t.snapshot(order, now).activeSpeakerId;
+      }
+      return active;
+    };
+    expect(run({ b: LOUD }, 3_000)).toBe("b");
+    // c joins in over b: the stage does not flip.
+    expect(run({ b: LOUD, c: LOUD }, 3_000)).toBe("b");
+    // b stops; c has been speaking long enough and takes it.
+    expect(run({ c: LOUD }, RING_OFF_MS + 200)).toBe("c");
+    // A short pause inside c's speech does not drop the floor.
+    expect(run({}, RING_OFF_MS - 300)).toBe("c");
+    expect(run({ c: LOUD }, 500)).toBe("c");
+    // Everyone quiet: nobody holds it, and c is the most recent.
+    expect(run({}, RING_OFF_MS + 200)).toBeNull();
+    const last = t.snapshot(order, now).lastSpokeAtMs;
+    expect(last.c).toBeGreaterThan(last.b ?? 0);
+  });
+});
+
 describe("rmsLevel", () => {
   it("is zero for silence and for an empty block, and rises with the signal", () => {
     expect(rmsLevel(new Float32Array(0))).toBe(0);

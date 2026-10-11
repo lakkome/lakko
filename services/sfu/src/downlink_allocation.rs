@@ -42,6 +42,19 @@
 //! fits, the rule runs on the budget and nobody keeps more than it gives
 //! them.
 //!
+//! **A set that fits is kept as it is** unless the subscriber changed its
+//! order of importance. Until 2026-10-09 the rule above was run on what
+//! the set needs at every call, with every publisher's *asked-for*
+//! quality: a more important publisher that was being given less than it
+//! asked for was then "given" its larger track out of the same budget
+//! whenever that track happened to cost less than the one a less
+//! important publisher held (the measured rates move from second to
+//! second), the less important one lost its track, and the more
+//! important one did not get its own, which waits for proof. On the live
+//! call of that day this took a middle picture away with nothing wrong
+//! on the path (three of twenty changes downward). Now a change of the
+//! order is what moves a track, and nothing else does.
+//!
 //! Not built: when a more important publisher's larger track costs more
 //! than the tracks the less important ones would give up for it, the
 //! swap is not tried by itself; that publisher waits until the path has
@@ -126,7 +139,8 @@ impl<K> Given<K> {
 }
 
 /// Qualities in ascending order of what they cost.
-const fn rank(quality: VideoQuality) -> u8 {
+#[must_use]
+pub(crate) const fn rank(quality: VideoQuality) -> u8 {
     match quality {
         VideoQuality::Light => 0,
         VideoQuality::Middle => 1,
@@ -142,6 +156,33 @@ pub const fn smaller(a: VideoQuality, b: VideoQuality) -> VideoQuality {
     } else {
         b
     }
+}
+
+/// What a middle picture counts for in a set's level ([`set_level`]).
+pub const LEVEL_MIDDLE: u64 = 1;
+/// What a main picture counts for in a set's level: more than a middle
+/// one by about what it costs more (a 720p sender against a 360p one in
+/// the Lakko clients: 2.5 to 3 Mbit/s against 0.5). Chosen.
+pub const LEVEL_MAIN: u64 = 6;
+
+/// How large a set is by **which pictures it holds**, not by what they
+/// cost at the moment: the sum of [`LEVEL_MAIN`] per main picture and
+/// [`LEVEL_MIDDLE`] per middle one. Two sets of the same level are "the
+/// same set" to the memory of a set that proved too large
+/// ([`crate::downlink_probe::DownlinkProbe::on_given_taken_back`]), and
+/// one of a higher level is a larger one. What a set needs in bits per
+/// second cannot serve: it moves by a fifth with the publishers'
+/// encoders from one second to the next.
+#[must_use]
+pub fn set_level(given: &[VideoQuality]) -> u64 {
+    given
+        .iter()
+        .map(|quality| match quality {
+            VideoQuality::Main => LEVEL_MAIN,
+            VideoQuality::Middle => LEVEL_MIDDLE,
+            VideoQuality::Light => 0,
+        })
+        .sum()
 }
 
 /// A heavy track's measured rate with the headroom on it.
@@ -277,6 +318,8 @@ pub struct NextStep {
     /// What the set after the move needs, headroom included
     /// ([`need_bps`]): the rate to try on the path.
     pub need_bps: u64,
+    /// How large the set after the move is ([`set_level`]).
+    pub level: u64,
 }
 
 /// The set to try next, or `None` when everyone is given what they asked
@@ -306,8 +349,39 @@ pub fn next_steps<K>(publishers: &[Publisher<K>], given: &[VideoQuality]) -> Vec
                 index,
                 quality,
                 need_bps: need_bps(publishers, &set),
+                level: set_level(&set),
             })
         })
+        .collect()
+}
+
+/// What stays of `current` (what is being given, capped at what is
+/// asked for) before anything is moved up: all of it when `keep` (it
+/// fits the budget and the order of importance stands); else what the
+/// rule gives, on what the set needs when it fits and on `budget_bps`
+/// when it does not, and never more than `current`.
+fn kept_or_shared<K>(
+    publishers: &[Publisher<K>],
+    current: &[VideoQuality],
+    budget_bps: u64,
+    keep: bool,
+) -> Vec<VideoQuality> {
+    if keep {
+        return publishers
+            .iter()
+            .zip(current)
+            .map(|(p, current)| held(p, *current))
+            .collect();
+    }
+    let shared = if wire_bps(publishers, current) <= budget_bps {
+        need_bps(publishers, current)
+    } else {
+        budget_bps
+    };
+    targets(Some(shared), publishers)
+        .iter()
+        .zip(current)
+        .map(|(target, current)| smaller(*target, *current))
         .collect()
 }
 
@@ -316,13 +390,32 @@ pub fn next_steps<K>(publishers: &[Publisher<K>], given: &[VideoQuality]) -> Vec
 #[derive(Debug, Clone)]
 pub struct DownlinkAllocation<K> {
     given: HashMap<K, VideoQuality>,
+    /// The publishers of the last call, in its order.
+    order: Vec<K>,
+    /// What the last call found: the order of importance had changed,
+    /// and what was being given no longer fitted the budget.
+    reordered: bool,
+    over_budget: bool,
 }
 
 impl<K> Default for DownlinkAllocation<K> {
     fn default() -> Self {
         Self {
             given: HashMap::new(),
+            order: Vec::new(),
+            reordered: false,
+            over_budget: false,
         }
+    }
+}
+
+/// The track of `p` that `quality` comes to: itself when the publisher
+/// has that track, else the next smaller one it has.
+fn held<K>(p: &Publisher<K>, quality: VideoQuality) -> VideoQuality {
+    match quality {
+        VideoQuality::Main if p.main_bps.is_some() => VideoQuality::Main,
+        VideoQuality::Main | VideoQuality::Middle if p.middle_bps.is_some() => VideoQuality::Middle,
+        _ => VideoQuality::Light,
     }
 }
 
@@ -349,6 +442,35 @@ impl<K: Clone + Eq + Hash> DownlinkAllocation<K> {
         carried_bps: Option<u64>,
         publishers: &[Publisher<K>],
     ) -> Vec<Given<K>> {
+        self.allocate_within(budget_bps, carried_bps, None, publishers)
+    }
+
+    /// Whether the last call found the order of importance changed
+    /// (among the publishers listed both times).
+    #[must_use]
+    pub const fn reordered(&self) -> bool {
+        self.reordered
+    }
+
+    /// Whether the last call found that what was being given no longer
+    /// fitted the budget as it is on the wire.
+    #[must_use]
+    pub const fn over_budget(&self) -> bool {
+        self.over_budget
+    }
+
+    /// As [`Self::allocate`], and no publisher is moved **up** to a set
+    /// of level `held_from` or more ([`set_level`]), whatever the path
+    /// was seen to carry: the caller's memory of a set that proved too
+    /// large a moment ago ([`crate::downlink_probe`]). `None` holds
+    /// nothing. It never takes anything away.
+    pub fn allocate_within(
+        &mut self,
+        budget_bps: Option<u64>,
+        carried_bps: Option<u64>,
+        held_from: Option<u64>,
+        publishers: &[Publisher<K>],
+    ) -> Vec<Given<K>> {
         let previous: Vec<Option<VideoQuality>> = publishers
             .iter()
             .map(|p| self.given.get(&p.publisher).copied())
@@ -362,6 +484,21 @@ impl<K: Clone + Eq + Hash> DownlinkAllocation<K> {
                     .unwrap_or(0)
             })
             .collect();
+        let order: Vec<K> = publishers
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| first_of[*i] == *i)
+            .map(|(_, p)| p.publisher.clone())
+            .collect();
+        // The order among the publishers listed both times.
+        self.reordered = self
+            .order
+            .iter()
+            .filter(|k| order.contains(k))
+            .ne(order.iter().filter(|k| self.order.contains(k)));
+        self.over_budget = false;
+        self.order = order;
+        let reordered = self.reordered;
         let mut set: Vec<VideoQuality> = if let Some(budget) = budget_bps {
             // What is being given now; a publisher seen for the first
             // time starts at its light track, and nobody is given more
@@ -390,16 +527,17 @@ impl<K: Clone + Eq + Hash> DownlinkAllocation<K> {
             // track at once; nothing else moves). When it no longer
             // fits, the rule runs on the estimate. Either way a
             // publisher is moved down at once.
-            let shared = if wire_bps(publishers, &current) <= budget {
-                need_bps(publishers, &current)
-            } else {
-                budget
-            };
-            let mut set: Vec<VideoQuality> = targets(Some(shared), publishers)
-                .iter()
-                .zip(&current)
-                .map(|(target, current)| smaller(*target, *current))
-                .collect();
+            //
+            // And a set that fits is kept as it is, unless the order of
+            // importance changed: the rule run on what the set needs
+            // gives a more important publisher its larger track first
+            // whenever that happens to cost less than a less important
+            // one's, which takes the latter's away and gives the former
+            // nothing (it waits for proof). The measured rates move all
+            // the time; the order moves when the subscriber says so.
+            let fits = wire_bps(publishers, &current) <= budget;
+            self.over_budget = !fits;
+            let mut set = kept_or_shared(publishers, &current, budget, fits && !reordered);
             // Up only as far as the path has carried and the budget
             // covers, the most important publisher first, each to the
             // largest track that fits.
@@ -415,6 +553,7 @@ impl<K: Clone + Eq + Hash> DownlinkAllocation<K> {
                         trial[i] = quality;
                         if wire_bps(publishers, &trial) <= carried
                             && need_bps(publishers, &trial) <= budget
+                            && held_from.map_or(true, |held| set_level(&trial) < held)
                         {
                             best = Some(quality);
                         }
@@ -643,6 +782,7 @@ mod tests {
                 index: 0,
                 quality: Main,
                 need_bps: base + with_headroom(MAIN),
+                level: LEVEL_MAIN,
             })
         );
         // No light track: nothing is taken off for it.
@@ -903,6 +1043,74 @@ mod tests {
         let carried = wire_bps(&reordered, &[Main, Middle, Middle]);
         let given = allocation.allocate(Some(inflated), Some(carried), &reordered);
         assert_eq!(qualities(&given), vec![Main, Middle, Middle]);
+    }
+
+    /// A set that fits is kept as it is while the order of importance
+    /// stands. Seen on a live call (2026-10-09): the subscriber's first
+    /// publisher was on its light track and the second on its middle one;
+    /// the first's middle track came to cost less than the second's for a
+    /// moment, the rule gave the budget to the first, the second lost its
+    /// picture and the first got none (it waits for proof).
+    #[test]
+    fn a_cheaper_track_of_a_more_important_publisher_takes_nothing_away() {
+        use VideoQuality::{Light, Middle};
+        let mut publishers = vec![publisher("a", Middle), publisher("b", Middle)];
+        let mut allocation = DownlinkAllocation::new();
+        // Settled on light for a and middle for b: a budget for one
+        // middle track, and b's was the one the path was seen to carry.
+        let one = first(2) + with_headroom(MIDDLE);
+        let _ = allocation.allocate(Some(first(2)), None, &publishers);
+        publishers[0].middle_bps = Some(MIDDLE * 2);
+        let given = allocation.allocate(
+            Some(one),
+            Some(wire_bps(&publishers, &[Light, Middle])),
+            &publishers,
+        );
+        assert_eq!(qualities(&given), vec![Light, Middle]);
+        // a's middle track now costs less than b's.
+        publishers[0].middle_bps = Some(MIDDLE - 100_000);
+        assert_eq!(
+            targets(Some(need_bps(&publishers, &[Light, Middle])), &publishers),
+            vec![Middle, Light],
+            "what the rule alone would say"
+        );
+        let given = allocation.allocate(Some(one), None, &publishers);
+        assert_eq!(qualities(&given), vec![Light, Middle], "nothing moves");
+        assert!(!allocation.reordered() && !allocation.over_budget());
+        // The subscriber names b first: still nothing to move.
+        let reordered = vec![publishers[1].clone(), publishers[0].clone()];
+        let given = allocation.allocate(Some(one), None, &reordered);
+        assert_eq!(qualities(&given), vec![Middle, Light]);
+        assert!(allocation.reordered());
+        // And when what is given no longer fits, the rule runs as ever.
+        let given = allocation.allocate(Some(first(2)), None, &reordered);
+        assert_eq!(qualities(&given), vec![Light, Light]);
+        assert!(allocation.over_budget());
+    }
+
+    /// A set the caller holds too large is not given, whatever the path
+    /// was seen to carry; a smaller one is, and nothing is taken away.
+    #[test]
+    fn a_set_held_too_large_is_not_given_on_any_proof() {
+        use VideoQuality::{Light, Main, Middle};
+        let publishers = vec![publisher("a", Middle), publisher("b", Middle)];
+        let mut allocation = DownlinkAllocation::new();
+        let _ = allocation.allocate(Some(first(2)), None, &publishers);
+        let lots = Some(need_bps(&publishers, &[Middle, Middle]) * 2);
+        assert_eq!(set_level(&[Middle, Middle]), 2 * LEVEL_MIDDLE);
+        assert_eq!(set_level(&[Main, Light]), LEVEL_MAIN);
+        // Two middles are held: one is given.
+        let given = allocation.allocate_within(lots, lots, Some(2), &publishers);
+        assert_eq!(qualities(&given), vec![Middle, Light], "one is under it");
+        // One middle is held as well now: nothing more, and it stays.
+        let given = allocation.allocate_within(lots, lots, Some(1), &publishers);
+        assert_eq!(qualities(&given), vec![Middle, Light], "and it stays");
+        let given = allocation.allocate_within(lots, lots, None, &publishers);
+        assert_eq!(qualities(&given), vec![Middle, Middle]);
+        // The next steps say how large the set after each is.
+        let steps = next_steps(&publishers, &[Middle, Light]);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].level, 2);
     }
 
     /// The headroom is asked for to give a track, not to keep it: a set

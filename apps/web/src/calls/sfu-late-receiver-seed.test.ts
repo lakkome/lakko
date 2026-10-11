@@ -163,3 +163,78 @@ describe("SfuCallSession — receiver keying after a rekey", () => {
     );
   });
 });
+
+/**
+ * The call screen reads a person's sound level from the receiver that
+ * decodes their audio (`audio-level.ts`), on this device.
+ */
+describe("SfuCallSession: the audio receiver of a peer", () => {
+  async function connected(): Promise<SfuCallSession> {
+    const session = new SfuCallSession({
+      sfuBaseUrl: "wss://sfu.test",
+      jwt: "jwt",
+      seed: new Uint8Array(32).fill(3),
+      localLeaf: 0,
+      media: { audio: true, video: false },
+    });
+    await session.connect();
+    return session;
+  }
+
+  it("is known by peer id from the moment the track is announced, and only for audio", async () => {
+    const session = await connected();
+    const audio = { track: { readyState: "live" } };
+    const seen: unknown[] = [];
+    // The receiver must already answer inside the track callback.
+    (session as unknown as { callbacks: { onRemoteTrack?: (rt: { streamId: string }) => void } }).callbacks.onRemoteTrack =
+      (rt): void => {
+        seen.push(session.audioReceiverFor(rt.streamId));
+      };
+    hooks.pcs[0]?.ontrack?.({ streams: [fakeStream("b")], track: { kind: "audio" }, receiver: audio });
+    hooks.pcs[0]?.ontrack?.({
+      streams: [fakeStream("c")],
+      track: { kind: "video", addEventListener: () => undefined },
+      receiver: {},
+    });
+    expect(seen[0]).toBe(audio);
+    expect(session.audioReceiverFor("b")).toBe(audio);
+    expect(session.audioReceiverFor("c")).toBeUndefined();
+    expect(session.audioReceiverFor("nobody")).toBeUndefined();
+  });
+
+  it("is known for a peer whose audio arrives in a later track event than their video", async () => {
+    const session = await connected();
+    const stream = fakeStream("b");
+    const announced: { kind: string; receiver: unknown }[] = [];
+    (session as unknown as { callbacks: { onRemoteTrack?: (rt: { streamId: string; track: { kind: string } }) => void } }).callbacks.onRemoteTrack =
+      (rt): void => {
+        announced.push({ kind: rt.track.kind, receiver: session.audioReceiverFor(rt.streamId) });
+      };
+    hooks.pcs[0]?.ontrack?.({
+      streams: [stream],
+      track: { kind: "video", addEventListener: () => undefined },
+      receiver: {},
+    });
+    const audio = { track: { readyState: "live" } };
+    hooks.pcs[0]?.ontrack?.({ streams: [stream], track: { kind: "audio" }, receiver: audio });
+    // Each track is announced, so whoever maps streams is told twice and
+    // finds the receiver the second time.
+    expect(announced).toEqual([
+      { kind: "video", receiver: undefined },
+      { kind: "audio", receiver: audio },
+    ]);
+  });
+
+  it("is gone once the track has ended and after hang-up", async () => {
+    const session = await connected();
+    const b = { track: { readyState: "live" } };
+    const c = { track: { readyState: "live" } };
+    hooks.pcs[0]?.ontrack?.({ streams: [fakeStream("b")], track: { kind: "audio" }, receiver: b });
+    hooks.pcs[0]?.ontrack?.({ streams: [fakeStream("c")], track: { kind: "audio" }, receiver: c });
+    b.track.readyState = "ended";
+    expect(session.audioReceiverFor("b")).toBeUndefined();
+    expect(session.audioReceiverFor("c")).toBe(c);
+    session.hangUp();
+    expect(session.audioReceiverFor("c")).toBeUndefined();
+  });
+});
