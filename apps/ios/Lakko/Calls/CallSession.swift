@@ -778,6 +778,10 @@ public final class CallSession: ObservableObject {
     ) async {
         do {
             let answerSdp = try await rtc.createAnswer(remoteOfferSdp: offerSdp)
+            // The senders' codecs are negotiated now: their SFrame encryptors
+            // need them to leave the right codec header in the clear
+            // (ADR-0071). Until told, a video encryptor keeps nothing clear.
+            rtc.syncSenderCodecs()
             // `createAnswer` set the remote offer: candidates held while the
             // call rang can go in now.
             await applyBufferedRemoteCandidates(to: rtc)
@@ -860,6 +864,9 @@ public final class CallSession: ObservableObject {
                 Task { [weak self] in
                     do {
                         try await rtc.applyRemoteAnswer(sdp)
+                        // Negotiated: tell the encryptors their codecs
+                        // (ADR-0071).
+                        rtc.syncSenderCodecs()
                         await self?.applyBufferedRemoteCandidates(to: rtc)
                         // Arm the mid-call renegotiation drive now the
                         // initial exchange is applied on our side (B2b).
@@ -880,6 +887,9 @@ public final class CallSession: ObservableObject {
                     self?.isSettingRemoteAnswerPending = true
                     do {
                         try await rtc.applyRemoteAnswer(sdp)
+                        // A renegotiation (mid-call camera on) may have
+                        // added a sender or changed a codec (ADR-0071).
+                        rtc.syncSenderCodecs()
                     } catch {
                         NSLog(
                             "reneg applyRemoteAnswer failed: %@",
@@ -1028,6 +1038,8 @@ public final class CallSession: ObservableObject {
                 try await rtc.rollbackLocalDescription()
             }
             let answerSdp = try await rtc.createAnswer(remoteOfferSdp: sdp)
+            // The renegotiation is applied on this side (ADR-0071).
+            rtc.syncSenderCodecs()
             let bytes = try composeCallSignaling(
                 body: .answer(callId: callId, sdp: answerSdp)
             )

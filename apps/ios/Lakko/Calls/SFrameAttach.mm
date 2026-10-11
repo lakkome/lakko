@@ -470,7 +470,11 @@ void LakkoBridgeLogSink(const char *line) {
     IMP imp = class_getMethodImplementation([sender class], selector);
     if (imp != nullptr) {
         auto setEncryptor = reinterpret_cast<SetFrameEncryptorIMP>(imp);
-        setEncryptor(sender, selector, nullptr);
+        // An EMPTY scoped_refptr, passed by address like the attach
+        // path: the framework reads the argument as a pointer to a
+        // scoped_refptr, so a bare nullptr is dereferenced and crashes.
+        rtc::scoped_refptr<webrtc::FrameEncryptorInterface> none;
+        setEncryptor(sender, selector, static_cast<void *>(&none));
     }
     // Then drop our wrapper retain — wrapper's dealloc calls
     // Release() on the C++ pointer, taking the count to 0 and
@@ -489,7 +493,9 @@ void LakkoBridgeLogSink(const char *line) {
     IMP imp = class_getMethodImplementation([receiver class], selector);
     if (imp != nullptr) {
         auto setDecryptor = reinterpret_cast<SetFrameDecryptorIMP>(imp);
-        setDecryptor(receiver, selector, nullptr);
+        // An empty scoped_refptr by address; see detachFromSender.
+        rtc::scoped_refptr<webrtc::FrameDecryptorInterface> none;
+        setDecryptor(receiver, selector, static_cast<void *>(&none));
     }
     objc_setAssociatedObject(receiver,
                              (__bridge const void *)kDecryptorAssociationKey,

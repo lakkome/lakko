@@ -982,6 +982,10 @@
       "text": "المشارك {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "تثبيت {name}",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "مثبّت",
       "status": "machine"
@@ -996,6 +1000,10 @@
     },
     "call.participant.unnamed": {
       "text": "مشارك",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "إلغاء تثبيت {name}",
       "status": "machine"
     },
     "call.participant.you": {

@@ -660,6 +660,8 @@ public class WebRtcPeerConnection(
         val middleTrackIds: Set<String>,
         /** This device's camera senders, by the `mid` of their media line. */
         val senderByMid: Map<String, CameraSenderKind>,
+        /** This device's camera senders, by the id of the track each sends. */
+        val senderByTrackId: Map<String, CameraSenderKind>,
     )
 
     /**
@@ -684,6 +686,7 @@ public class WebRtcPeerConnection(
             lightTrackIds = remoteLightVideoTrackIds.toSet(),
             middleTrackIds = remoteMiddleVideoTrackIds.toSet(),
             senderByMid = cameraSenderByMid(),
+            senderByTrackId = cameraSenderByTrackId(),
         )
     }
 
@@ -924,6 +927,18 @@ public class WebRtcPeerConnection(
         return out
     }
 
+    /** This device's camera senders, by the id of the track each sends: the
+     *  second way the media counters name an `outbound-rtp` entry
+     *  ([outboundSenderKind]), for a report whose entry carries no usable
+     *  `mid`. The ids are this class's own constants, so nothing native is
+     *  read. Only senders this device has are listed. */
+    private fun cameraSenderByTrackId(): Map<String, CameraSenderKind> {
+        val out = HashMap<String, CameraSenderKind>()
+        if (localVideoSender != null) out[VIDEO_TRACK_ID] = CameraSenderKind.MAIN
+        for (kind in cameraCopies.keys) out[copyTrackId(kind)] = kind.sender
+        return out
+    }
+
     /** Take the [kind] copy off the connection: its sender, its track and
      *  its encryptor. Every step is best effort. */
     internal fun removeCameraCopySender(kind: CameraCopyKind) {
@@ -974,7 +989,19 @@ public class WebRtcPeerConnection(
      *
      * Called after every step that can change a sender's codec or give a
      * sender a new encryptor: the SFU's answer, an answer of this device's to
-     * an SFU offer, a mid-call arm, a copy added. Safe to call at any time.
+     * an SFU offer, a mid-call arm, a copy added; on a one-to-one call, each
+     * completed offer / answer exchange. Safe to call at any time.
+     *
+     * Reads only the `RtpSender` objects this class holds (`sender.parameters`)
+     * and never `PeerConnection.getTransceivers()` or `getSenders()`, so it
+     * neither triggers nor is hurt by the wrapper disposal described on
+     * [localVideoTransceiver]: `getTransceivers()` disposes the transceiver
+     * wrappers and the sender wrapper each of them made for itself, while the
+     * sender `addTrack` returned is a separate wrapper kept in the
+     * connection's sender list, which only `getSenders()` disposes. The
+     * one-to-one call's use of the transceiver list ([setLocalVideoSending],
+     * [sampleLocalVideoSendFacts]) therefore leaves the sender read here
+     * usable, in either order.
      */
     public fun syncSenderCodecs() {
         val main = localVideoSender

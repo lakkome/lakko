@@ -164,7 +164,21 @@ internal class SpeakingMonitor(
     }
 }
 
-/** How often the levels are read: about seven times a second. */
+/**
+ * How often the levels are read: about seven times a second. The web client
+ * reads every 100 ms (`SAMPLE_INTERVAL_MS` in `speaking-monitor.ts`).
+ *
+ * The difference does not move the stage. Every threshold of
+ * [SpeakingTracker] is a time in milliseconds measured between the readings'
+ * own timestamps, none is a number of readings, and the floor's onset
+ * ([FLOOR_ONSET_MS]) is a whole number of both intervals, so on either grid a
+ * person takes the floor on the reading 1.5 s after the first one that heard
+ * them (`SpeakingTest`). What the coarser grid does cost is the ring: it
+ * comes on at the first reading at or past [RING_ON_MS], which is 300 ms
+ * after the first one with sound here and 200 ms on the web, and goes off at
+ * 900 ms of silence against 800 ms. Each reading here is the connection's
+ * whole statistics report, which is why it is not taken more often.
+ */
 internal const val SPEAKING_SAMPLE_INTERVAL_MS: Long = 150L
 
 /** How many readings one diagnostics report covers (about 2 seconds, the

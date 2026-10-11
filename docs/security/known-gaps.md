@@ -1972,6 +1972,27 @@ follows the WG.
 
 ### G-26: RFC 9605 §4.3 SFrame wire header + framed pipeline + cross-platform AAD; §4.3-conformant, only live deployed-SFU RTP interop pending
 
+**Update (2026-10-11) — the media path no longer uses the frame this
+entry describes.** [ADR-0071](../adr/0071-codec-header-in-the-clear.md)
+(Proposed) moved call media to `clear_prefix || ciphertext_and_tag ||
+sframe_header || trailer`: the web client on 2026-10-07, the native bridge
+on 2026-10-11. Read the 2026-07 update below with three corrections. (1)
+The header codec is still RFC 9605 §4.3, but a whole frame is no longer
+the RFC's shape, so the statement that a Lakko frame interoperates with
+any other RFC 9605 implementation does not hold for call media; ADR-0071
+says so. (2) The golden vector below pins the header-first `seal_framed` /
+`open_framed`, which remain in the core, both FFI crates and the C ABI and
+which no client's media path calls. The media layout has a second golden
+vector, pinned in the core (`media_frame.rs`), the wasm FFI, the C ABI
+test (`tests/media_frame_c_abi.rs`), the web suite and
+`test_bridge.cc`; the iOS and Android golden tests go through UniFFI, which
+has no entry point for the new layout, and pin the old one only. (3) The
+residual is unchanged in kind and larger in fact: no live frame has
+crossed from a browser to a phone or back in the new layout, and for four
+days (2026-10-07 to 10-11) the two sides could not have opened each
+other's media. The web side has carried video between browsers on live
+calls; nothing native has been run.
+
 **Update (2026-07) — the §4.3 rewrite landed; the header is now RFC 9605 §4.3
 wire-compatible.** An earlier revision of `SframeHeader::encode` used a
 Lakko-custom first-byte layout (`R | LEN | X | KID` with an always-trailing CTR)

@@ -982,6 +982,10 @@
       "text": "Katılımcı {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "{name} adlı kişiyi sabitle",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "Sabitlendi",
       "status": "machine"
@@ -996,6 +1000,10 @@
     },
     "call.participant.unnamed": {
       "text": "Katılımcı",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "{name} adlı kişinin sabitlemesini kaldır",
       "status": "machine"
     },
     "call.participant.you": {

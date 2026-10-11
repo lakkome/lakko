@@ -73,6 +73,40 @@ internal class TileControlsReveal(
 }
 
 /**
+ * Decides, for each press on the call screen, whether it hides the controls
+ * a tap brought up: every press does, except one that began on the tile whose
+ * controls they are (its pin button included, which is inside the tile).
+ *
+ * A press is reported in three steps, in this order, within one pointer
+ * event: [pressSeen] by whatever watches the whole screen, before anything
+ * under the finger hears of it; [pressOnTile] by the tile under the finger,
+ * if there is one; [pressSettled] by the watcher again, after everything
+ * under the finger has heard. A press on the status line, the layout switch,
+ * the control bar, a margin or the page dots names no tile, and hides.
+ *
+ * Pure. One caller, one thread.
+ */
+internal class TilePressWatch(private val reveal: TileControlsReveal) {
+    private var tileId: String? = null
+
+    /** A press began somewhere on the screen. */
+    fun pressSeen() {
+        tileId = null
+    }
+
+    /** The press that began is on this tile. */
+    fun pressOnTile(tileId: String) {
+        this.tileId = tileId
+    }
+
+    /** Everything under the finger has heard of the press: decide. */
+    fun pressSettled() {
+        reveal.pressBegan(tileId)
+        tileId = null
+    }
+}
+
+/**
  * What pressing a tile's pin button does (section 6.2), as the two things the
  * call state is told, in order.
  *

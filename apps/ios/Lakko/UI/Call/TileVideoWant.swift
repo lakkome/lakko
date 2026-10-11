@@ -84,4 +84,24 @@ final class TileControlsRevealModel: ObservableObject {
     func hide() {
         reveal.hide()
     }
+
+    /// A press began inside the call area, at `point`. On the tile whose
+    /// controls are up it changes nothing; anywhere else it hides them.
+    /// `point` and the tile frames are in the global coordinate space.
+    func pressBegan(at point: CGPoint) {
+        reveal.pressBegan(TilePressTarget.tileId(at: point, frames: tileFrames))
+    }
+
+    /// Where each drawn tile is, in the global coordinate space. Not
+    /// published: nothing is drawn from it.
+    var tileFrames: [String: CGRect] = [:]
+}
+
+/// The frames of the call's tiles, by participant id, gathered from the
+/// tiles up to the call screen.
+struct TileFramesKey: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
 }

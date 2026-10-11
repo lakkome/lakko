@@ -982,6 +982,10 @@
       "text": "प्रतिभागी {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "{name} को पिन करें",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "पिन है",
       "status": "machine"
@@ -996,6 +1000,10 @@
     },
     "call.participant.unnamed": {
       "text": "प्रतिभागी",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "{name} को अनपिन करें",
       "status": "machine"
     },
     "call.participant.you": {

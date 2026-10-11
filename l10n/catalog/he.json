@@ -982,6 +982,10 @@
       "text": "משתתף {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "הצמדת {name}",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "מוצמד",
       "status": "machine"
@@ -996,6 +1000,10 @@
     },
     "call.participant.unnamed": {
       "text": "משתתף",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "ביטול ההצמדה של {name}",
       "status": "machine"
     },
     "call.participant.you": {

@@ -660,3 +660,68 @@ yet** and nothing was run against a browser.
   is not known from this work. All constants chosen, none measured.
   Details and the client contract: `services/sfu/README.md`, "Senders
   nobody watches".
+
+## Note, 2026-10-11: the web client acts on `video-needed`; iOS and Android are ported
+
+Written from the tree at `5b7c89a2` by reading the sources and the commit
+record; nothing was built or run for this note.
+
+**Correction to the note above.** "No client reads the frame yet" was true
+of the build that note describes. The same day the web client was given
+it: `apps/web/src/calls/sender-activity.ts` decides, per camera sender,
+from the SFU's last `video-needed`, the people count and the camera
+state, whether the sender is active, and the session sets
+`encodings[0].active` of the main and the middle sender accordingly,
+serialised per sender; the light sender is never switched off. The call
+log carries `needed=` and `active=` per sender.
+
+**Seen on live calls since** (web only; the commit record of 2026-10-11,
+which gives no figures): the main sender going off in a grid and coming
+back for a pinned person, in five browsers; no downlink oscillation; the
+burst-end key frame. **Not seen:** the stage following the speaker (why
+it did not on the last call was not established) and the pin button.
+So the "Open" list of the note above loses its first item, the web
+client, and keeps the rest: what a browser sends first when a sender is
+switched back on was not measured on those calls as far as this
+document knows.
+
+**iOS and Android** now speak the same contract as the web client
+(steps 1, 2 and 5, `video-given` of step 6, and `video-needed`):
+
+- **Three ordinary senders** in place of the simulcast code of
+  ADR-0067 step 5 (`CameraSender.swift`, `CameraSenders.kt`; Android's
+  `CameraLayers.kt` is deleted): main (SFrame stream index 1), light
+  (quarter size, 150 kbit/s, index 3) and middle (half size, 500 kbit/s,
+  index 4, active from three people by `middle_sender_wanted`). Each
+  copy is a second track on the same video source on its own send-only
+  transceiver, and a copy whose encryptor cannot be attached is removed
+  (invariant #4). The offer names the light and the middle lines
+  (`composeSfuSdpOfferWithMiddle`).
+- **`video-wants`** per tile by its width through
+  `lakko_ui_rules::tile_video_quality` (`VideoWants.swift`,
+  `VideoWants.kt`); **`video-given`** is read and a tile shows the lower
+  of what it wants and what the SFU gives (`VideoGiven.swift`,
+  `VideoGiven.kt`); remote tracks are routed by `<peer>`, `<peer>~mid`
+  and `<peer>~light`, and the shared `layer_display` rule picks the
+  shown one.
+- **`video-needed`** switches the main and the middle encoding on and
+  off; the light one stays on (`SenderActivity.swift`,
+  `SenderActivity.kt`).
+- The codec of each sender is given to its SFrame encryptor after each
+  negotiation (ADR-0071 phase 2).
+- The stage and pin control of `docs/ux/group-call-grid.md` 6.2 and the
+  speaking-floor rule (the own microphone does not take the floor).
+
+**What exists as evidence for the native side:** unit tests of the
+sender plan, the mids, needed-to-active, wants, given, stream routing,
+the pin reveal and the floor rule (`GroupCallProtocolTests.swift` and
+the `calls` test package on Android). **What does not:** a run on a
+device or an emulator, a native client in a call against the SFU, a
+native publisher switched off and on by `video-needed`, a native viewer
+under downlink control, and any web-to-native media since ADR-0071.
+The live observations in this ADR are all of browsers.
+
+**Unbuilt, unchanged:** the `jitterBufferTarget` fallback for a receiver
+that ignores the playout-delay extension; a fallback to main when a
+wanted middle track carries nothing. Downlink control is still off by
+default and its acceptance tests are still `#[ignore]`d.

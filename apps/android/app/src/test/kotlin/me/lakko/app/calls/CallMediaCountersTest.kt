@@ -280,4 +280,109 @@ class CallMediaCountersTest {
         // No camera, no line.
         assertNull(readSender(listOf(RtcStat("outbound-rtp", mapOf("kind" to "audio"), id = "O-a"))))
     }
+
+    private val trackIds = mapOf(
+        "lakko-video0" to CameraSenderKind.MAIN,
+        "lakko-video-light0" to CameraSenderKind.LIGHT,
+        "lakko-video-middle0" to CameraSenderKind.MIDDLE,
+    )
+
+    private fun mediaSource(id: String, trackId: String?) = RtcStat(
+        type = "media-source",
+        id = id,
+        members = mapOf("kind" to "video", "trackIdentifier" to trackId),
+    )
+
+    @Test
+    fun `a sender with no mid in its entry is named by the track of its media source`() {
+        // The entries carry no `mid` at all; the media sources come after the
+        // entries that name them, as a report is free to order them.
+        val stats = listOf(
+            outbound("O-l", null, 320, 180, 30.0, extra = mapOf("mediaSourceId" to "SV2")),
+            outbound("O-m", null, 640, 360, 30.0, extra = mapOf("mediaSourceId" to "SV3")),
+            outbound("O-f", null, 1280, 720, 30.0, extra = mapOf("mediaSourceId" to "SV1")),
+            mediaSource("SV1", "lakko-video0"),
+            mediaSource("SV2", "lakko-video-light0"),
+            mediaSource("SV3", "lakko-video-middle0"),
+            // An audio source is never a camera sender.
+            RtcStat("media-source", mapOf("kind" to "audio", "trackIdentifier" to "lakko-audio0"), id = "SA1"),
+        )
+        val reading = readMedia(stats, senderByTrackId = trackIds)
+        assertEquals(
+            listOf(
+                CameraSenderKind.MAIN to 1280.0,
+                CameraSenderKind.MIDDLE to 640.0,
+                CameraSenderKind.LIGHT to 320.0,
+            ),
+            reading.outboundVideoSenders.map { it.sender to it.frameWidth },
+        )
+        // Without the second way every one of them would read as main.
+        assertEquals(
+            listOf(CameraSenderKind.MAIN, CameraSenderKind.MAIN, CameraSenderKind.MAIN),
+            readMedia(stats).outboundVideoSenders.map { it.sender },
+        )
+    }
+
+    @Test
+    fun `the mid names a sender first, and the track when the mid names nobody`() {
+        val sources = mapOf("SV1" to "lakko-video0", "SV2" to "lakko-video-light0")
+        fun kind(mid: String?, source: String?) = outboundSenderKind(
+            outbound("O", mid, 1, 1, 1.0, extra = mapOf("mediaSourceId" to source)),
+            mids,
+            trackIds,
+            sources,
+        )
+        // Both agree.
+        assertEquals(CameraSenderKind.LIGHT, kind("2", "SV2"))
+        // They disagree: the mid is the media line, and wins.
+        assertEquals(CameraSenderKind.MIDDLE, kind("3", "SV2"))
+        // A mid nobody named, an empty one, none: the track answers.
+        assertEquals(CameraSenderKind.LIGHT, kind("9", "SV2"))
+        assertEquals(CameraSenderKind.LIGHT, kind("", "SV2"))
+        assertEquals(CameraSenderKind.MAIN, kind(null, "SV1"))
+        // Neither way: unknown, not a guess.
+        assertNull(kind(null, null))
+        assertNull(kind("9", "SV7"))
+        // A source whose track is not one of this device's camera tracks.
+        assertNull(
+            outboundSenderKind(
+                outbound("O", null, 1, 1, 1.0, extra = mapOf("mediaSourceId" to "SVx")),
+                mids,
+                trackIds,
+                mapOf("SVx" to "someone-elses-track"),
+            ),
+        )
+    }
+
+    @Test
+    fun `media sources are read by entry id, and one with no track is left out`() {
+        assertEquals(
+            mapOf("SV1" to "lakko-video0"),
+            mediaSourceTrackIds(
+                listOf(
+                    mediaSource("SV1", "lakko-video0"),
+                    mediaSource("SV2", null),
+                    mediaSource("SV3", ""),
+                    RtcStat("media-source", mapOf("trackIdentifier" to "t")),
+                    RtcStat("outbound-rtp", mapOf("trackIdentifier" to "t"), id = "O"),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `the sender line names the main sender's codec when only the tracks tell the senders apart`() {
+        val stats = listOf(
+            RtcStat("codec", mapOf("mimeType" to "video/VP8"), id = "C-main"),
+            RtcStat("codec", mapOf("mimeType" to "video/H264"), id = "C-copy"),
+            // The copy comes first in the report and carries no mid.
+            outbound("O-l", null, 320, 180, 30.0, extra = mapOf("mediaSourceId" to "SV2", "codecId" to "C-copy")),
+            outbound("O-f", null, 1280, 720, 30.0, extra = mapOf("mediaSourceId" to "SV1", "codecId" to "C-main")),
+            mediaSource("SV1", "lakko-video0"),
+            mediaSource("SV2", "lakko-video-light0"),
+        )
+        assertEquals("video/VP8", readSender(stats, senderByTrackId = trackIds)!!.videoCodec)
+        // By the mid alone the first entry would have been taken for main.
+        assertEquals("video/H264", readSender(stats)!!.videoCodec)
+    }
 }

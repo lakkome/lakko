@@ -856,6 +856,10 @@ public class CallSession(
 
             try {
                 val answerSdp = rtc.createAnswer(remoteOfferSdp = offerSdp)
+                // The answer fixed each sender's codec: tell the video
+                // encryptor, so it leaves that codec's frame header clear
+                // (ADR-0071). See [syncSenderCodecsAfterNegotiation].
+                syncSenderCodecsAfterNegotiation(rtc)
                 // The remote offer is now the remote description: the
                 // candidates the caller trickled while this call rang can go in.
                 applyBufferedRemoteCandidates(rtc)
@@ -920,6 +924,7 @@ public class CallSession(
                     scope.launch {
                         try {
                             rtc.applyRemoteAnswer(body.sdp)
+                            syncSenderCodecsAfterNegotiation(rtc)
                             applyBufferedRemoteCandidates(rtc)
                             // ADR-0032 piece B2b — arm renegotiation for future
                             // local track changes; drive a camera-on that was
@@ -1154,6 +1159,30 @@ public class CallSession(
     // ----------------------------------------------------------------
 
     /**
+     * Tell the video sender's SFrame encryptor the codec the negotiation that
+     * has just completed gave its sender (ADR-0071), so the encryptor leaves
+     * that codec's frame header in the clear. Without it the encryptor of a
+     * one-to-one call stays at "no codec" and keeps nothing clear.
+     *
+     * Called after every completed offer / answer exchange of this call: the
+     * first one in either role, and each renegotiation in either role (a
+     * camera turned on mid-call gets its media line, and so its codec, with
+     * that exchange's answer). The sender armed mid-call before its answer is
+     * told again here; a sender that is not there yet is skipped.
+     *
+     * Best effort and never a reason to end the call: an encryptor told
+     * nothing seals the whole frame, which costs the peer its key-frame
+     * detection and never the confidentiality of the media.
+     */
+    private fun syncSenderCodecsAfterNegotiation(connection: WebRtcPeerConnection) {
+        try {
+            connection.syncSenderCodecs()
+        } catch (cause: RuntimeException) {
+            android.util.Log.w("CallSession", "could not tell the video encryptor its codec", cause)
+        }
+    }
+
+    /**
      * Drive a mid-call renegotiation offer (the offerer role of perfect
      * negotiation). Mirror of the web `onNegotiationNeeded`. Gated so it only
      * fires once the initial exchange has landed ([negotiationReady]), never
@@ -1233,6 +1262,7 @@ public class CallSession(
             }
             // createAnswer sets the remote offer, builds + sets the answer.
             val answerSdp = connection.createAnswer(sdp)
+            syncSenderCodecsAfterNegotiation(connection)
             val bytes = composeCallSignaling(
                 FfiCallSignalingBody.Answer(callId = callId, sdp = answerSdp),
             )
@@ -1259,6 +1289,7 @@ public class CallSession(
             isSettingRemoteAnswerPending = true
             connection.applyRemoteAnswer(sdp)
             isSettingRemoteAnswerPending = false
+            syncSenderCodecsAfterNegotiation(connection)
         } catch (cause: Throwable) {
             isSettingRemoteAnswerPending = false
             android.util.Log.w("CallSession", "renegotiation answer apply failed", cause)

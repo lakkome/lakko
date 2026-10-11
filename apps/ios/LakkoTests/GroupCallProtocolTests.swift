@@ -34,7 +34,9 @@ final class GroupCallSendersTests: XCTestCase {
         let plan = CameraSender.plan(middleActive: true)
         XCTAssertEqual(
             plan[0].encoding,
-            CameraEncodingSpec(scaleResolutionDownBy: nil, maxBitrateBps: nil, active: true))
+            CameraEncodingSpec(
+                scaleResolutionDownBy: nil, maxBitrateBps: nil, active: true,
+                numTemporalLayers: 3))
         XCTAssertEqual(
             plan[1].encoding,
             CameraEncodingSpec(scaleResolutionDownBy: 4, maxBitrateBps: 150_000, active: true))
@@ -91,6 +93,97 @@ final class GroupCallSendersTests: XCTestCase {
         XCTAssertEqual(middle.scaleResolutionDownBy, NSNumber(value: 2.0))
         XCTAssertEqual(middle.maxBitrateBps, NSNumber(value: 500_000))
         XCTAssertFalse(middle.isActive)
+    }
+
+    /// The main sender is asked for three temporal layers, as the web
+    /// client's `L1T3`; the copies are asked for none, as on web.
+    func testOnlyTheMainSenderIsAskedForThreeTemporalLayers() {
+        XCTAssertEqual(CameraSender.mainTemporalLayers, 3)
+        for middleActive in [true, false] {
+            let plan = CameraSender.plan(middleActive: middleActive)
+            XCTAssertEqual(plan[0].kind, .main)
+            XCTAssertEqual(plan[0].encoding.numTemporalLayers, 3)
+            XCTAssertNil(plan[1].encoding.numTemporalLayers)
+            XCTAssertNil(plan[2].encoding.numTemporalLayers)
+        }
+        let main = CameraSender.rtcEncoding(CameraSender.mainEncoding)
+        XCTAssertEqual(main.numTemporalLayers, NSNumber(value: 3))
+        XCTAssertNil(main.scaleResolutionDownBy)
+        XCTAssertNil(main.maxBitrateBps)
+        XCTAssertNil(
+            CameraSender.rtcEncoding(CameraSender.copyEncoding(.light)).numTemporalLayers)
+    }
+
+    func testTheLineSaysWhatTheStackKeptOfTheLayers() {
+        XCTAssertEqual(
+            CameraSender.temporalLayersLine(asked: 3, kept: 3),
+            "camera sender: asked for 3 temporal layers, the stack kept 3")
+        XCTAssertEqual(
+            CameraSender.temporalLayersLine(asked: 3, kept: 1),
+            "camera sender: asked for 3 temporal layers, the stack kept 1 instead")
+        XCTAssertEqual(
+            CameraSender.temporalLayersLine(asked: 3, kept: nil),
+            "camera sender: asked for 3 temporal layers, the stack reports none")
+    }
+
+    /// A copy refused with its encoding is asked for again without one and
+    /// then sized through its sender; the second attempt is made only after
+    /// the first was refused.
+    func testACopyRefusedWithItsEncodingIsTriedPlainly() {
+        var plainAsked = 0
+        func plain(_ taken: Bool) -> Bool {
+            plainAsked += 1
+            return taken
+        }
+        XCTAssertEqual(
+            CameraSender.copyAddStep(withEncodingTaken: true, plainTaken: plain(true)), .keep)
+        XCTAssertEqual(plainAsked, 0, "a taken transceiver is not asked for twice")
+        XCTAssertEqual(
+            CameraSender.copyAddStep(withEncodingTaken: false, plainTaken: plain(true)),
+            .configureWithParameters)
+        XCTAssertEqual(
+            CameraSender.copyAddStep(withEncodingTaken: false, plainTaken: plain(false)), .absent)
+        XCTAssertEqual(plainAsked, 2)
+    }
+
+    /// A copy sized through its sender stays only when the sender holds the
+    /// size, the ceiling and the activity asked for: never a full-size copy.
+    func testACopyThatCouldNotBeSizedDoesNotStay() {
+        let wanted = CameraSender.copyEncoding(.middle, active: false)
+        XCTAssertTrue(CameraSender.copyIsSized(wanted: wanted, readBack: wanted))
+        XCTAssertFalse(CameraSender.copyIsSized(wanted: wanted, readBack: nil))
+        // The binding kept its own encoding: full size, no ceiling.
+        XCTAssertFalse(
+            CameraSender.copyIsSized(
+                wanted: wanted,
+                readBack: CameraEncodingSpec(
+                    scaleResolutionDownBy: nil, maxBitrateBps: nil, active: true)))
+        XCTAssertFalse(
+            CameraSender.copyIsSized(
+                wanted: wanted,
+                readBack: CameraEncodingSpec(
+                    scaleResolutionDownBy: 2, maxBitrateBps: nil, active: false)))
+        XCTAssertFalse(
+            CameraSender.copyIsSized(
+                wanted: wanted,
+                readBack: CameraEncodingSpec(
+                    scaleResolutionDownBy: 4, maxBitrateBps: 500_000, active: false)))
+        XCTAssertFalse(
+            CameraSender.copyIsSized(
+                wanted: wanted,
+                readBack: CameraEncodingSpec(
+                    scaleResolutionDownBy: 2, maxBitrateBps: 500_000, active: true)))
+    }
+
+    /// Writing a copy's encoding onto the binding's own and reading it back
+    /// gives the same values: what the fallback compares.
+    func testACopysEncodingSurvivesTheBindingsOwnObject() {
+        let wanted = CameraSender.copyEncoding(.light)
+        let encoding = RTCRtpEncodingParameters()
+        CameraSender.apply(wanted, to: encoding)
+        XCTAssertTrue(
+            CameraSender.copyIsSized(wanted: wanted, readBack: CameraSender.spec(of: encoding)))
+        XCTAssertNil(encoding.rid)
     }
 
     /// Both publish paths of the SFU session create the camera's senders
@@ -866,6 +959,58 @@ final class TilePinTests: XCTestCase {
         reveal.tap("peer-a")
         reveal.hide()
         XCTAssertNil(reveal.tileId)
+    }
+
+    /// A press is on the tile whose frame holds the point where it began,
+    /// and on no tile anywhere else: the control bar, the status line, the
+    /// gap between two tiles.
+    func testWhichTileAPressBeganOn() {
+        let frames: [String: CGRect] = [
+            "peer-a": CGRect(x: 0, y: 100, width: 180, height: 240),
+            "peer-b": CGRect(x: 188, y: 100, width: 180, height: 240),
+        ]
+        XCTAssertEqual(TilePressTarget.tileId(at: CGPoint(x: 90, y: 200), frames: frames), "peer-a")
+        // The pin control sits in its tile's top right corner.
+        XCTAssertEqual(TilePressTarget.tileId(at: CGPoint(x: 170, y: 110), frames: frames), "peer-a")
+        XCTAssertEqual(TilePressTarget.tileId(at: CGPoint(x: 200, y: 300), frames: frames), "peer-b")
+        XCTAssertNil(TilePressTarget.tileId(at: CGPoint(x: 184, y: 200), frames: frames))
+        XCTAssertNil(TilePressTarget.tileId(at: CGPoint(x: 90, y: 40), frames: frames))
+        XCTAssertNil(TilePressTarget.tileId(at: CGPoint(x: 90, y: 700), frames: frames))
+        XCTAssertNil(TilePressTarget.tileId(at: CGPoint(x: 90, y: 200), frames: [:]))
+    }
+
+    /// The whole rule as the call screen drives it: a press anywhere but the
+    /// tile that owns the controls hides them at once, and the later
+    /// movements of one press change nothing.
+    func testAPressBesideTheOwningTileHidesTheControlsAtOnce() {
+        let frames: [String: CGRect] = [
+            "peer-a": CGRect(x: 0, y: 100, width: 180, height: 240),
+            "peer-b": CGRect(x: 188, y: 100, width: 180, height: 240),
+        ]
+        let timer = OneTimer()
+        var changes: [String?] = []
+        let reveal = TileControlsReveal(deps: timer.deps) { changes.append($0) }
+        func press(_ x: CGFloat, _ y: CGFloat) {
+            reveal.pressBegan(TilePressTarget.tileId(at: CGPoint(x: x, y: y), frames: frames))
+        }
+
+        reveal.tap("peer-a")
+        press(170, 110)
+        press(170, 110)
+        XCTAssertEqual(reveal.tileId, "peer-a", "on the control or its tile: kept")
+        press(90, 700)
+        XCTAssertNil(reveal.tileId, "on the control bar: gone")
+        press(90, 700)
+        reveal.tap("peer-a")
+        press(184, 200)
+        XCTAssertNil(reveal.tileId, "on empty space in the grid: gone")
+        reveal.tap("peer-a")
+        press(200, 300)
+        XCTAssertNil(reveal.tileId, "on another tile: gone, until its own tap")
+        reveal.tap("peer-b")
+        press(200, 300)
+        XCTAssertEqual(reveal.tileId, "peer-b")
+        XCTAssertEqual(changes, ["peer-a", nil, "peer-a", nil, "peer-a", nil, "peer-b"])
     }
 
     /// A tile is never itself the pin control: there is a control only on

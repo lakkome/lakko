@@ -144,6 +144,27 @@ Not built. Listed so the work is sized from the code and not from this summary; 
 5. Rebuild the static libraries and the Android `.so` so the new symbols and the regenerated header exist; add the new golden vector to `test_bridge.cc` and the iOS / Android golden tests; then delete the header-first functions from the core, both FFI crates, the C ABI and the SFU's test.
 6. UniFFI was not extended: per-frame media on native goes through the C ABI.
 
+## Note, 2026-10-11: phase 2 as built, and what phase 1 has shown since
+
+Written from the tree at `5b7c89a2`. The Status line above and the section before this one describe 2026-10-07 and are left as they were; whether this ADR is Accepted is the maintainer's call.
+
+**Phase 1 on live calls.** The commit record of 2026-10-09 states that video between Chrome, Firefox and Safari was seen on live calls on the test stack. That answers the first open question below for those three browsers as far as a call shows it; this document holds no log or counter from those calls beyond the two calls in Context. The web client also gained a second way to reach the encoded frames, `createEncodedStreams()` where `RTCRtpScriptTransform` is absent (`apps/web/src/calls/sframe-transport.ts`); both end in the same seal and open (`sframe-worker-core.ts`), so the layout is the same on either.
+
+**Phase 2, by the numbered list above:**
+
+1. Done. `LakkoFrameEncryptor::Encrypt` calls `lakko_sframe_media_clear_prefix_len` and then `lakko_sframe_seal_media_frame`; `GetMaxCiphertextByteSize` returns the frame plus 36.
+2. Done. `LakkoFrameEncryptor::SetCodec(uint8_t)` stores the codec in a `std::atomic<uint8_t>`, so it may be called from the signaling thread while the codec thread is inside `Encrypt`; a frame sealed during the call is sealed under one value or the other. A fresh encryptor holds `OTHER` (nothing clear). The C ABI gained `LAKKO_SFRAME_MEDIA_CODEC_OTHER` / `_VP8` / `_OPUS` and `LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN` as literals tied to the core by compile-time assertions; no function of the C ABI changed. iOS: `LakkoSFrameAttach setCodec:forSender:` / `setCodecName:forSender:` / `codecForName:`. Android: `SFrameMediaCodec`, `LakkoFrameEncryptor.setCodec` / `setCodecName`, JNI `nativeSetCodec` / `nativeCodecFromName`. Both clients call them from `syncSenderCodecs` on the peer connection wrapper, which reads the first entry of each sender's negotiated codecs, after every applied answer or renegotiation and after an encryptor is attached again.
+3. As decided: nothing in the bridge states a key frame; the core reads the VP8 frame tag.
+4. Done. `LakkoFrameDecryptor::Decrypt` calls `lakko_sframe_call_key_ring_open_media_frame_with_overlap` and takes no codec. An empty frame is answered as nothing to decrypt, not as a failed decryption.
+5. **Half done.** The Android `libsframe_jni.so` for `arm64-v8a` and `x86_64` is rebuilt and committed. `test_bridge.cc` holds the ADR-0071 golden vector and fifteen tests, all in this layout, one of which asserts that the header-first golden vector and a freshly sealed header-first frame do not open on the media path. The iOS and Android golden tests were **not** given the new vector: they call UniFFI, which has no entry point for this layout, and now say in a comment that they pin the header-first functions only. **The header-first functions were not deleted**: `seal_framed` / `open_framed` are still in `lakko-calls`, both FFI crates and the C ABI, and `services/sfu/tests/synthetic_client_e2e.rs`, the golden tests and `crates/lakko-sframe-native/tests/golden_cross_stack.rs` still call them. No client's media path does.
+6. Unchanged: UniFFI was not extended.
+
+**What this changes in Consequences.** The line "until phase 2, web and native do not interoperate on media" describes the state before `5b7c89a2`. By construction a web client and a native client now seal and open the same layout through the same core. That has not been observed: no web-to-native call, and no native-to-native call, has been made since.
+
+**Not run.** Nothing native was run on a device, an emulator or a call. Whether the bridge's host test binary, the iOS build and the Android build were run for the port is not recorded in this document; this note was written by reading the sources and ran none of them. The fuzz target `media_frame_open` is still compile-checked only.
+
+**Still open from the list below, now with a native side:** the third question (a native receiver and a publisher that sends no frame descriptor, which is Firefox) is untested in both directions.
+
 ## Open questions
 
 - **Does Firefox's receive path start decoding, and Safari's?** Not observable without a browser. The expectation rests on the inference in Context.

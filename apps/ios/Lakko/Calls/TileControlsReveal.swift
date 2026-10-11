@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import CoreGraphics
 import Foundation
 
 /// Which call tile shows its controls after a tap
@@ -99,4 +100,22 @@ enum TilePinControl: Equatable {
 
     /// The side of the control's touch target, points (section 6.2: 44 pt).
     static let touchTarget: CGFloat = 44
+}
+
+/// Which tile a press inside the call area began on
+/// (`docs/ux/group-call-grid.md` section 6.2). The call screen watches every
+/// press in the call area, without taking it from whatever it lands on, and
+/// hands the answer to ``TileControlsReveal/pressBegan(_:)``: a press on the
+/// tile whose controls are up (the pin control lies inside its tile) keeps
+/// them, a press anywhere else (another tile, the status line, the control
+/// bar, empty space in the grid) hides them at once.
+enum TilePressTarget {
+
+    /// The id of the tile whose frame holds `point`, or `nil` when the press
+    /// began beside every tile. `frames` and `point` are in one coordinate
+    /// space. Tiles do not overlap; were two to, the lowest id is named so
+    /// the answer does not depend on dictionary order.
+    static func tileId(at point: CGPoint, frames: [String: CGRect]) -> String? {
+        frames.filter { $0.value.contains(point) }.keys.min()
+    }
 }

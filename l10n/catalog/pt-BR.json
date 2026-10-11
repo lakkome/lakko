@@ -982,6 +982,10 @@
       "text": "Participante {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "Fixar {name}",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "Fixado",
       "status": "machine"
@@ -996,6 +1000,10 @@
     },
     "call.participant.unnamed": {
       "text": "Participante",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "Desafixar {name}",
       "status": "machine"
     },
     "call.participant.you": {

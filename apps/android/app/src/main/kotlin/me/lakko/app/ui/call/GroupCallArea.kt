@@ -77,6 +77,7 @@ import me.lakko.app.calls.LocalVideoPreviewView
 import me.lakko.app.calls.RemoteLayeredVideoView
 import me.lakko.app.calls.SettledWidth
 import me.lakko.app.calls.TileControlsReveal
+import me.lakko.app.calls.TilePressWatch
 import me.lakko.app.calls.WebRtcPeerConnection
 import me.lakko.app.calls.askedQuality
 import me.lakko.app.calls.connectionIsWorthShowing
@@ -124,6 +125,12 @@ import uniffi.lakko_ffi_uniffi.TileVideoQuality
  *
  * @param modifier sizes the call AREA: the caller places this between the
  *   status line and the control bar, inside the side margins.
+ * @param controls which tile shows its controls, held by the caller when the
+ *   caller watches presses over more than this area: the call screen does,
+ *   over the whole screen ([hidesTileControlsOnPressElsewhere]), because the
+ *   status line, the layout switch, the control bar and the margins are all
+ *   outside the area. `null` makes the area hold it and watch its own
+ *   bounds only.
  */
 @Composable
 internal fun GroupCallArea(
@@ -131,6 +138,7 @@ internal fun GroupCallArea(
     participants: List<CallUiState.Participant>,
     rules: GroupCallRules,
     modifier: Modifier = Modifier,
+    controls: TileControlsHost? = null,
 ) {
     val pinnedId by state.pinnedId.collectAsState()
     val choice by state.layoutChoice.collectAsState()
@@ -141,20 +149,17 @@ internal fun GroupCallArea(
     // Section 6.2: a tile is never itself the pin control. A tap on someone
     // else's tile only brings that tile's controls up for a few seconds; the
     // pin button among them is what pins and unpins.
-    val timers = remember { MainThreadTimers() }
-    var revealedId by remember { mutableStateOf<String?>(null) }
-    val reveal = remember(timers) { TileControlsReveal(timers) { revealedId = it } }
-    DisposableEffect(reveal) { onDispose { reveal.dispose() } }
-    /** The tile the press now under way began on, or `null` for no tile. */
-    val pressedTile = remember { PressedTile() }
+    val host = controls ?: rememberTileControlsHost()
+    val timers = host.timers
+    val reveal = host.reveal
     val haptics = LocalHapticFeedback.current
     val tiles = TileEnvironment(
         rules = rules,
         people = participants.size,
         timers = timers,
-        revealedId = revealedId,
+        revealedId = host.revealedId,
         onTap = { id -> reveal.tap(id) },
-        onPressBegan = { id -> pressedTile.id = id },
+        onPressBegan = { id -> host.watch.pressOnTile(id) },
         onPin = { id ->
             togglePin(
                 pinnedId = state.pinnedId.value,
@@ -169,21 +174,11 @@ internal fun GroupCallArea(
     )
 
     BoxWithConstraints(
-        // A press anywhere in the call area but on the tile whose controls
-        // are up hides them. This sees the press first (the initial pass runs
-        // from here down to the tiles, each of which names itself), and
-        // decides in the main pass, which comes back up after them.
-        modifier = modifier.pointerInput(reveal) {
-            awaitPointerEventScope {
-                while (true) {
-                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                    if (event.type != PointerEventType.Press) continue
-                    pressedTile.id = null
-                    awaitPointerEvent(PointerEventPass.Main)
-                    reveal.pressBegan(pressedTile.id)
-                }
-            }
-        },
+        // With no host from the caller the area watches the presses inside
+        // its own bounds; a caller that handed one in watches a larger area
+        // itself, and a second watcher here would only decide the same press
+        // twice.
+        modifier = if (controls == null) modifier.hidesTileControlsOnPressElsewhere(host) else modifier,
     ) {
         // Whole dp, like the rule's own arithmetic. The strip under the tiles
         // is always there, so the grid does not change size when a second page
@@ -861,9 +856,49 @@ private class TileEnvironment(
     val onPin: (id: String) -> Unit,
 )
 
-/** The tile the press now under way began on. Written and read on the main
- *  thread within one pointer event. */
-private class PressedTile(var id: String? = null)
+/**
+ * Which tile of a group call shows its controls, and the watch over the
+ * presses that hide them (section 6.2). Held where the presses are watched:
+ * by the call screen for the whole screen, or by the call area for itself.
+ */
+internal class TileControlsHost(val timers: CallTimers) {
+    /** The tile whose controls are up, or `null`. Compose state. */
+    var revealedId: String? by mutableStateOf(null)
+        private set
+    val reveal: TileControlsReveal = TileControlsReveal(timers) { revealedId = it }
+    val watch: TilePressWatch = TilePressWatch(reveal)
+}
+
+/** A [TileControlsHost] for as long as the caller is on screen. */
+@Composable
+internal fun rememberTileControlsHost(): TileControlsHost {
+    val host = remember { TileControlsHost(MainThreadTimers()) }
+    DisposableEffect(host) { onDispose { host.reveal.dispose() } }
+    return host
+}
+
+/**
+ * A press anywhere inside this element, other than on the tile whose controls
+ * are up, hides them ([TilePressWatch]). Put on an ancestor of the tiles.
+ *
+ * It sees every press first and takes nothing from anyone: the initial pass
+ * runs from here down to the tiles, each of which names itself, and the
+ * decision is made in the main pass, which comes back up after them. The
+ * event is never consumed, so the button or tile under the press works as it
+ * did.
+ */
+internal fun Modifier.hidesTileControlsOnPressElsewhere(host: TileControlsHost): Modifier =
+    pointerInput(host) {
+        awaitPointerEventScope {
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.type != PointerEventType.Press) continue
+                host.watch.pressSeen()
+                awaitPointerEvent(PointerEventPass.Main)
+                host.watch.pressSettled()
+            }
+        }
+    }
 
 /** [CallTimers] on the main thread, for the call area's own timers. */
 private class MainThreadTimers : CallTimers {

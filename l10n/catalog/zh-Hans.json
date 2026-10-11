@@ -982,6 +982,10 @@
       "text": "参与者 {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "置顶 {name}",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "已置顶",
       "status": "machine"
@@ -996,6 +1000,10 @@
     },
     "call.participant.unnamed": {
       "text": "参与者",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "取消置顶 {name}",
       "status": "machine"
     },
     "call.participant.you": {

@@ -1146,8 +1146,14 @@ class SfuCallSession(
         val sample = connection.sampleMediaStats() ?: return
         if (pc !== connection) return
         val at = nowMs()
-        val reading = readMedia(sample.stats, sample.lightTrackIds, sample.middleTrackIds, sample.senderByMid)
-        val sender = readSender(sample.stats, sample.senderByMid)
+        val reading = readMedia(
+            sample.stats,
+            sample.lightTrackIds,
+            sample.middleTrackIds,
+            sample.senderByMid,
+            sample.senderByTrackId,
+        )
+        val sender = readSender(sample.stats, sample.senderByMid, sample.senderByTrackId)
         // A sender libwebrtc refused to start is asked again, and a flag a
         // renegotiation reset is put back.
         syncSenderActivity()

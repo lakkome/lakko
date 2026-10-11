@@ -855,6 +855,13 @@ private struct GroupCallArea: View {
                     state.togglePin(person.id)
                     reveal.hide()
                 })
+            // Where the tile is, so a press can be told apart: on the tile
+            // whose controls are up, or anywhere else (section 6.2).
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: TileFramesKey.self, value: [person.id: proxy.frame(in: .global)])
+                })
     }
 }
 
@@ -1584,6 +1591,17 @@ public struct CallScreen: View {
             }
         }
         .coordinateSpace(.named(Self.menuSpace))
+        .onPreferenceChange(TileFramesKey.self) { frames in
+            Task { @MainActor in tileReveal.tileFrames = frames }
+        }
+        // Every press that begins inside the call area is seen here, beside
+        // whatever it lands on and never instead of it: a tile's controls go
+        // at once on a press anywhere but their own tile, the control bar and
+        // the empty space of the grid included (section 6.2). Idempotent, so
+        // the later movements of the same press change nothing.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { value in tileReveal.pressBegan(at: value.startLocation) })
         .animation(.easeInOut(duration: 0.2), value: state.participantListOpen)
         .modifier(encryptionSheet)
     }

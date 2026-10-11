@@ -171,4 +171,36 @@ class SpeakingTest {
         assertNull(snap.lastSpokeAtMs["a"])
         assertTrue(snap.speakingIds.isEmpty())
     }
+
+    /**
+     * The first reading, counted from the first one with sound, at which
+     * [read] is true when a person speaks without a pause and is read every
+     * [intervalMs].
+     */
+    private fun firstReadingWhere(intervalMs: Long, read: (SpeakingSnapshot) -> Boolean): Long {
+        val t = SpeakingTracker()
+        var now = 0L
+        while (now <= 10_000) {
+            t.sample("a", loud, now)
+            if (read(t.snapshot(order, now))) return now
+            now += intervalMs
+        }
+        error("never")
+    }
+
+    @Test
+    fun `the floor is taken at the same moment whether read every 100 ms or every 150`() {
+        // This client reads every 150 ms and the web client every 100. The
+        // thresholds are times, not numbers of readings, and the onset is a
+        // whole number of both intervals.
+        assertEquals(150L, SPEAKING_SAMPLE_INTERVAL_MS)
+        assertEquals(0L, FLOOR_ONSET_MS % 100)
+        assertEquals(0L, FLOOR_ONSET_MS % SPEAKING_SAMPLE_INTERVAL_MS)
+        assertEquals(FLOOR_ONSET_MS, firstReadingWhere(100) { it.activeSpeakerId == "a" })
+        assertEquals(FLOOR_ONSET_MS, firstReadingWhere(SPEAKING_SAMPLE_INTERVAL_MS) { it.activeSpeakerId == "a" })
+        // The ring is where the grids differ: the first reading at or past
+        // 200 ms is the one at 300 ms on this client's grid.
+        assertEquals(200L, firstReadingWhere(100) { "a" in it.speakingIds })
+        assertEquals(300L, firstReadingWhere(SPEAKING_SAMPLE_INTERVAL_MS) { "a" in it.speakingIds })
+    }
 }

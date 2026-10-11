@@ -630,7 +630,30 @@ public final class WebRTCPeerConnection: NSObject {
         let sender = peer.add(track, streamIds: ["lakko-local-stream"])
         self.localVideoTrack = track
         self.localVideoSender = sender
-        if let sender { preferFramerate(sender) }
+        if let sender { configureMainCameraSender(sender) }
+    }
+
+    /// Ask the main camera sender for its temporal layers
+    /// (``CameraSender/mainTemporalLayers``) and for the frame-rate
+    /// preference, in one set of its parameters, then read the layers back
+    /// and say in one line what the stack kept. `add(_:streamIds:)` takes no
+    /// encodings, so this is the only way to ask. Best effort: a stack that
+    /// refuses keeps one layer, and the line says so.
+    private func configureMainCameraSender(_ sender: RTCRtpSender) {
+        let asked = CameraSender.mainTemporalLayers
+        let framerate = NSNumber(value: RTCDegradationPreference.maintainFramerate.rawValue)
+        Self.libwebrtcQueue.async {
+            let parameters = sender.parameters
+            if let first = parameters.encodings.first {
+                first.numTemporalLayers = NSNumber(value: asked)
+            }
+            parameters.degradationPreference = framerate
+            sender.parameters = parameters
+            let kept = sender.parameters.encodings.first?.numTemporalLayers?.intValue
+            NSLog(
+                "WebRTCPeerConnection: %@",
+                CameraSender.temporalLayersLine(asked: asked, kept: kept))
+        }
     }
 
     /// Add the light and the middle copy of the camera, each an ordinary
@@ -648,6 +671,13 @@ public final class WebRTCPeerConnection: NSObject {
     /// Never fails the call: a copy the binding will not take is absent,
     /// said once, and the call goes on without it. A copy that exists is
     /// left alone.
+    ///
+    /// A transceiver refused with its encoding is asked for again without
+    /// one, and the size, the ceiling and the activity are then set through
+    /// the sender's parameters (``CameraSender/copyAddStep(withEncodingTaken:plainTaken:)``,
+    /// the web client's fallback). A copy that cannot be sized that way is
+    /// removed here, before SFrame is armed and before any offer: the camera
+    /// is never sent another time at full size.
     func addCameraCopies(_ source: RTCVideoSource, middleActive: Bool) {
         guard let peer = peer, localVideoSender != nil else { return }
         let plan = CameraSender.plan(middleActive: middleActive)
@@ -658,15 +688,52 @@ public final class WebRTCPeerConnection: NSObject {
             let transceiverInit = RTCRtpTransceiverInit()
             transceiverInit.direction = .sendOnly
             transceiverInit.sendEncodings = [CameraSender.rtcEncoding(spec.encoding)]
-            guard let transceiver = peer.addTransceiver(with: track, init: transceiverInit) else {
+            var transceiver = peer.addTransceiver(with: track, init: transceiverInit)
+            let step = CameraSender.copyAddStep(
+                withEncodingTaken: transceiver != nil,
+                plainTaken: {
+                    let plainInit = RTCRtpTransceiverInit()
+                    plainInit.direction = .sendOnly
+                    transceiver = peer.addTransceiver(with: track, init: plainInit)
+                    return transceiver != nil
+                }())
+            guard let transceiver, step != .absent else {
+                track.isEnabled = false
                 NSLog(
                     "WebRTCPeerConnection: publishing the camera without a %@ sender: "
                         + "the transceiver was refused", kind.rawValue)
                 continue
             }
             cameraCopies[kind] = CameraCopy(track: track, transceiver: transceiver)
+            if step == .configureWithParameters {
+                NSLog(
+                    "WebRTCPeerConnection: the %@ camera transceiver was refused with its "
+                        + "encoding, added without and sized through the sender", kind.rawValue)
+                guard configureCameraCopy(transceiver.sender, wanted: spec.encoding) else {
+                    removeCameraCopy(kind, reason: "its size and bitrate ceiling were refused")
+                    continue
+                }
+            }
             preferFramerate(transceiver.sender)
         }
+    }
+
+    /// Give an already-added copy's sender its size, its bitrate ceiling and
+    /// its activity through the sender's parameters, and read them back: the
+    /// binding's setter reports nothing, so what the sender holds afterwards
+    /// is the only answer. `false` when the sender has no encoding or does
+    /// not hold what was asked.
+    ///
+    /// Made on the calling thread, unlike the other parameter writes here:
+    /// the caller must know the answer before SFrame is armed and an offer is
+    /// built, and it runs only on the fallback path.
+    private func configureCameraCopy(_ sender: RTCRtpSender, wanted: CameraEncodingSpec) -> Bool {
+        let parameters = sender.parameters
+        guard let first = parameters.encodings.first else { return false }
+        CameraSender.apply(wanted, to: first)
+        sender.parameters = parameters
+        return CameraSender.copyIsSized(
+            wanted: wanted, readBack: sender.parameters.encodings.first.map(CameraSender.spec(of:)))
     }
 
     /// Take a copy's sender off the connection. Used when it could not be
@@ -765,9 +832,13 @@ public final class WebRTCPeerConnection: NSObject {
         if senders.isEmpty { return }
         Self.libwebrtcQueue.async {
             let told = senders.map { entry -> String in
-                let codec = entry.sender.parameters.codecs.first?.name
+                let parameters = entry.sender.parameters
+                let codec = parameters.codecs.first?.name
                 let set = LakkoSFrameAttach.setCodecName(codec, forSender: entry.sender)
-                return "\(entry.name)=\(codec ?? "-")\(set ? "" : "(no encryptor)")"
+                // The temporal layers the main sender holds once negotiated.
+                let layers = entry.name == CameraSenderKind.main.rawValue
+                    ? "/t\(parameters.encodings.first?.numTemporalLayers?.intValue ?? 1)" : ""
+                return "\(entry.name)=\(codec ?? "-")\(layers)\(set ? "" : "(no encryptor)")"
             }
             NSLog("WebRTCPeerConnection: sender codecs %@", told.joined(separator: " "))
         }

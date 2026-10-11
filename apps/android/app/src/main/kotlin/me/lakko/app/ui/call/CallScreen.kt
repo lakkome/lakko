@@ -704,12 +704,20 @@ private fun InCallView(
         viewStateConnectedSinceMs = stateConnectedSince,
     )
 
+    // docs/ux/group-call-grid.md section 6.2: a press anywhere on the call
+    // screen other than the tile whose controls are up hides them. The watch
+    // is on the root, because the call area is only the tiles: the status
+    // line, the chevron, the layout switch, the control bar, the drawer and
+    // the margins are its siblings here, not its children.
+    val tileControls = rememberTileControlsHost()
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(LakkoDark.background)
             .onSizeChanged { rootSize = it }
-            .onGloballyPositioned { rootLeftInWindowRoot = it.positionInRoot().x },
+            .onGloballyPositioned { rootLeftInWindowRoot = it.positionInRoot().x }
+            .hidesTileControlsOnPressElsewhere(tileControls),
     ) {
         when (stage) {
             CallStage.PORTRAIT -> CallPortrait(
@@ -783,6 +791,7 @@ private fun InCallView(
                         state = state,
                         participants = participants,
                         rules = rules,
+                        controls = tileControls,
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()

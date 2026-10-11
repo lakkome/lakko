@@ -82,6 +82,51 @@ private fun strOrNull(stat: RtcStat, key: String): String? =
     (stat.members[key] as? String)?.takeIf { it.isNotEmpty() }
 
 /**
+ * The id of the local track each `media-source` entry of a report describes,
+ * by the entry's id: what an `outbound-rtp` entry's `mediaSourceId` leads to.
+ */
+internal fun mediaSourceTrackIds(stats: Iterable<RtcStat>): Map<String, String> {
+    val out = HashMap<String, String>()
+    for (stat in stats) {
+        if (stat.type != "media-source") continue
+        val id = stat.id ?: continue
+        out[id] = strOrNull(stat, "trackIdentifier") ?: continue
+    }
+    return out
+}
+
+/**
+ * Which of this device's camera senders a video `outbound-rtp` entry is, or
+ * `null` when the report does not say. Two ways, tried in this order:
+ *
+ *  1. the entry's `mid`, looked up in [senderByMid] (the `mid` of each
+ *     sender's media line, read from its transceiver);
+ *  2. the entry's `mediaSourceId`, which names a `media-source` entry of the
+ *     same report whose `trackIdentifier` is the id of the track the sender
+ *     sends ([trackIdByMediaSource], from [mediaSourceTrackIds]), looked up
+ *     in [senderByTrackId]. Each camera sender has a track of its own with a
+ *     fixed id, so this needs neither the `mid` in the entry nor a
+ *     transceiver to read one from (the main sender made by the plain
+ *     `addTrack` has none).
+ *
+ * A `mid` that is absent, or that [senderByMid] does not know, falls through
+ * to the second way and is not an answer by itself. The frame size is
+ * deliberately not a third way: the encoder scales a sender down under load,
+ * so a main sender can report the size the plan gives a copy.
+ */
+internal fun outboundSenderKind(
+    stat: RtcStat,
+    senderByMid: Map<String, CameraSenderKind>,
+    senderByTrackId: Map<String, CameraSenderKind>,
+    trackIdByMediaSource: Map<String, String>,
+): CameraSenderKind? {
+    strOrNull(stat, "mid")?.let { senderByMid[it] }?.let { return it }
+    return strOrNull(stat, "mediaSourceId")
+        ?.let { trackIdByMediaSource[it] }
+        ?.let { senderByTrackId[it] }
+}
+
+/**
  * Reduce a statistics report to a reading.
  *
  * [lightTrackIds] and [middleTrackIds] hold the ids of the remote tracks that
@@ -89,20 +134,22 @@ private fun strOrNull(stat: RtcStat, key: String): String? =
  * `trackIdentifier` is among them is `light` or `middle`, any other is
  * `main`. An id in both sets is read as light.
  *
- * [senderByMid] names this device's camera senders by the `mid` of their
- * media line: a video `outbound-rtp` entry is the sender its `mid` leads to,
- * and the `main` one when it names no `mid` or one that is not in the map.
- * (The web client reads each copy's own sender report instead; libwebrtc's
- * outbound entries carry the `mid`, which answers the same question from the
- * one report.)
+ * [senderByMid] and [senderByTrackId] name this device's camera senders, by
+ * the `mid` of their media line and by the id of the track they send: a video
+ * `outbound-rtp` entry is the sender [outboundSenderKind] finds for it, and
+ * the `main` one when neither way names it. (The web client reads each copy's
+ * own sender report instead; libwebrtc's one report answers the same
+ * question.)
  */
 internal fun readMedia(
     stats: Iterable<RtcStat>,
     lightTrackIds: Set<String> = emptySet(),
     middleTrackIds: Set<String> = emptySet(),
     senderByMid: Map<String, CameraSenderKind> = emptyMap(),
+    senderByTrackId: Map<String, CameraSenderKind> = emptyMap(),
 ): MediaReading {
     val inbound = LinkedHashMap<String, InboundCounters>()
+    val trackIdByMediaSource = mediaSourceTrackIds(stats)
     val bySender = CAMERA_SENDER_KINDS.associateWith { ArrayList<OutboundVideo>() }
     for (stat in stats) {
         val kind = stat.members["kind"] as? String
@@ -134,7 +181,8 @@ internal fun readMedia(
             )
         } else if (stat.type == "outbound-rtp" && kind == "video") {
             // Three camera senders at most, one entry each.
-            val sender = strOrNull(stat, "mid")?.let { senderByMid[it] } ?: CameraSenderKind.MAIN
+            val sender = outboundSenderKind(stat, senderByMid, senderByTrackId, trackIdByMediaSource)
+                ?: CameraSenderKind.MAIN
             bySender.getValue(sender) += OutboundVideo(
                 sender = sender,
                 scalabilityMode = strOrNull(stat, "scalabilityMode"),
@@ -349,13 +397,16 @@ internal data class SenderReading(
 
 /**
  * Reduce a statistics report to the sender reading, or `null` with no camera.
- * Every camera sender is summed. [senderByMid] is as in [readMedia]; it only
- * decides whose codec is named (the main sender's, when it reports).
+ * Every camera sender is summed. [senderByMid] and [senderByTrackId] are as
+ * in [readMedia]; they only decide whose codec is named (the main sender's,
+ * when it reports).
  */
 internal fun readSender(
     stats: Iterable<RtcStat>,
     senderByMid: Map<String, CameraSenderKind> = emptyMap(),
+    senderByTrackId: Map<String, CameraSenderKind> = emptyMap(),
 ): SenderReading? {
+    val trackIdByMediaSource = mediaSourceTrackIds(stats)
     val outs = ArrayList<RtcStat>()
     val remotes = ArrayList<RtcStat>()
     var pair: RtcStat? = null
@@ -377,7 +428,7 @@ internal fun readSender(
         }
     }
     fun isCopy(stat: RtcStat): Boolean {
-        val kind = strOrNull(stat, "mid")?.let { senderByMid[it] }
+        val kind = outboundSenderKind(stat, senderByMid, senderByTrackId, trackIdByMediaSource)
         return kind != null && kind != CameraSenderKind.MAIN
     }
     val first = outs.firstOrNull { !isCopy(it) } ?: outs.firstOrNull() ?: return null

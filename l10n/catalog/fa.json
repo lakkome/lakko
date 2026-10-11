@@ -982,6 +982,10 @@
       "text": "شرکت‌کننده {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "سنجاق کردن {name}",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "سنجاق‌شده",
       "status": "machine"
@@ -996,6 +1000,10 @@
     },
     "call.participant.unnamed": {
       "text": "شرکت‌کننده",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "برداشتن سنجاق {name}",
       "status": "machine"
     },
     "call.participant.you": {

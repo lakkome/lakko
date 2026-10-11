@@ -195,7 +195,8 @@ and seals nothing; from the highest possible start that is
 `3 * 2^62` frames away.
 
 [ADR-0071](../adr/0071-codec-header-in-the-clear.md) (Proposed;
-built in the core, the wasm FFI and the web client) changes
+built in the core, the wasm FFI, the C ABI, the web client and,
+since 2026-10-11, the native bridge both phones use) changes
 where the header that carries this counter sits, not the
 counter: a sealed media frame is `clear_prefix ||
 ciphertext_and_tag || sframe_header || trailer`, and
@@ -225,11 +226,33 @@ receiver attempting to open a frame with the wrong AAD MUST
 get an authentication failure. This stops a header-tamper
 attacker from re-routing or replaying frames.
 
+**On the media path the AAD is wider since
+[ADR-0071](../adr/0071-codec-header-in-the-clear.md)** (web
+2026-10-07, the native bridge 2026-10-11): a sealed media frame
+is `clear_prefix || ciphertext_and_tag || sframe_header ||
+trailer`, and the AAD is `sframe_header || clear_prefix ||
+trailer` (`media_frame::media_frame_aad`), taken from the wire
+bytes. The header is still in it; so are the clear codec bytes
+(at most 16) and the 3-byte trailer that states the two lengths,
+so every byte of a frame that is not ciphertext is
+authenticated, and the boundary between clear and sealed bytes
+cannot be moved without the open failing. The statement of this
+invariant is unchanged; the set of bytes it covers grew. The
+header-first functions the two tests below exercise are still
+in the crate and no client's media path calls them.
+
 Tests:
 - [`sframe::tests::wrong_aad_rejects_open`](../../crates/lakko-calls/src/sframe.rs)
   — primitive level.
 - [`group_call::tests::cross_party_wrong_aad_rejects`](../../crates/lakko-calls/src/group_call.rs)
   — full cross-party path.
+- [`media_frame::tests::each_region_is_authenticated`](../../crates/lakko-calls/src/media_frame.rs)
+  — the ADR-0071 layout: the clear prefix, the ciphertext, the
+  header and the trailer.
+- `test_every_byte_is_authenticated` in
+  [`test_bridge.cc`](../../apps/shared/sframe-bridge/test_bridge.cc)
+  — the same through the native bridge, every single-byte flip
+  of a sealed VP8 key frame and of a delta frame.
 
 ### C-7: Wrong frame counter on the receive path is rejected
 
@@ -1599,11 +1622,46 @@ crate per [ADR-0011](../adr/0011-rust-sfu.md) — has now
 shipped its **signaling half** (S-3-B-routing-signaling
 + S-3-B-tests in
 [`docs/ROADMAP-PHASE3-CLOSEOUT.md`](../ROADMAP-PHASE3-CLOSEOUT.md)
-Group B). The media half (str0m-backed RTP fanout) is
-gated on the WebRTC pod sprint and stays open as
-`S-3-B-routing-media`. This invariant set pins what the
-signaling layer already guarantees, independently of
-whether real RTP is being forwarded.
+Group B). The media half (str0m-backed RTP fanout) was
+still open when this paragraph was written; it has shipped
+since (see "SFrame-passthrough property" below). This
+invariant set pins what the signaling layer guarantees,
+independently of whether real RTP is being forwarded.
+
+**State on 2026-10-11, corrected against the source.** The
+function names in sub-invariant 3 are those of the frame-mode
+SFU. Since ADR-0066 the forwarding function is
+`fanout_packets_into`; `fanout_media_data` no longer exists.
+The call-scoping is the same: `fanout_packets_into` looks up
+the origin's `call_id` once per packet and forwards to nobody
+when the origin has none. The tests named there
+(`fanout_never_crosses_calls`,
+`fanout_unbound_origin_forwards_to_nobody`,
+`fanout_never_crosses_calls_over_the_live_sfu`) still exist
+under those names. The test counts in the next line are those
+of the signaling sprint and are not kept current.
+
+**What the SFU reads of a media packet, after
+[ADR-0071](../adr/0071-codec-header-in-the-clear.md).** A
+sealed VP8 frame now begins with up to 10 clear bytes of the
+codec's own header (authenticated, see C-6 and C-55), so the
+first RTP packet of a frame carries bytes an SFU *could*
+read. `services/sfu` does not: `forward_packet` writes
+`packet.payload` to the subscriber's send stream without
+reading it, and a key frame is recognised only from the
+generic frame descriptor header extension
+(`frame_descriptor::is_independent_frame`), which is why a
+publisher that negotiates no descriptor (Firefox) shows the
+SFU no key frames at all. Two places touch payload bytes, and
+neither interprets media: `classify_video_red` reads the
+one-byte RED header (RFC 2198 transport framing in front of
+the sealed frame) where video RED is negotiated, and with
+`LAKKO_SFU_VIDEO_FEC=1` (off by default) the ULPFEC receiver
+and sender compute over payload bytes as opaque bytes. The
+zero-payload-inspection statement therefore holds as written;
+what changed is that the clear codec prefix is now something
+the statement has to be checked against, where before there
+was nothing in a payload an SFU could have read.
 
 **Pinned invariants** the test suite (32 unit + 9
 integration) asserts:
@@ -1710,8 +1768,11 @@ The SFU's media-layer responsibilities — RTP track
 forwarding and the `TracksIn`/`TracksOut` mapping that
 drives SDP renegotiation when a peer joins — have now
 **also** landed (S-3-B-routing-media steps 1–5 +
-S-3-B-tracks steps 1–3b). Simulcast layer selection per
-receiver and TWCC aggregation remain deferred follow-ups.
+S-3-B-tracks steps 1–3b). (When this was written simulcast
+layer selection and TWCC aggregation were deferred; both have
+been built since, and the group-call path now uses three
+ordinary senders with per-subscriber `video-wants`, see
+`services/sfu/README.md`.)
 
 **SFrame-passthrough property the fanout preserves.** Since
 ADR-0066 (2026-10-02) the SFU forwards RTP packets, not frames:
@@ -2538,40 +2599,70 @@ the call surface makes lives one layer down, in:
 
 `apps/shared/sframe-bridge/test_bridge.cc` builds and runs as
 a standalone C++17 binary (no libwebrtc runtime, no gtest)
-against the same bridge code the platform shims attach. Eight
-assertions, all green on every push that touches the bridge
-or the Rust crate it links:
+against the same bridge code the platform shims attach.
+**Since 2026-10-11 every test is in the
+[ADR-0071](../adr/0071-codec-header-in-the-clear.md) frame
+layout** (`clear_prefix || ciphertext_and_tag || sframe_header
+|| trailer`), which is the only layout the bridge seals and
+opens. Fifteen tests (the list here used to be eight, on the
+header-first layout, and its second item said a tampered host
+`additional_data` fails the open, which contradicted C-55 and
+the test itself):
 
-  1. **Single-sender round-trip** — encrypt + decrypt produces
-     byte-identical plaintext.
-  2. **AAD binding** — tampered `additional_data` returns
-     `kFailedToDecrypt` (NOT `kOk`, NOT `kRecoverable`).
+  1. **Single-sender round-trip** — the sealed frame fits
+     `GetMaxCiphertextByteSize` (the frame plus 36: tag 16,
+     header up to 17, trailer 3) and decrypts to the original
+     frame, never longer than its input.
+  2. **Host `additional_data` is NOT authenticated; the SFrame
+     header is** — a different host `additional_data` on the
+     receive side still opens (ADR-0013: host RTP metadata
+     cannot be reconstructed across stacks), and a flipped
+     header byte returns `kFailedToDecrypt`.
   3. **Multi-sender into one receiver** — three concurrent
-     senders into one decryptor each get their own
-     `ParticipantKey` cache entry, every round-trip succeeds.
-  4. **Bad seed length** — both `LakkoFrameEncryptor::Create`
-     and `LakkoFrameDecryptor::Create` return `nullptr` for
-     seeds shorter than 32 bytes (fail-closed; the platform
-     shim must refuse to install a `nullptr` encryptor per
-     security invariant #4 — no fallback to non-E2EE).
-  5. **Ciphertext-body tamper** — flipping a single bit in the
-     AEAD-protected body (between the SFrame wire header and
-     the trailing 16-byte tag) returns `kFailedToDecrypt`. Together
-     with #2 this exercises both halves of the AEAD's
-     authenticated set.
-  6. **Counter monotonicity + out-of-order delivery** — 1000
-     frames sealed in order, decrypted in a deterministic
-     shuffle, every plaintext recovered correctly. SFrame
-     counters live in the wire header, not in receiver state;
-     no monotonic-order assumption.
-  7. **Per-call key isolation** — two `CallKey` instances
-     seeded with different bytes cannot cross-decrypt. Mirrors
-     the per-call domain-separation MLS exporter labels
-     guarantee at the layer above.
-  8. **Payload-size extremes** — 1 B / 80 B / 1500 B / 64 KiB
-     all round-trip; rules out a silent-truncation regression
-     in `GetMaxCiphertextByteSize` or
-     `GetMaxPlaintextByteSize`.
+     senders into one decryptor, each keyed by the KID its
+     frames carry.
+  4. **Bad seed length** — both `Create` functions return
+     `nullptr` for a seed that is not 32 bytes (fail-closed;
+     the platform shim must refuse to install a `nullptr`
+     encryptor, invariant #4).
+  5. **Ciphertext-body tamper** — one flipped bit in the
+     ciphertext returns `kFailedToDecrypt`.
+  6. **Counter monotonicity + out-of-order delivery** — frames
+     sealed in order and decrypted in a shuffle all open; the
+     counter rides in each frame's header.
+  7. **Per-call key isolation** — two call keys from different
+     seeds cannot open each other's frames.
+  8. **Payload-size extremes** — 1 byte up to 64 KiB
+     round-trip.
+  9. **The ADR-0071 golden frame** — the decryptor opens the
+     pinned vector (the one the core, the wasm FFI, the C ABI
+     test and the web suite pin) to the pinned VP8 key frame;
+     the encryptor, told the codec is VP8, seals the same
+     input into a frame of the same shape that opens. Since
+     ADR-0069 an encryptor starts at a random counter, so it
+     cannot reproduce the golden bytes.
+  10. **The codec decides the clear prefix** — 10 bytes of a
+      VP8 key frame, 3 of any other VP8 frame, none for Opus,
+      for `OTHER`, for an unknown codec value, or before
+      `SetCodec` was called.
+  11. **Every byte is authenticated** — each single-byte flip
+      of a sealed VP8 key frame and of a sealed delta frame
+      fails, as does a frame cut short or extended (clear
+      prefix, ciphertext, tag, header and trailer).
+  12. **The header-first layout is refused** — neither the
+      ADR-0013 golden vector nor a frame sealed header-first
+      just now under the right key opens on the media path.
+  13. **`SetCodec` may race `Encrypt`** — one thread seals
+      while another changes the codec; every frame opens.
+  14. **Mid-call rekey overlap** (ADR-0029) — an old-epoch
+      frame opens inside the window, a new one under the new
+      key, and pruning closes the window.
+  15. **An empty frame is not a decrypt failure** — it is
+      answered as nothing to decrypt, and a non-empty
+      unopenable frame still fails.
+
+Whether this binary was run for the 2026-10-11 port is not
+recorded here; this list was written from the test source.
 
 The runner is `just test-sframe-bridge` locally and
 `.github/workflows/sframe-bridge.yml` in CI
@@ -2595,8 +2686,8 @@ both platforms before any call entry point renders (security
 invariant #4: refuse-to-start if `RtpSender.setFrameEncryptor`
 disappears from a libwebrtc bump).
 
-Tested in `apps/shared/sframe-bridge/test_bridge.cc` (eight
-host-side assertions, listed above) + boot probe at
+Tested in `apps/shared/sframe-bridge/test_bridge.cc` (fifteen
+host-side tests, listed above) + boot probe at
 `apps/ios/Lakko/Calls/SFrameAvailability.swift` +
 `apps/android/lakko-sframe/src/main/kotlin/me/lakko/sframe/
 SFrameAvailability.kt` (run at app start; fail-closed).
@@ -2688,9 +2779,9 @@ round-trip remains, G-26.) This is the same `lakko_calls::sframe`
 `seal_framed` / `open_framed` core pinned by C-37 / C-38;
 C-55 records that all three SFU clients now reach it.
 
-**Layout amended for the web by
+**Layout amended by
 [ADR-0071](../adr/0071-codec-header-in-the-clear.md) (Proposed,
-2026-10-07).** A receiver without the generic frame descriptor
+2026-10-07): the web first, the native bridge on 2026-10-11.** A receiver without the generic frame descriptor
 finds a key frame by reading the codec's own header at the
 start of the payload, where the SFrame header used to sit. The
 web client now seals and opens `clear_prefix ||
@@ -2704,14 +2795,24 @@ version), and the AAD is `sframe_header || clear_prefix ||
 trailer`, so every byte that is not ciphertext is
 authenticated and none of it is host RTP metadata. What the
 SFU newly sees is listed in the ADR (for VP8: the frame tag of
-every frame and the dimensions of key frames). The native
-bridges still call the header-first `seal_framed` /
-`open_framed`, and the two layouts do not open as each other
+every frame and the dimensions of key frames). The two layouts
+do not open as each other
 (`media_frame::tests::the_header_first_layout_is_refused_by_the_new_open`,
-`the_new_layout_is_refused_by_the_header_first_open`): **until
-the native side moves (ADR-0071 phase 2) a web client and a
-native client drop each other's media**, and sub-invariant 1
-below describes the native half only. Not run in a browser.
+`the_new_layout_is_refused_by_the_header_first_open`), so
+between 2026-10-07 and 2026-10-11, while the native bridge
+still sealed header-first, a web client and a native client
+dropped each other's media. **Since 2026-10-11 the native
+bridge (`apps/shared/sframe-bridge`) seals and opens only the
+ADR-0071 layout too** (`lakko_sframe_seal_media_frame`,
+`lakko_sframe_call_key_ring_open_media_frame_with_overlap`),
+and the platform shims tell each encryptor its sender's
+negotiated codec (`SetCodec`; until told, a video frame keeps
+nothing clear, and a frame handed over as audio never does).
+All three clients are on one layout again. The web side has
+carried video between Chrome, Firefox and Safari on live calls
+(the commit record of 2026-10-09); nothing native has been run
+on a device or a call in this layout, and no web-to-native
+media has been exchanged in it.
 
 Four sub-invariants:
 
@@ -2722,7 +2823,10 @@ Four sub-invariants:
    `sealMediaFrame` / `openMediaFrameWithOverlap`) and the native C++ bridge
    (`apps/shared/sframe-bridge`, via the
    `lakko-sframe-native` C ABI `lakko_sframe_seal_framed` /
-   `_open_framed`) call byte-for-byte the same Rust pipeline.
+   `_open_framed` until 2026-10-11, now
+   `lakko_sframe_seal_media_frame` /
+   `lakko_sframe_call_key_ring_open_media_frame_with_overlap`)
+   call byte-for-byte the same Rust pipeline.
    No platform re-implements the AEAD, the header, or the
    AAD choice.
 
@@ -2738,13 +2842,19 @@ Four sub-invariants:
    plaintext frame on either track. A failed arm aborts the
    call (fail-closed, invariant #4).
 
-3. **The SFU routes by the on-wire KID without touching the
-   ciphertext.** `open_framed` checks `kid == sender_leaf`
-   and binds the exact on-wire header; the SFU reads the KID
-   to fan out by participant (`services/sfu/src/media.rs`
-   pins the downstream MSID stream-id to the source `PeerId`)
-   but never decodes the body — the SFrame ciphertext is
-   opaque on the forwarding path (C-39).
+3. **The SFU routes without touching the frame.** The
+   receiver's open selects the key by the KID in the frame's
+   own header and binds the exact on-wire header. The SFU
+   fans out by participant from its own signaling state
+   (`services/sfu/src/media.rs` pins the downstream MSID
+   stream-id to the source `PeerId`, with `~mid` and `~light`
+   for the two further camera tracks) and never decodes the
+   body; it reads neither the KID nor, since ADR-0071, the
+   clear codec prefix at the start of a VP8 frame (C-39).
+   (This item used to say the SFU "reads the KID to fan out"
+   and that the open checks `kid == sender_leaf`; the first
+   was never what `media.rs` does, and the KID has been
+   `(sender_leaf << 8) | stream_index` since ADR-0035.)
 
 4. **Fail-closed on every surface.** A frame that fails to
    parse or authenticate is dropped, never forwarded as
@@ -2756,7 +2866,9 @@ by construction (one shared core + a platform-independent
 header) and by the native host test
 (`apps/shared/sframe-bridge/test_bridge.cc`, C-53: a
 mismatched host AAD does NOT fail decryption, a tampered
-header DOES). What is NOT yet observed firsthand is a live
+header DOES; in the ADR-0071 layout every single-byte flip of
+a sealed frame fails, and the golden frame the web suite pins
+opens through the bridge). What is NOT yet observed firsthand is a live
 media frame sealed on one platform decrypting on another over
 a deployed SFU forwarding path — that needs two real
 endpoints plus the SFU and cannot run in a headless build.

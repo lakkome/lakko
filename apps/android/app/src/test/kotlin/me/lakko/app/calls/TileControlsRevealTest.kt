@@ -139,4 +139,64 @@ class TileControlsRevealTest {
         assertEquals("b", call.pinnedId)
         assertEquals(listOf("layout=FOCUS", "pin=b"), call.told.toList())
     }
+
+    /** One press as the screen reports it: seen, named by the tile under it
+     *  (if any), settled. */
+    private fun press(watch: TilePressWatch, tileId: String?) {
+        watch.pressSeen()
+        if (tileId != null) watch.pressOnTile(tileId)
+        watch.pressSettled()
+    }
+
+    @Test
+    fun `a press that names no tile hides the controls, wherever on the screen it is`() {
+        // The control bar, the status line, the layout switch, a margin: none
+        // of them is a tile, so none of them names one.
+        val h = Harness()
+        val watch = TilePressWatch(h.reveal)
+        h.reveal.tap("a")
+        press(watch, null)
+        assertNull(h.reveal.tileId)
+        assertEquals(listOf("a", null), h.changes.toList())
+        // The time that was running is stopped with them.
+        h.timers.advance(TILE_CONTROLS_REVEAL_MS)
+        assertEquals(listOf("a", null), h.changes.toList())
+    }
+
+    @Test
+    fun `a press on the tile whose controls are up keeps them, one on another tile hides them`() {
+        val h = Harness()
+        val watch = TilePressWatch(h.reveal)
+        h.reveal.tap("a")
+        press(watch, "a")
+        assertEquals("a", h.reveal.tileId)
+        press(watch, "b")
+        assertNull(h.reveal.tileId)
+    }
+
+    @Test
+    fun `a tile named by one press does not answer for the next`() {
+        val h = Harness()
+        val watch = TilePressWatch(h.reveal)
+        h.reveal.tap("a")
+        press(watch, "a")
+        // The next press is on no tile. Nothing of the last one is left, even
+        // if whoever watches the screen missed its start.
+        watch.pressSettled()
+        assertNull(h.reveal.tileId)
+        h.reveal.tap("a")
+        press(watch, "a")
+        press(watch, null)
+        assertNull(h.reveal.tileId)
+    }
+
+    @Test
+    fun `with no controls up a press changes nothing`() {
+        val h = Harness()
+        val watch = TilePressWatch(h.reveal)
+        press(watch, null)
+        press(watch, "a")
+        assertNull(h.reveal.tileId)
+        assertEquals(emptyList<String?>(), h.changes.toList())
+    }
 }

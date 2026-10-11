@@ -23,7 +23,27 @@ commands.
 
 ## Status
 
-**Scaffolding only.** No Rust code is checked in yet.
+**State on 2026-10-11.** The crate is built and deployed to the test
+stack: signaling, JWT admission, RTP packet forwarding
+([ADR-0066](../../docs/adr/0066-sfu-forwards-rtp-packets.md)), and the
+call-media work of ADR-0067, ADR-0068 and
+[ADR-0070](../../docs/adr/0070-call-media-through-a-loss-burst.md)
+described section by section below. The WebRTC stack is `str0m`
+`=0.19.0`, a vendored fork with fifteen recorded changes
+([`UPSTREAM.md`](./UPSTREAM.md)); the signaling frames come from
+`crates/lakko-sfu-proto`, not `lakko-proto`. It has carried live calls
+between browsers (Chrome, Firefox, Safari, Edge). The iOS and Android
+clients were brought to the current protocol on 2026-10-11 and have not
+been on a call against it.
+
+The rest of this section, "Shape (target)" and "Crate boundaries" are
+the plan written before any code existed and are kept as history: the
+sprint table, the file layout (the code is in `src/media.rs`,
+`signaling.rs`, `router.rs` and the modules named in the sections
+below) and the lines "No vendored upstream tree. No patch directory."
+no longer describe the crate.
+
+**As first written: scaffolding only.** No Rust code is checked in yet.
 The next sprint pulls the trigger — see
 [`docs/ROADMAP-PHASE3-CLOSEOUT.md`](../../docs/ROADMAP-PHASE3-CLOSEOUT.md)
 group **B**:
@@ -795,8 +815,9 @@ as `video-wants` says above), so it sees a publisher's main picture while
 somebody else's wish keeps that sender on, and **the light track only**
 when the sender is off. A client that does not speak `video-wants` is not
 supported on an SFU with this switch on; there is no deployed client to
-stay compatible with, and the native clients are to be brought up to the
-protocol. The reason for the rule: somebody joining a call of five says
+stay compatible with, and the native clients were brought up to the
+protocol on 2026-10-11 (they send `video-wants`; unit-tested, not run on
+a device or a call). The reason for the rule: somebody joining a call of five says
 what it shows a fraction of a second after it is offered the tracks (seen
 on a live call: `light` for everyone in the same millisecond, `middle`
 about 230 ms later), and counting it as wanting main until then would
@@ -925,7 +946,14 @@ All constants chosen, none measured.
 
 ### Not verified
 
-Nothing here has been run against a browser. Whether a browser's first
+Note, 2026-10-11: the web client acts on the frame since the same day
+(`apps/web/src/calls/sender-activity.ts`), and the commit record of that
+day states that the main sender going off in a grid and coming back for
+a pinned person was seen on live calls in five browsers. No figure from
+those calls is recorded here, so the questions below stand as written.
+iOS and Android act on the frame too (unit-tested, not run).
+
+As first written: nothing here has been run against a browser. Whether a browser's first
 frame after `encoding.active` goes back to `true` is a key frame, whether
 it keeps its RTP sequence numbers, and what its own bitrate allocation does
 with a sender that returns, are not known from this work; the e2e publisher
@@ -1314,7 +1342,8 @@ again. It would take a parser of the VP8 payload descriptor (variable
 length: the X, I, L, T, K bits and a one- or two-byte picture id) run on
 attacker-chosen bytes, hence a fuzz target; a per-codec switch (VP9,
 H.264 and AV1 mark key frames differently); and a rule for clients that
-do not leave the header clear (the natives today), where the same bytes
+do not leave the header clear (the natives until 2026-10-11, when their
+bridge moved to the ADR-0071 layout), where the same bytes
 are ciphertext and the bit means nothing. It would change invariant
 C-39 from "the SFU never reads a payload" to "the SFU reads the codec's
 clear frame header of a payload and nothing after it", and the SFU
@@ -1571,7 +1600,8 @@ by default. **It was run against browsers once, on the live call of
 2026-10-09 (four browsers, see "The fourth round"), and cycled on a
 shared mobile downlink; what that call led to is built and host-tested
 and has not been on a call since.** The web client reads `video-given`;
-iOS and Android do not. Its acceptance tests
+iOS and Android do since 2026-10-11 (unit-tested, not run on a device or
+a call). Its acceptance tests
 against synthetic `str0m` clients (below) failed an independent check
 twice on 2026-10-06 (the first build dropped packets on the link once
 settled; the second passed only because attempts with late publisher
