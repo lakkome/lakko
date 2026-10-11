@@ -31,7 +31,23 @@
 //! media packet is recorded as sent; an FEC packet's protected numbers
 //! become a request for the slot the packet sits in.
 //!
+//! The same packets also drive the bookkeeping that says when a burst of
+//! loss on a publisher's stream has ended unrepaired
+//! (`services/sfu/src/burst_keyframe.rs`, ADR-0070 note of 2026-10-11): the
+//! sequence number of each packet, the numbers an FEC packet's mask names
+//! as protected, and, for a media packet, where its frame descriptor says
+//! it sits in its frame (the `B` and `E` flags and the frame id, read off
+//! the last bytes of the packet as a descriptor value). An admitted peer
+//! chooses all three. The packets are spread over more streams than the
+//! bookkeeping keeps, and its clock moves by a step the input chooses.
+//!
 //! Beyond not panicking, asserted after every packet:
+//!
+//! - the burst bookkeeping keeps no more streams and no more missing
+//!   packets than its stated bounds, and every burst it hands out counts
+//!   its missing packets consistently (known media, known not media and
+//!   unknown add up to what never arrived, which is no more than what was
+//!   lost);
 //!
 //! - the sender holds no more than its stated bounds, and an FEC packet it
 //!   builds is no longer than its stated bound and no shorter than an FEC
@@ -47,7 +63,12 @@
 
 #![no_main]
 
+use std::time::{Duration, Instant};
+
 use libfuzzer_sys::fuzz_target;
+
+use lakko_svc_sfu::burst_keyframe::{Arrived, BurstEnds, MAX_STREAMS, RETRANSMISSION_WINDOW};
+use lakko_svc_sfu::frame_descriptor::packet_position;
 
 use lakko_svc_sfu::fec_receive::{
     fec_protected, media_from_red, rtp_headers_len, zero_mutable_extensions, FecReceiver,
@@ -74,6 +95,11 @@ fuzz_target!(|data: &[u8]| {
     let mut receiver = FecReceiver::new(0x0102_0304);
     let mut sender: FecSender<u16> = FecSender::new();
     let mut seq: u16 = 0xfff0;
+    // The same number without the wrap; its low 16 bits are `seq`.
+    let mut ext: u64 = 0x1_0000_fff0;
+    let mut bursts: BurstEnds<u8> = BurstEnds::new();
+    let start = Instant::now();
+    let mut clock_ms: u64 = 0;
 
     while let Some((&[control, len], tail)) = rest.split_first_chunk::<2>() {
         let take = usize::from(len).min(tail.len());
@@ -84,10 +110,39 @@ fuzz_target!(|data: &[u8]| {
         // sometimes repeats a number and sometimes goes back.
         let step = i16::from(control >> 1) - 16;
         seq = seq.wrapping_add_signed(step);
+        ext = ext.saturating_add_signed(i64::from(step));
         if control >> 1 == 0x7f {
             // And now and then a jump far outside the window.
             seq = seq.wrapping_add(20_000);
+            ext = ext.saturating_add(20_000);
         }
+        // The burst bookkeeping: sixteen streams (it keeps twelve), a clock
+        // that moves 0 to 140 ms a packet.
+        let stream = len & 0x0f;
+        clock_ms += u64::from(control & 0x0e) * 10;
+        let now = start + Duration::from_millis(clock_ms);
+        if control & 1 == 0 {
+            let value = &packet[packet.len().saturating_sub(usize::from(len % 6))..];
+            let part = packet_position(value);
+            let what = if control & 0x10 == 0 {
+                Arrived::Media
+            } else {
+                Arrived::KeyFrameStart
+            };
+            bursts.on_described(stream, ext, now, what, part);
+        } else {
+            bursts.on_packet(stream, ext, now, Arrived::Fec);
+            if let Ok(protected) = fec_protected(packet) {
+                bursts.fec_protects(stream, ext, &protected);
+            }
+        }
+        for end in bursts.poll(now) {
+            assert!(end.unrepaired > 0 && end.unrepaired <= end.lost);
+            assert_eq!(end.unrepaired, end.media + end.not_media + end.unknown);
+        }
+        assert!(bursts.streams_kept() <= MAX_STREAMS);
+        let most_holes = MAX_STREAMS * usize::try_from(RETRANSMISSION_WINDOW).unwrap_or(usize::MAX);
+        assert!(bursts.open_holes() <= most_holes);
 
         // The RED header helpers see every payload.
         let _ = red_block_pt(packet);

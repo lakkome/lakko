@@ -1437,21 +1437,103 @@ The request:
 - is logged twice: `media: keyframe requested from publisher` and, for
   every burst that ended unrepaired whether or not anything was asked,
   `media: a burst of loss on a publisher's stream ended unrepaired`
-  (`lost`, `still_missing`, `beyond_repair`, `lasted_ms`, `key_frame` =
-  `asked` / `owed` / `not-asked` / `nobody-watching`, `given_up`).
+  (`lost`, `still_missing`, `known_media`, `known_not_media`, `unknown`,
+  `beyond_repair`, `lasted_ms`, `why` = `media-missing` / `unexplained`,
+  `key_frame` = `asked` / `owed` / `not-asked` / `nobody-watching`,
+  `given_up`).
 
-**A stream that carries FEC is judged by number.** A lost FEC packet takes
-a sequence number and is not sent again (recalled from libwebrtc, not read
-for this), so on such a stream a packet that stays missing is media
-somebody needs or an FEC packet nobody does, and nothing says which. There
-the burst ended unrepaired only when more packets stay missing than 2
+A burst that ended with packets still missing and was **not** taken for
+unrepaired is logged too, since 2026-10-11, so the log of a call shows
+every burst and not only the ones that asked:
+`media: a burst of loss on a publisher's stream ended with packets missing and asked for nothing`
+(`lost`, `still_missing`, `known_media`, `known_not_media`, `unknown`,
+`beyond_repair`, `lasted_ms`, `why` = `not-media` / `within-fec-share`).
+A burst that retransmission repaired whole, and one closed by a key frame
+that arrived of its own accord, are still closed without a line.
+
+### What a missing packet was (2026-10-11)
+
+A lost FEC packet takes a sequence number and is not sent again (recalled
+from libwebrtc, not read for this), so on a stream that carries FEC a
+packet that stays missing is media somebody needs or an FEC packet nobody
+does. Until 2026-10-11 nothing said which, and such a stream was judged by
+number alone: unrepaired only when more packets stayed missing than 2
 (`FEC_SLACK`) plus one and a half times the FEC share of what the burst
-lost; the share is counted over the last packets that arrived in sequence
-(up to 1024). One or two packets that stay missing on such a stream never
-cost a key frame. A stream on which no FEC packet has been seen is judged
-exactly. The cost of judging by number: a burst that leaves only a few
-media packets unrepaired on an FEC stream is not noticed, and a viewer
-asks as before.
+lost. With a share near one half that is three quarters of everything the
+burst lost: on the live call of 2026-10-11 (the note of that day in
+ADR-0070) bursts that left media missing asked for nothing, and a Firefox
+viewer stood still for 3.3 to 4.0 s until its own decoder asked.
+
+When a burst is judged, each packet still missing is now one of three
+kinds, from facts the SFU already has in the packets that did arrive:
+
+- **Known media.**
+  - An FEC packet that arrived lists it as protected (its mask;
+    `fec_receive::fec_protected`, `BurstEnds::fec_protects`). FEC protects
+    media packets only. The mask is read only while packets are missing on
+    the stream.
+  - The generic frame descriptors of the packets around it
+    (`frame_descriptor::packet_position`: the `B` and `E` flags of every
+    media packet and the 16-bit frame id of a frame's first packet).
+    Between two media packets that arrived, with only missing packets and
+    FEC packets between them: a packet on the left that does not end its
+    frame, or one on the right that does not begin its frame, means a
+    packet of that frame is missing; frame ids that step by more than one
+    across the gap mean whole frames are missing, one packet at least
+    each.
+- **Known not media.** Everything missing between a packet that ends frame
+  `n` and one that begins frame `n + 1`: an FEC packet, or nothing anybody
+  needs.
+- **Unknown.** Everything else: a neighbour without the extension, a
+  packet let go before the burst was judged, a gap whose frames cannot be
+  counted.
+
+The answer: one packet of known media still missing is unrepaired
+(`why = media-missing`), whatever the FEC share. Packets known not to be
+media never ask for anything (`not-media` when they are all that is
+missing). The unknown ones fall under the count rule, computed over them
+alone: on a stream without FEC one is unrepaired; on a stream with FEC,
+unrepaired when more of them stay missing than 2 plus one and a half times
+(the FEC share times what the burst lost, less the packets known not to be
+media) (`unexplained`, else `within-fec-share`). The share is counted over
+the last packets that arrived in sequence (up to 1024). A stream whose
+packets carry no descriptor and whose FEC masks name nothing missing is
+judged exactly as before.
+
+What the descriptor facts rest on, and when they are not used:
+
+- **Frame ids** wrap at 16 bits and are compared by their wrapping
+  difference. A libwebrtc sender numbers one sender's frames one after the
+  other, but simulcast layers of one sender share the counter (recalled,
+  not read), so the ids are used on a stream only after 8 frames in a row
+  (`FRAME_ID_TRUST`) began exactly one id after the frame before with
+  nothing missing between, and never again once two such frames differed
+  by anything else. Lakko's three camera senders are separate senders; a
+  simulcast layer is expected to fail this and stay on the count rule.
+- **Frame boundaries** say something about the packet missing next to them
+  only if FEC packets sit between frames and never inside one. A stream on
+  which an FEC packet was seen inside a frame loses that inference.
+- An FEC packet's own descriptor is never read (libwebrtc copies the last
+  media packet's onto it); a packet without the extension and a value
+  libwebrtc's parser would refuse say nothing.
+
+What the SFU reads for this is header only: sequence numbers, the FEC
+header's mask, and three fields of the frame descriptor that are in the
+clear already. No payload, no key (C-39).
+
+**Bounds** (an admitted peer chooses every one of these facts): at most 12
+streams per publisher (`MAX_STREAMS`); per stream at most 512 missing
+packets (`RETRANSMISSION_WINDOW`; a time and a flag each) and a fixed table
+of 1024 eight-byte entries (`ARRIVED_WINDOW`) for the packets that arrived
+lately, plus counters. A packet costs one table write; the kinds are worked
+out once per burst, when it is judged. A missing packet let go before that
+(missing for more than 1.5 s, or more than 512 behind the newest) keeps
+only what an FEC mask said of it.
+
+**Not known:** whether a browser's FEC masks and descriptors on a real
+lossy uplink name enough of what is missing. Every packet lost in a burst
+takes its own descriptor with it, and an FEC packet that was lost names
+nothing; what is left is what the survivors say. Not seen on a call.
 
 ### The packets of the burst are no longer asked for
 
@@ -1573,7 +1655,18 @@ again), a short burst (answered when its packets are 300 ms late, not
 before; repaired in time: nothing), a second burst inside the wait, a lull
 of four packets inside a burst, a stream that stops in a burst, a burst
 longer than the window, bounds, a key frame that has started arriving,
-each stream on its own, and the two FEC rules. Unit, `media.rs`:
+each stream on its own, and the two FEC rules by number; since 2026-10-11
+the measured case (half the stream FEC, 21 lost, three media among 14 left
+missing: nothing by number, asked through the masks, asked through the
+descriptors), a stream that loses only FEC packets (nothing, sixty in a row
+included), a frame without its begin or end, a gap in the frame ids and
+their wrap, a hole between consecutive frames, what cannot be classified
+(ids that skip, a stream too young, a neighbour without a descriptor, FEC
+inside a frame), what a mask may name, a named packet that came back or
+was let go, and the bounds under arbitrary input. Unit,
+`frame_descriptor.rs`: `packet_position`. Unit, `media.rs`:
+`media_left_missing_on_a_stream_that_is_half_fec_is_seen_through_masks_and_descriptors`,
+`a_burst_that_left_only_packets_nobody_needs_asks_the_publisher_for_nothing`,
 `an_unrepaired_burst_asks_the_publisher_once_after_the_stated_time`,
 `a_burst_that_retransmission_repaired_asks_the_publisher_for_nothing`,
 `a_stream_no_subscriber_is_being_sent_is_not_asked_for_a_key_frame`

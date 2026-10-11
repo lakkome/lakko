@@ -283,8 +283,18 @@ struct FecPacket {
     body: Vec<u8>,
 }
 
-/// Read an FEC packet (the bytes after the RED header byte).
-fn parse_fec(seq: u16, fec: &[u8]) -> Result<FecPacket, FecError> {
+/// An FEC packet taken apart, nothing copied but the numbers.
+struct FecParts<'a> {
+    /// The FEC header as far as the end of its mask.
+    header: &'a [u8],
+    /// The bytes it protects with.
+    body: &'a [u8],
+    /// The sequence numbers its mask names, in mask order.
+    protected: Vec<u16>,
+}
+
+/// Take an FEC packet apart (the bytes after the RED header byte).
+fn split_fec(fec: &[u8]) -> Result<FecParts<'_>, FecError> {
     if fec.len() > MAX_PACKET_LEN {
         return Err(FecError::Oversized);
     }
@@ -312,9 +322,23 @@ fn parse_fec(seq: u16, fec: &[u8]) -> Result<FecPacket, FecError> {
     if protected.is_empty() {
         return Err(FecError::ProtectsNothing);
     }
+    Ok(FecParts {
+        header,
+        body,
+        protected,
+    })
+}
+
+/// Read an FEC packet (the bytes after the RED header byte).
+fn parse_fec(seq: u16, fec: &[u8]) -> Result<FecPacket, FecError> {
+    let FecParts {
+        header,
+        body,
+        protected,
+    } = split_fec(fec)?;
     Ok(FecPacket {
         seq,
-        sn_base,
+        sn_base: u16::from_be_bytes([header[2], header[3]]),
         protected,
         head: [header[0], header[1]],
         ts_recovery: [header[4], header[5], header[6], header[7]],
@@ -326,15 +350,17 @@ fn parse_fec(seq: u16, fec: &[u8]) -> Result<FecPacket, FecError> {
 /// The sequence numbers an FEC packet protects, in mask order (`fec` is what
 /// follows the RED header byte). The SFU reads them off a publisher's FEC
 /// packet to know which packets its own FEC packet for a subscriber's leg
-/// has to cover ([`crate::fec_send`]).
+/// has to cover ([`crate::fec_send`]), and which sequence numbers that are
+/// missing on the publisher's stream were media ([`crate::burst_keyframe`]).
 ///
-/// Reads the FEC header and nothing of the protected bytes.
+/// Reads the FEC header and nothing of the protected bytes, and copies
+/// none of them.
 ///
 /// # Errors
 ///
 /// A [`FecError`] when the packet is malformed or protects nothing.
 pub fn fec_protected(fec: &[u8]) -> Result<Vec<u16>, FecError> {
-    parse_fec(0, fec).map(|parsed| parsed.protected)
+    split_fec(fec).map(|parts| parts.protected)
 }
 
 /// ULPFEC receive state for one publisher stream (one SSRC).

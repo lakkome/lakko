@@ -34,12 +34,18 @@
 //! frame-boundary bits are therefore the publisher's own and stay correct,
 //! because the SFU no longer re-cuts a frame into packets.
 //!
-//! It reads exactly two flags of a first-packet value, both already in the
-//! clear: `B` (this packet begins a frame) and `D` (the frame lists
-//! dependencies, so it is not a key frame) — see [`is_independent_frame`].
-//! They decide when a simulcast layer switch may take effect and feed the
-//! key-frame count in the diagnostic ledger. It never reads the frame id,
-//! the resolution or the dependency list, and it never looks at the
+//! It reads two flags of a first-packet value, both already in the clear:
+//! `B` (this packet begins a frame) and `D` (the frame lists dependencies,
+//! so it is not a key frame) — see [`is_independent_frame`]. They decide
+//! when a simulcast layer switch may take effect and feed the key-frame
+//! count in the diagnostic ledger.
+//!
+//! Since 2026-10-11 it also reads, of every packet's value, `E` (this
+//! packet ends a frame) and, of a first-packet value, the 16-bit frame id
+//! — see [`packet_position`]. They tell the burst-end bookkeeping
+//! ([`crate::burst_keyframe`]) whether a sequence number that stays missing
+//! was a packet of a frame or not. It never reads the resolution, the
+//! temporal layer or the dependency list, and it never looks at the
 //! SFrame-sealed payload (invariant #2, C-39).
 //!
 //! **This nonetheless widens what the relay transports.** Before this, the
@@ -173,6 +179,45 @@ pub fn is_independent_frame(value: &[u8]) -> Option<bool> {
         return None;
     }
     Some(first & FLAG_DEPENDENCIES == 0)
+}
+
+/// Where one packet sits in its frame, by the descriptor value it carried
+/// ([`packet_position`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketPosition {
+    /// The packet begins a frame, and this is the frame's 16-bit id. `None`
+    /// for a later packet of a frame, which carries no id.
+    pub begins_frame: Option<u16>,
+    /// The packet ends a frame.
+    pub ends_frame: bool,
+}
+
+/// Read where a packet sits in its frame off the descriptor value it
+/// carried: the `B` and `E` flags and, on a first packet, the frame id.
+///
+/// The frame id is bytes 2 and 3 of a first-packet value, low byte first
+/// (libwebrtc M125 `rtp_generic_frame_descriptor_extension.cc`, `Parse`:
+/// `data[2] | (data[3] << 8)`). It is a 16-bit counter and
+/// wraps; a caller compares two ids by their wrapping difference.
+///
+/// `None` for a value libwebrtc's parser would refuse, where nothing can be
+/// said: empty, a first-packet value shorter than four bytes, or a later
+/// packet's value that is not exactly one byte.
+#[must_use]
+pub fn packet_position(value: &[u8]) -> Option<PacketPosition> {
+    let first = *value.first()?;
+    let ends_frame = first & FLAG_END_OF_SUBFRAME != 0;
+    if first & FLAG_BEGIN_OF_SUBFRAME == 0 {
+        return (value.len() == 1).then_some(PacketPosition {
+            begins_frame: None,
+            ends_frame,
+        });
+    }
+    let id = value.get(2..MIN_FIRST_PACKET_LEN)?;
+    Some(PacketPosition {
+        begins_frame: Some(u16::from_le_bytes([id[0], id[1]])),
+        ends_frame,
+    })
 }
 
 /// Build the descriptor value for one packet of a frame being packetized.
@@ -356,6 +401,51 @@ mod tests {
         // Claims to be a first packet but is too short to be one.
         assert_eq!(is_independent_frame(&[FLAG_BEGIN_OF_SUBFRAME, 0x01]), None);
         assert_eq!(is_independent_frame(&[]), None);
+    }
+
+    #[test]
+    fn packet_position_reads_the_boundary_flags_and_the_frame_id() {
+        // A whole frame in one packet: begins and ends, id 0x002a.
+        assert_eq!(
+            packet_position(&key_frame_value()),
+            Some(PacketPosition {
+                begins_frame: Some(0x002a),
+                ends_frame: true,
+            })
+        );
+        // First packet of several, id 0x0102 written low byte first.
+        assert_eq!(
+            packet_position(&[
+                FLAG_BEGIN_OF_SUBFRAME | FLAG_DEPENDENCIES,
+                0x01,
+                0x02,
+                0x01,
+                0x01
+            ]),
+            Some(PacketPosition {
+                begins_frame: Some(0x0102),
+                ends_frame: false,
+            })
+        );
+        // A middle packet and a last packet: one byte, no id.
+        assert_eq!(
+            packet_position(&[FLAG_FIRST_SUBFRAME_V00 | FLAG_LAST_SUBFRAME_V00]),
+            Some(PacketPosition {
+                begins_frame: None,
+                ends_frame: false,
+            })
+        );
+        assert_eq!(
+            packet_position(&[FLAG_END_OF_SUBFRAME]),
+            Some(PacketPosition {
+                begins_frame: None,
+                ends_frame: true,
+            })
+        );
+        // What libwebrtc's parser refuses says nothing.
+        assert_eq!(packet_position(&[]), None);
+        assert_eq!(packet_position(&[FLAG_BEGIN_OF_SUBFRAME, 0x01, 0x2a]), None);
+        assert_eq!(packet_position(&[FLAG_END_OF_SUBFRAME, 0x00]), None);
     }
 
     /// A publisher's first-packet value for a key frame: flags `B|F|L`,

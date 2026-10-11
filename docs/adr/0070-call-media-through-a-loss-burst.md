@@ -725,3 +725,86 @@ The live observations in this ADR are all of browsers.
 that ignores the playout-delay extension; a fallback to main when a
 wanted middle track carries nothing. Downlink control is still off by
 default and its acceptance tests are still `#[ignore]`d.
+
+## Note, 2026-10-11: a burst that left media missing on a stream that is half FEC
+
+**Measured on a live call that day** (four to five browsers on the test
+stack; the SFU's log and the browsers' own logs):
+
+- A Firefox viewer stood still for 3.3 to 4.0 s, about every 30 s, on the
+  pictures of three different publishers. Chrome on the same link had no
+  stop of 1 s or more. In each episode Firefox went on receiving packets,
+  decoded nothing, went on asking for the missing packets, and after its
+  own 3 s timeout asked for a key frame.
+- When the SFU itself asked at the end of the publisher's burst
+  (`uplink-burst-end`, for example `lost=82 still_missing=25`), the same
+  viewer's stop was about 1.6 s. In six episodes the SFU asked for nothing
+  and the first request was the viewer's own (`subscriber-pli`) three
+  seconds later.
+- In those six the publisher's stream carried a large FEC share (per 5 s:
+  `packets=329 ... fec_packets=327`, `packets=347 ... fec_packets=202`),
+  and the viewer's receiver reports showed 5% to 20% loss in the interval,
+  with 18 to 48 NACKs that were never answered.
+
+**Read from the code:** the rule of 2026-10-09 judged a stream that
+carries FEC by number alone (`Stream::beyond_fec`): unrepaired only when
+more packets stayed missing than 2 plus one and a half times the FEC share
+of what the burst lost. With a share near one half that is three quarters
+of everything the burst lost, so media that stayed missing was explained
+away as lost FEC. The code confirmed the reading; it could not confirm that
+this is what happened in each of the six episodes, since a burst that
+asked for nothing left no line in the log.
+
+**Decided and built** (SFU only; `services/sfu/src/burst_keyframe.rs`,
+`frame_descriptor::packet_position`, `MediaPeer::observe_burst_end`):
+
+- The times, one answer per burst, and a key frame that has started
+  arriving closing what was missing before it, are unchanged.
+- When a burst is judged, each packet still missing is known media, known
+  not media, or unknown:
+  - **media** when an FEC packet that arrived lists it as protected, or
+    when the frame descriptors of the media packets on the two sides of
+    its gap say so: the frame on the left has no end, the frame on the
+    right has no beginning, or the frame ids step by more than one;
+  - **not media** when it lies between a packet that ends frame `n` and
+    one that begins frame `n + 1`;
+  - **unknown** otherwise.
+- One packet of known media still missing asks for the key frame, whatever
+  the FEC share. Packets known not to be media never ask. The count rule
+  stays for the unknown ones only, with the FEC packets the burst is
+  expected to have lost reduced by those already known not to be media.
+- The SFU now reads two more fields of the generic frame descriptor, both
+  in the clear already: the end-of-frame flag of every media packet and
+  the 16-bit frame id of a frame's first packet. No payload (C-39).
+- Frame ids are used on a stream only after eight frames in a row followed
+  the frame before with nothing missing between (simulcast layers of one
+  libwebrtc sender share a counter, recalled and not read, so a layer's ids
+  skip; such a stream stays on the count rule). The boundary inference is
+  dropped for a stream on which an FEC packet was seen inside a frame.
+- State per stream is bounded: at most 512 missing packets and a fixed
+  table of 1024 eight-byte entries for the packets that arrived lately; at
+  most 12 streams per publisher.
+- The log line of an unrepaired burst gains `known_media`,
+  `known_not_media`, `unknown` and `why`; a new INFO line,
+  `media: a burst of loss on a publisher's stream ended with packets
+  missing and asked for nothing`, carries the same counts and the reason
+  (`not-media` / `within-fec-share`), so the next call's log shows every
+  burst.
+
+**Evidence:** unit tests only. A modelled stream in which half the packets
+are FEC loses 21 in a row and three media packets never come back: by
+number alone nothing is asked (the old rule), through the masks one of the
+three is found and the key frame is asked, through the descriptors all
+three are found and six of the eleven lost FEC packets are known for what
+they are. A stream that loses only FEC packets, sixty in a row included,
+asks for nothing. The same case runs through `MediaPeer` with real FEC
+headers and descriptor bytes.
+
+**Not seen on a call, and not known:** whether what a browser's surviving
+packets say names the media that is missing in a real burst (a lost packet
+takes its descriptor with it, a lost FEC packet names nothing); whether a
+Chrome sender ever puts an FEC packet inside a frame or skips a frame id
+on one of Lakko's three senders (either only moves packets to unknown);
+how often the new line reports `within-fec-share` with a viewer's own
+request following it, which is the case this change is meant to remove.
+Firefox's 3 s timeout itself is untouched.

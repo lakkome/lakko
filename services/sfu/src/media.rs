@@ -5388,33 +5388,54 @@ impl MediaPeer {
     /// Hand one video packet THIS peer published to the bookkeeping
     /// that says when a burst on its stream has ended unrepaired
     /// ([`crate::burst_keyframe`]): stream, extended sequence number,
-    /// arrival, and whether its frame descriptor says it begins a key
-    /// frame. Header fields only. Every packet that takes a sequence
-    /// number of the stream counts: retransmissions, FEC packets and
-    /// packets rebuilt from FEC. A no-op for audio and with the
-    /// feature switched off.
+    /// arrival, whether its frame descriptor says it begins a key
+    /// frame, and where in its frame the descriptor says it sits (the
+    /// begin and end flags and, on a first packet, the frame id:
+    /// [`frame_descriptor::packet_position`]). Header fields only. Every
+    /// packet that takes a sequence number of the stream counts:
+    /// retransmissions, FEC packets and packets rebuilt from FEC. A
+    /// no-op for audio and with the feature switched off.
+    ///
+    /// An FEC packet's own descriptor is not read (it is a copy of the
+    /// last media packet's). Its mask is, but only while packets are
+    /// missing on its stream: the packets it names as protected are
+    /// media ([`BurstEnds::fec_protects`]). The mask is the FEC header's;
+    /// nothing of the protected bytes is read or copied (C-39).
     pub(crate) fn observe_burst_end(&mut self, packet: &RelayPacket) {
         if !self.protection.burst_keyframe || packet.kind != MediaKind::Video {
             return;
         }
-        let what = if packet.is_fec() {
-            Arrived::Fec
-        } else if packet.starts_independent_frame {
-            Arrived::KeyFrameStart
+        let stream = (packet.mid, packet.rid);
+        let fec = packet.is_fec();
+        let (what, part) = if fec {
+            (Arrived::Fec, None)
         } else {
-            Arrived::Media
+            let part = packet
+                .descriptor
+                .as_ref()
+                .and_then(|d| frame_descriptor::packet_position(&d.0));
+            if packet.starts_independent_frame {
+                (Arrived::KeyFrameStart, part)
+            } else {
+                (Arrived::Media, part)
+            }
         };
-        self.burst_ends.on_packet(
-            (packet.mid, packet.rid),
-            *packet.seq_no,
-            packet.arrival,
-            what,
-        );
+        self.burst_ends
+            .on_described(stream, *packet.seq_no, packet.arrival, what, part);
+        if fec && self.burst_ends.has_holes(stream) {
+            if let Some(protected) = video_fec::red_body(&packet.payload)
+                .and_then(|fec| fec_receive::fec_protected(fec).ok())
+            {
+                self.burst_ends
+                    .fec_protects(stream, *packet.seq_no, &protected);
+            }
+        }
     }
 
     /// The bursts on the video streams THIS peer publishes that have
-    /// ended unrepaired since the last call, each once, by
-    /// `(mid, rid)`.
+    /// ended with packets still missing since the last call, each
+    /// once, by `(mid, rid)`: those that ended unrepaired
+    /// ([`BurstEnd::asks`]) and those that ask for nothing.
     pub(crate) fn poll_burst_ends(&mut self, now: Instant) -> Vec<BurstEnd<VideoStream>> {
         if !self.protection.burst_keyframe {
             return Vec::new();
@@ -8831,6 +8852,10 @@ impl BurstKeyframe {
 ///   (a request inside the window is owed) and the bound on unanswered
 ///   requests both hold.
 /// - Once per burst: the bookkeeping hands each burst out once.
+/// - A burst that ended with packets missing of which none is taken for
+///   media somebody needs (known not media, or no more of unknown kind
+///   than lost FEC packets explain) asks for nothing, changes nothing and
+///   is only logged.
 ///
 /// **The packets of the burst are no longer asked for.** Whenever the key
 /// frame is asked for or owed, and whenever nobody is being sent the
@@ -8860,6 +8885,25 @@ pub(crate) fn drive_burst_keyframes(
     let mut outcomes = Vec::with_capacity(ended.len());
     for (publisher, end) in ended {
         let (mid, rid) = end.stream;
+        if !end.asks() {
+            // Packets stayed missing and none of them is taken for media
+            // somebody needs: said, so the log shows every burst.
+            tracing::info!(
+                origin = %publisher,
+                mid = ?mid,
+                rid = ?rid,
+                lost = end.lost,
+                still_missing = end.unrepaired,
+                known_media = end.media,
+                known_not_media = end.not_media,
+                unknown = end.unknown,
+                beyond_repair = end.beyond_repair,
+                lasted_ms = end.lasted.as_millis(),
+                why = end.why.as_str(),
+                "media: a burst of loss on a publisher's stream ended with packets missing and asked for nothing"
+            );
+            continue;
+        }
         let watched = router
             .peers()
             .iter()
@@ -8899,8 +8943,12 @@ pub(crate) fn drive_burst_keyframes(
             rid = ?rid,
             lost = end.lost,
             still_missing = end.unrepaired,
+            known_media = end.media,
+            known_not_media = end.not_media,
+            unknown = end.unknown,
             beyond_repair = end.beyond_repair,
             lasted_ms = end.lasted.as_millis(),
+            why = end.why.as_str(),
             key_frame = outcome.as_str(),
             given_up,
             "media: a burst of loss on a publisher's stream ended unrepaired"
@@ -15979,6 +16027,141 @@ mod tests {
             at += Duration::from_millis(10);
         }
         out
+    }
+
+    /// One packet of a publisher's stream as a libwebrtc sender with ULPFEC
+    /// numbers it: frame `seq / 4` is two media packets, then two FEC
+    /// packets that protect them. `described`: the media packets carry
+    /// the generic frame descriptor. An FEC packet carries a real FEC
+    /// header (short mask, the frame's two packets, no protected bytes)
+    /// after its RED header byte.
+    fn fec_stream_packet(seq: u64, described: bool, arrival: Instant) -> RelayPacket {
+        let frame = seq / 4;
+        let base = RelayPacket {
+            arrival,
+            ..video_packet_on(MAIN_MID, seq, false)
+        };
+        if seq % 4 >= 2 {
+            let sn_base = u16::try_from((4 * frame) & 0xffff).expect("fits");
+            let mut payload = vec![118u8, 0, 0];
+            payload.extend_from_slice(&sn_base.to_be_bytes());
+            payload.extend_from_slice(&[0; 8]);
+            payload.extend_from_slice(&[0xc0, 0x00]);
+            return RelayPacket {
+                red: Some(RedBody::Fec),
+                payload,
+                ..base
+            };
+        }
+        let first = seq % 4 == 0;
+        let descriptor = described.then(|| {
+            let id = u16::try_from(frame & 0xffff).expect("fits").to_le_bytes();
+            PacketDescriptor(if first {
+                vec![0xb8, 0x01, id[0], id[1], 0x01]
+            } else {
+                vec![0x70]
+            })
+        });
+        RelayPacket {
+            blind: !described,
+            descriptor,
+            ..base
+        }
+    }
+
+    /// The measured case of 2026-10-11 through the peer: half the stream
+    /// FEC, a burst that loses 21 packets (402..=422), of which the media
+    /// packets come again but for `never`. Returns every burst judged.
+    fn fec_stream_burst(described: bool, never: &[u64]) -> Vec<BurstEnd<VideoStream>> {
+        let t0 = Instant::now();
+        let mut publisher = publisher_with_video("pub", "call", &[MAIN_MID]);
+        let mut judged = Vec::new();
+        let mut at = t0;
+        for seq in 0..480u64 {
+            at = t0 + Duration::from_millis(4 * seq);
+            if !(402..423).contains(&seq) {
+                publisher.observe_burst_end(&fec_stream_packet(seq, described, at));
+            }
+            if seq == 437 {
+                // The retransmissions that came: media only.
+                for late in (402..423u64).filter(|s| s % 4 < 2 && !never.contains(s)) {
+                    publisher.observe_burst_end(&fec_stream_packet(late, described, at));
+                }
+            }
+            judged.extend(publisher.poll_burst_ends(at));
+        }
+        // The loop runs every pass: polled as time goes by, not once.
+        for ms in (10..=1000u64).step_by(10) {
+            judged.extend(publisher.poll_burst_ends(at + Duration::from_millis(ms)));
+        }
+        judged
+    }
+
+    #[test]
+    fn media_left_missing_on_a_stream_that_is_half_fec_is_seen_through_masks_and_descriptors() {
+        use crate::burst_keyframe::Why;
+        // The end of frame 101, the begin of frame 102, the end of frame
+        // 105 never come; eleven FEC packets do not either.
+        let never = [405, 408, 421];
+        // FEC masks alone: the FEC packet 423 arrives and names 420 and
+        // 421; 421 is still missing when the burst is judged.
+        let judged = fec_stream_burst(false, &never);
+        assert_eq!(judged.len(), 1, "{judged:?}");
+        assert_eq!((judged[0].lost, judged[0].unrepaired), (21, 14));
+        assert_eq!(judged[0].why, Why::MediaMissing);
+        assert_eq!((judged[0].media, judged[0].not_media), (1, 0));
+        // By number alone this burst asked for nothing: 14 - 2 is not
+        // more than 1.5 * 0.5 * 21. With 421 back, the masks that arrived
+        // name nothing missing and it still does not.
+        let judged = fec_stream_burst(false, &[405, 408]);
+        assert_eq!(judged.len(), 1, "{judged:?}");
+        assert_eq!(judged[0].why, Why::WithinFecShare);
+        assert!(!judged[0].asks());
+        // With the frame descriptors all three are found, and six of the
+        // lost FEC packets are known for what they are.
+        let judged = fec_stream_burst(true, &never);
+        assert_eq!(judged.len(), 1, "{judged:?}");
+        assert_eq!(judged[0].why, Why::MediaMissing);
+        assert_eq!((judged[0].media, judged[0].not_media), (3, 6));
+        // Every media packet back: the eleven missing are all known not
+        // to be media.
+        let judged = fec_stream_burst(true, &[]);
+        assert_eq!(judged.len(), 1, "{judged:?}");
+        assert_eq!(judged[0].why, Why::NotMedia);
+        assert_eq!((judged[0].media, judged[0].not_media), (0, 11));
+    }
+
+    #[test]
+    fn a_burst_that_left_only_packets_nobody_needs_asks_the_publisher_for_nothing() {
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        let mut publisher = publisher_with_video("pub", "call", &[MAIN_MID]);
+        let mut sub = peer_in_call("sub", "call");
+        open_video_track(&mut sub, &pid("pub"), Mid::from(MAIN_MID));
+        // Every FEC packet of thirty frames lost, no media packet: sixty
+        // sequence numbers that stay missing.
+        for seq in 0..800u64 {
+            if (400..520).contains(&seq) && seq % 4 >= 2 {
+                continue;
+            }
+            publisher.observe_burst_end(&fec_stream_packet(
+                seq,
+                true,
+                t0 + Duration::from_millis(4 * seq),
+            ));
+        }
+        assert!(publisher.burst_ends.in_burst((Mid::from(MAIN_MID), None)));
+        router.add_peer(publisher);
+        router.add_peer(sub);
+        let from = t0 + Duration::from_millis(4 * 520);
+        let asked = drive_bursts_over(&mut router, from, from + Duration::from_secs(5));
+        assert!(asked.is_empty(), "{asked:?}");
+        let publisher = find_peer(&router, "pub");
+        assert!(!publisher.burst_ends.in_burst((Mid::from(MAIN_MID), None)));
+        assert_eq!(
+            publisher.unanswered_keyframe_requests(Mid::from(MAIN_MID), None),
+            0
+        );
     }
 
     #[test]
