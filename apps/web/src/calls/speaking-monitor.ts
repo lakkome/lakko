@@ -9,21 +9,33 @@
  * decrypted and decoded. Nothing here reaches the network, and the call
  * server is never asked who is speaking.
  *
- * Where a level comes from, per person:
+ * ## One scale, and where a level comes from
  *
- *  - **Someone else**: the receiver that decodes their audio
- *    (`audio-level.ts`): its synchronization sources where the engine puts a
- *    level on them, else its `inbound-rtp` statistics. Only when a receiver
- *    offers neither, or the call hands over none, an `AnalyserNode` on the
- *    stream the browser plays.
+ * Every level handed to the tracker is the root mean square of samples in
+ * `-1..1` over about a tenth of a second (`speaking.ts`), for everyone:
+ *
  *  - **This device's own microphone**: an `AnalyserNode` on the captured
- *    stream. It has no receiver.
+ *    stream. The root mean square of its time-domain samples is the scale by
+ *    definition; its window (`TAP_WINDOW_SAMPLES`) covers most of the 100 ms
+ *    between two readings, so a reading is of the interval, not of one
+ *    hundredth of a second picked from it.
+ *  - **Someone else**: first the same `AnalyserNode` on the stream the
+ *    browser plays them from, so the remote ring and the own ring are read
+ *    by one instrument; then the `stats-energy` level of the receiver that
+ *    decodes them (`audio-level.ts`, which states its conversion). Both are
+ *    measurements of decoded audio on this device. A path with no reading
+ *    (no stream yet, an audio context the browser has not let run, no
+ *    energy in the statistics) falls through to the other, and so does a
+ *    path stuck at exactly zero for `STUCK_ZERO_MS` (`PathChooser`).
  *
- * The receiver comes first because it depends on nothing but the peer
- * connection. The analyser needs an `AudioContext` the browser lets run, and
- * a decoded remote stream it agrees to feed into one; where either is
- * refused it reads silence without an error, and silence is exactly "nobody
- * is speaking".
+ * The level a sender wrote into the packet header (the receiver's
+ * synchronization sources) and the statistics' own `audioLevel` are printed
+ * in the diagnostics line and never decide anything; `audio-level.ts` says
+ * why.
+ *
+ * Statistics are read ten times a second only for a person the analyser
+ * cannot serve, and once per diagnostics report for everyone else, so the
+ * next call's log shows every path side by side.
  *
  * One timer for the call, ten readings a second, stopped by `dispose`. A
  * statistics reading is a promise: at most one is under way per person, and
@@ -31,7 +43,13 @@
  * call of fifty people costs what a call of eight does.
  */
 
-import { ReceiverLevelReader, type LevelPath, type LevelReceiver } from "./audio-level";
+import {
+  PathChooser,
+  ReceiverLevelReader,
+  type LevelPath,
+  type LevelReceiver,
+  type PathReading,
+} from "./audio-level";
 import { rmsLevel, SpeakingTracker, type SpeakingSnapshot } from "./speaking";
 import type { VoiceReport } from "./voice-diagnostics";
 
@@ -39,6 +57,12 @@ import type { VoiceReport } from "./voice-diagnostics";
 export const SAMPLE_INTERVAL_MS = 100;
 /** The most statistics readings started in one tick. Chosen, not measured. */
 export const MAX_STATS_READS_PER_TICK = 8;
+/**
+ * How many samples an analyser tap reads: 4096 is 85 ms at 48 kHz and 93 ms
+ * at 44.1 kHz, most of `SAMPLE_INTERVAL_MS`. (512, as it was, is 11 ms: one
+ * syllable gap picked at random out of every tenth of a second.)
+ */
+export const TAP_WINDOW_SAMPLES = 4096;
 
 /** One person of the call, as the monitor needs them. */
 export interface VoiceSource {
@@ -81,7 +105,7 @@ export interface SpeakingMonitorDeps {
    *  over them, and who holds the floor. Diagnostics only. */
   readonly onReport?: (voices: readonly VoiceReport[], floorId: string | null) => void;
   /** Told once whenever the source of a person's level changes. */
-  readonly onPath?: (id: string, path: LevelPath | "analyser") => void;
+  readonly onPath?: (id: string, path: LevelPath) => void;
 }
 
 interface Voice {
@@ -90,13 +114,19 @@ interface Voice {
   readerOf: LevelReceiver | null;
   tap: StreamLevelTap | null;
   tapOf: MediaStream | null;
-  path: LevelPath | "analyser" | null;
+  chooser: PathChooser;
+  path: LevelPath | null;
   /** Readings in a row that had no source at all. */
   sourceless: number;
-  /** For the diagnostics report: the last source, the loudest level and
-   *  whether the ring was on, since the last report. */
-  reportPath: LevelPath | "analyser";
+  /** A statistics reading is owed to the diagnostics report. */
+  statsOwed: boolean;
+  /** For the diagnostics report, since the last one: the last path, the
+   *  loudest chosen level, the loudest analyser reading, whether the
+   *  analyser was passed over as stuck at zero, whether the ring was on. */
+  reportPath: LevelPath;
   reportPeak: number | null;
+  reportAnalyser: number | null;
+  reportAnalyserStuck: boolean;
   reportSpeaking: boolean;
 }
 
@@ -161,7 +191,7 @@ export function browserTaps(
       try {
         const source = ctx.createMediaStreamSource(stream);
         const analyser = ctx.createAnalyser();
-        analyser.fftSize = 512;
+        analyser.fftSize = TAP_WINDOW_SAMPLES;
         source.connect(analyser);
         const buffer = new Float32Array(new ArrayBuffer(analyser.fftSize * 4));
         return {
@@ -204,7 +234,7 @@ export class SpeakingMonitor {
   private readonly resumeTaps: () => void;
   private readonly onReport: ((voices: readonly VoiceReport[], floorId: string | null) => void) | null;
   private ticksSinceReport = 0;
-  private readonly onPath: (id: string, path: LevelPath | "analyser") => void;
+  private readonly onPath: (id: string, path: LevelPath) => void;
   private stopTimer: (() => void) | null = null;
   /** Everyone, in roster order. */
   private order: readonly string[] = [];
@@ -231,7 +261,7 @@ export class SpeakingMonitor {
       deps.onPath ??
       ((id, path): void => {
         // One line per person per change of source, for the call's console:
-        // which of the three ways this browser took.
+        // which of the ways this browser took.
         console.info(`[call] sound level of ${id}: ${path}`);
       });
   }
@@ -259,10 +289,14 @@ export class SpeakingMonitor {
           readerOf: null,
           tap: null,
           tapOf: null,
+          chooser: new PathChooser(),
           path: null,
           sourceless: 0,
+          statsOwed: true,
           reportPath: "none",
           reportPeak: null,
+          reportAnalyser: null,
+          reportAnalyserStuck: false,
           reportSpeaking: false,
         };
         this.voices.set(p.id, voice);
@@ -272,6 +306,7 @@ export class SpeakingMonitor {
       if ((receiver ?? null) !== voice.readerOf) {
         voice.readerOf = receiver ?? null;
         voice.reader = receiver === undefined ? null : new ReceiverLevelReader(receiver);
+        voice.statsOwed = true;
       }
       if (voice.tap !== null && voice.tapOf !== (p.stream ?? null)) {
         voice.tap.close();
@@ -338,22 +373,30 @@ export class SpeakingMonitor {
         voice.reportPath = "none";
         continue;
       }
-      let level: number | null = null;
-      let path: LevelPath | "analyser" = "none";
+      // Every path that can be read now, in order of preference; the
+      // chooser skips one that cannot be read or is stuck at zero.
+      const fromTap = this.tapLevel(voice);
       const reader = voice.reader;
+      const readings: PathReading[] = [{ path: "analyser", level: fromTap }];
       if (reader !== null) {
-        level = reader.level(now);
-        path = reader.path;
-        if (reader.needsStats && !reader.statsInFlight && budget > 0) {
-          budget -= 1;
-          nextCursor = (index + 1) % ids.length;
-          void reader.readStats(now);
-        }
+        readings.push({ path: "stats-energy", level: reader.energyLevel(now) });
       }
-      // No receiver, or one that offers no level either way: the stream.
-      if (level === null && (reader === null || reader.unsupported)) {
-        level = this.tapLevel(voice);
-        if (level !== null) path = "analyser";
+      const { level, path } = voice.chooser.choose(readings, now);
+      const tapStuck = fromTap !== null && voice.chooser.stuck("analyser", now);
+      if (fromTap !== null) voice.reportAnalyser = Math.max(voice.reportAnalyser ?? 0, fromTap);
+      if (tapStuck) voice.reportAnalyserStuck = true;
+      // The statistics keep a person going whom the analyser cannot serve,
+      // and are read once per report for everyone, for the diagnostics.
+      if (
+        reader !== null &&
+        (fromTap === null || tapStuck || voice.statsOwed) &&
+        !reader.statsInFlight(now) &&
+        budget > 0
+      ) {
+        budget -= 1;
+        nextCursor = (index + 1) % ids.length;
+        voice.statsOwed = false;
+        void reader.readStats(now);
       }
       // Say where a person's level comes from when that changes, and say
       // once when a few seconds have passed with no source at all.
@@ -372,7 +415,7 @@ export class SpeakingMonitor {
       }
       voice.reportPath = path;
       if (level !== null) voice.reportPeak = Math.max(voice.reportPeak ?? 0, level);
-      this.tracker.sample(id, level ?? 0, now);
+      this.tracker.sample(id, level, now);
     }
     this.statsCursor = budget === 0 ? nextCursor : 0;
     const candidates = ids.filter((id) => this.voices.get(id)?.source.isLocal !== true);
@@ -395,15 +438,23 @@ export class SpeakingMonitor {
     for (const id of this.order) {
       const voice = this.voices.get(id);
       if (voice === undefined) continue;
+      const micOn = voice.source.micOn;
       voices.push({
         id,
         isLocal: voice.source.isLocal,
-        path: voice.source.micOn ? voice.reportPath : "none",
+        path: micOn ? voice.reportPath : "none",
         peak: voice.reportPeak,
         speaking: voice.reportSpeaking,
+        threshold: this.tracker.thresholdOf(id),
+        analyser: voice.reportAnalyser,
+        analyserStuck: voice.reportAnalyserStuck,
+        receiver: voice.reader?.takeDiagnostics() ?? null,
       });
       voice.reportPeak = null;
+      voice.reportAnalyser = null;
+      voice.reportAnalyserStuck = false;
       voice.reportSpeaking = false;
+      voice.statsOwed = micOn;
     }
     this.onReport?.(voices, floorId);
   }
