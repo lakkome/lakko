@@ -2,25 +2,26 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * What a route guard renders, decided in one place — and the rule that a
- * freshly generated recovery phrase is shown and acknowledged before any other
- * screen.
+ * What a route guard renders, decided in one place: the steps that come
+ * before any route. New recovery words (after the account keys were changed
+ * on this device) are shown and acknowledged first; then the sign-up's
+ * "Protect your account" step (ADR-0067, `docs/ux/identity-recovery.md`
+ * 19.1a); then the new-password step.
  *
- * ## The defect this closes
+ * ## Why the guards own these steps
  *
- * `auth.signup` flips the auth state to `session` before it returns the
- * recovery phrase, and `/signup` sits inside `<RequireAnonymous>`. The guard
- * saw `session` and navigated home in the same tick, unmounting the signup
- * page before it could render its "Save your recovery phrase" panel. The phrase
- * is shown exactly once and cannot be shown again, so a new account was left
- * with no way to recover on another device (ADR-0017 makes the phrase the ONLY
- * source of the account identity there).
+ * `auth.signup` flips the auth state to `session` before it returns, and
+ * `/signup` sits inside `<RequireAnonymous>`. The guard sees `session` and
+ * navigates home in the same tick, unmounting the signup page, so a step
+ * that follows sign-up cannot live on that page. The auth context holds the
+ * step as owed until the person finished it, and BOTH guards render it while
+ * it is owed, so it is reached from `/signup`, from a protected route the
+ * user navigates to with the back button, and after a reload.
  *
- * The fix is not a delay in the signup page, which would race the guard again
- * the next time either changes. The auth context holds the phrase as pending
- * until the user acknowledges it, and BOTH guards render the phrase screen
- * while it is pending — so it is reached from `/signup`, from a protected
- * route the user navigates to with the back button, and after a reload.
+ * ADR-0067 D2: the recovery phrase is NOT shown at sign-up. The phrase
+ * screen (`save-signup-phrase`, named before that decision) is for new words
+ * only: a key reset, taking the account back, a key rotation, "Save a
+ * recovery phrase".
  *
  * The two ADR-0017 identity states that already worked the same way
  * (`needs-recovery-phrase`, `save-fresh-phrase` — which also covers the
@@ -49,8 +50,11 @@ export type GuardView =
   | "restore-identity"
   /** ADR-0017 lost-everything / ADR-0032 guest — a new phrase to save. */
   | "save-fresh-phrase"
-  /** A signup's recovery phrase, not yet acknowledged. */
+  /** New recovery words (the account keys were changed on this device),
+   *  not yet acknowledged. */
   | "save-signup-phrase"
+  /** ADR-0067 (UX 19.1a): the sign-up's "Protect your account" step. */
+  | "protect-account"
   /** docs/ux/identity-recovery.md 7.1 — a forgot-password route succeeded
    *  on a device that holds the keys: choose a new password, or "Not now". */
   | "choose-new-password"
@@ -64,13 +68,18 @@ export type GuardView =
  *
  * `newPasswordOffered` is the step after a forgot-password route (an
  * authenticator code, a passkey, another device) on a device that
- * holds the keys. It is shown in a live session only, and after an owed
- * signup phrase, which can never be skipped.
+ * holds the keys. It is shown in a live session only, and after owed new
+ * words, which can never be skipped.
+ *
+ * `protectStepOwed` is the sign-up's "Protect your account" step: after new
+ * words (choosing "Save a recovery phrase" on that step ends in them),
+ * before everything else.
  */
 function sharedView(
   kind: GuardAuthKind,
   signupPhrasePending: boolean,
   newPasswordOffered: boolean,
+  protectStepOwed: boolean,
 ): GuardView | null {
   switch (kind) {
     case "loading":
@@ -83,6 +92,7 @@ function sharedView(
       // Only a live session can have an unacknowledged signup phrase; a
       // pending flag left over in any other state is not a phrase to show.
       if (signupPhrasePending) return "save-signup-phrase";
+      if (protectStepOwed) return "protect-account";
       return newPasswordOffered ? "choose-new-password" : null;
     case "anon":
       return null;
@@ -94,9 +104,10 @@ export function sessionGuardView(
   kind: GuardAuthKind,
   signupPhrasePending: boolean,
   newPasswordOffered = false,
+  protectStepOwed = false,
 ): GuardView {
   return (
-    sharedView(kind, signupPhrasePending, newPasswordOffered) ??
+    sharedView(kind, signupPhrasePending, newPasswordOffered, protectStepOwed) ??
     (kind === "session" ? "children" : "redirect-login")
   );
 }
@@ -106,9 +117,10 @@ export function anonymousGuardView(
   kind: GuardAuthKind,
   signupPhrasePending: boolean,
   newPasswordOffered = false,
+  protectStepOwed = false,
 ): GuardView {
   return (
-    sharedView(kind, signupPhrasePending, newPasswordOffered) ??
+    sharedView(kind, signupPhrasePending, newPasswordOffered, protectStepOwed) ??
     (kind === "anon" ? "children" : "redirect-home")
   );
 }
@@ -129,7 +141,7 @@ function markerKey(accountIdB64: string): string {
 }
 
 /**
- * Record that `accountIdB64` has a signup phrase the user has not yet
+ * Record that `accountIdB64` has new recovery words the user has not yet
  * acknowledged. The phrase itself is NOT written here — it is already cached
  * under the device root key by the backup bootstrap (`backup/phrase-store.ts`),
  * and a reload reads it back from there. Only the fact that it is owed is kept

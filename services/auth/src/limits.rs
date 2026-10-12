@@ -85,6 +85,11 @@ pub(crate) const CODE_SIGNUP_RATE_LIMITED: &str = "signup-rate-limited";
 /// bucket).
 pub(crate) const CODE_HANDLE_BIND_LIMITED: &str = "handle-bind-limited";
 
+/// Body code for a refused letter of the recovery email (ADR-0067): the
+/// per-handle or per-account letter counter, or the address bucket of the
+/// two routes that send one.
+pub(crate) const CODE_EMAIL_RATE_LIMITED: &str = "email-rate-limited";
+
 /// Body code when the name-counter store cannot be read (`503`).
 pub(crate) const CODE_LIMITER_UNAVAILABLE: &str = "rate-limiter-unavailable";
 
@@ -196,10 +201,27 @@ pub(crate) enum Scope {
     /// caller holding a session and the password but not the account key
     /// spends none of it.
     KeyRotate = 16,
+    /// A letter of the recovery email asked for by login handle (ADR-0067
+    /// section 10): `POST /recovery-email/recover/start` and
+    /// `POST /recovery-email/enrol/start`, keyed on the login handle and
+    /// charged before anything is looked up, so an unknown name is counted
+    /// and refused exactly like a known one.
+    EmailLetterHandle = 17,
+    /// A letter of the recovery email per account, keyed on the account the
+    /// handle resolved to (or its decoy). On the anonymous recover route a
+    /// spent counter sends no letter and answers as always, so it is no
+    /// oracle; on the bearer enrol route it answers `429`.
+    EmailLetterAccount = 18,
+    /// `POST /recovery-email/recover/verify`, keyed on the login handle the
+    /// challenge was opened for: wrong codes across challenges.
+    EmailVerify = 19,
+    /// `POST /recovery-email/recover/open`, keyed on the account: how often
+    /// its email vault may leave the server.
+    EmailVaultOpen = 20,
 }
 
 impl Scope {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 16] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
@@ -212,6 +234,10 @@ impl Scope {
         Self::DeviceRevoke,
         Self::Recall,
         Self::KeyRotate,
+        Self::EmailLetterHandle,
+        Self::EmailLetterAccount,
+        Self::EmailVerify,
+        Self::EmailVaultOpen,
     ];
 
     /// Position in [`Self::ALL`] (the stored discriminants have a gap, so
@@ -230,6 +256,10 @@ impl Scope {
             Self::DeviceRevoke => 9,
             Self::Recall => 10,
             Self::KeyRotate => 11,
+            Self::EmailLetterHandle => 12,
+            Self::EmailLetterAccount => 13,
+            Self::EmailVerify => 14,
+            Self::EmailVaultOpen => 15,
         }
     }
 
@@ -247,6 +277,10 @@ impl Scope {
             Self::DeviceRevoke => "LAKKO_AUTH_LIMIT_DEVICE_REVOKE",
             Self::Recall => "LAKKO_AUTH_LIMIT_RECALL",
             Self::KeyRotate => "LAKKO_AUTH_LIMIT_KEY_ROTATE",
+            Self::EmailLetterHandle => "LAKKO_AUTH_LIMIT_EMAIL_LETTER_HANDLE",
+            Self::EmailLetterAccount => "LAKKO_AUTH_LIMIT_EMAIL_LETTER_ACCOUNT",
+            Self::EmailVerify => "LAKKO_AUTH_LIMIT_EMAIL_VERIFY",
+            Self::EmailVaultOpen => "LAKKO_AUTH_LIMIT_EMAIL_VAULT_OPEN",
         }
     }
 
@@ -260,10 +294,18 @@ impl Scope {
             | Self::DeviceGrantMint => Window::new(10, 900),
             Self::TotpRecover | Self::Recall => Window::new(5, 900),
             Self::DeviceRequestTarget => Window::new(5, 600),
-            Self::HandleBind => Window::new(5, 86_400),
+            // The email vault's five releases a day per account (ADR-0067
+            // section 10) share the handle bind's figure.
+            Self::HandleBind | Self::EmailVaultOpen => Window::new(5, 86_400),
             Self::RecoveryReplace => Window::new(10, 3600),
             Self::KeyReset | Self::KeyRotate => Window::new(3, 86_400),
             Self::DeviceRevoke => Window::new(20, 3600),
+            // ADR-0067 section 10. Five letters an hour per name and ten a
+            // day per account; fifteen code guesses an hour per name (three
+            // challenges' worth).
+            Self::EmailLetterHandle => Window::new(5, 3600),
+            Self::EmailLetterAccount => Window::new(10, 86_400),
+            Self::EmailVerify => Window::new(15, 3600),
         }
     }
 
@@ -278,7 +320,10 @@ impl Scope {
             | Self::KeyReset
             | Self::DeviceRevoke
             | Self::Recall
-            | Self::KeyRotate => CODE_TOO_MANY_ATTEMPTS,
+            | Self::KeyRotate
+            | Self::EmailVerify
+            | Self::EmailVaultOpen => CODE_TOO_MANY_ATTEMPTS,
+            Self::EmailLetterHandle | Self::EmailLetterAccount => CODE_EMAIL_RATE_LIMITED,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
         }
@@ -299,15 +344,19 @@ pub(crate) enum Category {
     Challenge,
     /// `PUT /auth/login-handle`.
     HandleBind,
+    /// The two routes that send a letter of the recovery email (ADR-0067):
+    /// `/recovery-email/enrol/start` and `/recovery-email/recover/start`.
+    Email,
 }
 
 impl Category {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Attempt,
         Self::DeviceRequest,
         Self::Signup,
         Self::Challenge,
         Self::HandleBind,
+        Self::Email,
     ];
 
     const fn index(self) -> usize {
@@ -321,6 +370,7 @@ impl Category {
             Self::Signup => "LAKKO_AUTH_IP_LIMIT_SIGNUP",
             Self::Challenge => "LAKKO_AUTH_IP_LIMIT_POW_CHALLENGE",
             Self::HandleBind => "LAKKO_AUTH_IP_LIMIT_HANDLE_BIND",
+            Self::Email => "LAKKO_AUTH_IP_LIMIT_EMAIL",
         }
     }
 
@@ -332,7 +382,7 @@ impl Category {
             Self::Attempt => Window::new(30, 60),
             Self::DeviceRequest | Self::Signup => Window::new(10, 3600),
             Self::Challenge => Window::new(30, 3600),
-            Self::HandleBind => Window::new(20, 3600),
+            Self::HandleBind | Self::Email => Window::new(20, 3600),
         }
     }
 
@@ -342,6 +392,7 @@ impl Category {
             Self::DeviceRequest => CODE_DEVICE_REQUEST_LIMITED,
             Self::Signup | Self::Challenge => CODE_SIGNUP_RATE_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
+            Self::Email => CODE_EMAIL_RATE_LIMITED,
         }
     }
 }
@@ -973,7 +1024,10 @@ mod tests {
         // were the removed one-time-code factor's. None is reused. 14 is the
         // ADR-0066 recall (listed after 15: it was added later); 16 is the
         // key rotation.
-        assert_eq!(pinned, vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16]);
+        assert_eq!(
+            pinned,
+            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 20]
+        );
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);
         }

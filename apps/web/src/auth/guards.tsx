@@ -16,9 +16,8 @@
  * the consumer never has to think about navigation imperatively.
  *
  * What either guard renders is decided by `phrase-gate.ts`, which also holds
- * the rule that an unacknowledged signup recovery phrase is shown before ANY
- * route — the anonymous guard used to navigate home on the very transition
- * that produced the phrase, so it was never seen.
+ * the rule that owed new recovery words, and the sign-up's "Protect your
+ * account" step, are shown before ANY route.
  *
  * The guards read the real auth state behind `useAuth()`, which rehydrates
  * a persisted session on mount, so they see a genuine `loading` / `anon` /
@@ -32,6 +31,7 @@ import { t } from "../l10n";
 import RestoreIdentityPrompt from "./RestoreIdentityPrompt";
 import SaveFreshPhrasePrompt from "./SaveFreshPhrasePrompt";
 import SignupPhrasePrompt from "./SignupPhrasePrompt";
+import ProtectAccountPrompt from "./protect/ProtectAccountPrompt";
 import NewPasswordPrompt from "./NewPasswordPrompt";
 import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
 import { readReturnUrl } from "./return-url";
@@ -45,7 +45,12 @@ import {
 export function RequireSession(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
   const view = (): GuardView =>
-    sessionGuardView(auth.state().kind, auth.signupPhrase() !== null, auth.newPasswordOffered());
+    sessionGuardView(
+      auth.state().kind,
+      auth.signupPhrase() !== null,
+      auth.newPasswordOffered(),
+      auth.protectStepOwed(),
+    );
   return (
     <SignedOutGate>
       <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
@@ -79,7 +84,12 @@ export function RequireAnonymous(props: {
 }): JSX.Element {
   const auth = useAuth();
   const view = (): GuardView =>
-    anonymousGuardView(auth.state().kind, auth.signupPhrase() !== null, auth.newPasswordOffered());
+    anonymousGuardView(
+      auth.state().kind,
+      auth.signupPhrase() !== null,
+      auth.newPasswordOffered(),
+      auth.protectStepOwed(),
+    );
   return (
     <SignedOutGate>
       <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
@@ -100,10 +110,12 @@ export function RequireAnonymous(props: {
  * - `choose-new-password`: the step after a forgot-password route on a
  *   device that holds the keys (docs/ux/identity-recovery.md 7.1). Saving or
  *   "Not now" clears it and the decision re-runs.
- * - `save-signup-phrase`: the signup recovery phrase, until acknowledged.
- *   Clearing it re-runs the decision: on a public auth page that is
- *   `redirect-home`, which honours `?return=`; inside the app the route
- *   underneath simply renders.
+ * - `save-signup-phrase`: new recovery words (the account keys were changed
+ *   on this device), until acknowledged.
+ * - `protect-account`: the sign-up's "Protect your account" step (ADR-0067,
+ *   UX 19.1a), until the person chose. Clearing it re-runs the decision: on
+ *   a public auth page that is `redirect-home`, which honours `?return=`;
+ *   inside the app the route underneath simply renders.
  */
 function GuardFallback(props: { view: GuardView }): JSX.Element {
   const location = useLocation();
@@ -120,6 +132,9 @@ function GuardFallback(props: { view: GuardView }): JSX.Element {
       </Match>
       <Match when={props.view === "save-signup-phrase"}>
         <SignupPhrasePrompt />
+      </Match>
+      <Match when={props.view === "protect-account"}>
+        <ProtectAccountPrompt />
       </Match>
       <Match when={props.view === "choose-new-password"}>
         <NewPasswordPrompt />

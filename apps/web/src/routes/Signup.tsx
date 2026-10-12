@@ -5,11 +5,14 @@
  * Signup route (docs/ux/client-redesign.md section 5.6): username with the
  * live availability hint, name, password, confirm password, Create account.
  *
- * The recovery-phrase step is NOT rendered here. `auth.signup` lands the
- * session before it returns the phrase, and this page sits inside
- * `<RequireAnonymous>`, which would navigate away on that transition; the
- * route guards render `auth/SignupPhrasePrompt.tsx` for as long as
- * `auth.signupPhrase()` is unacknowledged (`auth/phrase-gate.ts`).
+ * No recovery phrase is shown at sign-up (ADR-0067 D2): the phrase is
+ * generated and stored on the device, and the person may save one later.
+ * What follows the form is the "Protect your account" step
+ * (docs/ux/identity-recovery.md section 19.1a), which is NOT rendered here:
+ * `auth.signup` lands the session before it returns, and this page sits
+ * inside `<RequireAnonymous>`, which would navigate away on that
+ * transition; the route guards render `auth/protect/ProtectAccountPrompt.tsx`
+ * for as long as `auth.protectStepOwed()` (`auth/phrase-gate.ts`).
  */
 import { createSignal, onCleanup, Show, type JSX } from "solid-js";
 import { A, useSearchParams } from "@solidjs/router";
@@ -42,7 +45,7 @@ export default function Signup(): JSX.Element {
   const profiles = useProfiles();
   // docs/ux/who-can-find-me.md section 7: `Change` opens Settings > Privacy.
   // The setting exists only once the account does, so the link asks for the
-  // screen to open as soon as signup (and the recovery phrase) is done,
+  // screen to open as soon as signup (and its protect step) is done,
   // through the `?return=` the auth guards already honour.
   const [search, setSearch] = useSearchParams<{ return?: string }>();
   const privacyAfterSignup = (): boolean => search.return === paths.settingsSection("privacy");
@@ -110,8 +113,8 @@ export default function Signup(): JSX.Element {
     const controller = new AbortController();
     running = controller;
     try {
-      // Resolving lands the session with the phrase pending; the guard around
-      // this route switches to the phrase screen on that transition.
+      // Resolving lands the session with the protect step owed; the guard
+      // around this route switches to that step on the transition.
       await auth.signup(checked.normalised, password(), { signal: controller.signal });
       // ADR-0048: the name is local until there is something to publish it
       // into; a failure to save it never fails the signup.

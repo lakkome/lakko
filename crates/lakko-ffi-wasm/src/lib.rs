@@ -80,6 +80,7 @@ pub mod discover;
 pub mod discovery;
 pub mod ds_proof;
 pub mod ds_statement;
+pub mod email_vault;
 pub mod feed;
 pub mod key_reset;
 pub mod key_rotation;
@@ -124,6 +125,7 @@ pub use contacts::{
     PerRelationship, StrangerInbox, WasmProfile,
 };
 pub use discovery::{login_handle, normalize_username, validate_username, OprfBlinder};
+pub use email_vault::{email_vault_open, email_vault_seal, normalize_recovery_email};
 pub use mls::{AddMember, Group, GroupKind, Identity, ProcessedMessage, ProcessedMessageKind};
 pub use mnemonic::RecoveryMnemonic;
 pub use passkey_vault::{passkey_vault_open, passkey_vault_seal};

@@ -1080,6 +1080,9 @@ export class AuthClient {
     readonly proof: Uint8Array;
     /** Devices whose removal raced the commit (at most 8). */
     readonly revokeDeviceIds: readonly Uint8Array[];
+    /** ADR-0067 section 3: the person is saving a recovery phrase; the
+     *  account becomes phrase-protected with this rotation. */
+    readonly phraseSaved?: boolean;
   }): Promise<KeyResetResult> {
     if (args.sessionToken.length === 0) throw new AuthClientArgError("sessionToken must be non-empty");
     if (args.freshGrant.length === 0) throw new AuthClientArgError("freshGrant must be non-empty");
@@ -1106,6 +1109,7 @@ export class AuthClient {
         new_signature_pubkey_b64: base64UrlEncodeNoPad(args.newSignaturePubkey),
         supersession_proof_b64: base64UrlEncodeNoPad(args.proof),
         revoke_device_ids_b64: args.revokeDeviceIds.map((id) => base64UrlEncodeNoPad(id)),
+        ...(args.phraseSaved === true ? { phrase_saved: true } : {}),
       },
       args.sessionToken,
     );
@@ -1161,13 +1165,20 @@ export class AuthClient {
    * (`recall.ts` reads it). Throws `AuthHttpError` (`401 recall-refused`:
    * not possible any more; `429`) or `AuthNetworkError`.
    */
-  async recallStatus(sign: (signAtMs: number | null) => Uint8Array): Promise<unknown> {
+  async recallStatus(
+    sign: (signAtMs: number | null) => Uint8Array,
+    /** ADR-0067 section 8: name the account by login handle (base64url, no
+     *  pad). The statement `sign` returns must then carry the first 16
+     *  bytes of the handle in its account field. */
+    handle?: string,
+  ): Promise<unknown> {
     // T5 item 24: a device with a wrong clock is told the server's time and
     // signs again; it must not read "no anchor" and destroy its record.
     return sendWithStaleRetry(
       (signAtMs) =>
         this.post<RecallStatusRequest, unknown>("/account/recall/status", {
           statement_b64: base64UrlEncodeNoPad(sign(signAtMs)),
+          ...(handle === undefined ? {} : { handle }),
         }),
       authStaleTimeOf,
     );
@@ -1234,12 +1245,21 @@ export class AuthClient {
     readonly oldAccountSeed: Uint8Array;
     readonly anchorSeq: number;
     readonly oldPassword: Uint8Array;
+    /** ADR-0067 section 8, the phrase arm: the 64-byte seed of the recovery
+     *  phrase as it was before the reset. When given, the login is made from
+     *  it against the anchored recovery envelope and `oldPassword` is not
+     *  used. */
+    readonly oldPhraseSeed?: Uint8Array;
     readonly newPassword: Uint8Array;
     readonly newSeed: Uint8Array;
     readonly newSignaturePubkey: Uint8Array;
   }): Promise<RecallPendingFinish> {
-    if (args.oldPassword.length === 0 || args.newPassword.length === 0) {
+    const byPhrase = args.oldPhraseSeed !== undefined;
+    if ((!byPhrase && args.oldPassword.length === 0) || args.newPassword.length === 0) {
       throw new AuthClientArgError("passwords must be non-empty");
+    }
+    if (byPhrase && args.oldPhraseSeed.length === 0) {
+      throw new AuthClientArgError("oldPhraseSeed must be non-empty");
     }
     if (args.newSeed.length === 0) {
       throw new AuthClientArgError("newSeed must be non-empty");
@@ -1249,7 +1269,12 @@ export class AuthClient {
     }
     const wasm = await loadWasm();
     const accountIdB64Url = base64UrlEncodeNoPad(args.accountId);
-    const login = wasm.OpaqueLogin.startPassword(args.oldPassword);
+    // The secret the login is made from: the old password, or (the phrase
+    // arm) the old phrase's seed.
+    const loginSecret = args.oldPhraseSeed ?? args.oldPassword;
+    const login = byPhrase
+      ? wasm.OpaqueLogin.startRecovery(loginSecret)
+      : wasm.OpaqueLogin.startPassword(loginSecret);
     const passwordReg = wasm.OpaqueRegister.startPassword(args.newPassword);
     const recoveryReg = wasm.OpaqueRegister.startRecovery(args.newSeed);
     const loginRequest = login.requestB64;
@@ -1275,6 +1300,7 @@ export class AuthClient {
                 ),
           ),
           login_request: loginRequest,
+          ...(byPhrase ? { proof: "phrase" as const } : {}),
           password_request: passwordReg.requestB64,
           recovery_request: recoveryReg.requestB64,
         }),
@@ -1282,7 +1308,7 @@ export class AuthClient {
     );
     let loginFinish: string;
     try {
-      loginFinish = login.finish(args.oldPassword, start.login_response).finalizeB64;
+      loginFinish = login.finish(loginSecret, start.login_response).finalizeB64;
     } catch {
       // The AKE did not agree on a key: the OLD password is wrong. Nothing
       // more is sent; the attempt was counted at start.

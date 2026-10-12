@@ -14,15 +14,15 @@ final class ThreeWordsTests: XCTestCase {
     // MARK: - Row visibility
 
     func testTheRowNeedsACachedUsernameThePhraseAndTheKeys() {
-        XCTAssertTrue(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true, suspended: false))
+        XCTAssertTrue(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true, suspended: false, phraseSaved: true))
         // No cached account, or a guest (no username to address the sign-in by).
-        XCTAssertFalse(ThreeWords.offers(cachedUsername: nil, phraseOnDevice: true, keysOnDevice: true, suspended: false))
-        XCTAssertFalse(ThreeWords.offers(cachedUsername: "", phraseOnDevice: true, keysOnDevice: true, suspended: false))
-        XCTAssertFalse(ThreeWords.offers(cachedUsername: "  ", phraseOnDevice: true, keysOnDevice: true, suspended: false))
+        XCTAssertFalse(ThreeWords.offers(cachedUsername: nil, phraseOnDevice: true, keysOnDevice: true, suspended: false, phraseSaved: true))
+        XCTAssertFalse(ThreeWords.offers(cachedUsername: "", phraseOnDevice: true, keysOnDevice: true, suspended: false, phraseSaved: true))
+        XCTAssertFalse(ThreeWords.offers(cachedUsername: "  ", phraseOnDevice: true, keysOnDevice: true, suspended: false, phraseSaved: true))
         // No phrase on the device: nothing to check against.
-        XCTAssertFalse(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: false, keysOnDevice: true, suspended: false))
+        XCTAssertFalse(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: false, keysOnDevice: true, suspended: false, phraseSaved: true))
         // No keys: the sign-in would only reach the restore prompt.
-        XCTAssertFalse(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: false, suspended: false))
+        XCTAssertFalse(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: false, suspended: false, phraseSaved: true))
     }
 
     // MARK: - Budget
@@ -168,9 +168,9 @@ final class ThreeWordsTests: XCTestCase {
 
     func testASuspendedRouteIsNotOffered() {
         XCTAssertTrue(ThreeWords.offers(
-            cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true, suspended: false))
+            cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true, suspended: false, phraseSaved: true))
         XCTAssertFalse(ThreeWords.offers(
-            cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true, suspended: true))
+            cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true, suspended: true, phraseSaved: true))
     }
 
     func testSuspendingClearsTheBudgetAndTheMarkerIsPerAccountAndSurvivesARelaunch() throws {

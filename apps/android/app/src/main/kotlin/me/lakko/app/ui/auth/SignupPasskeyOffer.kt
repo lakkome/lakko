@@ -35,9 +35,9 @@ import me.lakko.app.webauthn.keysChoiceEndText
 import me.lakko.app.webauthn.passkeyAddOutcome
 
 /**
- * Step 3 of sign-up: "Add a passkey so you can sign in with your face,
- * fingerprint or screen lock." Skippable, and nothing here can fail the
- * sign-up: the account exists and its phrase is confirmed. Every outcome, a
+ * The passkey row of "Protect your account" (ADR-0067, UX 19.1a): "Add a
+ * passkey so you can sign in with your face, fingerprint or screen lock."
+ * Skippable, and nothing here can fail the sign-up: the account exists. Every outcome, a
  * failure included, leaves "Not now" available.
  *
  * Adding a passkey stores nothing for it beyond the credential. When the
@@ -56,6 +56,9 @@ public fun SignupPasskeyOffer(
     repository: AuthRepository,
     onDone: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Told once the passkey exists (the "Protect your account" step marks
+     *  its row done), before the keys choice. */
+    onAdded: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -69,7 +72,6 @@ public fun SignupPasskeyOffer(
     val proof = rememberProofController(repository, ProofSurface.AddPasskey)
 
     AuthScaffold(title = t("auth.signup.passkey.title"), onBack = null, modifier = modifier) {
-        StepLabel(current = 3, total = 3)
         val shown = result
         val choice = added
         when {
@@ -104,6 +106,7 @@ public fun SignupPasskeyOffer(
                             val passkey = WebauthnClient().use { client ->
                                 addPasskeyForSession(context, repository, nickname, client)
                             }
+                            onAdded()
                             val offer = passkeyAddOutcome(
                                 prfOutput = passkey.prfOutput != null,
                                 prfEnabled = passkey.prfEnabled,

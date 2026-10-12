@@ -75,6 +75,7 @@ class KeyRotationFlowTest {
         var discarded = 0
         var phraseReleased = 0
         var revokedWithCommit: ByteArray? = null
+        var phraseSavedWithCommit: Boolean? = null
         val identityCalls = mutableListOf<Pair<String?, Boolean>>()
         val rootCalls = mutableListOf<Pair<String?, Long?>>()
         var paused = 0L
@@ -113,9 +114,14 @@ class KeyRotationFlowTest {
 
         override fun envelope(): ByteArray = ByteArray(192) { 1 }
 
-        override suspend fun commit(freshGrant: String, revokeDeviceId: ByteArray): CommitAnswer.Committed {
+        override suspend fun commit(
+            freshGrant: String,
+            revokeDeviceId: ByteArray?,
+            phraseSaved: Boolean,
+        ): CommitAnswer.Committed {
             calls += "commit"
             revokedWithCommit = revokeDeviceId
+            phraseSavedWithCommit = phraseSaved
             return commit()
         }
 
@@ -982,5 +988,99 @@ class KeyRotationFlowTest {
         assertFalse(
             me.lakko.app.push.isServiceEnvelope("""{"v":1,"text":"hi"}""".toByteArray(), { false }, { false }, 27),
         )
+    }
+
+    // ---- ADR-0067 section 3: "Save a recovery phrase" ----------------------
+
+    @Test
+    fun `saving a phrase rotates the keys, removes no device and marks the commit`() = runTest {
+        val ports = FakePorts()
+        val storage = MapStorage()
+        val result = runner(ports, storage).savePhrase()
+        assertEquals(RotationResult.Done, result)
+        // No removal; the announcement goes to every kept device.
+        assertEquals(
+            listOf(
+                "prepare", "seal", "announce", "commit", "adopt", "identity",
+                "keypackage", "dg-root", "journals", "channels", "reach", "profile", "spent", "backup",
+            ),
+            ports.calls,
+        )
+        assertNull("no device is given a floor", ports.revokedWithCommit)
+        assertEquals(true, ports.phraseSavedWithCommit)
+        assertTrue(storage.map.isEmpty())
+        assertTrue(ports.phraseReleased >= 1)
+    }
+
+    @Test
+    fun `a device removal's rotation does not mark the phrase saved`() = runTest {
+        val ports = FakePorts()
+        runner(ports, MapStorage()).rotate(device)
+        assertEquals(false, ports.phraseSavedWithCommit)
+    }
+
+    @Test
+    fun `saving a phrase without a proof sends nothing and leaves no record`() = runTest {
+        val ports = FakePorts().apply { grant = null }
+        val storage = MapStorage()
+        val runner = runner(ports, storage)
+        val result = runner.savePhrase()
+        assertTrue((result as RotationResult.NotStarted).reason == NotStartedReason.ProofRequired)
+        assertTrue(ports.calls.isEmpty())
+        assertTrue(storage.map.isEmpty())
+        assertEquals(SavePhraseOutcome.ShowProofBlock, savePhraseOutcome(result, runner.owed()))
+    }
+
+    @Test
+    fun `the new words are shown only once the server step succeeded`() = runTest {
+        // The commit's answer is lost and cannot be settled: nothing is shown.
+        val lost = FakePorts().apply {
+            commit = { throw offline() }
+            lost = { LostCommit.Unknown }
+        }
+        val lostRunner = runner(lost, MapStorage())
+        val unsettled = lostRunner.savePhrase()
+        assertTrue(unsettled is RotationResult.Pending)
+        assertEquals(SavePhraseOutcome.Unsettled, savePhraseOutcome(unsettled, lostRunner.owed()))
+
+        // Committed, the directory upload still owed: the words are withheld.
+        val owing = FakePorts().apply { identity = { _, _ -> IdentityPublish.Retry(offline()) } }
+        val owingRunner = runner(owing, MapStorage())
+        val pending = owingRunner.savePhrase()
+        assertEquals(SavePhraseOutcome.ShowWords(withheld = true), savePhraseOutcome(pending, owingRunner.owed()))
+        assertEquals(0, owing.phraseReleased)
+
+        // Done: shown.
+        assertEquals(SavePhraseOutcome.ShowWords(withheld = false), savePhraseOutcome(RotationResult.Done, null))
+    }
+
+    @Test
+    fun `a refused save changed nothing and can be tried again`() = runTest {
+        val ports = FakePorts().apply {
+            commit = {
+                throw AuthHttpError(status = 429, endpoint = "/account/keys/rotate/finish", body = "", code = "too-many-attempts", retryAfterSecs = 60)
+            }
+        }
+        val storage = MapStorage()
+        val runner = runner(ports, storage)
+        val refused = runner.savePhrase()
+        assertEquals(SavePhraseOutcome.Failed(60), savePhraseOutcome(refused, runner.owed()))
+        assertFalse("the server cannot have changed the key", runner.owed()?.committed == true)
+        // Try again continues the same record and finishes.
+        ports.commit = { CommitAnswer.Committed("ATTEST", 5) }
+        assertEquals(RotationResult.Done, runner.savePhrase())
+        assertEquals(1, ports.preparedCount)
+    }
+
+    @Test
+    fun `the owed record of a phrase save survives a restart as one`() {
+        val storage = MapStorage()
+        val store = KeyRotationOwedStore(storage)
+        store.save(account, KeyRotationOwed(deviceIdB64Url = "", startedAtMs = 1L, removalWon = true, phraseSaved = true))
+        val back = KeyRotationOwedStore(storage).load(account)!!
+        assertTrue(back.phraseSaved)
+        assertFalse(back.removesDevice)
+        assertTrue(back.with(committed = true).phraseSaved)
+        assertEquals(RotationStep.Prepare, nextRotationStep(back))
     }
 }

@@ -603,7 +603,7 @@ final class DeviceRevocationTests: XCTestCase {
             FreshAuthSurface.removeDevice.helpKey,
             FreshAuthSurface.removeDevice.wrongPasswordKey, FreshAuthSurface.removeDevice.cancelledKey,
             "devices.signed_out.removing", "devices.signed_out.sign_in",
-        ]
+        ].compactMap { $0 }
         for key in keys {
             XCTAssertNotEqual(Localization.text(key, texts: ["device": "x"]), key, "\(key) is missing from the catalog")
         }

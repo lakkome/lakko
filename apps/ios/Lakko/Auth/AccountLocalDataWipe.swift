@@ -129,6 +129,9 @@ enum AccountLocalDataWipe {
         step("recovery-phrase") { try PhraseStore().deletePhrase(accountIdB64: accountIdB64) }
         step("three-words-budget") { ThreeWordsBudgetStore().clearAll(accountIdB64: accountIdB64) }
         step("recovery-markers") { RecoveryMarkers().clear(accountIdB64: accountIdB64) }
+        // ADR-0067 — the protection flags, the notice cursor and the "I did
+        // this" markers.
+        step("account-protection") { AccountProtectionStore().clear(accountIdB64: accountIdB64) }
         // ADR-0066 — the "account key recorded at auth" mark and the owed
         // device removals belong to the account's data on this device.
         step("identity-key-record") { IdentityKeyRecordMarks().clear(accountIdB64: accountIdB64) }

@@ -36,6 +36,9 @@ export function NewPasswordForm(props: {
   readonly onSkip?: () => void;
   /** The second button's label (default: "Not now"). */
   readonly skipLabel?: string;
+  /** ADR-0067 (UX 19.6): the form is on the "It was not me" screen of an
+   *  account notice, which asks nothing but the new password. */
+  readonly afterAccountNotice?: boolean;
 }): JSX.Element {
   const auth = useAuth();
   const [password, setPassword] = createSignal("");
@@ -53,7 +56,10 @@ export function NewPasswordForm(props: {
     }
     setBusy(true);
     try {
-      await auth.replacePassword(password());
+      await auth.replacePassword(
+        password(),
+        props.afterAccountNotice === true ? { afterAccountNotice: true } : undefined,
+      );
       setPassword("");
       setConfirm("");
       props.onSaved();

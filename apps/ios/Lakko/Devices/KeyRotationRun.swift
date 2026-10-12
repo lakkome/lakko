@@ -84,6 +84,14 @@ public struct KeyRotationRecord: Codable, Equatable {
     public var backupDone = false
     /// The person saw and confirmed the new words.
     public var phraseAcknowledged = false
+    /// ADR-0067 section 3 — this rotation is "Save a recovery phrase": no
+    /// device is removed (``targetDeviceIdB64`` is empty) and the commit
+    /// marks the account phrase-protected. Optional so an older record
+    /// still decodes.
+    public var phraseSaved: Bool?
+
+    /// Whether this record is a "Save a recovery phrase" rotation.
+    public var savesPhrase: Bool { phraseSaved == true }
 
     public init(targetDeviceIdB64: String, startedAtMs: Int64) {
         self.targetDeviceIdB64 = targetDeviceIdB64
@@ -110,6 +118,7 @@ public struct KeyRotationRecord: Codable, Equatable {
         case grantsDone = "grants_done"
         case backupDone = "backup_done"
         case phraseAcknowledged = "phrase_acknowledged"
+        case phraseSaved = "phrase_saved"
     }
 }
 
@@ -237,12 +246,14 @@ public enum KeyRotationPlan {
     ///   - heldAccountKey: the account key this device holds now.
     public static func resume(_ record: KeyRotationRecord?, heldAccountKey: Data?) -> Resume {
         guard let record else { return .nothing }
+        // A "Save a recovery phrase" rotation removed no device: before its
+        // commit nothing changed and there is nothing to say.
         switch record.phase {
         case .removing, .removed:
-            return .removedNotRotated
+            return record.savesPhrase ? .nothing : .removedNotRotated
         case .announced:
             if let new = record.newSignaturePubkey, new == heldAccountKey { return .commitLandedUnseen }
-            return .removedNotRotated
+            return record.savesPhrase ? .nothing : .removedNotRotated
         case .committed:
             return remaining(record).isEmpty ? .showWords : .finishOwed
         }
@@ -342,6 +353,18 @@ public enum KeyRotationPlan {
         case notRemoved(DeviceRemovalPlan.Result)
         /// The proof ran out before the commit.
         case freshAuthRequired
+        /// The keys were changed on an account that is not phrase-protected
+        /// (ADR-0067): no words are shown anywhere. What is still owed is
+        /// finished in the background.
+        case rotatedNoWords
+    }
+
+    /// ADR-0067 — whether a rotation shows its new words: the save-phrase
+    /// flow always (that is what it is for), any other rotation only on a
+    /// phrase-protected account. An account that never saved a phrase has
+    /// words nobody is meant to see.
+    public static func showsNewWords(savesPhrase: Bool, phraseProtected: Bool) -> Bool {
+        savesPhrase || phraseProtected
     }
 }
 
@@ -585,6 +608,20 @@ public final class KeyRotationRunner: ObservableObject {
         /// its unanswered contact requests from the new key. Throws while
         /// anything is still owed.
         public var spendOldGrants: @MainActor () async throws -> Void = {}
+        /// ADR-0067 section 3 — the commit of "Save a recovery phrase":
+        /// `rotate/finish` with `phrase_saved: true` and no device revoked.
+        public var commitSavingPhrase: (
+            _ token: String, _ grant: String, _ material: KeyRotationMaterial, _ proof: Data
+        ) async throws -> KeyResetResult = { _, _, _, _ in
+            throw AuthClientError.argument("saving a recovery phrase is not wired")
+        }
+        /// The commit of a "Save a recovery phrase" rotation landed: the
+        /// account is phrase-protected from here (the local flag, and the
+        /// marker that keeps this device from being told about its own act).
+        public var phraseWasSaved: @MainActor (_ accountIdB64: String) -> Void = { _ in }
+        /// Whether the account is phrase-protected (ADR-0067): only then are
+        /// the new words of a device rotation shown.
+        public var phraseProtected: @MainActor (_ accountIdB64: String) -> Bool = { _ in true }
         public var resealBackup: @MainActor () async throws -> Void
         /// The new words for the screen, read from this device's own store.
         public var devicePhrase: @MainActor (_ accountIdB64: String) -> String?
@@ -613,9 +650,22 @@ public final class KeyRotationRunner: ObservableObject {
             resume = .nothing
             return
         }
+        // A rotation that only waits for its words to be confirmed, on an
+        // account that is shown none: nothing is left of it.
+        if var record = store.load(accountIdB64: session.accountIdB64),
+           record.phase == .committed, KeyRotationPlan.remaining(record).isEmpty,
+           !showsWords(record, accountIdB64: session.accountIdB64) {
+            record.phraseAcknowledged = true
+            store.put(record, accountIdB64: session.accountIdB64)
+        }
         resume = KeyRotationPlan.resume(
             store.load(accountIdB64: session.accountIdB64),
             heldAccountKey: try? Identity.fromSeed(seed: session.accountIdentitySeed).signaturePublicKey())
+    }
+
+    private func showsWords(_ record: KeyRotationRecord, accountIdB64: String) -> Bool {
+        KeyRotationPlan.showsNewWords(
+            savesPhrase: record.savesPhrase, phraseProtected: ports.phraseProtected(accountIdB64))
     }
 
     /// The device id (base64) a stored record names, for `Try again`.
@@ -648,7 +698,8 @@ public final class KeyRotationRunner: ObservableObject {
     public func wordsToShow() -> String? {
         guard let session = ports.session(),
               let record = store.load(accountIdB64: session.accountIdB64),
-              record.phase == .committed, !KeyRotationPlan.publishOwed(record) else { return nil }
+              record.phase == .committed, !KeyRotationPlan.publishOwed(record),
+              showsWords(record, accountIdB64: session.accountIdB64) else { return nil }
         return ports.devicePhrase(session.accountIdB64)
     }
 
@@ -821,6 +872,125 @@ public final class KeyRotationRunner: ObservableObject {
         return await finishOwed(record, session: adopted)
     }
 
+    /// "Save a recovery phrase" (ADR-0067 section 3, UX 19.5): the same
+    /// rotation with no device removed, committed with `phrase_saved: true`.
+    /// The account gets new keys and new words; the other devices are kept
+    /// and adopt them; the email vault of the old phrase is deleted by the
+    /// commit. The caller obtained the fresh proof first.
+    ///
+    /// The result reads as the device rotation's: `.rotated` shows the NEW
+    /// words (only once the server step and the withholding publish steps
+    /// landed), `.rotatedPublishOwed` withholds them, `.freshAuthRequired`
+    /// asks for the proof again, and every `.removedNotRotated` /
+    /// `.notRemoved` means nothing changed.
+    public func savePhrase() async -> KeyRotationPlan.Result {
+        guard !running, let session = ports.session() else { return .removedNotRotated(nil) }
+        running = true
+        defer {
+            running = false
+            stage = nil
+            reload()
+        }
+        let accountIdB64 = session.accountIdB64
+        if let stored = store.load(accountIdB64: accountIdB64), stored.phase == .committed {
+            if stored.savesPhrase {
+                // The commit already landed: only its steps and words remain.
+                return await finishOwed(stored, session: session)
+            }
+            // A device rotation that committed still owes its steps: they
+            // finish before a second rotation starts over an owed publish.
+            if !KeyRotationPlan.remaining(stored).isEmpty {
+                _ = await finishOwed(stored, session: session)
+                if let after = store.load(accountIdB64: accountIdB64), KeyRotationPlan.publishOwed(after) {
+                    return .rotatedPublishOwed
+                }
+            }
+        }
+        guard let grant = ports.freshGrant() else { return .freshAuthRequired }
+        // Re-read: finishing an earlier rotation's steps does not move the
+        // seed, but the session is read again for what this run signs with.
+        guard let current = ports.session() else { return .removedNotRotated(nil) }
+
+        // 1. The owed record, before anything is sent. No device to remove.
+        var record = KeyRotationRecord(targetDeviceIdB64: "", startedAtMs: ports.nowMs())
+        record.phase = .removed
+        record.phraseSaved = true
+        store.put(record, accountIdB64: accountIdB64)
+
+        // 3 and 4. The new phrase, the proof by the OLD key, the envelope
+        // for the other devices.
+        stage = .changingKeys
+        let material: KeyRotationMaterial
+        let proof: Data
+        do {
+            let fresh = try ports.generate()
+            let nowSecs = ports.nowMs() / 1000
+            let signed = try ports.signProof(
+                current.accountIdentitySeed, fresh.seed, nowSecs, nowSecs + KeyRotationWire.proofWindowSecs)
+            let preparedAtMs = UInt64(max(0, ports.nowMs()))
+            try ports.storeOwnPending(
+                PendingKeyRotation(
+                    newSignaturePubkey: fresh.newSignaturePubkey,
+                    newEntropy: fresh.entropy,
+                    supersessionProof: signed,
+                    preparedAtMs: preparedAtMs,
+                    proofExpiresAtUnixSecs: nowSecs + KeyRotationWire.proofWindowSecs),
+                accountIdB64)
+            _ = try await ports.sendToDeviceGroup(
+                try ports.composeEnvelope(preparedAtMs, fresh.entropy, signed))
+            material = fresh
+            proof = signed
+        } catch {
+            NSLog("[protect] WARN saving a recovery phrase stopped before the commit: %@",
+                  String(describing: type(of: error)))
+            // Nothing changed on the server: nothing is owed.
+            store.clear(accountIdB64: accountIdB64)
+            return .removedNotRotated(nil)
+        }
+        record.phase = .announced
+        record.newSignaturePubkey = material.newSignaturePubkey
+        record.supersessionProof = proof
+        store.put(record, accountIdB64: accountIdB64)
+
+        // 5. The commit.
+        guard let token = ports.sessionToken() else {
+            store.clear(accountIdB64: accountIdB64)
+            return .removedNotRotated(.failed)
+        }
+        let committed: KeyResetResult
+        do {
+            committed = try await ports.commitSavingPhrase(token, grant, material, proof)
+        } catch {
+            let outcome = KeyRotationPlan.commitOutcome(of: error)
+            NSLog("[protect] WARN the recovery phrase was not saved (%@)", String(describing: outcome))
+            if outcome == .offline {
+                // Unknown: the record stays `announced`, the next landing
+                // finds out which it was.
+                return .removedNotRotated(outcome)
+            }
+            store.clear(accountIdB64: accountIdB64)
+            return outcome == .freshAuthRequired ? .freshAuthRequired : .removedNotRotated(outcome)
+        }
+        ports.dropFreshAuth()
+        ports.phraseWasSaved(accountIdB64)
+
+        // 6. Adopt locally, before any further network call.
+        record.phase = .committed
+        record.attestation = committed.attestation
+        record.keyGeneration = committed.session.keyGeneration
+        store.put(record, accountIdB64: accountIdB64)
+        stage = .updatingDevices
+        do {
+            try await ports.adopt(material, committed.session)
+        } catch {
+            NSLog("[protect] ERR the new keys could not be stored on this device: %@",
+                  String(describing: type(of: error)))
+            return .rotatedPublishOwed
+        }
+        guard let adopted = ports.session() else { return .rotatedPublishOwed }
+        return await finishOwed(record, session: adopted)
+    }
+
     /// Retry what a rotation still owes. Called at every session landing and
     /// when the Devices screen opens; a second call while one runs is
     /// dropped.
@@ -837,6 +1007,7 @@ public final class KeyRotationRunner: ObservableObject {
             // the commit landed. No attestation is in hand.
             record.phase = .committed
             store.put(record, accountIdB64: session.accountIdB64)
+            if record.savesPhrase { ports.phraseWasSaved(session.accountIdB64) }
         case .finishOwed:
             break
         }
@@ -902,6 +1073,13 @@ public final class KeyRotationRunner: ObservableObject {
                 record = KeyRotationPlan.marking(record, done: step)
                 store.put(record, accountIdB64: accountIdB64)
             }
+        }
+        if !showsWords(record, accountIdB64: accountIdB64) {
+            // Not phrase-protected: no words, no withheld-words state. The
+            // record stays only while steps are owed.
+            record.phraseAcknowledged = true
+            store.put(record, accountIdB64: accountIdB64)
+            return .rotatedNoWords
         }
         if KeyRotationPlan.publishOwed(record) { return .rotatedPublishOwed }
         guard let phrase = ports.devicePhrase(accountIdB64) else { return .rotatedPublishOwed }
@@ -1064,6 +1242,25 @@ extension KeyRotationRunner.Ports {
                 try await contacts.spendGrantsAfterKeyRotation(
                     predecessorSeeds: auth.ownPredecessorSeeds(
                         accountIdB64: base64Encode(secrets.accountId)))
+            },
+            commitSavingPhrase: { token, grant, material, proof in
+                try await AuthClient().rotateAccountKeys(
+                    sessionToken: token,
+                    freshGrant: grant,
+                    seed: material.seed,
+                    newSignaturePubkey: material.newSignaturePubkey,
+                    supersessionProof: proof,
+                    revokeDeviceIds: [],
+                    phraseSaved: true)
+            },
+            phraseWasSaved: { [weak auth] accountIdB64 in
+                auth?.protectionStore.setPhraseSaved(true, accountIdB64: accountIdB64)
+                auth?.protectionStore.markOwnAction(
+                    .phraseSaved, atMs: Int64(Date().timeIntervalSince1970 * 1000), accountIdB64: accountIdB64)
+                auth?.onProtectionChanged?()
+            },
+            phraseProtected: { [weak auth] accountIdB64 in
+                auth?.protectionStore.phraseSaved(accountIdB64: accountIdB64) ?? false
             },
             resealBackup: { [weak auth, weak chat] in
                 guard let auth else { throw SessionNotReady() }

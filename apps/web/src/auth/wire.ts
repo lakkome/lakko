@@ -325,6 +325,9 @@ export interface KeyRotateFinishRequest extends KeyResetFinishRequest {
   supersession_proof_b64: string;
   /** URL-safe base64 (no pad) device ids, at most 8; may be empty. */
   revoke_device_ids_b64: string[];
+  /** ADR-0067 section 3: the account becomes phrase-protected with this
+   *  rotation ("Save a recovery phrase"). Absent otherwise. */
+  phrase_saved?: true;
 }
 
 /** `POST /auth/session/refresh` with the session-upgrade statement. */
@@ -347,6 +350,11 @@ export interface RecallStatusRequest {
   /** The 138-byte `recall-status` account statement, signed by the OLD
    *  account key. */
   statement_b64: string;
+  /** ADR-0067 section 8: the account's login handle (base64url, no pad),
+   *  sent by a device that holds the phrase and no cached account id. The
+   *  statement then carries the first 16 bytes of the handle where the
+   *  account id goes. */
+  handle?: string;
 }
 
 /** `POST /account/recall/start` request body. */
@@ -355,8 +363,12 @@ export interface RecallStartRequest {
   anchor_seq: number;
   /** The `recall-start` statement over the anchor seq and `login_request`. */
   statement_b64: string;
-  /** `OpaqueLogin.startPassword(oldPassword).requestB64`. */
+  /** `OpaqueLogin.startPassword(oldPassword).requestB64`, or with
+   *  `proof: "phrase"` `OpaqueLogin.startRecovery(oldPhraseSeed).requestB64`. */
   login_request: string;
+  /** Which anchored envelope the login is against (ADR-0067 section 8).
+   *  Absent means `"password"`. */
+  proof?: "password" | "phrase";
   /** `OpaqueRegister.startPassword(newPassword).requestB64`. */
   password_request: string;
   /** `OpaqueRegister.startRecovery(newSeed).requestB64`. */

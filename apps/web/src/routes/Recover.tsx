@@ -6,6 +6,10 @@
  * 2, ADR-0064 decision 7): a list of ways back in, each a tappable row, that
  * reveals the matching form under a heading that leads back to the list.
  *
+ * First, above both groups (ADR-0067, UX 19.3): Email code, a code sent to
+ * the recovery email. What it brings depends on the account, and nothing
+ * says which before the code was accepted.
+ *
  * Brings back the chats:
  *   - Another device (first, "if you have one"): a device that is still
  *     signed in confirms the request and transfers the keys and a session.
@@ -50,6 +54,7 @@ import { PasskeyRecover } from "../auth/recover/PasskeyRecover";
 import { PhraseRecover } from "../auth/recover/PhraseRecover";
 import { DeviceRecover } from "../auth/recover/DeviceRecover";
 import { TotpRecover } from "../auth/recover/TotpRecover";
+import { EmailRecover } from "../auth/recover/EmailRecover";
 
 export default function Recover(): JSX.Element {
   const auth = useAuth();
@@ -94,7 +99,9 @@ export default function Recover(): JSX.Element {
             <For each={recoverMethodGroups(device())}>
               {(group) => (
                 <>
-                  <h2 class="lk-method-group">{group.label}</h2>
+                  <Show when={group.label.length > 0}>
+                    <h2 class="lk-method-group">{group.label}</h2>
+                  </Show>
                   <MethodList methods={() => group.methods} onPick={setMethod} />
                 </>
               )}
@@ -112,6 +119,14 @@ export default function Recover(): JSX.Element {
           <>
             <MethodHead method={() => recoverMethod(picked())} onBack={backToList} />
             <Switch>
+              <Match when={picked() === "email"}>
+                <EmailRecover
+                  username={username}
+                  setUsername={setUsername}
+                  onBack={backToList}
+                  onDone={done}
+                />
+              </Match>
               <Match when={picked() === "phrase"}>
                 <PhraseRecover username={username} setUsername={setUsername} onDone={done} />
               </Match>

@@ -206,12 +206,20 @@ fn decode_pubkey(b64: &str) -> Result<[u8; 32], ApiError> {
 /// passkeys, every in-flight WebAuthn ceremony and action grant, and the
 /// account's device grants and device requests. Shared with the recall
 /// (`crate::recall::finish`), which is this reset plus a password change.
+///
+/// ADR-0067: the email vault goes too. It seals the OLD phrase, which is no
+/// longer the account's; a vault of the new phrase is stored by enrolling the
+/// recovery email again. Recovery tickets in flight go with it. The
+/// `recovery_emails` row (the password route) is kept by a reset and deleted
+/// by a recall.
 pub(crate) async fn delete_superseded_state(
     tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     account_id: &[u8; 16],
 ) -> Result<(), ApiError> {
     for statement in [
         "DELETE FROM passkey_vaults WHERE account_id = ?",
+        "DELETE FROM email_vaults WHERE account_id = ?",
+        "DELETE FROM email_tickets WHERE account_id = ?",
         "DELETE FROM webauthn_credentials WHERE account_id = ?",
         "DELETE FROM webauthn_states WHERE account_id = ?",
         "DELETE FROM webauthn_action_grants WHERE account_id = ?",

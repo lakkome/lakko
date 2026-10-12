@@ -29,6 +29,12 @@ public enum class ProofSurface {
 
     /** ADR-0066 / UX 18.1 - remove another device (Settings > Devices). */
     RemoveDevice,
+
+    /** ADR-0067 / UX 19.2 - add, replace or remove the recovery email. */
+    RecoveryEmail,
+
+    /** ADR-0067 / UX 19.5 - save a recovery phrase (a key rotation). */
+    SavePhrase,
 }
 
 /** The per-surface lines of the block (UX 17.2-17.4). */
@@ -82,6 +88,20 @@ public fun proofCopy(surface: ProofSurface): ProofCopy = when (surface) {
         wrongPassword = "restore_identity.reset.error.wrong_password",
         cancelled = "proof.change_password.cancelled",
         generic = "recovery.new_password.error.generic",
+    )
+    // UX 19.2 / 19.5: the catalog has no cancelled line of their own; the
+    // closest existing line is used.
+    ProofSurface.RecoveryEmail -> ProofCopy(
+        helper = "proof.recovery_email.help",
+        wrongPassword = "restore_identity.reset.error.wrong_password",
+        cancelled = "chat.record.cancelled",
+        generic = "common.error.unavailable",
+    )
+    ProofSurface.SavePhrase -> ProofCopy(
+        helper = "proof.save_phrase.help",
+        wrongPassword = "restore_identity.reset.error.wrong_password",
+        cancelled = "chat.record.cancelled",
+        generic = "protect.phrase.save.failed",
     )
     // UX 18.6.
     ProofSurface.RemoveDevice -> ProofCopy(

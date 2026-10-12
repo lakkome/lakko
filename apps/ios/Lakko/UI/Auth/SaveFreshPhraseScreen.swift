@@ -4,7 +4,8 @@
 import SwiftUI
 
 /// The phrase screen of ``AuthState/saveFreshPhrase(_:)``: after "Reset
-/// account keys" and after a guest signup. It shows the new 12 words, asks
+/// account keys" and after taking the account back (not after a sign-up:
+/// ADR-0067 D2, a guest's included). It shows the new 12 words, asks
 /// for three of them back, then lands the session.
 ///
 /// One state comes before the words after a reset (UX 15.4): the account
@@ -38,8 +39,11 @@ public struct SaveFreshPhraseScreen: View {
     public var body: some View {
         if authRepository.freshPublishPending {
             publishPending
-        } else {
+        } else if authRepository.freshShowsWords {
             phraseGuide
+        } else {
+            // Not phrase-protected: no words; the session is landing.
+            Color.lakkoBackground.ignoresSafeArea()
         }
     }
 
@@ -72,11 +76,13 @@ public struct SaveFreshPhraseScreen: View {
 
     private var publishPending: some View {
         AuthScreen {
-            AuthTitle(title: l10n.t("recovery_phrase.fresh.title"))
+            if authRepository.freshShowsWords {
+                AuthTitle(title: l10n.t("recovery_phrase.fresh.title"))
+            }
             AuthHint(
-                text: l10n.t(authRepository.freshPublishNeedsSignIn
-                    ? "recovery_phrase.fresh.sign_in_to_finish"
-                    : "recovery_phrase.fresh.publish_owed"),
+                text: l10n.t(KeysChangedCopy.publishOwedKey(
+                    showsWords: authRepository.freshShowsWords,
+                    needsSignIn: authRepository.freshPublishNeedsSignIn)),
                 isError: true
             )
             if let retryError {

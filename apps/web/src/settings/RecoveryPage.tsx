@@ -25,6 +25,8 @@ import { createResource, createSignal, onCleanup, Show, type JSX } from "solid-j
 import { A } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
+import { showPhraseOffered, threeWordsShown } from "../auth/protect/account-protection";
+import { phraseProtectedHere } from "../auth/protect/protection-state";
 import { phraseRevealStep } from "../auth/key-reset-owed";
 import { AuthClient } from "../auth/client";
 import { authLimitMessage, isOffline, screenText } from "../auth/auth-error-copy";
@@ -45,6 +47,12 @@ export function RecoveryPage(): JSX.Element {
   // Whether this device holds the phrase. Only the fact is kept here; the
   // words are read again when the person asks to see them.
   const [phraseSaved] = createResource(async () => (await auth.devicePhrase()) !== null);
+  // Whether the account is phrase-protected, as this device knows it
+  // (`GET /recovery-email` at the landing, or a phrase saved here).
+  const phraseProtected = (): boolean => {
+    const st = auth.state();
+    return phraseProtectedHere(st.kind === "session" ? st.account.accountId : null);
+  };
   // Paused after the saved phrase was refused at log in (three-words.ts).
   const wordsSuspended = (): boolean => {
     const st = auth.state();
@@ -69,7 +77,12 @@ export function RecoveryPage(): JSX.Element {
 
       <section class="lk-card">
         <h2>{t("settings.recovery.group.keys")}</h2>
-        <PhraseRow saved={() => phraseSaved() === true} known={() => phraseSaved() !== undefined} />
+        {/* ADR-0067: the words were never shown to the owner of an account
+            without a saved phrase, so there is nothing to show again; saving
+            one is in Settings > Account. */}
+        <Show when={showPhraseOffered(phraseProtected(), phraseSaved() === true)}>
+          <PhraseRow saved={() => phraseSaved() === true} known={() => phraseSaved() !== undefined} />
+        </Show>
         <PasskeysRow />
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
@@ -85,6 +98,9 @@ export function RecoveryPage(): JSX.Element {
         </div>
       </section>
 
+      {/* ADR-0067 section 11: three words exist only for a phrase-protected
+          account. */}
+      <Show when={threeWordsShown(phraseProtected())}>
       <section class="lk-card">
         <h2>{t("settings.recovery.group.signin")}</h2>
         <div class="lk-card-row">
@@ -99,6 +115,7 @@ export function RecoveryPage(): JSX.Element {
           </div>
         </div>
       </section>
+      </Show>
 
       <section class="lk-card">
         <h2>{t("settings.recovery.totp.title")}</h2>

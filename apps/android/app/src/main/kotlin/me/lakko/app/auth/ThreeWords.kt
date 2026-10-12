@@ -55,8 +55,12 @@ public fun offersThreeWords(
     phraseOnDevice: Boolean,
     keysOnDevice: Boolean,
     suspended: Boolean,
+    /** ADR-0067 - the account is phrase-protected: the person was shown the
+     *  words. In a mail-protected account the row is absent. */
+    phraseSaved: Boolean = true,
 ): Boolean =
-    cachedUsername != null && cachedUsername.trim().isNotEmpty() && phraseOnDevice && keysOnDevice && !suspended
+    threeWordsSurfaceOffered(phraseSaved) &&
+        cachedUsername != null && cachedUsername.trim().isNotEmpty() && phraseOnDevice && keysOnDevice && !suspended
 
 /**
  * The catalog key of the informational three-word row in Settings >

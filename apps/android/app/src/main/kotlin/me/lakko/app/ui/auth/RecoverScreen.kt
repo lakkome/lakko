@@ -12,6 +12,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Password
 import androidx.compose.material.icons.automirrored.filled.ShortText
@@ -84,9 +85,13 @@ public fun RecoverScreen(
     LaunchedEffect(method) {
         method?.let { viewModel.onModeChange(it) }
     }
-    BackHandler(enabled = method != null && !state.busy) { method = null }
+    BackHandler(enabled = method != null && !state.busy && !state.email.busy) { method = null }
+    // The email flow ended without a session: back on the list, with its line.
+    LaunchedEffect(state.email.step) {
+        if (state.email.step is me.lakko.app.auth.EmailRecoverStep.Closed && method == RecoverMode.Email) method = null
+    }
 
-    val back: () -> Unit = { if (!state.busy) method = null }
+    val back: () -> Unit = { if (!state.busy && !state.email.busy) method = null }
     val chosen = method
     // The words form needs the account it was opened for (a restored
     // selection without it goes back to the list).
@@ -99,7 +104,20 @@ public fun RecoverScreen(
                     t("recovery.lede")
                 },
             )
+            FormError(state.listLine)
             Spacer(Modifier.height(16.dp))
+            // UX 19.3 - first, above both groups: what it brings depends on
+            // the account, and no row depends on server state.
+            MethodRow(
+                icon = Icons.Filled.Email,
+                title = t("recovery.email.row.title"),
+                subtitle = t("recovery.email.row.body"),
+                onClick = {
+                    viewModel.openEmail()
+                    method = RecoverMode.Email
+                },
+            )
+            Spacer(Modifier.height(12.dp))
             GroupLabel(t("recovery.group.keys"))
             MethodRow(
                 icon = Icons.Filled.Devices,
@@ -152,6 +170,7 @@ public fun RecoverScreen(
         RecoverMode.Passkey -> PasskeyForm(state, viewModel, back, modifier)
         RecoverMode.Words -> WordsForm(state, viewModel, back, modifier)
         RecoverMode.Authenticator -> AuthenticatorForm(state, cachedUsername, viewModel, back, modifier)
+        RecoverMode.Email -> EmailCodeForm(state, cachedUsername, viewModel, back, modifier)
     }
 }
 
@@ -415,6 +434,33 @@ private fun PhraseForm(
         )
         Spacer(Modifier.height(16.dp))
         NewPasswordFields(state, viewModel)
+        val recall = state.phraseRecall
+        if (recall != null) {
+            // UX 19.7 - the words were this account's phrase before its
+            // keys were changed.
+            Spacer(Modifier.height(16.dp))
+            Text(
+                t("recall.phrase.changed", mapOf("date" to recallDate(recall.status.changedAtMs))),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Spacer(Modifier.height(8.dp))
+            for (key in PHRASE_RECALL_EFFECTS) Lead(t(key))
+            FormError(state.error)
+            Spacer(Modifier.height(16.dp))
+            BusyButton(
+                label = t("recall.phrase.take_back"),
+                busy = state.busy,
+                busyLabel = t("devices.recall.form.working"),
+                onClick = viewModel::onPhraseRecallTakeBack,
+            )
+            OutlinedButton(
+                onClick = viewModel::onPhraseRecallDeclined,
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(t("notice.was_me")) }
+            Spacer(Modifier.height(16.dp))
+            return@AuthScaffold
+        }
         FormError(state.error)
         Spacer(Modifier.height(24.dp))
         BusyButton(
@@ -423,6 +469,168 @@ private fun PhraseForm(
             busyLabel = t("common.checking"),
             onClick = viewModel::onSubmit,
         )
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
+/** What taking the account back costs (the lines of 18.4's form). */
+private val PHRASE_RECALL_EFFECTS: List<String> = listOf(
+    "devices.recall.form.effect_keys",
+    "devices.recall.form.effect_factors",
+    "devices.recall.form.effect_messages",
+)
+
+@Composable
+private fun recallDate(atMs: Long): String {
+    val language = me.lakko.app.l10n.LocalStrings.current.language
+    return remember(atMs, language) {
+        java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
+            .format(java.util.Date(atMs))
+    }
+}
+
+/**
+ * Email code (UX 19.3). Step 1: username and address. Step 2, always and
+ * identical whatever was typed: "Check your email". Step 3, only when the
+ * account has an authenticator: its code. Step 4: the new password; only
+ * then is the server asked what the code brings, so nothing before it tells
+ * which kind of account this is.
+ */
+@Composable
+internal fun EmailCodeForm(
+    state: RecoverUiState,
+    cachedUsername: String?,
+    viewModel: RecoverViewModel,
+    onBack: () -> Unit,
+    modifier: Modifier,
+) {
+    val email = state.email
+    val waitLeft = rememberRemainingMs(email.waitUntilMs)
+    val title = when (email.step) {
+        is me.lakko.app.auth.EmailRecoverStep.Code -> t("recovery.email.check.title")
+        is me.lakko.app.auth.EmailRecoverStep.Totp -> t("recovery.email.totp.title")
+        is me.lakko.app.auth.EmailRecoverStep.NewPassword -> t("recovery.new_password.title")
+        else -> t("recovery.email.row.title")
+    }
+    AuthScaffold(title = title, onBack = if (email.busy) null else onBack, modifier = modifier) {
+        when (val step = email.step) {
+            me.lakko.app.auth.EmailRecoverStep.Address, is me.lakko.app.auth.EmailRecoverStep.Closed -> {
+                Lead(t("recovery.email.start.body"))
+                Spacer(Modifier.height(16.dp))
+                if (cachedUsername == null) {
+                    UsernameField(state.username, viewModel::onUsernameChange, enabled = !email.busy)
+                }
+                EmailField(
+                    value = state.emailAddress,
+                    onValueChange = viewModel::onEmailAddressChange,
+                    enabled = !email.busy,
+                    onDone = viewModel::onSubmitEmailAddress,
+                )
+                FormError(email.error)
+                if (waitLeft > 0L) {
+                    FormError(t("recovery.error.rate_limited", mapOf("time" to formatCountdown(waitLeft))))
+                }
+                Spacer(Modifier.height(24.dp))
+                BusyButton(
+                    label = t("recovery_email.send"),
+                    busy = email.busy,
+                    busyLabel = t("common.sending"),
+                    enabled = waitLeft <= 0L && me.lakko.app.auth.recoveryEmailPlausible(state.emailAddress),
+                    onClick = viewModel::onSubmitEmailAddress,
+                )
+            }
+            is me.lakko.app.auth.EmailRecoverStep.Code -> {
+                Lead(t("recovery.email.check.body"))
+                Spacer(Modifier.height(16.dp))
+                CodeField(
+                    value = state.emailCode,
+                    onValueChange = viewModel::onEmailCodeChange,
+                    enabled = !email.busy,
+                    label = t("recovery_email.code.title"),
+                    onDone = viewModel::onSubmitEmailCode,
+                )
+                FormError(email.error)
+                if (waitLeft > 0L) {
+                    FormError(t("recovery.error.rate_limited", mapOf("time" to formatCountdown(waitLeft))))
+                }
+                Spacer(Modifier.height(16.dp))
+                BusyButton(
+                    label = t("common.continue"),
+                    busy = email.busy,
+                    busyLabel = t("common.checking"),
+                    enabled = me.lakko.app.auth.normalizeEmailCode(state.emailCode) != null && waitLeft <= 0L,
+                    onClick = viewModel::onSubmitEmailCode,
+                )
+                ResendRow(
+                    resendAtMs = step.resendAtMs,
+                    enabled = !email.busy && waitLeft <= 0L,
+                    onResend = viewModel::onSubmitEmailAddress,
+                    secondLabel = t("common.back"),
+                    onSecond = viewModel::onEmailBackToAddress,
+                )
+            }
+            is me.lakko.app.auth.EmailRecoverStep.Totp -> {
+                Lead(t("recovery.email.totp.body"))
+                Spacer(Modifier.height(16.dp))
+                CodeField(
+                    value = state.emailCode,
+                    onValueChange = viewModel::onEmailCodeChange,
+                    enabled = !email.busy,
+                    label = t("recovery.totp.code_label"),
+                    onDone = viewModel::onSubmitEmailCode,
+                )
+                FormError(email.error)
+                Spacer(Modifier.height(16.dp))
+                BusyButton(
+                    label = t("common.continue"),
+                    busy = email.busy,
+                    busyLabel = t("common.checking"),
+                    enabled = me.lakko.app.auth.normalizeEmailCode(state.emailCode) != null,
+                    onClick = viewModel::onSubmitEmailCode,
+                )
+                Spacer(Modifier.height(12.dp))
+                Lead(t("recovery.email.totp.lost"))
+            }
+            is me.lakko.app.auth.EmailRecoverStep.NewPassword -> {
+                PasswordField(
+                    value = state.password,
+                    onValueChange = viewModel::onPasswordChange,
+                    label = t("auth.password.new.label"),
+                    enabled = !email.busy,
+                    supportingText = t(
+                        "auth.password.hint",
+                        emptyMap(),
+                        mapOf("count" to RecoverViewModel.MIN_PASSWORD_LEN.toULong()),
+                    ),
+                )
+                Spacer(Modifier.height(8.dp))
+                PasswordField(
+                    value = state.confirm,
+                    onValueChange = viewModel::onConfirmChange,
+                    label = t("auth.password.new_confirm.label"),
+                    enabled = !email.busy,
+                    imeAction = ImeAction.Done,
+                    onDone = viewModel::onSubmitEmailPassword,
+                )
+                FormError(email.error)
+                Spacer(Modifier.height(24.dp))
+                BusyButton(
+                    label = t("recovery.email.save"),
+                    busy = email.busy,
+                    busyLabel = t("common.saving"),
+                    onClick = viewModel::onSubmitEmailPassword,
+                )
+            }
+            me.lakko.app.auth.EmailRecoverStep.Restoring -> {
+                androidx.compose.foundation.layout.Row(
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
+                ) {
+                    androidx.compose.material3.CircularProgressIndicator()
+                    Text(t("recovery.email.restoring"))
+                }
+            }
+        }
         Spacer(Modifier.height(16.dp))
     }
 }

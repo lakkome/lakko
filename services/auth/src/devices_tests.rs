@@ -79,6 +79,7 @@ fn build_state(pool: MySqlPool, limits: Limits) -> AppState {
         backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
         anon_tokens: None,
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
+        recovery_email: None,
         limits: Arc::new(limits),
     }
 }

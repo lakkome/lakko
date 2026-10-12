@@ -402,6 +402,102 @@ pub(crate) async fn enroll_finish(
     Ok(Json(serde_json::json!({ "enabled": true })))
 }
 
+/// Whether `account_id` has a CONFIRMED authenticator. One primary-key read;
+/// needs no key, so it answers even when `LAKKO_TOTP_ENC_KEY` is unset.
+///
+/// # Errors
+///
+/// Any `sqlx::Error` from the read.
+pub(crate) async fn is_enabled(
+    pool: &sqlx::MySqlPool,
+    account_id: &[u8; 16],
+) -> Result<bool, sqlx::Error> {
+    let row: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM totp_secrets WHERE account_id = ? AND confirmed_at IS NOT NULL",
+    )
+    .bind(account_id.as_slice())
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
+/// Parse and check one authenticator code for `account_id`, with the rules
+/// of [`recover`]: the +-1 step window, strictly newer than the last accepted
+/// step, and an atomic compare-and-set so one step is accepted once. Shared
+/// with the recovery-email route (ADR-0067 D8).
+///
+/// `Ok(false)` for a wrong, replayed or malformed code and for an account
+/// without a confirmed authenticator.
+///
+/// # Errors
+///
+/// [`ApiError::Disabled`] when `LAKKO_TOTP_ENC_KEY` is unset;
+/// [`ApiError::Db`]; [`ApiError::Internal`] when the stored secret does not
+/// open.
+pub(crate) async fn check_code(
+    state: &AppState,
+    account_id: &[u8; 16],
+    code: &str,
+) -> Result<bool, ApiError> {
+    let key = require_key(state)?;
+    let Ok(code) = parse_code(code) else {
+        return Ok(false);
+    };
+    accept_code(&state.db, &key, account_id, code, now_unix_secs()).await
+}
+
+/// The verify-and-consume step behind [`recover`] and [`check_code`].
+async fn accept_code(
+    pool: &sqlx::MySqlPool,
+    key: &[u8; 32],
+    account_id: &[u8; 16],
+    code: u32,
+    now: u64,
+) -> Result<bool, ApiError> {
+    let row: Option<RecoverRow> = sqlx::query_as(
+        "SELECT secret_enc, confirmed_at, last_accepted_step \
+         FROM totp_secrets WHERE account_id = ?",
+    )
+    .bind(account_id.as_slice())
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::Db)?;
+
+    // Unknown account OR unconfirmed enrollment: run a dummy verify against a
+    // fixed secret so the timing/shape matches the wrong-code path.
+    let Some((secret_enc, Some(_confirmed_at), last_step)) = row.filter(|r| r.1.is_some()) else {
+        let _ = verify_code(&[0u8; SECRET_LEN], now, code);
+        return Ok(false);
+    };
+
+    let secret = lakko_crypto::aead::open_with_key(key, &secret_enc).map_err(|e| {
+        tracing::error!(error = %e, "totp: secret open failed");
+        ApiError::Internal
+    })?;
+
+    let Some(step) = verify_code(&secret, now, code).filter(|&step| step > last_step) else {
+        // Wrong code OR a replayed (not-strictly-newer) code.
+        return Ok(false);
+    };
+
+    // Atomic single-use-per-step consume: only one concurrent request whose
+    // matched step beats the stored `last_accepted_step` wins (`rows_affected
+    // == 1`). A duplicate that read the same old value loses the CAS and is
+    // treated as a replayed code.
+    Ok(sqlx::query(
+        "UPDATE totp_secrets SET last_accepted_step = ? \
+         WHERE account_id = ? AND last_accepted_step < ?",
+    )
+    .bind(step)
+    .bind(account_id.as_slice())
+    .bind(step)
+    .execute(pool)
+    .await
+    .map_err(ApiError::Db)?
+    .rows_affected()
+        == 1)
+}
+
 /// `POST /totp/recover` — recover ACCESS with an authenticator code.
 ///
 /// Anonymous; names the account by login handle (ADR-0054 S5). The named
@@ -442,53 +538,8 @@ pub(crate) async fn recover(
         .await
         .map_err(ApiError::Db)?;
 
-    let row: Option<RecoverRow> = sqlx::query_as(
-        "SELECT secret_enc, confirmed_at, last_accepted_step \
-         FROM totp_secrets WHERE account_id = ?",
-    )
-    .bind(account_id.as_slice())
-    .fetch_optional(&state.db)
-    .await
-    .map_err(ApiError::Db)?;
-
-    // Unknown account OR unconfirmed enrollment: run a dummy verify against a
-    // fixed secret so the timing/shape matches the wrong-code path, then
-    // return the SAME generic 401. (The attempt was already counted against
-    // the named handle above, for known and unknown alike.)
-    let Some((secret_enc, Some(_confirmed_at), last_step)) = row.filter(|r| r.1.is_some()) else {
-        let _ = verify_code(&[0u8; SECRET_LEN], now, code);
-        return Err(ApiError::InvalidCredential);
-    };
-
-    let secret = lakko_crypto::aead::open_with_key(&key, &secret_enc).map_err(|e| {
-        tracing::error!(error = %e, "totp: secret open failed (recover)");
-        ApiError::Internal
-    })?;
-
-    let matched = verify_code(&secret, now, code).filter(|&step| step > last_step);
-    let Some(step) = matched else {
-        // Wrong code OR a replayed (not-strictly-newer) code: the generic 401.
-        return Err(ApiError::InvalidCredential);
-    };
-
-    // Atomic single-use-per-step consume: only one concurrent request whose
-    // matched step beats the stored `last_accepted_step` wins (`rows_affected
-    // == 1`). A duplicate that read the same old value loses the CAS.
-    let consumed = sqlx::query(
-        "UPDATE totp_secrets SET last_accepted_step = ? \
-         WHERE account_id = ? AND last_accepted_step < ?",
-    )
-    .bind(step)
-    .bind(account_id.as_slice())
-    .bind(step)
-    .execute(&state.db)
-    .await
-    .map_err(ApiError::Db)?
-    .rows_affected()
-        == 1;
-    if !consumed {
-        // Lost the race to a concurrent redeem of the same step — treat as a
-        // replayed code.
+    if !accept_code(&state.db, &key, &account_id, code, now).await? {
+        // No authenticator, a wrong code, or a replayed one: the generic 401.
         return Err(ApiError::InvalidCredential);
     }
 
@@ -500,6 +551,38 @@ pub(crate) async fn recover(
         account_id_b64,
         session,
     }))
+}
+
+/// Give `account_id` a confirmed authenticator under `key` and return its
+/// secret (tests of other modules).
+#[cfg(test)]
+pub(crate) async fn enroll_for_test(
+    pool: &sqlx::MySqlPool,
+    key: &[u8; 32],
+    account_id: &[u8; 16],
+) -> Vec<u8> {
+    let mut secret = [0u8; SECRET_LEN];
+    OsRng.fill_bytes(&mut secret);
+    let secret_enc = lakko_crypto::aead::seal_with_key(key, &secret).expect("seal");
+    sqlx::query(
+        "INSERT INTO totp_secrets (account_id, secret_enc, confirmed_at, last_accepted_step) \
+         VALUES (?, ?, NOW(3), 0)",
+    )
+    .bind(account_id.as_slice())
+    .bind(secret_enc.as_slice())
+    .execute(pool)
+    .await
+    .expect("insert totp secret");
+    secret.to_vec()
+}
+
+/// The code an authenticator holding `secret` shows now (tests).
+#[cfg(test)]
+pub(crate) fn current_code_for_test(secret: &[u8]) -> String {
+    format!(
+        "{:06}",
+        hotp(secret, step_to_counter(current_step(now_unix_secs())))
+    )
 }
 
 /// RFC 4648 base32 DECODE (test-only) — round-trips [`base32_encode`] so the
@@ -705,6 +788,7 @@ mod totp_e2e_tests {
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
+            recovery_email: None,
             limits: Arc::new(crate::limits::Limits::defaults()),
         };
         (state, token_secret)

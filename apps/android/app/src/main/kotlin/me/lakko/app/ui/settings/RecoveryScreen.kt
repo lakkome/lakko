@@ -162,12 +162,19 @@ public fun RecoveryScreen(
                 return@Column
             }
 
+            // ADR-0067 / UX 19.1 - the phrase and the three words exist only
+            // for an account whose owner saved the phrase.
+            val protection by authRepository.recoveryEmail.collectAsStateWithLifecycle()
+            val phraseProtected = protection?.phraseSaved
+                ?: remember(account.accountIdB64) { authRepository.phraseProtected() }
             SectionLabel(t("settings.recovery.group.keys"))
-            RecoveryPhraseRow(
-                authRepository = authRepository,
-                phraseOnDevice = phraseOnDevice,
-                hasUsername = account.username.isNotBlank(),
-            )
+            if (phraseProtected) {
+                RecoveryPhraseRow(
+                    authRepository = authRepository,
+                    phraseOnDevice = phraseOnDevice,
+                    hasUsername = account.username.isNotBlank(),
+                )
+            }
             ListItem(
                 headlineContent = { Text(t("settings.passkeys.title")) },
                 supportingContent = {
@@ -196,7 +203,7 @@ public fun RecoveryScreen(
 
             SectionLabel(t("settings.recovery.group.signin"))
             // Informational only: there is nothing to turn on or off.
-            ListItem(
+            if (phraseProtected) ListItem(
                 headlineContent = { Text(t("recovery.method.words.title")) },
                 supportingContent = {
                     Text(

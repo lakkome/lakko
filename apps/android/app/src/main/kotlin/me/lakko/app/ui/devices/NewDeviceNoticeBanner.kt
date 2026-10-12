@@ -209,10 +209,14 @@ public fun KeysRotatedNotice(
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Button(
-                    onClick = onShowPhrase,
-                    modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
-                ) { Text(t("devices.rotated.show_phrase")) }
+                // ADR-0067 - `Show new phrase` only for a phrase-protected
+                // account: the others are never shown words.
+                if (repository.showsNewWordsHere()) {
+                    Button(
+                        onClick = onShowPhrase,
+                        modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
+                    ) { Text(t("devices.rotated.show_phrase")) }
+                }
                 TextButton(
                     onClick = { repository.dismissKeysRotatedNotice() },
                     modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),

@@ -74,6 +74,21 @@
 //!   account by login handle (login, recovery login, password reset, TOTP
 //!   recovery, and `/auth/login-handle`) answers 503 `login-by-name-disabled`, logged as a
 //!   warning at startup. Losing it unbinds every handle.
+//! - `LAKKO_AUTH_EMAIL_PEPPER` — 64 hex characters keying the stored
+//!   recovery-email value (ADR-0067). Optional; unset (or without
+//!   `LAKKO_VAULT_ENC_KEY` / `LAKKO_AUTH_HANDLE_PEPPER`) = the enrol, remove
+//!   and recover routes answer 503 `recovery-email-disabled` and
+//!   `GET /recovery-email/available` answers `{"available": false}`. Losing
+//!   it turns every account's recovery email off.
+//! - `LAKKO_AUTH_SMTP_HOST` / `_PORT` / `_TLS` (`starttls` | `implicit`) /
+//!   `_USERNAME` / `_PASSWORD` / `_FROM` / `_HELO` — the relay the recovery
+//!   code is mailed through (`src/mail.rs`). Host unset = the log-only
+//!   sender: nothing is delivered, and neither the address nor the code is
+//!   logged.
+//! - `LAKKO_AUTH_LIMIT_EMAIL_LETTER_HANDLE` / `_EMAIL_LETTER_ACCOUNT` /
+//!   `_EMAIL_VERIFY` / `_EMAIL_VAULT_OPEN` and `LAKKO_AUTH_IP_LIMIT_EMAIL` —
+//!   the recovery email's limits, each `N/SECS` (defaults chosen, not
+//!   measured; see `src/limits.rs`).
 //! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — anonymous-token epoch window (default
 //!   86400; must match every verifier).
 //! - `LAKKO_ANON_TOKEN_QUOTA_<CONTEXT>` — tokens per account per epoch for one
@@ -129,6 +144,38 @@
 //!   credentials answer `401 device-revoked` (ADR-0066 section 2.1, bearer-auth AND a
 //!   `fresh_grant` AND a `statement_b64` signed by the account's recorded identity key, else
 //!   `403 fresh-auth-required` / `403 account-key-required`)
+//! - `GET  /recovery-email/available` — whether this server can mail a recovery code
+//!   (ADR-0067, anonymous) -> `{available}`
+//! - `POST /recovery-email/enrol/start` / `/finish` — add or replace the account's recovery
+//!   email with a mailed code (ADR-0067 section 6, bearer-auth; the start also needs a
+//!   `fresh_grant` and the account's own bound `handle`; the finish optionally stores the
+//!   44-byte email vault)
+//! - `GET  /recovery-email`          — `{available, enabled, vault, phrase_saved, totp}` for the
+//!   session's account (bearer-auth)
+//! - `DELETE /recovery-email`        — remove the recovery email and the vault (bearer-auth +
+//!   `fresh_grant`)
+//! - `DELETE /recovery-email/vault`  — the account becomes phrase-protected: delete the vault,
+//!   mark the account, write the notice (bearer-auth + `fresh_grant`)
+//! - `GET  /account/notices?after=`  — what happened to the account, for its own devices
+//!   (ADR-0067 section 9, bearer-auth; kept 60 days)
+//! - `POST /recovery-email/recover/start` — mail a code if the handle and address belong
+//!   together; one answer for a match and a miss (ADR-0067 section 7, anonymous)
+//! - `POST /recovery-email/recover/verify` — the code -> `{ticket, totp_required}` or the
+//!   uniform `401 code-refused` (anonymous)
+//! - `POST /recovery-email/recover/totp` — the authenticator code, when the account has one
+//!   (anonymous, under the ticket)
+//! - `POST /recovery-email/recover/open` — the email vault (`mode: "vault"`, ticket spent) or
+//!   `mode: "password"` (anonymous, under the ticket)
+//! - `POST /recovery-email/recover/password/start` / `/finish` — choose a new password under
+//!   the ticket (password mode): captures the recall anchor, replaces the envelope, lands a
+//!   session pair and mints NO fresh-auth grant (anonymous)
+//!
+//! Since ADR-0067 the recall (`POST /account/recall/{status,start,finish}`) also has a phrase
+//! arm: `status` takes an optional `handle` and answers `account_id_b64` and `phrase_arm`,
+//! and `start` takes `proof: "phrase"` (a login against the anchored RECOVERY envelope),
+//! refused for an account that had an email vault when the anchor was captured. A key
+//! rotation (`/account/keys/rotate/finish`) takes `phrase_saved: true` for "Save a recovery
+//! phrase".
 //!
 //! Since ADR-0066 every session-landing route also takes an optional `device_id_b64` (the
 //! device the pair names), and `POST /auth/genesis/attest` records the account's identity
@@ -136,6 +183,7 @@
 
 #![forbid(unsafe_code)]
 
+mod account_notices;
 mod anon_tokens;
 mod backup_head;
 mod call_jwt;
@@ -149,12 +197,16 @@ mod key_reset;
 mod key_rotate;
 mod limits;
 mod login_handle;
+mod mail;
 mod opaque;
 mod passkey_vault;
 mod pow;
 mod recall;
 #[cfg(test)]
 mod recall_tests;
+mod recovery_email;
+#[cfg(test)]
+mod recovery_email_tests;
 mod session;
 mod throttle;
 mod totp;
@@ -300,6 +352,12 @@ pub(crate) struct AppState {
     /// per-address token buckets (in memory) that replaced proof of work on
     /// every route except `/signup/start`.
     pub(crate) limits: Arc<limits::Limits>,
+    /// ADR-0067 — the recovery email: the pepper keying `email_key` (and the
+    /// subkeys derived from it) and the mail sender. `None` when
+    /// `LAKKO_AUTH_EMAIL_PEPPER` is unset: the enrol, remove and recover
+    /// routes answer 503 `recovery-email-disabled`. The feature also needs
+    /// `vault_enc_key` and `handle_pepper`.
+    pub(crate) recovery_email: Option<Arc<recovery_email::Config>>,
 }
 
 #[tokio::main]
@@ -492,6 +550,11 @@ async fn main() -> Result<()> {
     );
     limits.log_startup();
 
+    // ADR-0067 — the recovery email: its pepper and its mail sender. Loud-fail
+    // on a malformed pepper or SMTP setting; dormant (with a warning) when the
+    // pepper is unset.
+    let recovery_email = recovery_email::load().context("load the recovery-email config")?;
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
@@ -510,8 +573,11 @@ async fn main() -> Result<()> {
         backup_head_mint_rate,
         anon_tokens: anon_tokens.clone().map(Arc::new),
         handle_pepper: handle_pepper.map(Arc::new),
+        recovery_email: recovery_email.map(Arc::new),
         limits: limits.clone(),
     };
+
+    recovery_email::log_startup(&state);
 
     // Background tasks: periodically delete expired rows from the
     // `opaque_login_states`, `pow_challenges`, and `webauthn_states`
@@ -524,6 +590,10 @@ async fn main() -> Result<()> {
     let _floor_pruner = session::spawn_floor_pruner(pool.clone(), refresh_token_ttl_ms);
     // ADR-0066 section 0.2 — expired recall anchors and stale recall states.
     let _recall_pruner = recall::spawn_pruner(pool.clone());
+    // ADR-0067 — expired mailed-code challenges and tickets; notices past
+    // their 60 days.
+    let _email_pruner = recovery_email::spawn_pruner(pool.clone());
+    let _notice_pruner = account_notices::spawn_pruner(pool.clone());
     // ADR-0033 — prune expired call-admission events + throttled-call rows.
     let _throttle_pruner = throttle::spawn_pruner(pool.clone(), throttle_config);
     // ADR-0054 — drop issuance-quota rows older than the previous epoch.
@@ -676,6 +746,28 @@ fn build_app(state: AppState) -> Router {
         // ANOTHER device and needs a fresh-auth grant AND a statement signed
         // by the account's identity key, so the password alone cannot wipe
         // the owner's devices.
+        // ADR-0067 sections 6 and 9 — the recovery email of the session's
+        // account: add or replace it (a mailed code; the start needs a
+        // fresh-auth grant and sends the letter, so it is also limited per
+        // address), remove it, read its state, mark the account
+        // phrase-protected, and the notices the account's devices show.
+        .route(
+            "/recovery-email/enrol/start",
+            post(recovery_email::enrol_start).route_layer(ip(limits::Category::Email)),
+        )
+        .route(
+            "/recovery-email/enrol/finish",
+            post(recovery_email::enrol_finish),
+        )
+        .route(
+            "/recovery-email",
+            get(recovery_email::status).delete(recovery_email::remove),
+        )
+        .route(
+            "/recovery-email/vault",
+            delete(recovery_email::remove_vault),
+        )
+        .route("/account/notices", get(account_notices::list))
         .route("/auth/session/logout", post(session::logout))
         .route("/auth/session/bind-device", post(session::bind_device))
         .route("/account/devices/revoke", post(devices::revoke))
@@ -840,6 +932,39 @@ fn build_app(state: AppState) -> Router {
         .route(
             "/account/recall/finish",
             post(recall::finish).route_layer(ip(limits::Category::Attempt)),
+        )
+        // ADR-0067 section 7 — getting back in with a mailed code. ANONYMOUS.
+        // `start` answers the same whatever was typed and is the route that
+        // can send a letter (its own address bucket, and the per-handle
+        // letter counter inside); the rest are guessing routes behind the
+        // shared attempt bucket, each bound to a challenge or a ticket.
+        .route(
+            "/recovery-email/available",
+            get(recovery_email::available),
+        )
+        .route(
+            "/recovery-email/recover/start",
+            post(recovery_email::recover_start).route_layer(ip(limits::Category::Email)),
+        )
+        .route(
+            "/recovery-email/recover/verify",
+            post(recovery_email::recover_verify).route_layer(ip(limits::Category::Attempt)),
+        )
+        .route(
+            "/recovery-email/recover/totp",
+            post(recovery_email::recover_totp).route_layer(ip(limits::Category::Attempt)),
+        )
+        .route(
+            "/recovery-email/recover/open",
+            post(recovery_email::recover_open).route_layer(ip(limits::Category::Attempt)),
+        )
+        .route(
+            "/recovery-email/recover/password/start",
+            post(recovery_email::password_start).route_layer(ip(limits::Category::Attempt)),
+        )
+        .route(
+            "/recovery-email/recover/password/finish",
+            post(recovery_email::password_finish).route_layer(ip(limits::Category::Attempt)),
         )
         // Phase 3b4 forward — anonymous JWKS endpoint. The
         // public key is public; the SFU fetches it at

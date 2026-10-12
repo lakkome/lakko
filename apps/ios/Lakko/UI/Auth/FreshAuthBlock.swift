@@ -30,10 +30,16 @@ enum FreshAuthSurface: Equatable {
     case changePassword
     /// Settings > Devices > Remove (ADR-0066 section 2.3, UX 18.1).
     case removeDevice
+    /// ADR-0067 / UX 19.2 — adding, replacing or removing the recovery email.
+    case recoveryEmail
+    /// ADR-0067 / UX 19.5 — `Save a recovery phrase`.
+    case savePhrase
 
     /// The helper under the field, naming the action.
-    var helpKey: String {
+    var helpKey: String? {
         switch self {
+        case .recoveryEmail: return "proof.recovery_email.help"
+        case .savePhrase: return "proof.save_phrase.help"
         case .removeDevice: return "proof.remove_device.help"
         case .reset: return "restore_identity.reset.password_help"
         case .deleteAccount: return "proof.delete.help"
@@ -49,6 +55,7 @@ enum FreshAuthSurface: Equatable {
         switch self {
         case .reset, .addPasskey, .changePassword:
             return "restore_identity.reset.error.wrong_password"
+        case .recoveryEmail, .savePhrase: return "settings.recovery.phrase.wrong_password"
         case .removeDevice: return "proof.remove_device.wrong_password"
         case .deleteAccount: return "proof.delete.wrong_password"
         case .addDeviceRequest: return "proof.add_device.request.wrong_password"
@@ -57,9 +64,11 @@ enum FreshAuthSurface: Equatable {
     }
 
     /// The line after a dismissed passkey sheet: it says what did NOT
-    /// happen on the surface.
-    var cancelledKey: String {
+    /// happen on the surface. `nil` where the catalog has no such line: the
+    /// surface is simply as it was.
+    var cancelledKey: String? {
         switch self {
+        case .recoveryEmail, .savePhrase: return nil
         case .reset: return "proof.reset.cancelled"
         case .deleteAccount: return "settings.account.delete.error.cancelled"
         case .addDeviceRequest: return "proof.add_device.request.cancelled"
@@ -194,7 +203,7 @@ struct FreshAuthBlockLayout: Equatable {
         case .rateLimited(let timed):
             return timed ? .countdown : .text(key: "common.error.too_many_attempts", isError: true)
         case .passkeySheet: return .text(key: "recovery.passkey.waiting", isError: false)
-        case .cancelled: return .text(key: surface.cancelledKey, isError: false)
+        case .cancelled: return surface.cancelledKey.map { .text(key: $0, isError: false) }
         case .passkeyOtherAccount: return .text(key: "proof.passkey.other_account", isError: true)
         case .passkeyFailed: return .text(key: "proof.passkey.failed", isError: true)
         case .offline: return .text(key: "common.error.offline", isError: true)

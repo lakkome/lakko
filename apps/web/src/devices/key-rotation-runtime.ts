@@ -36,7 +36,10 @@ import { loadWasm } from "../wasm";
 import {
   channelOwnerOutcome,
   newRotation,
+  newSavePhraseRotation,
   readRotation,
+  rotationRevokedDeviceIds,
+  rotationSavesPhrase,
   rotationResumesByItself,
   runRotation,
   writeRotation,
@@ -49,7 +52,11 @@ import {
   type RotationStep,
 } from "./key-rotation";
 import { useDeviceRemoval } from "./removal-runtime";
-import { keyRotationPort } from "./sync/key-rotation-port";
+import { awaitKeyRotationPort, keyRotationPort } from "./sync/key-rotation-port";
+
+/** How long "Save a recovery phrase" waits for the DeviceGroup handle of a
+ *  page that just landed (right after sign-up). Chosen. */
+const SAVE_PHRASE_PORT_WAIT_MS = 15_000;
 
 /** What starting (or continuing) a rotation came to. */
 export type RotateResult =
@@ -71,6 +78,11 @@ export interface KeyRotationRuntime {
   readonly activeStep: Accessor<RotationStep | null>;
   /** Start the rotation that removes `targetKey`, or continue the record. */
   rotate(targetKey: Uint8Array, grant: string | null, attestation?: Uint8Array | null): Promise<RotateResult>;
+  /** ADR-0067 section 3, "Save a recovery phrase": change the account keys
+   *  with every device kept and make the account phrase-protected. Starts
+   *  the operation or continues its record. The new words are shown once it
+   *  is complete. */
+  savePhrase(grant: string | null): Promise<RotateResult>;
   /** Continue the owed record (the same device), with a new proof when the
    *  commit still needs one. */
   retry(grant: string | null): Promise<RotateResult>;
@@ -223,13 +235,18 @@ export function useKeyRotation(): KeyRotationRuntime {
         return { kind: "removed", preRemovalEpoch: before };
       },
       prepare: async (current) => {
-        const port = keyRotationPort();
+        const savesPhrase = rotationSavesPhrase(current);
+        const port = savesPhrase
+          ? await awaitKeyRotationPort(SAVE_PHRASE_PORT_WAIT_MS)
+          : keyRotationPort();
         if (port === null) throw new Error("the DeviceGroup is not loaded");
         const prepared = await auth.keyRotation.prepare(current.deviceIdB64);
         // The one ordering seam (`sealKeyRotationAfterRemoval`): sealed only
-        // when the removed device is out of the DeviceGroup.
+        // when the removed device is out of the DeviceGroup. A rotation
+        // that removes no device names none (no leaf holds an empty key)
+        // and has no earlier epoch to be past.
         const sealed = await port.post({
-          removedDeviceKey: b64UrlDecode(current.deviceIdB64),
+          removedDeviceKey: savesPhrase ? new Uint8Array(0) : b64UrlDecode(current.deviceIdB64),
           preRemovalEpoch: current.preRemovalEpoch === undefined ? null : BigInt(current.preRemovalEpoch),
           envelope: prepared.envelope,
         });
@@ -241,7 +258,11 @@ export function useKeyRotation(): KeyRotationRuntime {
       },
       commit: async (current, grant) => {
         try {
-          const done = await auth.keyRotation.commit(grant, [b64UrlDecode(current.deviceIdB64)]);
+          const done = await auth.keyRotation.commit(
+            grant,
+            rotationRevokedDeviceIds(current).map(b64UrlDecode),
+            { phraseSaved: rotationSavesPhrase(current) },
+          );
           return { status: 200 as const, ...done };
         } catch (err) {
           error = err;
@@ -327,6 +348,17 @@ export function useKeyRotation(): KeyRotationRuntime {
       if (removal.blocked()) return { kind: "blocked" };
       const start = held !== null && held.deviceIdB64 === deviceIdB64 ? held : newRotation(deviceIdB64, Date.now());
       return run(a, start, grant, attestation);
+    },
+    async savePhrase(grant) {
+      const a = account();
+      if (a === null || chats.accountIdentity() === null) return { kind: "not-ready" };
+      const held = readRotation(storage(), a);
+      // A rotation already past its commit finishes first (whichever kind);
+      // one that never committed is replaced by this one.
+      if (held !== null && rotationResumesByItself(held)) return run(a, held, grant, undefined);
+      if (removal.blocked()) return { kind: "blocked" };
+      const start = held !== null && rotationSavesPhrase(held) ? held : newSavePhraseRotation(Date.now());
+      return run(a, start, grant, undefined);
     },
     async retry(grant) {
       const a = account();

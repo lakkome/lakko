@@ -51,8 +51,12 @@ enum ThreeWords {
         cachedUsername: String?,
         phraseOnDevice: Bool,
         keysOnDevice: Bool,
-        suspended: Bool
+        suspended: Bool,
+        phraseSaved: Bool
     ) -> Bool {
+        // ADR-0067 — an account whose phrase was never saved has no words
+        // the person could know: no three-word surface exists for it.
+        guard phraseSaved else { return false }
         guard !suspended else { return false }
         guard let cachedUsername,
               !cachedUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

@@ -2,8 +2,13 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The post-signup "Save your recovery phrase" screen, as a guided flow
- * (docs/ux/client-redesign.md section 5.6):
+ * "Save your recovery phrase": new recovery words, as a guided flow
+ * (docs/ux/client-redesign.md section 5.6). Shown after the account keys
+ * were changed on this device (a key reset, taking the account back, a key
+ * rotation, "Save a recovery phrase" of ADR-0067), never by a sign-up: the
+ * phrase is not shown at sign-up any more (ADR-0067 D2), and the file keeps
+ * its name from before that decision.
+ *
  *
  *   1. the 12 numbered words, reading across the rows (3 x 4 at phone
  *      width, 4 x 3 on a wide screen), Copy and a short explanation;
@@ -13,8 +18,8 @@
  *      (docs/ux/identity-recovery.md section 9, step 3): "Add a passkey" or
  *      "Not now". Adding one continues into the opt-in keys choice
  *      (`PasskeyKeysChoice`) when the browser can protect keys with it. The
- *      step never blocks signup: every outcome, a failure included, leaves
- *      "Not now" available.
+ *      step never blocks: every outcome, a failure included, leaves "Not
+ *      now" available.
  *
  * The phrase is acknowledged when the last step ends, so a reload in the
  * middle shows the phrase again from step 1.
@@ -51,7 +56,7 @@ type Step = "show" | "confirm" | "passkey";
 const PASSKEYS_SUPPORTED = WebauthnClient.isWebauthnAvailable();
 
 /**
- * Render the pending signup phrase. Acknowledging it clears the phrase; the
+ * Render the pending new words. Acknowledging them clears the phrase; the
  * guard that rendered this then re-decides what to show (the route it wraps,
  * or the `?return=` target on a public auth page).
  */
@@ -163,10 +168,18 @@ export default function SignupPhrasePrompt(): JSX.Element {
 
 /**
  * Step 3: "Add a passkey so you can sign in with your face, fingerprint or
- * screen lock." Skippable, and nothing here can fail the signup: the account
- * exists and its phrase is confirmed.
+ * screen lock." Skippable, and nothing here can fail: the account exists and
+ * its phrase is confirmed.
  */
-function PasskeyOffer(props: { readonly onDone: () => void }): JSX.Element {
+export function PasskeyOffer(props: {
+  readonly onDone: () => void;
+  /** A passkey now exists for the account (whatever the keys choice that
+   *  follows comes to). */
+  readonly onAdded?: () => void;
+  /** The "Protect your account" step (ADR-0067): no "Step 3 of 3" line, and
+   *  the second button reads Back. */
+  readonly standalone?: boolean;
+}): JSX.Element {
   const auth = useAuth();
   const { client, username } = useWebauthnClient();
   const [busy, setBusy] = createSignal(false);
@@ -176,9 +189,8 @@ function PasskeyOffer(props: { readonly onDone: () => void }): JSX.Element {
   const [added, setAdded] = createSignal<AddedPasskey | null>(null);
   const [resultKey, setResultKey] = createSignal<string | null>(null);
 
-  // Adding a passkey needs a fresh proof. The signup finish minted one, so
-  // nothing is asked here unless the person took more than ten minutes over
-  // the phrase; then the password field appears.
+  // Adding a passkey needs a fresh proof. When none is live (a key change
+  // spends the one it was made with) the password field appears.
   const gate = createProofGate({
     auth,
     copy: PROOF_COPY.addPasskey,
@@ -214,6 +226,7 @@ function PasskeyOffer(props: { readonly onDone: () => void }): JSX.Element {
             ? { accountIdBytes: secrets.accountId, accountIdB64: st.account.accountId }
             : null,
       });
+      props.onAdded?.();
       if (passkey.outcome === "offer-keys-choice") setAdded(passkey);
       else setResultKey("settings.passkeys.added_no_keys");
     } catch (err) {
@@ -254,7 +267,9 @@ function PasskeyOffer(props: { readonly onDone: () => void }): JSX.Element {
   return (
     <>
       <h1>{t("auth.signup.passkey.title")}</h1>
-      <p class="lk-auth-step">{t("recovery_phrase.step", { current: 3, total: 3 })}</p>
+      <Show when={props.standalone !== true}>
+        <p class="lk-auth-step">{t("recovery_phrase.step", { current: 3, total: 3 })}</p>
+      </Show>
       <Show
         when={resultKey()}
         fallback={
@@ -278,7 +293,7 @@ function PasskeyOffer(props: { readonly onDone: () => void }): JSX.Element {
                   {busy() ? t("recovery.passkey.waiting") : t("auth.signup.passkey.add")}
                 </button>
                 <button type="button" class="ghost" disabled={busy()} onClick={props.onDone}>
-                  {t("common.not_now")}
+                  {props.standalone === true ? t("common.back") : t("common.not_now")}
                 </button>
               </>
             }

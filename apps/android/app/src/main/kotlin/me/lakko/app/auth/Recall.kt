@@ -340,6 +340,12 @@ public data class RecallStatus(
     val changedAtMs: Long,
     /** Password attempts left before the server destroys the anchor. */
     val attemptsRemaining: Int,
+    /** ADR-0067: the account the anchor belongs to (the answer names it for
+     *  a device that asked by login handle). */
+    val accountId: ByteArray? = null,
+    /** ADR-0067 section 8: the account can be taken back with the recovery
+     *  phrase it had before the reset (it had a saved phrase then). */
+    val phraseArm: Boolean = false,
 )
 
 /** The old password did not open the anchor: noticed on this device (the
@@ -636,3 +642,11 @@ private const val DEFAULT_RETRY_SECS: Long = 60L
 private const val HTTP_UNAUTHORIZED: Int = 401
 private const val HTTP_CONFLICT: Int = 409
 private const val HTTP_TOO_MANY: Int = 429
+
+/**
+ * ADR-0067 section 8 / UX 19.7 - whether the 18.4 form offers `Use my
+ * recovery phrase instead`: only once the server said the phrase arm is
+ * open (the account had a saved phrase before the reset).
+ */
+public fun recallOffersPhrase(ui: RecallUi): Boolean =
+    (ui.availability as? RecallAvailability.Open)?.status?.phraseArm == true

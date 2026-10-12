@@ -21,10 +21,39 @@ const ALL_KINDS: GuardAuthKind[] = [
   "save-fresh-phrase",
 ];
 
-describe("the signup phrase gate", () => {
-  it("keeps /signup on the phrase screen when signup lands the session", () => {
-    // The defect: the anonymous guard saw `session` and redirected home in the
-    // same tick signup produced the phrase, so the phrase was never rendered.
+describe("the sign-up's protect step (ADR-0067, UX 19.1a)", () => {
+  it("keeps /signup on the step when signup lands the session", () => {
+    // `/signup` sits in the anonymous guard, which would otherwise navigate
+    // home in the same tick the session landed.
+    expect(anonymousGuardView("session", false, false, true)).toBe("protect-account");
+  });
+
+  it("shows the step instead of a protected route while it is owed", () => {
+    expect(sessionGuardView("session", false, false, true)).toBe("protect-account");
+  });
+
+  it("releases both guards once the person chose", () => {
+    expect(sessionGuardView("session", false, false, false)).toBe("children");
+    expect(anonymousGuardView("session", false, false, false)).toBe("redirect-home");
+  });
+
+  it("comes after owed new words and before the new-password step", () => {
+    // "Save a recovery phrase" on the step ends in new words: they are
+    // shown first, and never the step again in between.
+    expect(sessionGuardView("session", true, false, true)).toBe("save-signup-phrase");
+    expect(sessionGuardView("session", false, true, true)).toBe("protect-account");
+  });
+
+  it("is never shown outside a live session", () => {
+    for (const kind of ALL_KINDS.filter((k) => k !== "session")) {
+      expect(sessionGuardView(kind, false, false, true)).not.toBe("protect-account");
+      expect(anonymousGuardView(kind, false, false, true)).not.toBe("protect-account");
+    }
+  });
+});
+
+describe("the new-words gate", () => {
+  it("keeps a public auth page on the phrase screen while new words are owed", () => {
     expect(anonymousGuardView("session", true)).toBe("save-signup-phrase");
   });
 
@@ -39,7 +68,7 @@ describe("the signup phrase gate", () => {
     expect(anonymousGuardView("session", false)).toBe("redirect-home");
   });
 
-  it("never shows a signup phrase outside a live session", () => {
+  it("never shows new words outside a live session", () => {
     for (const kind of ALL_KINDS.filter((k) => k !== "session")) {
       expect(sessionGuardView(kind, true)).not.toBe("save-signup-phrase");
       expect(anonymousGuardView(kind, true)).not.toBe("save-signup-phrase");

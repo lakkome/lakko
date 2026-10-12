@@ -24,15 +24,21 @@ struct SettingsScreen: View {
     /// object rather than a second implementation.
     @StateObject private var accountDeletion: PasskeysViewModel
 
+    /// ADR-0067 — what protects the account: the status line, the banner
+    /// and the two rows of the Account section.
+    private let accountProtection: AccountProtectionCenter?
+
     init(
         account: SessionAccount,
         authRepository: AuthRepository,
+        accountProtection: AccountProtectionCenter? = nil,
         onOpen: @escaping (TabRoute) -> Void,
         onLogout: @escaping () -> Void,
         onForgetDevice: @escaping () -> Void,
         onAccountDeleted: @escaping (String) -> Void
     ) {
         self.account = account
+        self.accountProtection = accountProtection
         self.onOpen = onOpen
         self.onLogout = onLogout
         self.onForgetDevice = onForgetDevice
@@ -121,6 +127,14 @@ struct SettingsScreen: View {
 
             Section(l10n.t("settings.section.account")) {
                 row(l10n.t("settings.section.profile"), systemImage: "person.crop.circle") { onOpen(.profile) }
+                // UX 19.1 / 19.2 / 19.5 — its own view observes the centre,
+                // so this screen is not re-evaluated by it.
+                if let accountProtection {
+                    AccountProtectionSection(
+                        center: accountProtection,
+                        hasUsername: !account.username.isEmpty,
+                        onOpen: onOpen)
+                }
             }
 
             // `docs/ux/who-can-find-me.md` section 2 — Privacy, after Profile.

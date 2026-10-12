@@ -12,7 +12,7 @@
  * `privacy-groups` (the chosen groups and channels) a page under Privacy. Account is last:
  * it holds the export and the danger zone.
  */
-import { createSignal, Show, type JSX } from "solid-js";
+import { createSignal, onMount, Show, type JSX } from "solid-js";
 import { A, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
@@ -31,6 +31,8 @@ import { currentLanguage, supportedLanguages, t } from "../l10n";
 import { LanguagePicker } from "../l10n/LanguagePicker";
 import { WhoCanFindMeList, WhoCanFindMeSection } from "../settings/WhoCanFindMe";
 import { RecoveryPage } from "../settings/RecoveryPage";
+import { ProtectionCard } from "../auth/protect/ProtectionCard";
+import { refreshProtection } from "../auth/protect/protection-state";
 import Profile from "./Profile";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { paths } from "./paths";
@@ -79,6 +81,14 @@ export default function Settings(): JSX.Element {
   const params = useParams<{ section?: string }>();
   const auth = useAuth();
   const profiles = useProfiles();
+  // ADR-0067 (alignment M): whenever Settings opens, how the account is
+  // protected is read again, which keeps this device's "phrase-protected"
+  // flag in step with a phrase saved on another device.
+  onMount(() => {
+    const s = auth.state();
+    const token = auth.identitySecrets()?.sessionToken ?? null;
+    if (s.kind === "session" && token !== null) void refreshProtection(s.account.accountId, token);
+  });
 
   // `/settings` (no section) shows the list alone on a narrow screen and
   // Profile beside it on a wide one.
@@ -175,6 +185,7 @@ export default function Settings(): JSX.Element {
               <p>{t("settings.account.lede")}</p>
             </div>
             <ExportDataCard />
+            <ProtectionCard />
             <AccountCard />
           </Show>
         </div>

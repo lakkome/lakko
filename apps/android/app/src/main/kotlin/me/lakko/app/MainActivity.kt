@@ -696,43 +696,17 @@ private fun AppRoot(
             SaveFreshPhraseRoot(repository = authRepository, username = current.account.username)
         }
         is AuthState.Session -> {
-            // Sign-up lands the session the moment the account exists; the
-            // recovery phrase it produced is shown (and confirmed) here,
-            // before the app. The repository holds it until it is confirmed,
-            // and brings it back after a restart while it is still owed.
+            // A fresh identity's phrase that was never confirmed, brought
+            // back after a restart, is shown before the app. (Sign-up shows
+            // no phrase: ADR-0067 D2.)
             val owedPhrase by authRepository.signupPhrase.collectAsState()
             val phraseToSave = owedPhrase
-            val owedPhraseOrigin by authRepository.signupPhraseOrigin.collectAsState()
-            if (phraseToSave != null && owedPhraseOrigin == me.lakko.app.auth.OwedPhraseOrigin.FreshIdentity) {
-                // A fresh identity's phrase that was never confirmed, brought
-                // back after a restart: the same words around it as when it
-                // was made, not the sign-up's.
+            if (phraseToSave != null) {
                 InsetRoot {
                     me.lakko.app.ui.auth.SaveFreshPhraseScreen(
                         phrase = phraseToSave,
                         onConfirm = { authRepository.acknowledgeSignupPhrase() },
                         username = current.account.username,
-                    )
-                }
-                return
-            }
-            if (phraseToSave != null) {
-                InsetRoot {
-                    me.lakko.app.ui.auth.RecoveryPhraseOnboarding(
-                        phrase = phraseToSave,
-                        onDone = { authRepository.acknowledgeSignupPhrase() },
-                        // Step 3: offer a passkey. A passkey is registered
-                        // under the username; a guest account has none.
-                        thirdStep = if (current.account.username.isNotBlank()) {
-                            { finish ->
-                                me.lakko.app.ui.auth.SignupPasskeyOffer(
-                                    repository = authRepository,
-                                    onDone = finish,
-                                )
-                            }
-                        } else {
-                            null
-                        },
                     )
                 }
                 return
@@ -799,6 +773,29 @@ private fun AppRoot(
                     }
                 },
             )
+        }
+    }
+
+    val sessionAccount = (state as? AuthState.Session)?.account
+    if (sessionAccount != null) {
+        // ADR-0067 / UX 19.1a - "Protect your account", the one step after
+        // sign-up. Drawn ABOVE the session root, which keeps running
+        // underneath: "Save a recovery phrase" changes the account keys and
+        // needs the device list the session root opens.
+        val protectOwed by authRepository.protectStepOwed.collectAsStateWithLifecycle()
+        if (protectOwed) {
+            androidx.compose.material3.Surface(modifier = Modifier.fillMaxSize()) {
+                InsetRoot {
+                    me.lakko.app.ui.auth.ProtectAccountStep(
+                        repository = authRepository,
+                        chatRepository = chatRepository,
+                        hasUsername = sessionAccount.username.isNotBlank(),
+                    )
+                }
+            }
+        } else {
+            // UX 19.2 / 19.5 / 19.6 - what happened to the account elsewhere.
+            me.lakko.app.ui.auth.AccountNoticeHost(repository = authRepository, chatRepository = chatRepository)
         }
     }
 
@@ -926,6 +923,21 @@ private fun SaveFreshPhraseRoot(
     // directory and the device list the words are held back and the screen
     // offers "Try again" (or a sign-in, for a reset older than 30 days).
     val publishOwed by repository.freshPublishOwed.collectAsState()
+    // ADR-0067 - new words are shown only to a phrase-protected account. For
+    // the others the reset or the recall lands without a phrase step once
+    // its publish is done (while it is owed, the retry screen stays).
+    if (publishOwed == null && !repository.showsNewWordsHere()) {
+        LaunchedEffect(Unit) {
+            try {
+                repository.confirmFreshPhraseSaved()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                android.util.Log.w("lakko-auth", "the new keys' session did not land: ${cause.javaClass.simpleName}")
+            }
+        }
+        LoadingScreen()
+        return
+    }
     me.lakko.app.ui.auth.SaveFreshPhraseScreen(
         phrase = phrase,
         onConfirm = { repository.confirmFreshPhraseSaved() },
@@ -933,6 +945,7 @@ private fun SaveFreshPhraseRoot(
         publishOwed = publishOwed,
         onRetryPublish = { repository.retryFreshPublish() },
         onLogOut = { repository.logout() },
+        wordless = !repository.showsNewWordsHere(),
     )
 }
 
@@ -1963,6 +1976,31 @@ private fun SessionRoot(
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
                         onOpenWhoCanFindMe = { navController.navigate(Routes.WHO_CAN_FIND_ME) },
+                        accountProtection = {
+                            me.lakko.app.ui.auth.AccountProtectionSection(
+                                repository = authRepository,
+                                onOpenRecoveryEmail = { navController.navigate(Routes.RECOVERY_EMAIL) },
+                                onOpenSavePhrase = { navController.navigate(Routes.SAVE_PHRASE) },
+                                onOpenShowPhrase = { navController.navigate(Routes.RECOVERY) },
+                            )
+                        },
+                    )
+                }
+                // ADR-0067 / UX 19.2 - Settings > Account > Recovery email.
+                composable(Routes.RECOVERY_EMAIL) {
+                    me.lakko.app.ui.auth.RecoveryEmailScreen(
+                        repository = authRepository,
+                        onDone = { navController.popBackStack() },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                // ADR-0067 / UX 19.5 - Settings > Account > Recovery phrase.
+                composable(Routes.SAVE_PHRASE) {
+                    me.lakko.app.ui.auth.SaveRecoveryPhraseScreen(
+                        repository = authRepository,
+                        chatRepository = chatRepository,
+                        onDone = { navController.popBackStack() },
+                        onBack = { navController.popBackStack() },
                     )
                 }
 
@@ -2390,6 +2428,8 @@ private object Routes {
     const val DEVICES = "settings/devices"
     const val DEVICES_ADD = "settings/devices/add"
     const val RECOVERY = "settings/recovery"
+    const val RECOVERY_EMAIL = "settings/recovery_email"
+    const val SAVE_PHRASE = "settings/save_phrase"
     const val ANTI_CENSORSHIP = "settings/anti_censorship"
     const val CHANNELS_I_SHARE = "settings/channels_i_share"
     const val LANGUAGE = "settings/language"

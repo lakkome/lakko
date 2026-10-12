@@ -428,6 +428,10 @@ final class RecallFlowTests: XCTestCase {
         private(set) var statusCalls: [RecallRecord] = []
         var takeBack: Result<SessionPair, Error> = .failure(RecallWrongPassword())
         private(set) var attempts: [RecallAttempt] = []
+        /// ADR-0067 section 8 — the status read by login handle.
+        var byHandle: Result<RecallByHandle, Error> = .failure(
+            AuthClientError.http(status: 401, endpoint: "/account/recall/status", body: #"{"error":"recall-refused"}"#))
+        private(set) var byHandleCalls: [(handle: Data, seed: Data)] = []
         let attestation = Data(repeating: 0xA7, count: KeyResetResult.attestationLength)
         var grant: FreshAuthGrant? = FreshAuthGrant(grant: "grant-recall", expiresAtMs: 9_000_000)
         private(set) var events: [String] = []
@@ -445,6 +449,10 @@ final class RecallFlowTests: XCTestCase {
                     return RecallLanded(
                         reset: KeyResetResult(attestation: self.attestation, session: pair),
                         freshGrant: self.grant)
+                },
+                statusByHandle: { [unowned self] handle, seed in
+                    self.byHandleCalls.append((handle, seed))
+                    return try self.byHandle.get()
                 }
             )
         }
@@ -500,6 +508,7 @@ final class RecallFlowTests: XCTestCase {
         AccountIdentitySeedStore.deleteAccountIdentitySeed(accountIdB64: accountIdB64)
         DeviceIdentityStore.deleteDeviceIdentitySeed(accountIdB64: accountIdB64)
         try? PhraseStore().deletePhrase(accountIdB64: accountIdB64)
+        AccountProtectionStore().clear(accountIdB64: accountIdB64)
         for suite in suites { UserDefaults().removePersistentDomain(forName: suite) }
         suites = []
         try await super.tearDown()
@@ -520,12 +529,16 @@ final class RecallFlowTests: XCTestCase {
     private func device(
         signedIn: Bool = true,
         holdsKeys: Bool = true,
+        phraseProtected: Bool = true,
         recalls: InMemoryRecallRecordStore = InMemoryRecallRecordStore(),
         server: Server = Server(),
         clock: Clock = Clock()
     ) -> Harness {
         let store = SessionStore(defaults: defaults("recall-session"))
         let persistence = Persistence()
+        // ADR-0067: a phrase-protected account by default (after it is taken
+        // back, its new words are shown).
+        AccountProtectionStore().setPhraseSaved(phraseProtected && signedIn, accountIdB64: accountIdB64)
         if signedIn {
             store.save(PersistedSession(accountIdB64: accountIdB64, username: "alice"))
             persistence.token = PersistedSessionToken(pair: .fixture(access: "tok-old", accessExpiresAtMs: 2_000_000))
@@ -587,6 +600,139 @@ final class RecallFlowTests: XCTestCase {
         let open = await waitUntil { h.repository.recall?.canTakeBack == true }
         XCTAssertTrue(open)
         return h
+    }
+
+    // MARK: ADR-0067 section 8 — the phrase as the proof
+
+    func testAnOldDeviceTakesTheAccountBackWithThePhraseInsteadOfThePassword() async throws {
+        let h = await asking()
+        h.repository.recallTapNo()
+        h.server.takeBack = .success(.fixture(access: "tok-recalled", refresh: "r1.recalled", generation: 3))
+        let old = RecoveryMnemonic.generate()
+
+        await h.repository.recallTakeBack(proof: .phrase(" \(old.phrase()) "), newPassword: Data("new-password".utf8))
+
+        // The proof is the seed of the words typed; no password is sent.
+        let attempt = try XCTUnwrap(h.server.attempts.first)
+        XCTAssertEqual(attempt.oldPhraseSeed, old.toSeed())
+        XCTAssertEqual(attempt.oldPassword, Data())
+        XCTAssertEqual(attempt.newPassword, Data("new-password".utf8))
+        // The outcome is the recall's: a NEW identity, its words shown last.
+        XCTAssertNil(h.repository.recall)
+        XCTAssertEqual(
+            h.repository.state, .saveFreshPhrase(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+    }
+
+    func testAnAccountWithoutASavedPhraseIsTakenBackWithNoWordsOnAnyScreen() async throws {
+        let server = Server()
+        server.statusAnswers = [.success(openWindow)]
+        let h = device(phraseProtected: false, server: server)
+        h.repository.handleKeysSuperseded(accountIdB64: accountIdB64)
+        let open = await waitUntil { h.repository.recall?.canTakeBack == true }
+        XCTAssertTrue(open)
+        // The record kept the flag across the staged wipe.
+        XCTAssertEqual(h.recalls.record?.phraseSaved, false)
+        h.repository.recallTapNo()
+        server.takeBack = .success(.fixture(access: "tok-recalled", refresh: "r1.recalled", generation: 3))
+
+        await h.repository.recallTakeBack(oldPassword: Data("old-password".utf8), newPassword: Data("new-password".utf8))
+
+        XCTAssertEqual(
+            h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")),
+            "no phrase screen")
+        XCTAssertNil(h.repository.freshPhrase())
+        XCTAssertFalse(h.markers.isPhraseOwed(accountIdB64: accountIdB64))
+        XCTAssertNil(h.repository.devicePhrase())
+        XCTAssertTrue(h.repository.accountRecalledThisSession)
+    }
+
+    func testWordsThatAreNoPhraseAreAWrongProofWithoutARequest() async {
+        let h = await asking()
+        h.repository.recallTapNo()
+        await h.repository.recallTakeBack(
+            proof: .phrase("these are not twelve words"), newPassword: Data("new-password".utf8))
+        XCTAssertTrue(h.server.attempts.isEmpty)
+        XCTAssertEqual(h.repository.recall?.form, .wrongPassword(triesLeft: nil))
+        XCTAssertEqual(h.repository.recall?.step, .form)
+    }
+
+    func testAFreshDeviceAsksByHandleWhetherTheWordsWereTheAccountsPhrase() async throws {
+        let server = Server()
+        let h = device(signedIn: false, server: server)
+        let old = RecoveryMnemonic.generate()
+        let phraseWindow = RecallWindow(
+            anchorSeq: 6, expiresAtMs: 1_000_000 + 10 * day, changedAtMs: 900_000, attemptsRemaining: 20,
+            phraseArm: true)
+
+        // Every refusal reads as "not this account's phrase": no offer.
+        let none = await h.repository.phraseRecallOffer(username: "@Alice", mnemonicPhrase: old.phrase())
+        XCTAssertNil(none)
+        // The account is named by the login handle of the typed name, the
+        // statement signed by the key derived from the typed words.
+        XCTAssertEqual(server.byHandleCalls.first?.handle, try loginHandle(username: "alice"))
+        XCTAssertEqual(
+            server.byHandleCalls.first?.seed, try Identity.fromSeed(seed: old.toSeed()).ed25519Seed())
+
+        // An account that had an email vault: the phrase proves nothing.
+        server.byHandle = .success(RecallByHandle(window: openWindow, accountId: accountId))
+        let noArm = await h.repository.phraseRecallOffer(username: "alice", mnemonicPhrase: old.phrase())
+        XCTAssertNil(noArm)
+
+        server.byHandle = .success(RecallByHandle(window: phraseWindow, accountId: accountId))
+        let offered = await h.repository.phraseRecallOffer(username: "alice", mnemonicPhrase: old.phrase())
+        let offer = try XCTUnwrap(offered)
+        XCTAssertEqual(offer.accountId, accountId)
+        XCTAssertEqual(offer.username, "alice")
+        XCTAssertEqual(offer.window.changedAtMs, 900_000, "the date the prompt names")
+
+        // Words that are no phrase ask nothing.
+        let before = server.byHandleCalls.count
+        let bad = await h.repository.phraseRecallOffer(username: "alice", mnemonicPhrase: "not a phrase")
+        XCTAssertNil(bad)
+        XCTAssertEqual(server.byHandleCalls.count, before)
+    }
+
+    func testAFreshDeviceTakesTheAccountBackWithThePhrase() async throws {
+        let server = Server()
+        let h = device(signedIn: false, server: server)
+        let old = RecoveryMnemonic.generate()
+        let offer = PhraseRecallOffer(
+            accountId: accountId, username: "alice",
+            window: RecallWindow(
+                anchorSeq: 6, expiresAtMs: 1_000_000 + 10 * day, changedAtMs: 900_000, attemptsRemaining: 20,
+                phraseArm: true))
+
+        // The words do not open the anchor: nothing changed, nothing landed.
+        do {
+            try await h.repository.takeBackWithPhrase(
+                offer: offer, mnemonicPhrase: old.phrase(), newPassword: Data("new-password".utf8))
+            XCTFail("a wrong proof must not land")
+        } catch {
+            XCTAssertTrue(error is RecallWrongPassword)
+        }
+        XCTAssertNil(h.tokens.current)
+        XCTAssertFalse(h.repository.accountRecalledThisSession)
+
+        server.takeBack = .success(.fixture(access: "tok-recalled", refresh: "r1.recalled", generation: 3))
+        try await h.repository.takeBackWithPhrase(
+            offer: offer, mnemonicPhrase: old.phrase(), newPassword: Data("new-password".utf8))
+
+        let attempt = try XCTUnwrap(server.attempts.last)
+        XCTAssertEqual(attempt.anchorSeq, 6)
+        XCTAssertEqual(attempt.oldPhraseSeed, old.toSeed())
+        XCTAssertEqual(attempt.oldPassword, Data())
+        // The statements are signed by the key derived from the typed words.
+        XCTAssertEqual(attempt.record.oldSeed, try Identity.fromSeed(seed: old.toSeed()).ed25519Seed())
+        XCTAssertEqual(attempt.record.accountIdB64, accountIdB64)
+        XCTAssertNotEqual(attempt.newSeed, old.toSeed(), "the old identity does not return")
+        // The recall's outcome: the session, the attested upload, the new words last.
+        XCTAssertEqual(h.tokens.current?.sessionToken, "tok-recalled")
+        XCTAssertEqual(
+            h.repository.state, .saveFreshPhrase(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+        XCTAssertEqual(h.directory.published.first?.attest, server.attestation)
+        XCTAssertTrue(h.repository.accountRecalledThisSession)
+        let phrase = try XCTUnwrap(h.repository.freshPhrase())
+        XCTAssertEqual(try RecoveryMnemonic.fromPhrase(phrase: phrase).toSeed(), attempt.newSeed)
     }
 
     private func refused() -> Error {

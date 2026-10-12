@@ -340,6 +340,11 @@ final class RecoveryFlowTests: XCTestCase {
     private func parkWithoutKeys(_ h: Harness) async throws {
         try await h.repository.recoverWithTotp(username: "alice", code: "123456")
         XCTAssertTrue(isNeedsKeys(h.repository))
+        // A phrase-protected account: a key reset shows its new words
+        // (ADR-0067; the other kind is `testAKeyResetWithoutASavedPhrase...`).
+        if let accountIdB64 = h.store.load()?.accountIdB64 {
+            AccountProtectionStore().setPhraseSaved(true, accountIdB64: accountIdB64)
+        }
     }
 
     // MARK: - The phrase is stored on every landing path that gives keys
@@ -354,7 +359,15 @@ final class RecoveryFlowTests: XCTestCase {
                 recoveryPhrase: mnemonic.phrase(), sessionToken: "tok-signup", sessionExpiresAtMs: 9_000_000),
             username: "alice")
         XCTAssertTrue(isSession(h.repository))
+        // The device keeps the phrase (it seals the email vault and is what
+        // a phrase typed later is checked against)...
         XCTAssertEqual(DevicePhrase.read(accountIdB64: account.b64), mnemonic.phrase())
+        XCTAssertEqual(h.repository.heldPhraseForEmailVault(), mnemonic.phrase())
+        // ...but ADR-0067 D2: it is not shown at sign-up, and `Show recovery
+        // phrase` has nothing to show until the person saved one.
+        XCTAssertNil(h.repository.devicePhrase(), "no saved phrase, nothing to show")
+        XCTAssertFalse(h.repository.threeWordsCheckAvailable)
+        AccountProtectionStore().setPhraseSaved(true, accountIdB64: account.b64)
         XCTAssertEqual(h.repository.devicePhrase(), mnemonic.phrase(), "what Show recovery phrase reads")
     }
 
@@ -447,6 +460,51 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertFalse(h.markers.isPublishOwed(accountIdB64: account.b64))
         XCTAssertFalse(h.markers.isPhraseOwed(accountIdB64: account.b64))
         XCTAssertEqual(h.tokens.current?.sessionToken, "tok-access", "the old pair stays")
+    }
+
+    func testAKeyResetWithoutASavedPhraseShowsNoWordsAndLandsTheSession() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        // Not phrase-protected (ADR-0067): no words on any screen.
+        AccountProtectionStore().setPhraseSaved(false, accountIdB64: account.b64)
+
+        _ = try await mint(h)
+
+        XCTAssertTrue(isSession(h.repository), "no phrase screen, no withheld-words screen")
+        XCTAssertNil(h.repository.freshPhrase())
+        XCTAssertFalse(h.repository.freshPublishPending)
+        XCTAssertFalse(h.markers.isPhraseOwed(accountIdB64: account.b64), "nothing waits to be confirmed")
+        XCTAssertNil(h.repository.devicePhrase(), "and nothing to show in Settings")
+        // The device keeps the new words unseen, and the publish still runs.
+        XCTAssertNotNil(DevicePhrase.read(accountIdB64: account.b64))
+        let published = await waitUntil { !h.markers.isPublishOwed(accountIdB64: account.b64) }
+        XCTAssertTrue(published)
+        XCTAssertEqual(h.directory.events, ["publish+attest"])
+    }
+
+    func testAnOwedPublishWithoutASavedPhraseShowsTheFinishingScreenThenLandsWithNoWords() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        AccountProtectionStore().setPhraseSaved(false, accountIdB64: account.b64)
+        h.reset.deviceGroupError = DsStatementError.keyResetDisabled
+
+        _ = try await mint(h)
+
+        // The retry screen, with no words behind it.
+        if case .saveFreshPhrase = h.repository.state {} else { XCTFail("the finishing screen") }
+        XCTAssertTrue(h.repository.freshPublishPending)
+        XCTAssertFalse(h.repository.freshShowsWords)
+        XCTAssertNil(h.repository.freshPhrase())
+
+        // `Try again` finishes the publish and the session lands at once.
+        h.reset.deviceGroupError = nil
+        try await h.repository.retryFreshPublish()
+        XCTAssertTrue(isSession(h.repository), "no phrase screen")
+        XCTAssertFalse(h.markers.isPublishOwed(accountIdB64: account.b64))
+        XCTAssertFalse(h.markers.isPhraseOwed(accountIdB64: account.b64))
+        XCTAssertNil(h.repository.devicePhrase())
     }
 
     func testAKeyResetPersistsThenPublishesInOrderThenShowsThePhrase() async throws {
@@ -1131,6 +1189,9 @@ final class RecoveryFlowTests: XCTestCase {
         let mnemonic = RecoveryMnemonic.generate()
         try AccountIdentitySeedStore.putAccountIdentitySeed(accountIdB64: account.b64, seed: mnemonic.toSeed())
         try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mnemonic.phrase().utf8))
+        // ADR-0067: the account's phrase was saved (the three-word surfaces
+        // exist only then).
+        AccountProtectionStore().setPhraseSaved(true, accountIdB64: account.b64)
         let h = harness(marker: PersistedSession(accountIdB64: account.b64, username: username), routes: routes)
         return (h, mnemonic, account.b64)
     }
@@ -1150,6 +1211,12 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertNil(noKeys.repository.threeWordsAccount(), "no keys on the device")
 
         XCTAssertNil(harness().repository.threeWordsAccount(), "no cached account")
+
+        // ADR-0067: the device holds the words of an account whose phrase was
+        // never saved, but the person never saw them: no row.
+        let (unsaved, _, unsavedId) = try deviceWithKeysAndPhrase()
+        AccountProtectionStore().setPhraseSaved(false, accountIdB64: unsavedId)
+        XCTAssertNil(unsaved.repository.threeWordsAccount(), "no saved phrase")
     }
 
     func testWrongWordsAreAMissAndNothingIsSentAnywhere() async throws {
@@ -1279,6 +1346,8 @@ final class RecoveryFlowTests: XCTestCase {
         let mnemonic = RecoveryMnemonic.generate()
         let newKey = try Identity.fromSeed(seed: mnemonic.toSeed()).signaturePublicKey()
         try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mnemonic.phrase().utf8))
+        // A phrase-protected account (ADR-0067): only it has words to show.
+        AccountProtectionStore().setPhraseSaved(true, accountIdB64: account.b64)
         let persistence = ScriptedPersistence()
         persistence.deviceKey = true
         persistence.seed = mnemonic.toSeed()
@@ -1468,6 +1537,7 @@ final class RecoveryFlowTests: XCTestCase {
         let mine = RecoveryMnemonic.generate()
         try AccountIdentitySeedStore.putAccountIdentitySeed(accountIdB64: account.b64, seed: mine.toSeed())
         try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mine.phrase().utf8))
+        AccountProtectionStore().setPhraseSaved(true, accountIdB64: account.b64)
         try await h.repository.recoverWithTotp(username: "alice", code: "123456")
         XCTAssertTrue(isSession(h.repository), "the device holds the keys: signed in")
         XCTAssertTrue(h.repository.newPasswordOffered)

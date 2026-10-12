@@ -84,6 +84,14 @@ struct RecoverySettingsScreen: View {
         return DevicePhrase.isStored(accountIdB64: account.accountIdB64)
     }
 
+    /// ADR-0067 — whether the account's recovery phrase was saved. The
+    /// phrase row and the three-word row exist only then: an account that
+    /// never saved a phrase has no words the person could know.
+    private var phraseProtected: Bool {
+        guard let account else { return false }
+        return authRepository.protectionStore.phraseSaved(accountIdB64: account.accountIdB64)
+    }
+
     /// What "Show recovery phrase" does right now (``PhraseReveal``).
     private var reveal: PhraseReveal {
         PhraseReveal.decide(replaceOwed: credentialOwed, phraseStored: phraseStoredHere)
@@ -102,14 +110,18 @@ struct RecoverySettingsScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 card(titleKey: "settings.recovery.group.keys") {
-                    phraseRow
-                    Divider()
+                    if phraseProtected {
+                        phraseRow
+                        Divider()
+                    }
                     passkeysRow
                     Divider()
                     devicesRow
                 }
-                card(titleKey: "settings.recovery.group.signin") {
-                    wordsRow
+                if phraseProtected {
+                    card(titleKey: "settings.recovery.group.signin") {
+                        wordsRow
+                    }
                 }
                 if let session = DeviceSession.current(authRepository) {
                     card(titleKey: nil) {

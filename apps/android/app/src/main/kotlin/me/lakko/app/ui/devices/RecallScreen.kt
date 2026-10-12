@@ -111,12 +111,12 @@ internal fun RecallRoot(repository: AuthRepository, ui: RecallUi, modifier: Modi
         RecallStage.Form -> RecallForm(
             ui = ui,
             onBack = { repository.recallShow(RecallStage.Question) },
-            onSubmit = { old, new ->
+            onSubmit = { old, new, oldPhrase ->
                 scope.launch {
                     val oldBytes = old.toByteArray(Charsets.UTF_8)
                     val newBytes = new.toByteArray(Charsets.UTF_8)
                     try {
-                        withContext(Dispatchers.IO) { repository.recallSubmit(oldBytes, newBytes) }
+                        withContext(Dispatchers.IO) { repository.recallSubmit(oldBytes, newBytes, oldPhrase) }
                     } finally {
                         oldBytes.fill(0)
                         newBytes.fill(0)
@@ -238,11 +238,17 @@ private fun RecallQuestion(
 private fun RecallForm(
     ui: RecallUi,
     onBack: () -> Unit,
-    onSubmit: (oldPassword: String, newPassword: String) -> Unit,
+    /** [oldPhrase] non-null: `Use my recovery phrase instead` (UX 19.7). */
+    onSubmit: (oldPassword: String, newPassword: String, oldPhrase: String?) -> Unit,
     modifier: Modifier,
 ) {
     // Memory only: never saved across a process death, never pre-filled.
     var oldPassword by remember { mutableStateOf("") }
+    // UX 19.7 - the phrase in place of the password, where the account had
+    // a saved phrase before the reset.
+    var usePhrase by remember { mutableStateOf(false) }
+    var oldPhrase by remember { mutableStateOf("") }
+    val phraseOffered = me.lakko.app.auth.recallOffersPhrase(ui)
     var newPassword by remember { mutableStateOf("") }
     var repeat by remember { mutableStateOf("") }
     val oldFocus = remember { FocusRequester() }
@@ -250,9 +256,10 @@ private fun RecallForm(
     val wait = ui.line as? RecallLine.RateLimited
     val waitLeft = rememberRemainingMs(wait?.untilMs)
     val problem = if (newPassword.isEmpty() || repeat.isEmpty()) null else recallFormProblem(newPassword, repeat)
-    val enabled = recallSubmitEnabled(ui, oldPassword, newPassword, repeat, System.currentTimeMillis()) &&
+    val proofTyped = if (usePhrase) oldPhrase else oldPassword
+    val enabled = recallSubmitEnabled(ui, proofTyped, newPassword, repeat, System.currentTimeMillis()) &&
         waitLeft <= 0L
-    val submit = { if (enabled) onSubmit(oldPassword, newPassword) }
+    val submit = { if (enabled) onSubmit(oldPassword, newPassword, oldPhrase.takeIf { usePhrase }) }
     val fieldsEnabled = !ui.working
 
     // A wrong password: the first field keeps focus.
@@ -275,18 +282,31 @@ private fun RecallForm(
         Lead(t("devices.recall.form.lede"))
         Spacer(Modifier.height(16.dp))
         // Password fields stay left-to-right in a right-to-left interface.
-        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-            PasswordField(
-                value = oldPassword,
-                onValueChange = { oldPassword = it },
-                label = t("devices.recall.form.old_password"),
+        if (usePhrase) {
+            me.lakko.app.ui.auth.RecoveryPhraseEntryGrid(
+                phrase = oldPhrase,
+                onPhraseChange = { oldPhrase = it },
                 enabled = fieldsEnabled,
-                modifier = Modifier.focusRequester(oldFocus),
             )
+        } else {
+            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                PasswordField(
+                    value = oldPassword,
+                    onValueChange = { oldPassword = it },
+                    label = t("devices.recall.form.old_password"),
+                    enabled = fieldsEnabled,
+                    modifier = Modifier.focusRequester(oldFocus),
+                )
+            }
+        }
+        if (phraseOffered) {
+            androidx.compose.material3.TextButton(onClick = { usePhrase = !usePhrase }, enabled = fieldsEnabled) {
+                Text(t(if (usePhrase) "proof.password.use" else "recall.phrase.use"))
+            }
         }
         if (wrong != null) {
             Column(modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
-                FormError(t("devices.recall.error.wrong_password"))
+                FormError(t(if (usePhrase) "recall.phrase.wrong" else "devices.recall.error.wrong_password"))
                 wrong.triesLeft?.let { left ->
                     FormError(
                         me.lakko.app.l10n.UiText(

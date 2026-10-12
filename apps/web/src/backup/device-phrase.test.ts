@@ -117,20 +117,28 @@ describe("every path that lands a device with keys stores the phrase", () => {
   });
 
   it("a recall continues through the reset's one path, and drops its record only after the new keys are stored (ADR-0066 part 1)", () => {
-    const start = authContext.indexOf("function recallTakeBack(");
+    // ADR-0067 section 8: the old device's recall and the recall by phrase
+    // share one runner; each supplies what happens once the keys are stored.
+    const wrapperStart = authContext.indexOf("function recallTakeBack(");
+    const wrapper = authContext.slice(wrapperStart, authContext.indexOf("\n  }\n", wrapperStart));
+    const start = authContext.indexOf("function runRecall(");
     const end = authContext.indexOf("\n  }\n", start);
     const body = authContext.slice(start, end);
+    expect(wrapper.includes("return runRecall(")).toBe(true);
+    expect(body.includes("afterPersist: target.afterPersist,")).toBe(true);
     // The server exchange is two calls since ADR-0066 T5 item 25 (the finish
     // request is kept until it is answered); the adoption follows the finish.
     const server = body.lastIndexOf("await client.recallFinish(");
     expect(body.indexOf("await client.recallPrepare(")).toBeGreaterThan(0);
     const adopt = body.indexOf("await adoptKeyResetOutcome(");
-    const destroy = body.indexOf("await deleteRecallRecord(");
+    const destroy = wrapper.indexOf("await deleteRecallRecord(");
     expect(server).toBeGreaterThan(0);
     expect(adopt).toBeGreaterThan(server);
     // Inside `afterPersist`, which the shared path runs once everything
-    // local is stored.
-    expect(destroy).toBeGreaterThan(body.indexOf("afterPersist:"));
+    // local is stored; nowhere in the runner itself.
+    expect(wrapper.indexOf("afterPersist:")).toBeGreaterThan(0);
+    expect(destroy).toBeGreaterThan(wrapper.indexOf("afterPersist:"));
+    expect(body.includes("deleteRecallRecord(")).toBe(false);
     expect(body.includes("storeDevicePhrase(")).toBe(false);
     expect(body.includes("publishResetIdentity(")).toBe(false);
     const adoptStart = authContext.indexOf("async function adoptKeyResetOutcome(");

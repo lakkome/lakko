@@ -66,6 +66,12 @@
 //!   again from a device that holds the NEW phrase, which seals the new
 //!   entropy. The server cannot re-seal a vault itself (it never sees the
 //!   entropy or the PRF output, invariant #2), so there is nothing to keep.
+//! - **Deleted: the email vault** (ADR-0067 section 3), for the same reason:
+//!   it seals the old phrase. With `phrase_saved: true` in `finish` the
+//!   rotation is "Save a recovery phrase": the account is marked
+//!   phrase-protected in the same transaction (it never gets an email vault
+//!   again, and a mailed code changes its password only) and its devices get
+//!   the "recovery phrase saved" notice. The `recovery_emails` row is kept.
 //! - **Deleted: in-flight WebAuthn states and action grants, device grants,
 //!   device requests.** A device grant minted before the rotation would land
 //!   a new device with the old phrase.
@@ -140,6 +146,11 @@ pub(crate) struct RotateFinishReq {
     /// transaction. Absent or empty: none.
     #[serde(default)]
     pub(crate) revoke_device_ids_b64: Vec<String>,
+    /// ADR-0067 section 3: this rotation is "Save a recovery phrase". The
+    /// person is shown the NEW phrase's words once it commits; the account
+    /// is marked phrase-protected and its devices are told. Absent: false.
+    #[serde(default)]
+    pub(crate) phrase_saved: bool,
 }
 
 /// Decode the URL-safe base64 new identity key and refuse an unusable one.
@@ -390,6 +401,8 @@ pub(crate) async fn finish(
     //    (`webauthn_credentials`) are kept.
     for statement in [
         "DELETE FROM passkey_vaults WHERE account_id = ?",
+        "DELETE FROM email_vaults WHERE account_id = ?",
+        "DELETE FROM email_tickets WHERE account_id = ?",
         "DELETE FROM webauthn_states WHERE account_id = ?",
         "DELETE FROM webauthn_action_grants WHERE account_id = ?",
         "DELETE FROM device_grants WHERE account_id = ?",
@@ -398,6 +411,14 @@ pub(crate) async fn finish(
         sqlx::query(statement)
             .bind(account_id.as_slice())
             .execute(&mut *tx)
+            .await
+            .map_err(ApiError::Db)?;
+    }
+
+    //    ADR-0067 section 3: "Save a recovery phrase". The vault of the old
+    //    phrase is gone (above); from here the account is phrase-protected.
+    if payload.phrase_saved {
+        crate::account_notices::mark_phrase_saved(&mut tx, &account_id, now)
             .await
             .map_err(ApiError::Db)?;
     }

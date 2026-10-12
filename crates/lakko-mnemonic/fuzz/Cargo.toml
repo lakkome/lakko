@@ -29,3 +29,14 @@ path = "fuzz_targets/mnemonic_parse.rs"
 test = false
 doc = false
 bench = false
+
+# The email-vault open path (ADR-0067): the sealed blob is served by the
+# server in the answer to a mailed code, so its bytes are attacker-chosen.
+# Opened under a fixed stretched key (no Argon2id per input); the same bytes
+# also drive the recovery-address rule and its idempotence.
+[[bin]]
+name = "email_vault_open"
+path = "fuzz_targets/email_vault_open.rs"
+test = false
+doc = false
+bench = false

@@ -113,6 +113,8 @@ import {
   claimUsername,
   loginHandleFor,
   nameTargetFor,
+  type LoginHandle,
+  type NameTarget,
 } from "./login-handle";
 import { createLoginHandleSync } from "./login-handle-sync";
 import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
@@ -293,6 +295,14 @@ import {
   isSignupPhraseOwed,
   markSignupPhraseOwed,
 } from "./phrase-gate";
+import {
+  clearProtectStepOwed,
+  isPhraseProtected,
+  isProtectStepOwed,
+  markProtectStepOwed,
+  newWordsShown,
+  setPhraseProtected,
+} from "./protect/account-protection";
 import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { KeyedError } from "../l10n/keyed-error";
@@ -367,12 +377,12 @@ export type AuthState =
       readonly account: SessionAccount;
     };
 
-/** Result handed back to the signup form so it can display the
- *  freshly-generated 12-word recovery passphrase exactly once. */
+/** Result of a signup. */
 export interface SignupOutcome {
-  /** The 12-word BIP39 recovery phrase. The form must show this
-   *  to the user and require an explicit "I have written it down"
-   *  acknowledgement before navigating away. */
+  /** The 12-word BIP39 recovery phrase the device generated and stored.
+   *  ADR-0067 D2: a sign-up with a username does NOT show it (the "Protect
+   *  your account" step follows instead, and the person may save a phrase
+   *  later). The guest signup still shows it through its phrase screen. */
   recoveryPhrase: string;
 }
 
@@ -543,7 +553,28 @@ export interface RecallApi {
   /** "Take the account back": the old password proves it, the account gets
    *  the new password, new keys and a new phrase. `null` when it landed
    *  (the phrase screen is up); otherwise why it did not. Never throws. */
-  takeBack(oldPassword: string, newPassword: string): Promise<RecallAttemptFailure | null>;
+  takeBack(
+    oldPassword: string,
+    newPassword: string,
+    /** ADR-0067 section 8 (UX 19.7), "Use my recovery phrase instead": the
+     *  12 words from before the reset prove it and `oldPassword` is not
+     *  used. A phrase the core refuses reads as a wrong one. */
+    options?: { readonly phrase?: string },
+  ): Promise<RecallAttemptFailure | null>;
+  /** UX 19.7, without an old device: ask whether `phrase` is `username`'s
+   *  recovery phrase from before a key reset in the last month. Anonymous;
+   *  the account is named by login handle and the statement is signed by
+   *  the key the phrase derives. `open` only when the phrase arm is offered
+   *  for it. Never throws. */
+  checkByPhrase(username: string, phrase: string): Promise<RecallCheck>;
+  /** UX 19.7: take the account back with the phrase alone. The account gets
+   *  `newPassword`, new keys and a new phrase; this device lands on the new
+   *  phrase screen. `null` when it landed. Never throws. */
+  takeBackByPhrase(
+    username: string,
+    phrase: string,
+    newPassword: string,
+  ): Promise<RecallAttemptFailure | null>;
 }
 
 /** Public surface of the auth context. */
@@ -576,17 +607,39 @@ export interface AuthApi {
    *  reset. Never resets again. Throws what the step threw (offline, `429`,
    *  `503`, a refusal). */
   retryFreshPublish(): Promise<void>;
-  /** The recovery phrase a signup just generated, until the user acknowledges
-   *  it; `null` otherwise. While non-null BOTH route guards render the phrase
-   *  screen instead of any route (see `phrase-gate.ts` for the defect this
-   *  closes: the anonymous guard used to navigate home the moment signup
-   *  landed the session, before the phrase was ever shown). Survives a reload
-   *  and a sign-out/sign-in on this device: the fact that it is owed is kept in
-   *  storage and the phrase is read back from the device-key-wrapped cache. */
+  /** New recovery words this device owes the person a look at, until they
+   *  acknowledge them; `null` otherwise. Set after the account keys were
+   *  changed on this device (a key reset, taking the account back, a key
+   *  rotation, "Save a recovery phrase"), never by a sign-up (ADR-0067 D2:
+   *  the phrase is not shown at sign-up). While non-null BOTH route guards
+   *  render the phrase screen instead of any route (`phrase-gate.ts`).
+   *  Survives a reload and a sign-out/sign-in on this device: the fact that
+   *  it is owed is kept in storage and the phrase is read back from the
+   *  device-key-wrapped cache. */
   readonly signupPhrase: Accessor<string | null>;
-  /** The user has written the signup phrase down. Clears it (memory and the
+  /** The user has written the new words down. Clears them (memory and the
    *  owed marker); the guards then render the route they wrap. */
   acknowledgeSignupPhrase(): void;
+  /** ADR-0067 (UX 19.1a): the sign-up's "Protect your account" step is
+   *  owed. While `true` both route guards render that step instead of any
+   *  route; it survives a reload (a marker in storage). */
+  readonly protectStepOwed: Accessor<boolean>;
+  /** The person chose on the "Protect your account" step (an email was
+   *  added, a phrase is being saved, or "Continue without"). */
+  finishProtectStep(): void;
+  /** Land the session `POST /recovery-email/recover/password/finish`
+   *  answered (ADR-0067 section 7, password mode): the password was already
+   *  replaced by the mailed code, so no new-password step is owed and no
+   *  fresh-auth proof is held. On a device that holds the account's keys the
+   *  session lands; otherwise the guard shows "Restore your keys". */
+  landEmailPasswordRecovery(
+    username: string,
+    accountId: Uint8Array,
+    session: SessionPair,
+  ): Promise<void>;
+  /** URL-safe base64 of this device's id for a landing of `username`'s
+   *  account, when this device already holds its keys; else `undefined`. */
+  landingDeviceIdFor(username: string): string | undefined;
   /** ADR-0065: this device's keys are not the account's keys any more
    *  (`SignedOutState`). While non-null both route guards render the
    *  signed-out screen instead of any route, whatever `state()` says. */
@@ -634,9 +687,9 @@ export interface AuthApi {
    *  Throws on network / server errors (the form surfaces them).
    *  On success, persists `(accountId, username)` to localStorage,
    *  derives the device root key + writes it to IndexedDB, and
-   *  flips state to `session`. The returned [`SignupOutcome`]
-   *  carries the BIP39 recovery phrase that the UI MUST display
-   *  exactly once. */
+   *  flips state to `session` with the "Protect your account" step owed
+   *  (`protectStepOwed`). The recovery phrase is stored on the device and
+   *  not shown (ADR-0067 D2). */
   /** `options.signal` cancels the account-creation proof of work (ADR-0054
    *  S4) and everything after it; the abort rejects with an `AbortError`
    *  (`auth/pow.ts` `isAbortError`) and nothing is created server-side. */
@@ -771,6 +824,10 @@ export interface AuthApi {
     commit(
       grant: string,
       revokeDeviceIds: readonly Uint8Array[],
+      /** ADR-0067 section 3: `phraseSaved` makes the account
+       *  phrase-protected in the same transaction ("Save a recovery
+       *  phrase"); the server deletes the email vault with it. */
+      options?: { readonly phraseSaved?: boolean },
     ): Promise<{
       readonly keyGeneration: bigint;
       readonly attestationB64Url: string;
@@ -871,7 +928,14 @@ export interface AuthApi {
    *  proves it holds the keys and the person types only the new password.
    *  Unlike `recover`, nothing on this device is re-keyed or wiped: the
    *  stored device key is kept. */
-  replacePassword(newPassword: string): Promise<void>;
+  replacePassword(
+    newPassword: string,
+    /** ADR-0067 (UX 19.6): the "It was not me" screen of an account notice
+     *  asks nothing but the new password, since this device holds the keys
+     *  and the person was just told someone else changed or used the
+     *  account's password. */
+    options?: { readonly afterAccountNotice?: boolean },
+  ): Promise<void>;
   /** ADR-0018 factor (a), path (a) — finish the
    *  `needs-recovery-phrase` state with a seed transferred from
    *  another device over the E2EE pairing channel instead of a
@@ -1139,6 +1203,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // The signup recovery phrase awaiting acknowledgement — see
   // `AuthApi.signupPhrase` and `phrase-gate.ts`.
   const [signupPhrase, setSignupPhrase] = createSignal<string | null>(null);
+  // ADR-0067 (UX 19.1a): bumped when the "Protect your account" marker of
+  // the signed-in account is written or cleared.
+  const [protectVersion, setProtectVersion] = createSignal(0);
+  const protectStepOwed = (): boolean => {
+    protectVersion();
+    const s = state();
+    return s.kind === "session" && isProtectStepOwed(plainStorage(), s.account.accountId);
+  };
   // UX spec section 8: why the restore prompt is up after a passkey sign-in.
   const [restoreNotice, setRestoreNotice] = createSignal<RestoreNotice | null>(null);
   // UX spec 7.1: a forgot-password route succeeded, so the new-password step
@@ -1690,6 +1762,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   async function restoreOwedSignupPhrase(accountIdB64: string): Promise<void> {
     const storage = typeof localStorage === "undefined" ? undefined : localStorage;
     if (!isSignupPhraseOwed(storage, accountIdB64)) return;
+    // ADR-0067 (alignment I): new words are shown only to a phrase-protected
+    // account. The owner of any other account was never shown words, so none
+    // are shown after a rotation, a reset or a recall either, and a guest
+    // sign-up shows none: the owed marker is dropped, nothing is withheld.
+    const st = state();
+    const knownUsername =
+      st.kind === "session" && st.account.accountId === accountIdB64
+        ? st.account.username
+        : (loadPersisted()?.username ?? "");
+    if (!newWordsShown(isPhraseProtected(storage, accountIdB64), knownUsername.trim().length > 0)) {
+      clearSignupPhraseOwed(storage, accountIdB64);
+      return;
+    }
     // A reset whose publish is owed: the identity the phrase belongs to is
     // not findable yet, so the words are withheld until both publishing
     // steps landed (`settleOwedKeyResetPublish` calls back here then).
@@ -2502,12 +2587,90 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   function recallTakeBack(
     oldPassword: string,
     newPassword: string,
+    options?: { readonly phrase?: string },
   ): Promise<RecallAttemptFailure | null> {
     const held = recallHeld;
     if (held === null) return Promise.resolve({ kind: "closed" });
-    const accountIdB64 = held.record.accountIdB64;
+    return runRecall(
+      {
+        accountIdB64: held.record.accountIdB64,
+        username: held.record.username,
+        oldSeed: held.record.oldSeed,
+        deviceKey: held.deviceKey,
+        check: recallCheck,
+        isCurrent: () => recallHeld === held,
+        afterPersist: async () => {
+          // The server answered 200 and the new keys are stored: the record
+          // has done its work.
+          held.record.oldSeed.fill(0);
+          recallHeld = null;
+          try {
+            await deleteRecallRecord(held.record.accountIdB64);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "the recall record could not be deleted",
+              err instanceof Error ? err.name : "unknown",
+            );
+          }
+          setRecallDone(true);
+          setSignedOut(null);
+        },
+      },
+      oldPassword,
+      newPassword,
+      options?.phrase ?? null,
+    );
+  }
+
+  /** What one recall runs against: the recall record of an old device, or
+   *  (ADR-0067 section 8) the key a typed phrase derives. */
+  interface RecallTarget {
+    readonly accountIdB64: string;
+    readonly username: string;
+    /** The OLD account identity's 32-byte Ed25519 seed. */
+    readonly oldSeed: Uint8Array;
+    /** The account's device key on this device, when it has one. */
+    readonly deviceKey: CryptoKey | null;
+    readonly check: () => Promise<RecallCheck>;
+    /** Whether the target is still the one to act on. */
+    readonly isCurrent: () => boolean;
+    readonly afterPersist: () => Promise<void>;
+  }
+
+  /** The 64-byte seed of a typed phrase, or `null` when the words are not a
+   *  recovery phrase. */
+  async function seedOfTypedPhrase(phrase: string): Promise<Uint8Array | null> {
+    const wasm = await loadWasm();
+    try {
+      const mnemonic = wasm.RecoveryMnemonic.fromPhrase(phrase);
+      try {
+        return mnemonic.toSeed();
+      } finally {
+        mnemonic.free();
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  /** `oldPhrase` non-null is the phrase arm: the login is made from the
+   *  phrase's seed and `oldPassword` is not used. */
+  function runRecall(
+    target: RecallTarget,
+    oldPassword: string,
+    newPassword: string,
+    oldPhrase: string | null,
+  ): Promise<RecallAttemptFailure | null> {
+    const accountIdB64 = target.accountIdB64;
     return withRecallLock(accountIdB64, async (): Promise<RecallAttemptFailure | null> => {
-      if (recallHeld !== held) return { kind: "closed" };
+      if (!target.isCurrent()) return { kind: "closed" };
+      let oldPhraseSeed: Uint8Array | null = null;
+      if (oldPhrase !== null) {
+        oldPhraseSeed = await seedOfTypedPhrase(oldPhrase);
+        // Not a phrase at all: the same line as a wrong one, nothing sent.
+        if (oldPhraseSeed === null) return { kind: "wrong-password" };
+      }
       const accountIdBytes = base64Decode(accountIdB64);
       const failureOf = (err: unknown): RecallAttemptFailure => {
         if (err instanceof RecallWrongPasswordError) {
@@ -2577,9 +2740,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       } else {
         dropPending();
         // The anchor to prove against, confirmed now.
-        const check = await recallCheck();
+        const check = await target.check();
         if (check.kind === "closed" || check.kind === "exhausted") return { kind: "closed" };
         if (check.kind === "unknown") return check.offline ? { kind: "offline" } : { kind: "error" };
+        // The phrase proves nothing on an anchor without the phrase arm
+        // (the account was mail-protected): nothing is sent.
+        if (oldPhraseSeed !== null && !check.status.phraseArm) return { kind: "wrong-password" };
+        // Whether the account had a saved phrase when its keys were reset
+        // (the anchor's phrase arm): only then are the NEW words shown after
+        // the recall. Recorded before anything is sent, so an attempt whose
+        // answer is lost and found later reads the same.
+        setPhraseProtected(plainStorage(), accountIdB64, check.status.phraseArm);
         const wasm = await loadWasm();
         // A brand-new phrase and identity: the old key authorises the recall
         // and does not return (ADR-0066 section 1.2).
@@ -2594,9 +2765,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         try {
           prepared = await client.recallPrepare({
             accountId: accountIdBytes,
-            oldAccountSeed: held.record.oldSeed,
+            oldAccountSeed: target.oldSeed,
             anchorSeq: check.status.anchorSeq,
             oldPassword: utf8(oldPassword),
+            ...(oldPhraseSeed === null ? {} : { oldPhraseSeed }),
             newPassword: utf8(newPassword),
             newSeed: seed.slice(),
             newSignaturePubkey: newPubkey,
@@ -2629,38 +2801,150 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       // The account is this device's again. The staged wipe dropped the
       // restore marker; a reload must find the account.
-      savePersisted({ v: 1, accountIdB64, username: held.record.username });
+      oldPhraseSeed?.fill(0);
+      savePersisted({ v: 1, accountIdB64, username: target.username });
       explicitSignInThisPage = true;
       if (reset.freshGrant !== null) freshGrants.put(accountIdB64, reset.freshGrant);
       await adoptKeyResetOutcome({
         accountIdB64,
         accountIdBytes,
-        username: held.record.username,
-        deviceKey: held.deviceKey,
+        username: target.username,
+        deviceKey: target.deviceKey,
         seed,
         phrase,
         newPubkey,
         reset,
-        afterPersist: async () => {
-          // The server answered 200 and the new keys are stored: the record
-          // has done its work.
-          held.record.oldSeed.fill(0);
-          recallHeld = null;
-          try {
-            await deleteRecallRecord(accountIdB64);
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn(
-              "the recall record could not be deleted",
-              err instanceof Error ? err.name : "unknown",
-            );
-          }
-          setRecallDone(true);
-          setSignedOut(null);
-        },
+        afterPersist: target.afterPersist,
       });
       return null;
     });
+  }
+
+  /** A statement of `kind` by the key `oldSeed` signs with, for a device
+   *  that names the account by login handle: the account field carries the
+   *  first 16 bytes of the handle (ADR-0067 section 8). */
+  async function recallStatusByHandle(
+    handle: LoginHandle,
+    oldSeed: Uint8Array,
+  ): Promise<RecallCheck> {
+    try {
+      const wasm = await loadWasm();
+      const stated = handle.bytes.slice(0, 16);
+      const body = await client.recallStatus(
+        (signAtMs) =>
+          signAtMs === null
+            ? wasm.signAccountStatement(oldSeed, ACCOUNT_STATEMENT_RECALL_STATUS, stated, new Uint8Array(0))
+            : wasm.signAccountStatementAt(
+                oldSeed,
+                ACCOUNT_STATEMENT_RECALL_STATUS,
+                stated,
+                new Uint8Array(0),
+                BigInt(signAtMs),
+              ),
+        handle.wire,
+      );
+      return recallStatusVerdict({ status: 200, errorCode: null, body }, Date.now());
+    } catch (err) {
+      if (err instanceof AuthHttpError) {
+        return recallStatusVerdict(
+          { status: err.status, errorCode: err.errorCode, body: null },
+          Date.now(),
+        );
+      }
+      if (!(err instanceof AuthNetworkError)) {
+        // eslint-disable-next-line no-console
+        console.warn("recall status by handle failed", err instanceof Error ? err.name : "unknown");
+      }
+      return { kind: "unknown", offline: err instanceof AuthNetworkError };
+    }
+  }
+
+  /** The login handle of a typed name and the OLD account key's Ed25519
+   *  seed a typed phrase derives; `null` when either is not what it claims
+   *  to be. */
+  async function phraseRecallInputs(
+    username: string,
+    phrase: string,
+  ): Promise<{ target: NameTarget; oldSeed: Uint8Array } | null> {
+    const seed = await seedOfTypedPhrase(phrase);
+    if (seed === null) return null;
+    try {
+      const wasm = await loadWasm();
+      return { target: await nameTargetFor(username), oldSeed: ed25519SeedOf(wasm, seed) };
+    } catch {
+      return null;
+    } finally {
+      seed.fill(0);
+    }
+  }
+
+  /** UX 19.7: is the typed phrase the account's from before a reset? */
+  async function recallCheckByPhrase(username: string, phrase: string): Promise<RecallCheck> {
+    const inputs = await phraseRecallInputs(username, phrase);
+    if (inputs === null) return { kind: "closed" };
+    try {
+      const check = await recallStatusByHandle(inputs.target.handle, inputs.oldSeed);
+      // Only an anchor with the phrase arm, and an answer that names the
+      // account, can be acted on from here.
+      if (check.kind === "open" && (!check.status.phraseArm || check.status.accountIdB64Url === null)) {
+        return { kind: "closed" };
+      }
+      return check;
+    } finally {
+      inputs.oldSeed.fill(0);
+    }
+  }
+
+  /** UX 19.7: the recall with the phrase alone, from a device that holds
+   *  nothing of the account. */
+  async function recallTakeBackByPhrase(
+    username: string,
+    phrase: string,
+    newPassword: string,
+  ): Promise<RecallAttemptFailure | null> {
+    const inputs = await phraseRecallInputs(username, phrase);
+    if (inputs === null) return { kind: "wrong-password" };
+    const check = () => recallStatusByHandle(inputs.target.handle, inputs.oldSeed);
+    const first = await check();
+    if (first.kind === "unknown") {
+      inputs.oldSeed.fill(0);
+      return first.offline ? { kind: "offline" } : { kind: "error" };
+    }
+    if (first.kind !== "open" || !first.status.phraseArm || first.status.accountIdB64Url === null) {
+      inputs.oldSeed.fill(0);
+      return { kind: "closed" };
+    }
+    const accountIdBytes = base64UrlDecodeNoPad(first.status.accountIdB64Url);
+    const accountIdB64 = base64Encode(accountIdBytes);
+    // A device key this browser already holds for the account is reused
+    // (minting another would orphan what it wraps); else one is derived
+    // from the new seed.
+    let deviceKey: CryptoKey | null = null;
+    try {
+      deviceKey = await getDeviceKey(accountIdB64);
+    } catch {
+      deviceKey = null;
+    }
+    try {
+      return await runRecall(
+        {
+          accountIdB64,
+          username: inputs.target.username,
+          oldSeed: inputs.oldSeed,
+          deviceKey,
+          check,
+          isCurrent: () => true,
+          afterPersist: async () => {
+            setRecallDone(true);
+          },
+        },
+        "",
+        newPassword,
+        phrase,
+      );
+    } finally {
+      inputs.oldSeed.fill(0);
+    }
   }
 
   /**
@@ -2988,6 +3272,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         keysOnDevice = false;
       }
     }
+    // ADR-0067 section 11: three words exist only for a phrase-protected
+    // account (the flag this device keeps; `protect/account-protection.ts`).
+    if (!isPhraseProtected(plainStorage(), cached.accountIdB64)) return null;
     if (
       phrase === null ||
       !offersThreeWords({
@@ -3988,7 +4275,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         preparedAtMs: prepared.preparedAtMs,
       };
     },
-    async commit(grant, revokeDeviceIds) {
+    async commit(grant, revokeDeviceIds, options) {
       const { accountIdB64, secrets } = rotationSession();
       const deviceKey = await rotationDeviceKey(accountIdB64);
       const prepared = (await getKeyRotationState(accountIdB64, deviceKey)).prepared;
@@ -4007,6 +4294,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           newSignaturePubkey: base64Decode(prepared.newSignaturePubkeyB64),
           proof: base64Decode(prepared.proofB64),
           revokeDeviceIds,
+          phraseSaved: options?.phraseSaved === true,
         });
       } catch (err) {
         seed.fill(0);
@@ -4243,6 +4531,26 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       setSignupPhrase(null);
     },
+    protectStepOwed,
+    finishProtectStep() {
+      const s = state();
+      if (s.kind === "session") clearProtectStepOwed(plainStorage(), s.account.accountId);
+      setProtectVersion((v) => v + 1);
+    },
+    async landEmailPasswordRecovery(username, accountId, session) {
+      const accountIdB64 = base64Encode(accountId);
+      setRestoreNotice(null);
+      explicitSignInThisPage = true;
+      // The mailed code already replaced the password.
+      setNewPasswordOwed(false);
+      // A mailed code is not a fresh-auth proof (the finish mints none).
+      sessionLanding = "other";
+      freshGrants.clear();
+      await landAfterAccessRecovery(username, accountId, accountIdB64, session);
+    },
+    landingDeviceIdFor(username) {
+      return landingDevice({ username });
+    },
     signedOut,
     async confirmSignedOut() {
       const current = signedOut();
@@ -4265,6 +4573,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       check: recallCheck,
       end: finishRecallWipe,
       takeBack: recallTakeBack,
+      checkByPhrase: recallCheckByPhrase,
+      takeBackByPhrase: recallTakeBackByPhrase,
     },
     recallDone,
     dismissRecallDone: () => setRecallDone(false),
@@ -4485,21 +4795,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionExpiresAtMs: result.session.sessionExpiresAtMs,
         keyGeneration: result.session.keyGeneration,
       });
-      // The phrase becomes pending BEFORE the session lands, so the route
-      // guards never see a signed-in state without it: `/signup` sits in
-      // `<RequireAnonymous>`, which used to navigate home on this very
-      // transition and unmount the phrase panel before it rendered. The owed
-      // marker keeps the screen coming back across a reload until the user
-      // acknowledges it (see `phrase-gate.ts`).
-      // A device that holds the keys holds the phrase (the local three-word
-      // check, the hand-over to a new device, "Show recovery phrase").
-      // Awaited so the owed-phrase reload below can always read it back.
+      // ADR-0067 D2: the phrase is generated and stored exactly as before,
+      // and NOT shown. A device that holds the keys holds the phrase (the
+      // hand-over to a new device, the email vault's seal, a later "Save a
+      // recovery phrase").
       await storeDevicePhrase(accountIdB64, result.recoveryPhrase, deviceKey, "signup");
-      markSignupPhraseOwed(
-        typeof localStorage === "undefined" ? undefined : localStorage,
-        accountIdB64,
-      );
-      setSignupPhrase(result.recoveryPhrase);
+      // UX 19.1a: the "Protect your account" step is owed BEFORE the session
+      // lands, so the route guards never see a signed-in state without it
+      // (`/signup` sits in `<RequireAnonymous>`, which navigates home on
+      // this very transition). The marker keeps the step coming back across
+      // a reload until the person chose.
+      markProtectStepOwed(plainStorage(), accountIdB64);
+      setProtectVersion((v) => v + 1);
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: normalisedUsername },
@@ -4861,7 +5168,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       setNewPasswordOwed(false);
     },
     canReplacePassword,
-    async replacePassword(newPassword) {
+    async replacePassword(newPassword, options) {
       // UX spec 7.1. `/password/reset/*` is authorised by a recovery OPAQUE
       // proof made from the 64-byte BIP39 seed (`AuthClient.recover`). This
       // device holds that seed (cached under its device key, in memory for
@@ -4882,7 +5189,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // so the bare session would do. This client does not allow it: the
       // person proves the current password or a passkey, or checks three
       // words of the recovery phrase, first.
-      if (!api.passwordChangeAllowed()) throw new FreshAuthRequiredError();
+      if (options?.afterAccountNotice !== true && !api.passwordChangeAllowed()) {
+        throw new FreshAuthRequiredError();
+      }
       const accountIdB64 = s.account.accountId;
       const target = await nameTargetFor(s.account.username);
       // `AuthClient.recover` uses the seed as the OPAQUE recovery input; hand

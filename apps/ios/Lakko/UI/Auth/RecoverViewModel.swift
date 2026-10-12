@@ -31,6 +31,10 @@ public final class RecoverViewModel: ObservableObject {
 
     /// One way back in.
     public enum Mode: Hashable {
+        /// ADR-0067 / UX 19.3 — a code sent to the recovery email. What it
+        /// brings depends on the account, so the row stands above both
+        /// groups; it is always listed (no row depends on server state).
+        case email
         /// Restore through a device that is still signed in.
         case anotherDevice
         /// A passkey: signs in, and restores the keys when it carries them.
@@ -46,6 +50,9 @@ public final class RecoverViewModel: ObservableObject {
     /// The account the three-word route can sign in on this device, or
     /// `nil` when the route is not offered here.
     @Published public private(set) var threeWordsAccount: SessionAccount?
+
+    /// The row above both groups.
+    public var topMethods: [Mode] { [.email] }
 
     /// The list's two groups in display order.
     public var keysMethods: [Mode] { [.anotherDevice, .passkey, .phrase] }
@@ -68,8 +75,20 @@ public final class RecoverViewModel: ObservableObject {
             methodUnavailable = false
             wordsRetired = false
             if mode == .words { enterWords() }
+            if mode != .phrase { phraseRecall = nil }
+            if mode != .email { email.reset() }
         }
     }
+
+    /// The email-code route (UX 19.3).
+    let email: EmailRecoverModel
+
+    /// UX 19.7 — the words typed are not the account's phrase now, but were
+    /// before its keys were changed within the last month: the prompt that
+    /// offers to take the account back. `nil` otherwise.
+    @Published public private(set) var phraseRecall: PhraseRecallOffer?
+    /// The take-back from the 19.7 prompt is running.
+    @Published public private(set) var phraseRecallBusy: Bool = false
 
     /// Non-nil once the another-device form turned the typed username into
     /// its login handle (ADR-0056, no lookup).
@@ -132,9 +151,22 @@ public final class RecoverViewModel: ObservableObject {
     private let drawPositions: () -> [Int]
 
     public convenience init(repository: AuthRepository, cachedUsername: String?) {
+        self.init(repository: repository, cachedUsername: cachedUsername, noteOwnAction: { _ in })
+    }
+
+    /// - Parameter noteOwnAction: this device did what an account notice
+    ///   will report (it opened the account, or changed the password, by
+    ///   email), so the notice is not shown here.
+    convenience init(
+        repository: AuthRepository, cachedUsername: String?,
+        noteOwnAction: @escaping @MainActor (AccountNoticeKind) -> Void
+    ) {
         self.init(
             repository: repository,
             cachedUsername: cachedUsername,
+            email: EmailRecoverModel(
+                ports: .live(repository: repository, noteOwnAction: noteOwnAction),
+                cachedUsername: cachedUsername),
             budgets: ThreeWordsBudgetStore(),
             nowMs: { Int64(Date().timeIntervalSince1970 * 1000) },
             drawPositions: { phraseCheckRandomPositions().map { Int($0) } }
@@ -144,12 +176,15 @@ public final class RecoverViewModel: ObservableObject {
     init(
         repository: AuthRepository,
         cachedUsername: String?,
+        email: EmailRecoverModel? = nil,
         budgets: ThreeWordsBudgetStore,
         nowMs: @escaping () -> Int64,
         drawPositions: @escaping () -> [Int]
     ) {
         self.repository = repository
         self.cachedUsername = cachedUsername
+        // A caller that passes no model gets one that reaches no server.
+        self.email = email ?? EmailRecoverModel(ports: .unwired, cachedUsername: cachedUsername)
         self.budgets = budgets
         self.nowMs = nowMs
         self.drawPositions = drawPositions
@@ -172,6 +207,8 @@ public final class RecoverViewModel: ObservableObject {
         errorText = nil
         methodUnavailable = false
         wordsRetired = false
+        phraseRecall = nil
+        email.reset()
     }
 
     // MARK: - Submit
@@ -211,7 +248,7 @@ public final class RecoverViewModel: ObservableObject {
         // other modes submit through their own entry points.
         let phraseSnapshot: String
         switch mode {
-        case .anotherDevice, .passkey, .words:
+        case .anotherDevice, .passkey, .words, .email:
             // Defensive no-op: these forms never show this button.
             errorText = .key("recovery.error.generic")
             return
@@ -253,10 +290,78 @@ public final class RecoverViewModel: ObservableObject {
                 password = ""
                 confirm = ""
             } catch {
+                // UX 19.7 — the words are not this account's phrase NOW. If
+                // they were its phrase before its keys were changed in the
+                // last month, the form continues with the question; for
+                // every other answer it says what it always says.
+                if PhraseRecallRule.asksServer(afterRecoverFailure: error),
+                   let offer = await repository.phraseRecallOffer(
+                       username: usernameSnapshot ?? cachedUsername ?? "",
+                       mnemonicPhrase: phraseSnapshot) {
+                    busy = false
+                    errorText = nil
+                    phraseRecall = offer
+                    return
+                }
                 // A bad phrase (unknown word or checksum) reads as one
                 // sentence; a wrong phrase and an unknown account too.
                 busy = false
                 self.errorText = UiText { AuthErrorCopy.recover(error) }
+            }
+        }
+    }
+
+    // MARK: - UX 19.7: taking the account back with the phrase
+
+    /// `It was me`: the keys were changed by the person; these words are no
+    /// longer the account's.
+    public func phraseRecallWasMe() {
+        phraseRecall = nil
+        errorText = .key("recovery.error.no_match")
+    }
+
+    /// `Take the account back`: the recall with the phrase as the proof and
+    /// the new password typed on the form.
+    public func phraseRecallTakeBack() {
+        guard !phraseRecallBusy, let offer = phraseRecall else { return }
+        if password != confirm {
+            errorText = .key("auth.password.error.mismatch")
+            return
+        }
+        if password.count < Self.minPasswordLength {
+            errorText = .key("auth.password.error.too_short", counts: ["count": UInt64(Self.minPasswordLength)])
+            return
+        }
+        phraseRecallBusy = true
+        errorText = nil
+        let phraseSnapshot = phrase
+        let passwordBytes = Data(password.utf8)
+        Task {
+            do {
+                try await repository.takeBackWithPhrase(
+                    offer: offer, mnemonicPhrase: phraseSnapshot, newPassword: passwordBytes)
+                // The account is back: the router shows the new words.
+                phraseRecallBusy = false
+                phraseRecall = nil
+                phrase = ""
+                password = ""
+                confirm = ""
+            } catch {
+                phraseRecallBusy = false
+                switch RecallAnswers.refusal(of: error) {
+                case .refused:
+                    // The window passed or the attempts ran out.
+                    phraseRecall = nil
+                    errorText = .key("recovery.error.no_match")
+                case .wrongPassword:
+                    errorText = .key(RecallCopy.wrongPhrase)
+                case .rateLimited:
+                    errorText = .key("common.error.too_many_attempts")
+                case .offline:
+                    errorText = .key("common.error.offline")
+                case .failed:
+                    errorText = .key("common.error.unavailable")
+                }
             }
         }
     }
@@ -530,5 +635,77 @@ public struct DeviceRestoreTarget: Equatable {
     public init(username: String, loginHandle: Data) {
         self.username = username
         self.loginHandle = loginHandle
+    }
+}
+
+/// UX 19.7 — when a failed phrase recovery asks the server whether the words
+/// were the account's phrase before a reset, pure.
+enum PhraseRecallRule {
+
+    /// Only a refusal of the words themselves (`401`: not this account's
+    /// recovery credential, by design the same answer as an unknown name).
+    /// A limit, a server fault, no connection and words that are no phrase
+    /// at all ask nothing.
+    static func asksServer(afterRecoverFailure error: Error) -> Bool {
+        guard case .http(let status, _, _) = error as? AuthClientError else { return false }
+        return status == 401
+    }
+}
+
+extension EmailRecoverModel.Ports {
+
+    /// Ports that reach no server: every route is refused as unavailable.
+    static var unwired: EmailRecoverModel.Ports {
+        struct Unwired: Error {}
+        return EmailRecoverModel.Ports(
+            normalize: { try normalizeRecoveryEmail(address: $0) },
+            handle: { try LoginName.make($0, emptyError: Unwired()) },
+            start: { _, _ in throw Unwired() },
+            verify: { _, _ in throw Unwired() },
+            totp: { _, _ in throw Unwired() },
+            open: { _ in throw Unwired() },
+            unseal: { _, _, _, _ in throw Unwired() },
+            restoreWithPhrase: { _, _, _ in throw Unwired() },
+            changePassword: { _, _, _ in throw Unwired() },
+            noteOwnAction: { _ in }
+        )
+    }
+
+    /// The production ports.
+    @MainActor
+    static func live(
+        repository: AuthRepository,
+        noteOwnAction: @escaping @MainActor (AccountNoticeKind) -> Void
+    ) -> EmailRecoverModel.Ports {
+        // The letter is written in the language of this device.
+        let lang: @Sendable () async -> String = { await MainActor.run { Localization.shared.language } }
+        return EmailRecoverModel.Ports(
+            normalize: { try normalizeRecoveryEmail(address: $0) },
+            handle: { try LoginName.make($0, emptyError: AuthClientError.argument("empty username")) },
+            start: { handle, address in
+                try await AuthClient().recoveryEmailRecoverStart(handle: handle, address: address, lang: await lang())
+            },
+            verify: { challengeId, code in
+                try await AuthClient().recoveryEmailRecoverVerify(challengeId: challengeId, code: code)
+            },
+            totp: { ticket, code in
+                try await AuthClient().recoveryEmailRecoverTotp(ticket: ticket, code: code)
+            },
+            open: { ticket in try await AuthClient().recoveryEmailRecoverOpen(ticket: ticket) },
+            unseal: { handle, address, salt, sealed in
+                try await EmailVaultWork.open(handle: handle, address: address, vaultSalt: salt, sealed: sealed)
+            },
+            restoreWithPhrase: { [weak repository] phrase, newPassword, username in
+                guard let repository else { throw SessionNotReady() }
+                try await repository.recover(
+                    mnemonicPhrase: phrase, newPassword: newPassword, username: username)
+            },
+            changePassword: { [weak repository] username, ticket, newPassword in
+                guard let repository else { throw SessionNotReady() }
+                try await repository.recoverPasswordByEmail(
+                    username: username, ticket: ticket, newPassword: newPassword)
+            },
+            noteOwnAction: noteOwnAction
+        )
     }
 }

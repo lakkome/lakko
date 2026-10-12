@@ -37,6 +37,9 @@ final class AppServices {
     /// ADR-0066 section 3.2 — "It was lost or stolen": remove a device AND
     /// change the account keys, with its owed record.
     let keyRotation: KeyRotationRunner
+    /// ADR-0067 — the signed-in account's protection (recovery email, saved
+    /// phrase) and the notices its devices are shown.
+    let accountProtection: AccountProtectionCenter
 
     init(
         authRepository: AuthRepository,
@@ -49,7 +52,8 @@ final class AppServices {
         inviteIntake: InviteIntake,
         feedRefresh: FeedRefreshCenter,
         deviceRemoval: DeviceRemovalRunner,
-        keyRotation: KeyRotationRunner
+        keyRotation: KeyRotationRunner,
+        accountProtection: AccountProtectionCenter
     ) {
         self.authRepository = authRepository
         self.contactsRepository = contactsRepository
@@ -62,6 +66,7 @@ final class AppServices {
         self.feedRefresh = feedRefresh
         self.deviceRemoval = deviceRemoval
         self.keyRotation = keyRotation
+        self.accountProtection = accountProtection
     }
 }
 

@@ -1038,27 +1038,34 @@ public class AuthClient(
      * when, and how many password attempts are left. `401 recall-refused`
      * ([recallFailureOf]) means it cannot.
      */
-    public suspend fun recallStatus(accountId: ByteArray, oldAccountSeed: ByteArray): RecallStatus {
+    public suspend fun recallStatus(
+        accountId: ByteArray,
+        oldAccountSeed: ByteArray,
+        handle: ByteArray? = null,
+    ): RecallStatus {
+        // ADR-0067 section 8: a device with no account id names the account
+        // by login handle; the statement's account field then carries the
+        // first 16 bytes of the handle.
+        if (handle != null) requireHandle(handle)
+        val stated = handle?.copyOfRange(0, ACCOUNT_ID_LEN) ?: accountId
         // ADR-0066 T5 item 24: a device with a wrong clock is told the
         // server's time (never "no anchor") and signs again at it, once.
         val res: RecallStatusResponse = sendWithStaleStatementRetry { signAtMs ->
             val kind = uniffi.lakko_ffi_uniffi.AccountStatementKind.RECALL_STATUS
             val statement = if (signAtMs == null) {
-                uniffi.lakko_ffi_uniffi.signAccountStatement(oldAccountSeed, kind, accountId, ByteArray(0))
+                uniffi.lakko_ffi_uniffi.signAccountStatement(oldAccountSeed, kind, stated, ByteArray(0))
             } else {
-                uniffi.lakko_ffi_uniffi.signAccountStatementAt(oldAccountSeed, kind, accountId, ByteArray(0), signAtMs)
+                uniffi.lakko_ffi_uniffi.signAccountStatementAt(oldAccountSeed, kind, stated, ByteArray(0), signAtMs)
             }
             post(
                 "/account/recall/status",
-                RecallStatusRequest(statement_b64 = base64UrlEncodeNoPad(statement)),
+                RecallStatusRequest(
+                    statement_b64 = base64UrlEncodeNoPad(statement),
+                    handle = handle?.let { base64UrlEncodeNoPad(it) },
+                ),
             )
         }
-        return RecallStatus(
-            anchorSeq = res.anchor_seq,
-            expiresAtMs = res.expires_at_ms,
-            changedAtMs = res.changed_at_ms,
-            attemptsRemaining = res.attempts_remaining,
-        )
+        return recallStatusOf(res, byHandle = handle != null)
     }
 
     /**
@@ -1083,8 +1090,12 @@ public class AuthClient(
         newSeed: ByteArray,
         newSignaturePubkey: ByteArray,
         deviceId: ByteArray? = null,
+        /** ADR-0067 section 8: the 64-byte seed of the OLD recovery phrase.
+         *  When given, the login is made against the anchored RECOVERY
+         *  envelope (`proof: "phrase"`) and [oldPassword] is not used. */
+        oldRecoverySeed: ByteArray? = null,
     ): RecallResult {
-        if (oldPassword.isEmpty() || newPassword.isEmpty()) {
+        if ((oldRecoverySeed == null && oldPassword.isEmpty()) || newPassword.isEmpty()) {
             throw AuthClientArgError("passwords must be non-empty")
         }
         if (newSeed.isEmpty()) throw AuthClientArgError("seed must be non-empty")
@@ -1093,7 +1104,10 @@ public class AuthClient(
         }
         if (anchorSeq < 0) throw AuthClientArgError("anchorSeq must not be negative")
         val accountIdB64Url = base64UrlEncodeNoPad(accountId)
-        OpaqueLogin.startPassword(oldPassword).use { login ->
+        val loginSecret = oldRecoverySeed ?: oldPassword
+        val loginStart =
+            if (oldRecoverySeed != null) OpaqueLogin.startRecovery(oldRecoverySeed) else OpaqueLogin.startPassword(oldPassword)
+        loginStart.use { login ->
             OpaqueRegister.startPassword(newPassword).use { passwordReg ->
                 OpaqueRegister.startRecovery(newSeed).use { recoveryReg ->
                     val loginRequest = login.requestB64()
@@ -1125,6 +1139,7 @@ public class AuthClient(
                                 login_request = loginRequest,
                                 password_request = passwordReg.requestB64(),
                                 recovery_request = recoveryReg.requestB64(),
+                                proof = if (oldRecoverySeed != null) "phrase" else null,
                             ),
                         )
                     }
@@ -1136,7 +1151,7 @@ public class AuthClient(
                     // The password check. A failure here is the OLD password
                     // being wrong; nothing more is sent.
                     val loginOut = try {
-                        login.finish(oldPassword, start.login_response)
+                        login.finish(loginSecret, start.login_response)
                     } catch (_: uniffi.lakko_ffi_uniffi.FfiException) {
                         throw RecallWrongPassword()
                     }
@@ -1291,6 +1306,8 @@ public class AuthClient(
         newSignaturePubkey: ByteArray,
         supersessionProof: ByteArray,
         revokeDeviceIds: List<ByteArray>,
+        /** ADR-0067 section 3: this rotation is "Save a recovery phrase". */
+        phraseSaved: Boolean = false,
     ): KeyResetResult {
         requireSession(sessionToken)
         if (freshGrant.isEmpty()) throw AuthClientArgError("freshGrant must be non-empty")
@@ -1319,6 +1336,7 @@ public class AuthClient(
                     new_signature_pubkey_b64 = base64UrlEncodeNoPad(newSignaturePubkey),
                     supersession_proof_b64 = base64UrlEncodeNoPad(supersessionProof),
                     revoke_device_ids_b64 = revokeDeviceIds.map { base64UrlEncodeNoPad(it) },
+                    phrase_saved = if (phraseSaved) true else null,
                 ),
                 bearer = sessionToken,
             )
@@ -1394,6 +1412,247 @@ public class AuthClient(
             refreshExpiresAtMs = resp.refresh_expires_at_ms,
             keyGeneration = resp.key_generation,
         )
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0067: the recovery email
+    // -----------------------------------------------------------------
+
+    /** `GET /recovery-email/available` (anonymous): whether this server can
+     *  mail a recovery code. */
+    public suspend fun recoveryEmailAvailable(): Boolean {
+        val res: RecoveryEmailAvailableResponse = doRequest(HttpMethod.Get, "/recovery-email/available") {}
+        return res.available
+    }
+
+    /** `GET /recovery-email` (bearer): the account's protection. Never the
+     *  address. */
+    public suspend fun recoveryEmailStatus(sessionToken: String): RecoveryEmailStatus {
+        requireSession(sessionToken)
+        val res: RecoveryEmailStatusResponse = doRequest(HttpMethod.Get, "/recovery-email") {
+            header(HttpHeaders.Authorization, "Bearer $sessionToken")
+        }
+        return RecoveryEmailStatus(
+            available = res.available,
+            enabled = res.enabled,
+            vault = res.vault,
+            phraseSaved = res.phrase_saved,
+            totp = res.totp,
+        )
+    }
+
+    /**
+     * `POST /recovery-email/enrol/start` (bearer + fresh-auth grant): mail a
+     * code to [address] and get the salt the vault is sealed with.
+     *
+     * @throws AuthHttpError `403 fresh-auth-required`, `400 address-invalid`,
+     *   `409 handle-mismatch` / `username-required`, `429 email-rate-limited`,
+     *   `502 mail-send-failed`, `503 recovery-email-disabled`.
+     */
+    public suspend fun recoveryEmailEnrolStart(
+        sessionToken: String,
+        freshGrant: String?,
+        handle: ByteArray,
+        address: String,
+        lang: String?,
+    ): RecoveryEmailEnrolStart {
+        requireSession(sessionToken)
+        requireHandle(handle)
+        val res: RecoveryEmailEnrolStartResponse = post(
+            "/recovery-email/enrol/start",
+            RecoveryEmailEnrolStartRequest(
+                fresh_grant = freshGrant,
+                handle = base64UrlEncodeNoPad(handle),
+                address = address,
+                lang = lang,
+            ),
+            bearer = sessionToken,
+        )
+        val salt = try {
+            base64Decode(res.vault_salt)
+        } catch (_: IllegalArgumentException) {
+            throw AuthHttpError(HTTP_OK, "/recovery-email/enrol/start", "malformed vault_salt")
+        }
+        if (salt.size != EMAIL_VAULT_SALT_LEN) {
+            throw AuthHttpError(HTTP_OK, "/recovery-email/enrol/start", "vault salt of ${salt.size} bytes")
+        }
+        return RecoveryEmailEnrolStart(
+            challengeId = res.challenge_id,
+            vaultSalt = salt,
+            resendAfterSecs = res.resend_after_secs,
+            expiresInSecs = res.expires_in_secs,
+        )
+    }
+
+    /**
+     * `POST /recovery-email/enrol/finish` (bearer): the mailed code, and the
+     * sealed vault for an account without a saved phrase. Returns whether a
+     * vault was stored.
+     *
+     * @throws AuthHttpError `401 code-refused`, `410 code-expired`, `409
+     *   phrase-saved`, `429 too-many-attempts`.
+     */
+    public suspend fun recoveryEmailEnrolFinish(
+        sessionToken: String,
+        challengeId: String,
+        code: String,
+        sealedEntropy: ByteArray?,
+    ): Boolean {
+        requireSession(sessionToken)
+        if (sealedEntropy != null && sealedEntropy.size != EMAIL_VAULT_SEALED_LEN) {
+            throw AuthClientArgError("the email vault must be $EMAIL_VAULT_SEALED_LEN bytes")
+        }
+        val res: RecoveryEmailEnrolFinishResponse = post(
+            "/recovery-email/enrol/finish",
+            RecoveryEmailEnrolFinishRequest(
+                challenge_id = challengeId,
+                code = code,
+                sealed_entropy = sealedEntropy?.let { base64Encode(it) },
+            ),
+            bearer = sessionToken,
+        )
+        return res.vault
+    }
+
+    /** `DELETE /recovery-email` (bearer + fresh-auth grant): remove the
+     *  recovery email and the vault. */
+    public suspend fun recoveryEmailRemove(sessionToken: String, freshGrant: String?) {
+        requireSession(sessionToken)
+        sendJson<RecoveryEmailGrantRequest, RecoveryEmailRemoveResponse>(
+            HttpMethod.Delete,
+            "/recovery-email",
+            RecoveryEmailGrantRequest(fresh_grant = freshGrant),
+            bearer = sessionToken,
+        )
+    }
+
+    /** `GET /account/notices` (bearer): one page, oldest first, past the
+     *  cursor ([after]) or, for a device with no cursor, since [sinceMs]. */
+    public suspend fun accountNotices(
+        sessionToken: String,
+        after: Long?,
+        sinceMs: Long? = null,
+    ): AccountNoticesResponse {
+        requireSession(sessionToken)
+        val query = when {
+            after != null -> "?after=$after"
+            sinceMs != null -> "?since_ms=$sinceMs"
+            else -> ""
+        }
+        return doRequest(HttpMethod.Get, "/account/notices$query") {
+            header(HttpHeaders.Authorization, "Bearer $sessionToken")
+        }
+    }
+
+    /**
+     * `POST /recovery-email/recover/start` (anonymous): the same answer for a
+     * matching pair, a wrong pair, an unknown name and an account without an
+     * email.
+     */
+    public suspend fun emailRecoverStart(handle: ByteArray, address: String, lang: String?): EmailRecoverStartResponse {
+        requireHandle(handle)
+        return post(
+            "/recovery-email/recover/start",
+            EmailRecoverStartRequest(handle = base64UrlEncodeNoPad(handle), address = address, lang = lang),
+        )
+    }
+
+    /** `POST /recovery-email/recover/verify`: `401 code-refused` for a wrong
+     *  code and for a code that was never sent. */
+    public suspend fun emailRecoverVerify(challengeId: String, code: String): EmailRecoverVerifyResponse =
+        post("/recovery-email/recover/verify", EmailRecoverVerifyRequest(challenge_id = challengeId, code = code))
+
+    /** `POST /recovery-email/recover/totp`: the authenticator's code. */
+    public suspend fun emailRecoverTotp(ticket: String, code: String) {
+        val res: EmailRecoverOkResponse =
+            post("/recovery-email/recover/totp", EmailRecoverTotpRequest(ticket = ticket, code = code))
+        if (!res.ok) throw AuthHttpError(HTTP_OK, "/recovery-email/recover/totp", "server reported ok=false")
+    }
+
+    /** `POST /recovery-email/recover/open`: the sealed keys (the ticket is
+     *  then spent) or the password-only mode. */
+    public suspend fun emailRecoverOpen(ticket: String): EmailRecoverOpen {
+        val endpoint = "/recovery-email/recover/open"
+        val res: EmailRecoverOpenResponse = post(endpoint, EmailRecoverTicketRequest(ticket = ticket))
+        return when (res.mode) {
+            "password" -> EmailRecoverOpen.Password
+            "vault" -> {
+                val salt = res.vault_salt?.let(::decodeOrNull)
+                val sealed = res.sealed_entropy?.let(::decodeOrNull)
+                if (salt == null || sealed == null ||
+                    salt.size != EMAIL_VAULT_SALT_LEN || sealed.size != EMAIL_VAULT_SEALED_LEN
+                ) {
+                    throw AuthHttpError(HTTP_OK, endpoint, "malformed vault")
+                }
+                EmailRecoverOpen.Vault(vaultSalt = salt, sealedEntropy = sealed)
+            }
+            else -> throw AuthHttpError(HTTP_OK, endpoint, "unknown mode")
+        }
+    }
+
+    private fun recallStatusOf(res: RecallStatusResponse, byHandle: Boolean): RecallStatus = RecallStatus(
+        anchorSeq = res.anchor_seq,
+        expiresAtMs = res.expires_at_ms,
+        changedAtMs = res.changed_at_ms,
+        attemptsRemaining = res.attempts_remaining,
+        // Only a device that asked by handle needs to be told the account.
+        accountId = res.account_id_b64?.takeIf { byHandle }?.let {
+            try {
+                base64UrlDecodeNoPad(it).takeIf { id -> id.size == ACCOUNT_ID_LEN }
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        },
+        phraseArm = res.phrase_arm,
+    )
+
+    private fun decodeOrNull(b64: String): ByteArray? = try {
+        base64Decode(b64)
+    } catch (_: IllegalArgumentException) {
+        null
+    }
+
+    /**
+     * `POST /recovery-email/recover/password/{start,finish}`: choose a new
+     * password under the ticket (an account with a saved phrase). The answer
+     * is the session pair and the account id; no fresh-auth grant.
+     */
+    public suspend fun emailRecoverSetPassword(
+        ticket: String,
+        newPassword: ByteArray,
+        deviceId: ByteArray? = null,
+    ): TotpRecoverResult {
+        if (newPassword.isEmpty()) throw AuthClientArgError("newPassword must be non-empty")
+        OpaqueRegister.startPassword(newPassword).use { reg ->
+            val start: EmailRecoverPasswordStartResponse = post(
+                "/recovery-email/recover/password/start",
+                EmailRecoverPasswordStartRequest(ticket = ticket, new_password_request = reg.requestB64()),
+            )
+            val upload = reg.finish(newPassword, start.new_password_response).use { it.uploadB64() }
+            val finish: EmailRecoverPasswordFinishResponse = post(
+                "/recovery-email/recover/password/finish",
+                EmailRecoverPasswordFinishRequest(
+                    ticket = ticket,
+                    new_password_upload = upload,
+                    device_id_b64 = deviceIdField(deviceId),
+                ),
+            )
+            val accountId = try {
+                base64UrlDecodeNoPad(finish.account_id_b64)
+            } catch (_: IllegalArgumentException) {
+                throw AuthHttpError(HTTP_OK, "/recovery-email/recover/password/finish", "malformed account_id_b64")
+            }
+            return TotpRecoverResult(
+                accountId = accountIdFromFinish(accountId, "/recovery-email/recover/password/finish"),
+                session = SessionPair(
+                    accessToken = finish.session_token,
+                    accessExpiresAtMs = finish.session_expires_at_ms,
+                    refreshToken = finish.refresh_token,
+                    refreshExpiresAtMs = finish.refresh_expires_at_ms,
+                    keyGeneration = finish.key_generation,
+                ),
+            )
+        }
     }
 
     // -----------------------------------------------------------------

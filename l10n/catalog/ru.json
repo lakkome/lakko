@@ -2,6 +2,10 @@
   "format": 1,
   "language": "ru",
   "messages": {
+    "account.keys_changed.finishing": {
+      "text": "У аккаунта новые ключи. Завершаем изменение.",
+      "status": "machine"
+    },
     "app.not_found.body": {
       "text": "По этому адресу ничего нет.",
       "status": "machine"
@@ -4426,12 +4430,12 @@
       "text": "Другие ваши устройства сохранят чаты и сами получат новые ключи.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Ключи доступа по-прежнему позволяют войти. Функция «Восстанавливать ключи этим ключом доступа» отключена, пока вы не включите её снова.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "Ссылки-приглашения и ссылки на звонок, созданные раньше, перестанут работать. Создайте новые.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Ключи доступа по-прежнему позволяют войти. Функция «Восстанавливать ключи этим ключом доступа» отключена, пока вы не включите её снова.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -6186,6 +6190,58 @@
       "text": "Вы будете владельцем группы. Позже можно добавить ещё людей.",
       "status": "machine"
     },
+    "notice.email_added": {
+      "text": "К вашему аккаунту добавлена почта для восстановления.",
+      "status": "machine"
+    },
+    "notice.email_removed": {
+      "text": "Почта для восстановления удалена.",
+      "status": "machine"
+    },
+    "notice.email_replaced": {
+      "text": "Почта для восстановления заменена.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.body": {
+      "text": "{date}, на другом устройстве.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.title": {
+      "text": "Ваш аккаунт открыли с помощью почты для восстановления",
+      "status": "machine"
+    },
+    "notice.password_by_email.body": {
+      "text": "{date} кто-то выбрал новый пароль с помощью вашей почты для восстановления.",
+      "status": "machine"
+    },
+    "notice.password_by_email.title": {
+      "text": "Ваш пароль изменён",
+      "status": "machine"
+    },
+    "notice.phrase_saved": {
+      "text": "Для вашего аккаунта сохранена фраза восстановления.",
+      "status": "machine"
+    },
+    "notice.secure.new_keys": {
+      "text": "Аккаунт получит новые ключи, и тот, кто его открыл, потеряет доступ.",
+      "status": "machine"
+    },
+    "notice.secure.password_saved": {
+      "text": "Пароль изменён.",
+      "status": "machine"
+    },
+    "notice.secure.title": {
+      "text": "Защитите аккаунт",
+      "status": "machine"
+    },
+    "notice.was_me": {
+      "text": "Это был я",
+      "status": "machine"
+    },
+    "notice.was_not_me": {
+      "text": "Это был не я",
+      "status": "machine"
+    },
     "notification.channel.messages": {
       "text": "Сообщения",
       "status": "machine"
@@ -6282,6 +6338,10 @@
       "text": "Использовать пароль",
       "status": "machine"
     },
+    "proof.recovery_email.help": {
+      "text": "Введите пароль, чтобы изменить почту для восстановления.",
+      "status": "machine"
+    },
     "proof.remove_device.cancelled": {
       "text": "Отменено. Устройство не удалено.",
       "status": "machine"
@@ -6326,6 +6386,130 @@
       "text": "Что можно сделать:",
       "status": "machine"
     },
+    "proof.save_phrase.help": {
+      "text": "Введите пароль, чтобы сохранить фразу восстановления.",
+      "status": "machine"
+    },
+    "protect.banner.action": {
+      "text": "Защитить",
+      "status": "machine"
+    },
+    "protect.banner.none": {
+      "text": "У этого аккаунта нет способа восстановления.",
+      "status": "machine"
+    },
+    "protect.body": {
+      "text": "Если вы забудете пароль или потеряете этот телефон, так вы вернётесь в аккаунт.",
+      "status": "machine"
+    },
+    "protect.continue": {
+      "text": "Продолжить",
+      "status": "machine"
+    },
+    "protect.done": {
+      "text": "Готово",
+      "status": "machine"
+    },
+    "protect.email.badge": {
+      "text": "Рекомендуем",
+      "status": "machine"
+    },
+    "protect.email.body": {
+      "text": "Мы отправим на неё код. Тот, кто может читать этот ящик, сможет войти в ваш аккаунт.",
+      "status": "machine"
+    },
+    "protect.email.title": {
+      "text": "Добавить почту",
+      "status": "machine"
+    },
+    "protect.passkey.body": {
+      "text": "Вход по отпечатку, лицу или блокировке экрана. Пароль помнить не нужно.",
+      "status": "machine"
+    },
+    "protect.passkey.title": {
+      "text": "Создать ключ доступа",
+      "status": "machine"
+    },
+    "protect.phrase.body": {
+      "text": "12 слов, которые храните только вы. Надёжнее и не связано с почтой.",
+      "status": "machine"
+    },
+    "protect.phrase.save.body": {
+      "text": "12 слов, которые храните только вы. После этого код из письма сможет сменить пароль, но не откроет аккаунт.",
+      "status": "machine"
+    },
+    "protect.phrase.save.effect": {
+      "text": "Аккаунт получит новые ключи. Контакты и чаты останутся как есть. Другие ваши устройства останутся в аккаунте.",
+      "status": "machine"
+    },
+    "protect.phrase.save.failed": {
+      "text": "Не удалось завершить. Ничего не изменилось.",
+      "status": "machine"
+    },
+    "protect.phrase.save.finishing": {
+      "text": "У аккаунта новые ключи. Завершаем.",
+      "status": "machine"
+    },
+    "protect.phrase.save.progress": {
+      "text": "Меняем ключи аккаунта",
+      "status": "machine"
+    },
+    "protect.phrase.save.show": {
+      "text": "Показать мои 12 слов",
+      "status": "machine"
+    },
+    "protect.phrase.title": {
+      "text": "Сохранить фразу восстановления",
+      "status": "machine"
+    },
+    "protect.skip": {
+      "text": "Не сейчас",
+      "status": "machine"
+    },
+    "protect.skip.confirm.body": {
+      "text": "Если вы забудете пароль или потеряете этот телефон, вернуться в этот аккаунт будет нельзя.",
+      "status": "machine"
+    },
+    "protect.skip.confirm.continue": {
+      "text": "Продолжить без защиты",
+      "status": "machine"
+    },
+    "protect.skip.confirm.title": {
+      "text": "Продолжить без защиты?",
+      "status": "machine"
+    },
+    "protect.status.email": {
+      "text": "Защищён вашей почтой",
+      "status": "machine"
+    },
+    "protect.status.none": {
+      "text": "Не защищён",
+      "status": "machine"
+    },
+    "protect.status.phrase": {
+      "text": "Защищён фразой восстановления",
+      "status": "machine"
+    },
+    "protect.title": {
+      "text": "Защитите аккаунт",
+      "status": "machine"
+    },
+    "recall.phrase.changed": {
+      "text": "{date} ключи этого аккаунта были изменены. Это были вы?",
+      "status": "machine"
+    },
+    "recall.phrase.take_back": {
+      "text": "Вернуть аккаунт",
+      "status": "machine"
+    },
+    "recall.phrase.use": {
+      "text": "Использовать фразу восстановления",
+      "status": "machine"
+    },
+    "recall.phrase.wrong": {
+      "text": "Эти слова не являются фразой восстановления этого аккаунта.",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "Код из аутентификатора позволяет войти. На устройстве, где этого аккаунта никогда не было, после этого всё равно понадобится другое устройство, ключ доступа или фраза восстановления.",
       "status": "machine"
@@ -6348,6 +6532,50 @@
     },
     "recovery.device.restoring": {
       "text": "Восстановление {username}",
+      "status": "machine"
+    },
+    "recovery.email.check.body": {
+      "text": "Если это имя и адрес связаны, код уже в пути. Он действует 10 минут.",
+      "status": "machine"
+    },
+    "recovery.email.check.title": {
+      "text": "Проверьте почту",
+      "status": "machine"
+    },
+    "recovery.email.failed": {
+      "text": "Не удалось вернуть аккаунт. Попробуйте ещё раз или выберите другой способ.",
+      "status": "machine"
+    },
+    "recovery.email.restoring": {
+      "text": "Возвращаем ваш аккаунт",
+      "status": "machine"
+    },
+    "recovery.email.row.body": {
+      "text": "Код, отправленный на вашу почту для восстановления.",
+      "status": "machine"
+    },
+    "recovery.email.row.title": {
+      "text": "Код из письма",
+      "status": "machine"
+    },
+    "recovery.email.save": {
+      "text": "Сохранить и войти",
+      "status": "machine"
+    },
+    "recovery.email.start.body": {
+      "text": "Введите имя пользователя и почту для восстановления.",
+      "status": "machine"
+    },
+    "recovery.email.totp.body": {
+      "text": "Введите 6-значный код из приложения-аутентификатора.",
+      "status": "machine"
+    },
+    "recovery.email.totp.lost": {
+      "text": "Потеряли аутентификатор? Выберите другой способ.",
+      "status": "machine"
+    },
+    "recovery.email.totp.title": {
+      "text": "Код аутентификатора",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6560,6 +6788,118 @@
     },
     "recovery.words.tries_left": {
       "text": "{count, plural, one {Осталась # попытка} few {Остались # попытки} many {Осталось # попыток} other {Осталось # попытки}} до паузы на 15 минут.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.body": {
+      "text": "Ключи аккаунта изменились. Введите адрес снова, чтобы код из письма мог вернуть аккаунт.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.title": {
+      "text": "Добавьте почту снова",
+      "status": "machine"
+    },
+    "recovery_email.body": {
+      "text": "Если вы забудете пароль, мы отправим код на этот адрес, чтобы вы смогли вернуться.",
+      "status": "machine"
+    },
+    "recovery_email.code.expired": {
+      "text": "Срок действия кода истёк.",
+      "status": "machine"
+    },
+    "recovery_email.code.other_address": {
+      "text": "Указать другой адрес",
+      "status": "machine"
+    },
+    "recovery_email.code.resend": {
+      "text": "Отправить ещё раз",
+      "status": "machine"
+    },
+    "recovery_email.code.resend_in": {
+      "text": "Отправить ещё раз через {time}",
+      "status": "machine"
+    },
+    "recovery_email.code.sent_to": {
+      "text": "Мы отправили 6-значный код на {address}.",
+      "status": "machine"
+    },
+    "recovery_email.code.title": {
+      "text": "Введите код",
+      "status": "machine"
+    },
+    "recovery_email.code.used_up": {
+      "text": "Слишком много попыток. Отправьте новый код.",
+      "status": "machine"
+    },
+    "recovery_email.code.wrong": {
+      "text": "Код не подходит.",
+      "status": "machine"
+    },
+    "recovery_email.field": {
+      "text": "Почта",
+      "status": "machine"
+    },
+    "recovery_email.invalid": {
+      "text": "Введите адрес почты полностью.",
+      "status": "machine"
+    },
+    "recovery_email.mailbox_warning": {
+      "text": "Тот, кто может читать этот ящик, сможет войти в ваш аккаунт. Сохраните фразу восстановления, чтобы это изменить.",
+      "status": "machine"
+    },
+    "recovery_email.needs_username": {
+      "text": "Сначала выберите имя пользователя.",
+      "status": "machine"
+    },
+    "recovery_email.not_kept": {
+      "text": "Lakko не хранит ваш адрес. Когда понадобится код, вы введёте его снова вместе с именем пользователя.",
+      "status": "machine"
+    },
+    "recovery_email.remove": {
+      "text": "Удалить",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.body": {
+      "text": "Вы не сможете вернуться в аккаунт через почту.",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.title": {
+      "text": "Удалить почту для восстановления?",
+      "status": "machine"
+    },
+    "recovery_email.replace": {
+      "text": "Заменить",
+      "status": "machine"
+    },
+    "recovery_email.send": {
+      "text": "Отправить код",
+      "status": "machine"
+    },
+    "recovery_email.send_failed": {
+      "text": "Не удалось отправить письмо. Попробуйте позже.",
+      "status": "machine"
+    },
+    "recovery_email.status.off": {
+      "text": "Выключена",
+      "status": "machine"
+    },
+    "recovery_email.status.on": {
+      "text": "Включена",
+      "status": "machine"
+    },
+    "recovery_email.title": {
+      "text": "Почта для восстановления",
+      "status": "machine"
+    },
+    "recovery_email.totp_warning": {
+      "text": "Понадобится ещё и код из приложения-аутентификатора. Если оно на телефоне, который вы потеряете, почты будет недостаточно.",
+      "status": "machine"
+    },
+    "recovery_email.unavailable": {
+      "text": "Коды по почте сейчас недоступны.",
+      "status": "machine"
+    },
+    "recovery_email.username_change": {
+      "text": "Смена имени пользователя отключает почту для восстановления. Потом её можно добавить снова.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {

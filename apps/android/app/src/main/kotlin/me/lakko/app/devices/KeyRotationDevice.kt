@@ -37,18 +37,28 @@ internal object KeyRotationDevice {
         deviceId: ByteArray? = null,
         attestation: ByteArray? = null,
         onStep: (RotationUiStep) -> Unit = {},
+        /** ADR-0067 section 3: the runner of "Save a recovery phrase", a
+         *  rotation that removes no device. */
+        savingPhrase: Boolean = false,
     ): KeyRotationRunner? {
         val secrets = authRepository.identitySecrets.value ?: return null
         val app = context.applicationContext
         val accountIdB64 = base64Encode(secrets.accountId)
         val store = KeyRotationOwedStore.onDevice(app)
-        val target = deviceId ?: store.load(accountIdB64)?.deviceIdB64Url?.let {
+        val owedNow = store.load(accountIdB64)
+        val noDevice = savingPhrase || (deviceId == null && owedNow != null && !owedNow.removesDevice)
+        val named: ByteArray? = deviceId ?: owedNow?.takeIf { it.removesDevice }?.deviceIdB64Url?.let {
             try {
                 base64UrlDecodeNoPad(it)
             } catch (_: IllegalArgumentException) {
                 null
             }
-        } ?: return null
+        }
+        if (named == null && !noDevice) return null
+        // A rotation that removes no device never asks the removal ports.
+        val target: ByteArray by lazy {
+            named ?: throw IllegalStateException("this rotation removes no device")
+        }
 
         fun sync(): DeviceGroupSyncRepository =
             DeviceGroupSyncRepository.active ?: throw IllegalStateException("the device list is not open")
@@ -74,8 +84,11 @@ internal object KeyRotationDevice {
 
             override fun envelope(): ByteArray = authRepository.rotationEnvelope()
 
-            override suspend fun commit(freshGrant: String, revokeDeviceId: ByteArray): CommitAnswer.Committed =
-                authRepository.rotationCommit(freshGrant, revokeDeviceId)
+            override suspend fun commit(
+                freshGrant: String,
+                revokeDeviceId: ByteArray?,
+                phraseSaved: Boolean,
+            ): CommitAnswer.Committed = authRepository.rotationCommit(freshGrant, revokeDeviceId, phraseSaved)
 
             override suspend fun resolveLostCommit(): LostCommit = authRepository.rotationResolveLostCommit()
 

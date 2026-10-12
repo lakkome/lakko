@@ -44,6 +44,8 @@ import { deleteAccountIdentitySeed } from "./account-identity-seed-store";
 import { deleteKeyRotationState } from "./key-rotation-store";
 import { clearRotatedNotice, clearRotation } from "../devices/key-rotation";
 import { clearSignupPhraseOwed } from "./phrase-gate";
+import { clearProtectionFacts } from "./protect/account-protection";
+import { clearNoticeStores } from "./protect/notices";
 import { clearPersistedAccountFor } from "./persisted-account";
 import { deleteDeviceGroupSnapshot } from "../devices/device-group-snapshot-store";
 import { deleteSyncState } from "../devices/sync/sync-state-idb";
@@ -239,6 +241,11 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     },
     { name: "readmission-removed", run: () => clearRemovedDevicesForAccount(accountIdB64) },
     { name: "signup-phrase-owed", run: () => clearSignupPhraseOwed(storage, accountIdB64) },
+    // ADR-0067: the "phrase-protected" flag, the no-protection banner's
+    // dismissal, the owed "Protect your account" step, and what this device
+    // saw and did of the account's notices.
+    { name: "protection-facts", run: () => clearProtectionFacts(storage, accountIdB64) },
+    { name: "account-notices", run: () => clearNoticeStores(storage, accountIdB64) },
     // The local three-word guess budget and the ADR-0065 "publish owed"
     // record (a reset whose attestation was not yet carried to the directory
     // and the device list).

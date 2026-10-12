@@ -36,6 +36,12 @@ import {
 } from "./wipe-account";
 import { savePersistedAccount, loadPersistedAccount } from "./persisted-account";
 import { markSignupPhraseOwed } from "./phrase-gate";
+import {
+  dismissBanner,
+  markProtectStepOwed,
+  setPhraseProtected,
+} from "./protect/account-protection";
+import { markOwnAction, startNoticeCursor } from "./protect/notices";
 import { markThreeWordsSuspended, saveBudget } from "./recover/three-words";
 import { writeKeyResetOwed } from "./key-reset-owed";
 import { writeGenesisRecorded, writeKnownDeviceId } from "./session-device";
@@ -176,6 +182,13 @@ function seedAccount(acct: string, acctUrl: string): void {
   rememberInviteLinkSecret(acctUrl, "slug1", "fragmentfragment");
   put(`lakko.readmission.removed.v1:${acct}`, JSON.stringify({ [G]: ["k"] }));
   markSignupPhraseOwed(local, acct);
+  // ADR-0067: how the account is protected as this device knows it, and
+  // what it saw and did of the account's notices.
+  setPhraseProtected(local, acct, true);
+  dismissBanner(local, acct, 1);
+  markProtectStepOwed(local, acct);
+  startNoticeCursor(local, acct, 3);
+  markOwnAction(local, acct, "recovery-email-added", 1);
   saveBudget(local, acct, { misses: 2, pausedUntilMs: null });
   markThreeWordsSuspended(local, acct);
   writeKeyResetOwed(local, acct, {
@@ -520,6 +533,11 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko/invite-link-secrets/v1/": "account",
   "lakko.readmission.removed.v1:": "account",
   "lakko:signup-phrase-unacknowledged:": "account",
+  "lakko:phrase-protected:": "account",
+  "lakko:protect-banner-dismissed:": "account",
+  "lakko:protect-step-owed:": "account",
+  "lakko:account-notices-seen:": "account",
+  "lakko:account-notices-self:": "account",
   "lakko:three-words-budget:": "account",
   "lakko:three-words-suspended:": "account",
   "lakko:key-reset-owed:": "account",

@@ -2139,12 +2139,22 @@ you get back in.
   [mail]  Add an email                 Recommended     >
           We send a code to it. Anyone who can read that
           mailbox can get into your account.
+  [passkey] Create a passkey                           >
+          Sign in with your fingerprint, face or screen
+          lock. No password to remember.
   [key]   Save a recovery phrase                       >
           12 words only you keep. Stronger, and nothing
           to do with email.
 
 Not now
 ```
+
+- `Create a passkey` (added 2026-10-12) is shown only where the device or
+  browser can use passkeys. It runs the existing passkey creation, including
+  its own choice of whether the passkey also carries the keys, and returns
+  to this step with the row marked `Done`; the person may then add another
+  option or press `Continue`, which replaces `Not now` once any row is done.
+- An account with a passkey does not show the "no way back in" banner.
 
 - `Add an email` goes to 19.2. `Save a recovery phrase` goes to 19.5.
   Either lands in the app afterwards; the other stays available in Settings.

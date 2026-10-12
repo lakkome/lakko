@@ -51,9 +51,18 @@ public fun SaveFreshPhraseScreen(
     publishOwed: PublishOwedReason? = null,
     onRetryPublish: suspend () -> Unit = {},
     onLogOut: () -> Unit = {},
+    /** ADR-0067 - the account is NOT phrase-protected: the retry screen says
+     *  nothing about words (none will be shown). */
+    wordless: Boolean = false,
 ) {
     if (publishOwed != null) {
-        PublishPending(reason = publishOwed, onRetry = onRetryPublish, onLogOut = onLogOut, modifier = modifier)
+        PublishPending(
+            reason = publishOwed,
+            onRetry = onRetryPublish,
+            onLogOut = onLogOut,
+            modifier = modifier,
+            wordless = wordless,
+        )
         return
     }
     val guest = username.isNullOrBlank()
@@ -72,6 +81,26 @@ public fun SaveFreshPhraseScreen(
     )
 }
 
+/**
+ * The catalog keys of the publish-owed screen's text, joined by a blank
+ * line. A phrase-protected account keeps the existing text (it says the new
+ * words are withheld); any other account is told the change is finishing,
+ * with no mention of words ([wordless]).
+ */
+public fun publishOwedLeadKeys(reason: PublishOwedReason, wordless: Boolean): List<String> {
+    val owed = if (wordless) "account.keys_changed.finishing" else "recovery_phrase.fresh.publish_owed"
+    return when (reason) {
+        is PublishOwedReason.SignInRequired -> listOf("recovery_phrase.fresh.sign_in_to_finish")
+        is PublishOwedReason.Refused, is PublishOwedReason.Unverified ->
+            listOf(owed, "recovery_phrase.fresh.publish_refused")
+        is PublishOwedReason.Retryable -> listOf(owed)
+    }
+}
+
+/** The screen's title: the phrase title only where words will follow. */
+public fun publishOwedTitleKey(wordless: Boolean): String =
+    if (wordless) "devices.rotate.step_keys" else "recovery_phrase.fresh.title"
+
 /** The sentence for a failed retry of the publish of a reset. */
 public fun freshPublishFailure(err: Throwable): UiText = when (err) {
     is AuthNetworkError -> UiText("common.error.offline")
@@ -87,6 +116,7 @@ private fun PublishPending(
     onRetry: suspend () -> Unit,
     onLogOut: () -> Unit,
     modifier: Modifier,
+    wordless: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
@@ -98,15 +128,8 @@ private fun PublishPending(
     val waitLeft = rememberRemainingMs(waitUntilMs)
     val signInRequired = reason is PublishOwedReason.SignInRequired
 
-    AuthScaffold(title = t("recovery_phrase.fresh.title"), onBack = null, modifier = modifier) {
-        Lead(
-            when (reason) {
-                is PublishOwedReason.SignInRequired -> t("recovery_phrase.fresh.sign_in_to_finish")
-                is PublishOwedReason.Refused, is PublishOwedReason.Unverified ->
-                    t("recovery_phrase.fresh.publish_owed") + "\n\n" + t("recovery_phrase.fresh.publish_refused")
-                is PublishOwedReason.Retryable -> t("recovery_phrase.fresh.publish_owed")
-            },
-        )
+    AuthScaffold(title = t(publishOwedTitleKey(wordless)), onBack = null, modifier = modifier) {
+        Lead(publishOwedLeadKeys(reason, wordless).map { t(it) }.joinToString("\n\n"))
         if (waitLeft > 0L) {
             FormError(t("recovery.error.rate_limited", mapOf("time" to formatCountdown(waitLeft))))
         } else {

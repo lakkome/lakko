@@ -2,6 +2,11 @@
   "format": 1,
   "version": 1,
   "messages": {
+    "account.keys_changed.finishing": {
+      "text": "Your account has new keys. We are finishing the change.",
+      "comment": "Shown after a reset or take-back while the last steps are still owed, for an account that has no saved recovery phrase. Must not mention words or a phrase.",
+      "security_critical": true
+    },
     "app.not_found.body": {
       "text": "There is nothing at this address.",
       "comment": "Line under 'Page not found' on the web page shown for an unknown address."
@@ -4548,13 +4553,13 @@
       "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
       "security_critical": true
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Your passkeys still sign you in. \"Restore keys with this passkey\" is turned off until you turn it on again.",
+    "devices.rotate.effect_links": {
+      "text": "Invite links and call links you created before stop working. Create new ones.",
       "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
       "security_critical": true
     },
-    "devices.rotate.effect_links": {
-      "text": "Invite links and call links you created before stop working. Create new ones.",
+    "devices.rotate.effect_passkeys": {
+      "text": "Your passkeys still sign you in. \"Restore keys with this passkey\" is turned off until you turn it on again.",
       "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
       "security_critical": true
     },
@@ -6345,6 +6350,68 @@
       "text": "You will be the group's owner. You can add more people later.",
       "comment": "Line under \"New group\" on the create-group form."
     },
+    "notice.email_added": {
+      "text": "A recovery email was added to your account.",
+      "comment": "Notice on the account's other devices.",
+      "security_critical": true
+    },
+    "notice.email_removed": {
+      "text": "Your recovery email was removed.",
+      "comment": "Notice on the account's other devices.",
+      "security_critical": true
+    },
+    "notice.email_replaced": {
+      "text": "Your recovery email was replaced.",
+      "comment": "Notice on the account's other devices.",
+      "security_critical": true
+    },
+    "notice.opened_by_email.body": {
+      "text": "On {date}, on another device.",
+      "comment": "{date} is a localized date and time.",
+      "security_critical": true
+    },
+    "notice.opened_by_email.title": {
+      "text": "Your account was opened with your recovery email",
+      "comment": "Title of a notice on the account's own devices.",
+      "security_critical": true
+    },
+    "notice.password_by_email.body": {
+      "text": "Someone used your recovery email to choose a new password on {date}.",
+      "comment": "{date} is a localized date and time.",
+      "security_critical": true
+    },
+    "notice.password_by_email.title": {
+      "text": "Your password was changed",
+      "comment": "Title of a notice on the account's own devices.",
+      "security_critical": true
+    },
+    "notice.phrase_saved": {
+      "text": "A recovery phrase was saved for your account.",
+      "comment": "Notice on the account's other devices.",
+      "security_critical": true
+    },
+    "notice.secure.new_keys": {
+      "text": "This gives your account new keys, so whoever opened it loses it.",
+      "comment": "Under 'Save a recovery phrase' on the screen opened by 'It was not me'.",
+      "security_critical": true
+    },
+    "notice.secure.password_saved": {
+      "text": "Your password was changed.",
+      "comment": "Line on that screen after the new password was saved."
+    },
+    "notice.secure.title": {
+      "text": "Secure your account",
+      "comment": "Title of the screen opened by 'It was not me'."
+    },
+    "notice.was_me": {
+      "text": "It was me",
+      "comment": "Button dismissing a security notice."
+    },
+    "notice.was_not_me": {
+      "text": "It was not me",
+      "comment": "Button opening the screen where the person secures the account.",
+      "security_critical": true
+    },
     "notification.channel.messages": {
       "text": "Messages",
       "comment": "Name of the notification category for new messages, shown in the phone's notification settings."
@@ -6455,6 +6522,10 @@
       "text": "Use your password instead",
       "comment": "Button shown where a sensitive account action would be confirmed with a passkey. Reveals a password field instead."
     },
+    "proof.recovery_email.help": {
+      "text": "Enter your password to change your recovery email.",
+      "comment": "Helper under the password field of the proof block on the recovery email screens."
+    },
     "proof.remove_device.cancelled": {
       "text": "Cancelled. The device was not removed.",
       "comment": "Shown when the passkey prompt on the remove-device sheet was dismissed.",
@@ -6509,6 +6580,141 @@
       "text": "What you can do:",
       "comment": "Heading of the list of three ways to get the account's keys back, on the screen that says the keys cannot be reset without the password or a passkey."
     },
+    "proof.save_phrase.help": {
+      "text": "Enter your password to save a recovery phrase.",
+      "comment": "Helper under the password field of the proof block on 'Save a recovery phrase'."
+    },
+    "protect.banner.action": {
+      "text": "Protect it",
+      "comment": "Button on that banner."
+    },
+    "protect.banner.none": {
+      "text": "This account has no way back in.",
+      "comment": "Banner in Settings > Account for an account with no email and no saved phrase.",
+      "security_critical": true
+    },
+    "protect.body": {
+      "text": "If you forget your password or lose this phone, this is how you get back in.",
+      "comment": "Under the heading of the protect-your-account step."
+    },
+    "protect.continue": {
+      "text": "Continue",
+      "comment": "Main button of the protect-your-account step once at least one option is done."
+    },
+    "protect.done": {
+      "text": "Done",
+      "comment": "Mark on a row of the protect-your-account step that was completed."
+    },
+    "protect.email.badge": {
+      "text": "Recommended",
+      "comment": "Small label beside 'Add an email'."
+    },
+    "protect.email.body": {
+      "text": "We send a code to it. Anyone who can read that mailbox can get into your account.",
+      "comment": "Under 'Add an email'. The second sentence is a security warning and must stay.",
+      "security_critical": true
+    },
+    "protect.email.title": {
+      "text": "Add an email",
+      "comment": "Row title on the protect-your-account step."
+    },
+    "protect.passkey.body": {
+      "text": "Sign in with your fingerprint, face or screen lock. No password to remember.",
+      "comment": "Under 'Create a passkey' on the protect-your-account step."
+    },
+    "protect.passkey.title": {
+      "text": "Create a passkey",
+      "comment": "Row on the protect-your-account step."
+    },
+    "protect.phrase.body": {
+      "text": "12 words only you keep. Stronger, and nothing to do with email.",
+      "comment": "Under 'Save a recovery phrase' on the protect-your-account step.",
+      "security_critical": true
+    },
+    "protect.phrase.save.body": {
+      "text": "12 words that only you keep. After this, a code by email can change your password but cannot open your account.",
+      "comment": "First paragraph of the 'Save a recovery phrase' screen.",
+      "security_critical": true
+    },
+    "protect.phrase.save.effect": {
+      "text": "This gives your account new keys. Your contacts and chats stay as they are. Your other devices stay signed in.",
+      "comment": "Second paragraph of that screen.",
+      "security_critical": true
+    },
+    "protect.phrase.save.failed": {
+      "text": "We could not finish. Nothing changed.",
+      "comment": "The key change behind saving a phrase failed.",
+      "security_critical": true
+    },
+    "protect.phrase.save.finishing": {
+      "text": "Your account has new keys. Finishing up.",
+      "comment": "Shown while the last steps of saving a phrase are still owed; the words appear after it.",
+      "security_critical": true
+    },
+    "protect.phrase.save.progress": {
+      "text": "Changing your account's keys",
+      "comment": "Progress line while 'Save a recovery phrase' is working."
+    },
+    "protect.phrase.save.show": {
+      "text": "Show my 12 words",
+      "comment": "Main button of that screen."
+    },
+    "protect.phrase.title": {
+      "text": "Save a recovery phrase",
+      "comment": "Row title; also the title of the Settings screen that shows the 12 words for the first time."
+    },
+    "protect.skip": {
+      "text": "Not now",
+      "comment": "Plain button that skips the protect-your-account step."
+    },
+    "protect.skip.confirm.body": {
+      "text": "If you forget your password, or lose this phone, you will not be able to get back into this account.",
+      "comment": "Body of the confirmation after 'Not now'.",
+      "security_critical": true
+    },
+    "protect.skip.confirm.continue": {
+      "text": "Continue without",
+      "comment": "Plain button confirming the skip."
+    },
+    "protect.skip.confirm.title": {
+      "text": "Continue without protection?",
+      "comment": "Title of the confirmation after 'Not now'.",
+      "security_critical": true
+    },
+    "protect.status.email": {
+      "text": "Protected by your email",
+      "comment": "Status line in Settings > Account."
+    },
+    "protect.status.none": {
+      "text": "Not protected",
+      "comment": "Status line in Settings > Account."
+    },
+    "protect.status.phrase": {
+      "text": "Protected by your recovery phrase",
+      "comment": "Status line in Settings > Account."
+    },
+    "protect.title": {
+      "text": "Protect your account",
+      "comment": "Heading of the step after sign-up where the person chooses how to get back in later."
+    },
+    "recall.phrase.changed": {
+      "text": "This account's keys were changed on {date}. Was that you?",
+      "comment": "Shown after the person typed the phrase of the account as it was before a recent reset. {date} is a localized date.",
+      "security_critical": true
+    },
+    "recall.phrase.take_back": {
+      "text": "Take the account back",
+      "comment": "Button starting the take-back with the phrase.",
+      "security_critical": true
+    },
+    "recall.phrase.use": {
+      "text": "Use my recovery phrase instead",
+      "comment": "Under the password field of the 'Was it you?' form."
+    },
+    "recall.phrase.wrong": {
+      "text": "Those words are not this account's recovery phrase.",
+      "comment": "Wrong phrase on the take-the-account-back form."
+    },
     "recovery.access_only_note": {
       "text": "An authenticator code logs you in. On a device that has never held this account you then still need another device, a passkey or your recovery phrase.",
       "comment": "Note under the list of recovery methods.",
@@ -6535,6 +6741,51 @@
     "recovery.device.restoring": {
       "text": "Restoring {username}",
       "comment": "Heading while another device restores the account; {username} is the username with @."
+    },
+    "recovery.email.check.body": {
+      "text": "If that username and address belong together, a code is on its way. It works for 10 minutes.",
+      "comment": "Shown whether or not a letter was sent; must not reveal which.",
+      "security_critical": true
+    },
+    "recovery.email.check.title": {
+      "text": "Check your email",
+      "comment": "Heading of the code step. Shown whatever was typed."
+    },
+    "recovery.email.failed": {
+      "text": "We could not bring back your account. Try again, or choose another way.",
+      "comment": "The keys kept for the account could not be opened after the code was accepted. Nothing was changed."
+    },
+    "recovery.email.restoring": {
+      "text": "Bringing back your account",
+      "comment": "Progress line while the keys are being restored after the code."
+    },
+    "recovery.email.row.body": {
+      "text": "A code sent to your recovery email.",
+      "comment": "Under that row."
+    },
+    "recovery.email.row.title": {
+      "text": "Email code",
+      "comment": "Row on the 'Get back in' list."
+    },
+    "recovery.email.save": {
+      "text": "Save and log in",
+      "comment": "Main button of the new-password step."
+    },
+    "recovery.email.start.body": {
+      "text": "Type your username and your recovery email.",
+      "comment": "Under the heading of the first step."
+    },
+    "recovery.email.totp.body": {
+      "text": "Type the 6-digit code from your authenticator app.",
+      "comment": "Under that heading."
+    },
+    "recovery.email.totp.lost": {
+      "text": "Lost your authenticator? Use another way to get back in.",
+      "comment": "Link back to the list of ways."
+    },
+    "recovery.email.totp.title": {
+      "text": "Authenticator code",
+      "comment": "Heading of the extra step when the account has an authenticator."
     },
     "recovery.error.generic": {
       "text": "Could not recover the account. Check the words and try again.",
@@ -6758,6 +7009,124 @@
     "recovery.words.tries_left": {
       "text": "{count, plural, one {# try left} other {# tries left}} before a 15-minute pause.",
       "comment": "Shown after a wrong answer on the three-words form; {count} is how many more wrong answers this device accepts before the form pauses for 15 minutes.",
+      "security_critical": true
+    },
+    "recovery_email.add_again.body": {
+      "text": "Your account's keys changed. Type your address again so a code by email can bring your account back.",
+      "comment": "Under that action.",
+      "security_critical": true
+    },
+    "recovery_email.add_again.title": {
+      "text": "Add your email again",
+      "comment": "Row and banner action when the account's keys changed and email can no longer bring the account back."
+    },
+    "recovery_email.body": {
+      "text": "If you forget your password, we send a code to this address so you can get back in.",
+      "comment": "Under the title of the recovery email screen."
+    },
+    "recovery_email.code.expired": {
+      "text": "That code has expired.",
+      "comment": "When adding an address and the code is too old."
+    },
+    "recovery_email.code.other_address": {
+      "text": "Use a different address",
+      "comment": "Button back to the address step."
+    },
+    "recovery_email.code.resend": {
+      "text": "Send again",
+      "comment": "Button that sends a new code."
+    },
+    "recovery_email.code.resend_in": {
+      "text": "Send again in {time}",
+      "comment": "Disabled state of that button; {time} is minutes:seconds in Latin digits."
+    },
+    "recovery_email.code.sent_to": {
+      "text": "We sent a 6-digit code to {address}.",
+      "comment": "{address} is the address just typed, shown back once."
+    },
+    "recovery_email.code.title": {
+      "text": "Enter the code",
+      "comment": "Heading of the code step when adding an address."
+    },
+    "recovery_email.code.used_up": {
+      "text": "Too many attempts. Send a new code.",
+      "comment": "After five wrong codes."
+    },
+    "recovery_email.code.wrong": {
+      "text": "That code is not right.",
+      "comment": "Wrong, expired-looking or never-sent code; deliberately the same line for all."
+    },
+    "recovery_email.field": {
+      "text": "Email",
+      "comment": "Label of the address field."
+    },
+    "recovery_email.invalid": {
+      "text": "Type a full email address.",
+      "comment": "Under the address field when it does not parse."
+    },
+    "recovery_email.mailbox_warning": {
+      "text": "Anyone who can read this mailbox can get into your account. Save a recovery phrase to change that.",
+      "comment": "Shown under the address field only while no recovery phrase is saved.",
+      "security_critical": true
+    },
+    "recovery_email.needs_username": {
+      "text": "Choose a username first.",
+      "comment": "A guest account opened the recovery email screen."
+    },
+    "recovery_email.not_kept": {
+      "text": "Lakko does not keep your address. You will type it again, together with your username, when you need a code.",
+      "comment": "Note under the address field.",
+      "security_critical": true
+    },
+    "recovery_email.remove": {
+      "text": "Remove",
+      "comment": "Button: remove the recovery email."
+    },
+    "recovery_email.remove.confirm.body": {
+      "text": "You will not be able to get back in by email.",
+      "comment": "Body of the confirmation.",
+      "security_critical": true
+    },
+    "recovery_email.remove.confirm.title": {
+      "text": "Remove recovery email?",
+      "comment": "Title of the confirmation."
+    },
+    "recovery_email.replace": {
+      "text": "Replace",
+      "comment": "Button: add a different address in place of the current one."
+    },
+    "recovery_email.send": {
+      "text": "Send code",
+      "comment": "Main button: send the code to the typed address."
+    },
+    "recovery_email.send_failed": {
+      "text": "We could not send the letter. Try again later.",
+      "comment": "The server failed to hand the letter over."
+    },
+    "recovery_email.status.off": {
+      "text": "Off",
+      "comment": "Value of the Settings row when no address is added."
+    },
+    "recovery_email.status.on": {
+      "text": "On",
+      "comment": "Value of the Settings row when an address is added. The address itself is never shown."
+    },
+    "recovery_email.title": {
+      "text": "Recovery email",
+      "comment": "Title of the Settings row and screen."
+    },
+    "recovery_email.totp_warning": {
+      "text": "You will also need a code from your authenticator app. If it is on the phone you lose, the email will not be enough.",
+      "comment": "Shown on the recovery email screen when the account has an authenticator.",
+      "security_critical": true
+    },
+    "recovery_email.unavailable": {
+      "text": "Email codes are not available right now.",
+      "comment": "Mail is not set up on this server."
+    },
+    "recovery_email.username_change": {
+      "text": "Changing your username turns your recovery email off. You can add it again afterwards.",
+      "comment": "On the username screen, before a change, when the account has a recovery email.",
       "security_critical": true
     },
     "recovery_phrase.check.acknowledge": {

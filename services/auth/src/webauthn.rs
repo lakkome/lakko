@@ -1405,6 +1405,12 @@ pub(crate) enum ApiError {
         /// Unix milliseconds at which the last open anchor expires.
         until_ms: i64,
     },
+    /// A refusal that is a status and one stable JSON body code,
+    /// `{"error": <code>}`, with nothing else to carry. Used by the
+    /// ADR-0067 recovery-email routes (`recovery-email-disabled`,
+    /// `code-refused`, `ticket-refused` and the rest, listed in
+    /// `crate::recovery_email`).
+    Coded(StatusCode, &'static str),
     /// 2a2b: catch-all for unrecoverable server-side errors
     /// (session-token issuance failures). The OPAQUE module
     /// folds the same case into a tuple-StatusCode; we keep an
@@ -1531,6 +1537,9 @@ impl IntoResponse for ApiError {
                     })),
                 )
                     .into_response();
+            },
+            Self::Coded(status, code) => {
+                return (status, axum::Json(serde_json::json!({ "error": code }))).into_response();
             },
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::Db(e) => {

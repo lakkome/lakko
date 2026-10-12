@@ -34,7 +34,12 @@
 //!     positions and compares them itself. No server takes part and nothing
 //!     about the words is stored or sent anywhere.
 //!   * [`vault`] — the passkey vault: the 16-byte phrase entropy sealed
-//!     under a passkey's WebAuthn PRF output (ADR-0064 decision 6).
+//!     under a passkey's WebAuthn PRF output (ADR-0064 decision 6); and the
+//!     email vault: the same entropy sealed under a key stretched from the
+//!     login handle and the recovery email address (ADR-0067 section 2).
+//!   * [`recovery_email`] — the one rule for what a recovery email address
+//!     is and how it is normalised (ADR-0067 section 4), shared with
+//!     `services/auth`.
 //!
 //! ## Security notes
 //!
@@ -70,6 +75,7 @@
 
 mod error;
 mod mnemonic;
+pub mod recovery_email;
 mod secret;
 pub mod vault;
 pub mod word_check;
@@ -106,5 +112,30 @@ pub mod fuzz_api {
             Err(_) => false,
         };
         entropy_ok || phrase_ok
+    }
+
+    /// Drive the email-vault open path and the recovery-address rule on
+    /// attacker-chosen bytes (ADR-0067).
+    ///
+    /// The sealed blob is served by the server in the answer to a mailed
+    /// code, so every byte of it is chosen by whoever controls that answer.
+    /// It is opened under a FIXED stretched key (Argon2id is skipped: its
+    /// inputs are the person's, not the blob's), which exercises the length
+    /// gate, the HKDF step, the AEAD refusal and the entropy rebuild. The
+    /// same bytes, when UTF-8, go through `normalize_recovery_email`, and a
+    /// normalised address must normalise to itself (the client and the
+    /// server each normalise once).
+    ///
+    /// Returns `(opened, address_stable)`; the harness asserts
+    /// `address_stable`.
+    #[must_use]
+    pub fn open_email_vault(bytes: &[u8]) -> (bool, bool) {
+        let opened = crate::vault::fuzz_open_email_vault(bytes);
+        let stable = core::str::from_utf8(bytes).map_or(true, |s| {
+            crate::recovery_email::normalize_recovery_email(s).map_or(true, |once| {
+                crate::recovery_email::normalize_recovery_email(&once).as_deref() == Ok(&once)
+            })
+        });
+        (opened, stable)
     }
 }

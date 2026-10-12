@@ -79,15 +79,24 @@ public struct RecallRecord: Codable, Equatable {
     public let username: String
     /// Unix milliseconds: when this device learned the keys were reset.
     public let learnedAtMs: Int64
+    /// ADR-0067 — whether the account's recovery phrase was saved, as this
+    /// device knew it before the staged wipe removed that flag with
+    /// everything else. A flag, kept so that after the account is taken
+    /// back the new words are shown only to a phrase-protected account.
+    /// Optional so an older record still decodes (as not saved).
+    public var phraseSaved: Bool?
 
     public static let seedLength = 32
     public static let accountIdLength = 16
 
-    public init(accountIdB64: String, oldSeed: Data, username: String, learnedAtMs: Int64) {
+    public init(
+        accountIdB64: String, oldSeed: Data, username: String, learnedAtMs: Int64, phraseSaved: Bool? = nil
+    ) {
         self.accountIdB64 = accountIdB64
         self.oldSeed = oldSeed
         self.username = username
         self.learnedAtMs = learnedAtMs
+        self.phraseSaved = phraseSaved
     }
 
     enum CodingKeys: String, CodingKey {
@@ -95,6 +104,7 @@ public struct RecallRecord: Codable, Equatable {
         case oldSeed = "old_seed"
         case username
         case learnedAtMs = "learned_at_ms"
+        case phraseSaved = "phrase_saved"
     }
 
     /// The 16-byte account id, or `nil` for a record that names none.
@@ -207,12 +217,20 @@ public struct RecallWindow: Equatable, Sendable {
     public let changedAtMs: Int64
     /// How many password attempts are left before the server ends it.
     public let attemptsRemaining: Int
+    /// ADR-0067 section 8 — the anchor also accepts the recovery phrase as
+    /// the proof (`proof: "phrase"`): the account had a saved phrase and no
+    /// email vault when the anchor was captured.
+    public let phraseArm: Bool
 
-    public init(anchorSeq: UInt64, expiresAtMs: Int64, changedAtMs: Int64, attemptsRemaining: Int) {
+    public init(
+        anchorSeq: UInt64, expiresAtMs: Int64, changedAtMs: Int64, attemptsRemaining: Int,
+        phraseArm: Bool = false
+    ) {
         self.anchorSeq = anchorSeq
         self.expiresAtMs = expiresAtMs
         self.changedAtMs = changedAtMs
         self.attemptsRemaining = attemptsRemaining
+        self.phraseArm = phraseArm
     }
 }
 
@@ -542,6 +560,16 @@ public enum RecallForm {
         return nil
     }
 
+    /// The same gate when the proof is the recovery phrase (UX 19.7): the
+    /// 12 words stand where the old password does.
+    public static func canSubmit(
+        phrase: String, newPassword: String, repeated: String, status: RecallFormStatus, waiting: Bool
+    ) -> Bool {
+        let words = phrase.split(whereSeparator: { $0 == " " || $0 == "\n" }).count
+        return status != .working && !waiting && words == 12
+            && problem(oldPassword: "x", newPassword: newPassword, repeated: repeated) == nil
+    }
+
     public static func canSubmit(
         oldPassword: String, newPassword: String, repeated: String, status: RecallFormStatus, waiting: Bool
     ) -> Bool {
@@ -586,6 +614,12 @@ public enum RecallCopy {
     public static let done = "devices.recall.done"
     public static let deleteBlocked = "settings.account.delete.blocked"
     public static let back = "common.back"
+    /// ADR-0067 / UX 19.7.
+    public static let usePhrase = "recall.phrase.use"
+    public static let phraseChanged = "recall.phrase.changed"
+    public static let phraseTakeBack = "recall.phrase.take_back"
+    /// The 12 words did not open the account as it was before the reset.
+    public static let wrongPhrase = "recall.phrase.wrong"
 
     public static let all: [String] = [
         title, body, question, yes, no, until, checking, offline, yesConfirm, yesDelete, yesBack,
@@ -595,10 +629,10 @@ public enum RecallCopy {
     ]
 
     /// The line under the first field for a form status, or `nil`.
-    public static func formErrorKey(_ status: RecallFormStatus) -> String? {
+    public static func formErrorKey(_ status: RecallFormStatus, phraseProof: Bool = false) -> String? {
         switch status {
         case .idle, .working, .rateLimited: return nil
-        case .wrongPassword: return wrongPassword
+        case .wrongPassword: return phraseProof ? wrongPhrase : wrongPassword
         case .offline: return offline
         case .failed: return failed
         }
@@ -621,7 +655,15 @@ public enum RecallCopy {
 
 struct RecallStatusRequest: Codable, Equatable {
     let statementB64: String
-    enum CodingKeys: String, CodingKey { case statementB64 = "statement_b64" }
+    /// ADR-0067 section 8 — the account's login handle (base64url, no
+    /// padding), sent by a device that holds the phrase and no account id.
+    /// The statement then carries the first 16 bytes of the handle in its
+    /// account field.
+    var handle: String? = nil
+    enum CodingKeys: String, CodingKey {
+        case statementB64 = "statement_b64"
+        case handle
+    }
 }
 
 struct RecallStatusResponse: Codable, Equatable {
@@ -629,18 +671,24 @@ struct RecallStatusResponse: Codable, Equatable {
     let expiresAtMs: Int64
     let changedAtMs: Int64
     let attemptsRemaining: Int
+    /// URL-safe base64 of the account id: what a device that named the
+    /// account by handle did not have.
+    var accountIdB64: String? = nil
+    var phraseArm: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case anchorSeq = "anchor_seq"
         case expiresAtMs = "expires_at_ms"
         case changedAtMs = "changed_at_ms"
         case attemptsRemaining = "attempts_remaining"
+        case accountIdB64 = "account_id_b64"
+        case phraseArm = "phrase_arm"
     }
 
     var window: RecallWindow {
         RecallWindow(
             anchorSeq: anchorSeq, expiresAtMs: expiresAtMs, changedAtMs: changedAtMs,
-            attemptsRemaining: attemptsRemaining)
+            attemptsRemaining: attemptsRemaining, phraseArm: phraseArm ?? false)
     }
 }
 
@@ -649,6 +697,9 @@ struct RecallStartRequest: Codable, Equatable {
     let anchorSeq: UInt64
     let statementB64: String
     let loginRequest: String
+    /// `"phrase"` when the login is made from the old recovery phrase's
+    /// seed (ADR-0067 section 8); absent for the password.
+    var proof: String? = nil
     let passwordRequest: String
     let recoveryRequest: String
 
@@ -657,6 +708,7 @@ struct RecallStartRequest: Codable, Equatable {
         case anchorSeq = "anchor_seq"
         case statementB64 = "statement_b64"
         case loginRequest = "login_request"
+        case proof
         case passwordRequest = "password_request"
         case recoveryRequest = "recovery_request"
     }
@@ -738,11 +790,59 @@ struct RecallFinishResponse: Codable, Equatable, SessionPairCarrying {
     }
 }
 
+/// What `POST /account/recall/status` answers a device that named the account
+/// by login handle (ADR-0067 section 8).
+public struct RecallByHandle: Equatable, Sendable {
+    public let window: RecallWindow
+    /// The 16-byte account id, for `start` and `finish`.
+    public let accountId: Data
+
+    public init(window: RecallWindow, accountId: Data) {
+        self.window = window
+        self.accountId = accountId
+    }
+}
+
+/// The proof a take-back is made with (UX 18.4, 19.7).
+public enum RecallProof: Equatable {
+    /// The password the account had before the reset.
+    case password(Data)
+    /// The recovery phrase the account had before the reset.
+    case phrase(String)
+}
+
+/// Take the account back with the phrase from a device that holds nothing
+/// else of it (UX 19.7): what `Get back in > Recovery phrase` learned from
+/// the server about the words just typed.
+public struct PhraseRecallOffer: Equatable {
+    public let accountId: Data
+    public let username: String
+    public let window: RecallWindow
+
+    public init(accountId: Data, username: String, window: RecallWindow) {
+        self.accountId = accountId
+        self.username = username
+        self.window = window
+    }
+
+    /// Whether the 19.7 prompt is shown for a status answer: only when the
+    /// anchor accepts the phrase, has attempts left and has not expired.
+    public static func offered(_ window: RecallWindow, nowMs: Int64) -> Bool {
+        window.phraseArm && window.attemptsRemaining > 0 && nowMs < window.expiresAtMs
+    }
+}
+
 /// One take-back attempt: what the client sends through `start` and `finish`.
 public struct RecallAttempt {
     public let record: RecallRecord
     public let anchorSeq: UInt64
+    /// The password from before the reset; empty when ``oldPhraseSeed`` is
+    /// the proof.
     public let oldPassword: Data
+    /// ADR-0067 section 8 — the 64-byte seed of the recovery phrase as it
+    /// was before the reset: the proof instead of the old password
+    /// (`proof: "phrase"`). `nil` for the password arm.
+    public let oldPhraseSeed: Data?
     public let newPassword: Data
     /// The 64-byte BIP39 seed of the NEW phrase.
     public let newSeed: Data
@@ -752,12 +852,13 @@ public struct RecallAttempt {
     public let deviceId: Data?
 
     public init(
-        record: RecallRecord, anchorSeq: UInt64, oldPassword: Data, newPassword: Data,
-        newSeed: Data, newSignaturePubkey: Data, deviceId: Data?
+        record: RecallRecord, anchorSeq: UInt64, oldPassword: Data, oldPhraseSeed: Data? = nil,
+        newPassword: Data, newSeed: Data, newSignaturePubkey: Data, deviceId: Data?
     ) {
         self.record = record
         self.anchorSeq = anchorSeq
         self.oldPassword = oldPassword
+        self.oldPhraseSeed = oldPhraseSeed
         self.newPassword = newPassword
         self.newSeed = newSeed
         self.newSignaturePubkey = newSignaturePubkey
@@ -785,19 +886,30 @@ public struct RecallOperations {
     /// `POST /account/recall/{start,finish}`. Throws ``RecallWrongPassword``
     /// when the old password did not open `start`'s answer.
     public var takeBack: (_ attempt: RecallAttempt) async throws -> RecallLanded
+    /// ADR-0067 section 8 — `POST /account/recall/status` naming the account
+    /// by login handle, the statement signed by `oldEd25519Seed` (the key
+    /// derived from a typed phrase). Answers the window and the account id.
+    public var statusByHandle: (_ handle: Data, _ oldEd25519Seed: Data) async throws -> RecallByHandle
 
     public init(
         status: @escaping (_ record: RecallRecord) async throws -> RecallWindow,
-        takeBack: @escaping (_ attempt: RecallAttempt) async throws -> RecallLanded
+        takeBack: @escaping (_ attempt: RecallAttempt) async throws -> RecallLanded,
+        statusByHandle: @escaping (_ handle: Data, _ oldEd25519Seed: Data) async throws -> RecallByHandle = { _, _ in
+            throw AuthClientError.argument("recall by handle is not wired")
+        }
     ) {
         self.status = status
         self.takeBack = takeBack
+        self.statusByHandle = statusByHandle
     }
 
     public static func live(_ factory: @escaping () -> AuthClient) -> RecallOperations {
         RecallOperations(
             status: { record in try await factory().recallStatus(record: record) },
-            takeBack: { attempt in try await factory().recallAccount(attempt) }
+            takeBack: { attempt in try await factory().recallAccount(attempt) },
+            statusByHandle: { handle, seed in
+                try await factory().recallStatusByHandle(handle: handle, oldEd25519Seed: seed)
+            }
         )
     }
 }

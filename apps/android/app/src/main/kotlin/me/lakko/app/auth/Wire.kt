@@ -483,6 +483,9 @@ data class KeyRotateFinishRequest(
     val supersession_proof_b64: String,
     /** base64url (no padding) device ids, at most 8. */
     val revoke_device_ids_b64: List<String> = emptyList(),
+    /** ADR-0067 section 3: this rotation is "Save a recovery phrase". Sent
+     *  only when `true`. */
+    val phrase_saved: Boolean? = null,
 )
 
 /** `POST /account/keys/reset/finish` 200 body: the attestation and the pair
@@ -508,6 +511,10 @@ data class RecallStatusRequest(
     /** base64url (no padding) of a 138-byte account statement of kind
      *  `recall-status`, signed by the OLD account identity key. */
     val statement_b64: String,
+    /** ADR-0067 section 8: base64url (no padding) of the 32-byte login
+     *  handle, from a device that holds no account id. The statement then
+     *  carries the first 16 bytes of the handle in its account field. */
+    val handle: String? = null,
 )
 
 @Serializable
@@ -516,6 +523,10 @@ data class RecallStatusResponse(
     val expires_at_ms: Long,
     val changed_at_ms: Long,
     val attempts_remaining: Int,
+    /** ADR-0067: base64url (no padding) of the 16-byte account id. */
+    val account_id_b64: String? = null,
+    /** ADR-0067: the account can be taken back with its recovery phrase. */
+    val phrase_arm: Boolean = false,
 )
 
 /** `POST /account/recall/start`. Each accepted start is one password attempt. */
@@ -531,6 +542,9 @@ data class RecallStartRequest(
     val password_request: String,
     /** base64(RegistrationRequest) for the NEW recovery credential. */
     val recovery_request: String,
+    /** ADR-0067 section 8: `"phrase"` when `login_request` is a login with
+     *  the OLD recovery credential; absent for the password. */
+    val proof: String? = null,
 )
 
 @Serializable
@@ -633,4 +647,148 @@ data class DeviceRevokeRequest(
     /** base64url (no padding) of the 138-byte `device-revoke` account
      *  statement, signed by the account identity key. */
     val statement_b64: String,
+)
+
+// -----------------------------------------------------------------
+// ADR-0067: the recovery email, and the account's notices
+// -----------------------------------------------------------------
+
+/** `GET /recovery-email/available` (anonymous). */
+@Serializable
+data class RecoveryEmailAvailableResponse(val available: Boolean = false)
+
+/** `GET /recovery-email` (bearer). Never the address. */
+@Serializable
+data class RecoveryEmailStatusResponse(
+    val available: Boolean = false,
+    val enabled: Boolean = false,
+    val vault: Boolean = false,
+    val phrase_saved: Boolean = false,
+    val totp: Boolean = false,
+)
+
+/** `POST /recovery-email/enrol/start` (bearer). The address is sent as typed
+ *  and kept nowhere on this device. */
+@Serializable
+data class RecoveryEmailEnrolStartRequest(
+    val fresh_grant: String?,
+    /** base64url (no padding) of the account's 32-byte login handle. */
+    val handle: String,
+    val address: String,
+    val lang: String? = null,
+) {
+    /** The address and the grant never reach a log line. */
+    override fun toString(): String = "RecoveryEmailEnrolStartRequest(<redacted>)"
+}
+
+@Serializable
+data class RecoveryEmailEnrolStartResponse(
+    val challenge_id: String,
+    /** Standard base64 of the 16-byte vault salt. */
+    val vault_salt: String,
+    val resend_after_secs: Long = 0,
+    val expires_in_secs: Long = 0,
+)
+
+/** `POST /recovery-email/enrol/finish` (bearer). */
+@Serializable
+data class RecoveryEmailEnrolFinishRequest(
+    val challenge_id: String,
+    val code: String,
+    /** Standard base64 of the 44-byte email vault; absent for an account
+     *  with a saved phrase. */
+    val sealed_entropy: String? = null,
+)
+
+@Serializable
+data class RecoveryEmailEnrolFinishResponse(val enabled: Boolean = false, val vault: Boolean = false)
+
+/** Body of `DELETE /recovery-email`. */
+@Serializable
+data class RecoveryEmailGrantRequest(val fresh_grant: String?)
+
+/** `DELETE /recovery-email` 200 body. */
+@Serializable
+data class RecoveryEmailRemoveResponse(val removed: Boolean = false)
+
+/** `POST /recovery-email/recover/start` (anonymous). */
+@Serializable
+data class EmailRecoverStartRequest(val handle: String, val address: String, val lang: String? = null) {
+    /** The address never reaches a log line. */
+    override fun toString(): String = "EmailRecoverStartRequest(<redacted>)"
+}
+
+@Serializable
+data class EmailRecoverStartResponse(
+    val challenge_id: String,
+    val resend_after_secs: Long = 0,
+    val expires_in_secs: Long = 0,
+)
+
+/** `POST /recovery-email/recover/verify`. */
+@Serializable
+data class EmailRecoverVerifyRequest(val challenge_id: String, val code: String)
+
+@Serializable
+data class EmailRecoverVerifyResponse(
+    val ticket: String,
+    val totp_required: Boolean = false,
+    val expires_in_secs: Long = 0,
+)
+
+/** `POST /recovery-email/recover/totp`. */
+@Serializable
+data class EmailRecoverTotpRequest(val ticket: String, val code: String)
+
+@Serializable
+data class EmailRecoverOkResponse(val ok: Boolean = false)
+
+/** `POST /recovery-email/recover/open`. */
+@Serializable
+data class EmailRecoverTicketRequest(val ticket: String)
+
+@Serializable
+data class EmailRecoverOpenResponse(
+    /** `"vault"` or `"password"`. */
+    val mode: String,
+    val vault_salt: String? = null,
+    val sealed_entropy: String? = null,
+)
+
+/** `POST /recovery-email/recover/password/start`. */
+@Serializable
+data class EmailRecoverPasswordStartRequest(val ticket: String, val new_password_request: String)
+
+@Serializable
+data class EmailRecoverPasswordStartResponse(val new_password_response: String)
+
+/** `POST /recovery-email/recover/password/finish`. */
+@Serializable
+data class EmailRecoverPasswordFinishRequest(
+    val ticket: String,
+    val new_password_upload: String,
+    val device_id_b64: String? = null,
+)
+
+/** The session pair and the account id. No fresh-auth grant. */
+@Serializable
+data class EmailRecoverPasswordFinishResponse(
+    val account_id_b64: String,
+    val session_token: String,
+    val session_expires_at_ms: Long,
+    val refresh_token: String,
+    val refresh_expires_at_ms: Long,
+    val key_generation: Long,
+)
+
+/** One row of `GET /account/notices`. */
+@Serializable
+data class AccountNoticeWire(val id: Long, val kind: String, val at_ms: Long)
+
+/** `GET /account/notices?after=<id>` (bearer). */
+@Serializable
+data class AccountNoticesResponse(
+    val notices: List<AccountNoticeWire> = emptyList(),
+    val next_after: Long = 0,
+    val more: Boolean = false,
 )

@@ -439,6 +439,20 @@ export const PROOF_COPY = {
     cancelledKey: "proof.remove_device.cancelled",
     genericKey: "devices.remove.error.not_revoked",
   },
+  // ADR-0067 (UX 19.2, 19.5): adding, replacing and removing the recovery
+  // email, and saving a recovery phrase.
+  recoveryEmail: {
+    helpKey: "proof.recovery_email.help",
+    wrongPasswordKey: "restore_identity.reset.error.wrong_password",
+    cancelledKey: null,
+    genericKey: "recovery_phrase.fresh.error.generic",
+  },
+  savePhrase: {
+    helpKey: "proof.save_phrase.help",
+    wrongPasswordKey: "restore_identity.reset.error.wrong_password",
+    cancelledKey: null,
+    genericKey: "protect.phrase.save.failed",
+  },
 } as const satisfies Record<string, ProofCopy>;
 
 /** The catalog key (and whether it is an error line) for a failure the

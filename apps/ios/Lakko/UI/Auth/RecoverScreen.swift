@@ -40,6 +40,9 @@ public struct RecoverScreen: View {
                 title: l10n.t("recovery.title"),
                 subtitle: l10n.t("recovery.lede"))
 
+            // UX 19.3 — the email code first, above both groups: what it
+            // brings depends on the account.
+            group(titleKey: nil, methods: viewModel.topMethods)
             group(titleKey: "recovery.group.keys", methods: viewModel.keysMethods)
             group(titleKey: "recovery.group.signin", methods: viewModel.signInMethods)
 
@@ -76,12 +79,14 @@ public struct RecoverScreen: View {
 
     /// One labelled run of rows.
     @ViewBuilder
-    private func group(titleKey: String, methods: [RecoverViewModel.Mode]) -> some View {
+    private func group(titleKey: String?, methods: [RecoverViewModel.Mode]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(l10n.t(titleKey))
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(Color.lakkoTextMuted)
-                .accessibilityAddTraits(.isHeader)
+            if let titleKey {
+                Text(l10n.t(titleKey))
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .accessibilityAddTraits(.isHeader)
+            }
             RecoveryMethodList(
                 rows: methods.map {
                     RecoveryMethodRow(
@@ -162,6 +167,7 @@ extension RecoverViewModel.Mode {
     /// A stable id for the row.
     var rowId: String {
         switch self {
+        case .email: return "email"
         case .anotherDevice: return "device"
         case .passkey: return "passkey"
         case .phrase: return "phrase"
@@ -173,6 +179,7 @@ extension RecoverViewModel.Mode {
     /// The catalog key of the row title (ADR-0061).
     var titleKey: String {
         switch self {
+        case .email: return "recovery.email.row.title"
         case .anotherDevice: return "recovery.method.device.title"
         case .passkey: return "recovery.method.passkey.title"
         case .phrase: return "recovery.method.phrase.title"
@@ -184,6 +191,7 @@ extension RecoverViewModel.Mode {
     /// The catalog key of the row's second line.
     var detailKey: String {
         switch self {
+        case .email: return "recovery.email.row.body"
         case .anotherDevice: return "recovery.method.device.sub"
         case .passkey: return "recovery.method.passkey.sub"
         case .phrase: return "recovery.method.phrase.sub"
@@ -194,6 +202,7 @@ extension RecoverViewModel.Mode {
 
     var systemImage: String {
         switch self {
+        case .email: return "envelope"
         case .anotherDevice: return "iphone.gen3.radiowaves.left.and.right"
         case .passkey: return "person.badge.key"
         case .phrase: return "key"
@@ -205,6 +214,7 @@ extension RecoverViewModel.Mode {
     /// The catalog key of the line under the form title.
     var formLeadKey: String {
         switch self {
+        case .email: return "recovery.email.start.body"
         case .anotherDevice: return "recovery.device.intro_qr"
         case .passkey: return "recovery.passkey.intro"
         case .phrase: return "recovery.phrase.intro"
@@ -253,6 +263,8 @@ private struct RecoverForm: View {
         }
 
         switch viewModel.mode {
+        case .email:
+            EmailRecoverSection(model: viewModel.email, onBackToList: onBackToList)
         case .anotherDevice:
             anotherDeviceSection
         case .passkey:
@@ -271,7 +283,9 @@ private struct RecoverForm: View {
         case .totp:
             totpSection
         case .phrase:
-            PhraseEntryGrid(phrase: $viewModel.phrase, disabled: viewModel.busy)
+            PhraseEntryGrid(
+                phrase: $viewModel.phrase,
+                disabled: viewModel.busy || viewModel.phraseRecall != nil || viewModel.phraseRecallBusy)
 
             AuthSecureField(
                 label: l10n.t("auth.password.new.label"),
@@ -295,12 +309,38 @@ private struct RecoverForm: View {
                 AuthHint(text: error, isError: true)
             }
 
-            AuthPrimaryButton(
-                title: l10n.t("recovery.submit"),
-                busy: viewModel.busy,
-                busyTitle: l10n.t("common.checking"),
-                action: viewModel.onSubmit
-            )
+            if let offer = viewModel.phraseRecall {
+                // UX 19.7 — the words belong to the account as it was before
+                // its keys were changed: the question, on the same form. The
+                // new password above is the one the account gets.
+                Text(l10n.t(
+                    RecallCopy.phraseChanged,
+                    texts: ["date": RecallCopy.date(ms: offer.window.changedAtMs, locale: l10n.locale)]))
+                    .font(.headline)
+                    .foregroundStyle(Color.lakkoText)
+                VStack(alignment: .leading, spacing: 8) {
+                    AuthHint(text: l10n.t(RecallCopy.effectKeys))
+                    AuthHint(text: l10n.t(RecallCopy.effectFactors))
+                    AuthHint(text: l10n.t(RecallCopy.effectMessages))
+                }
+                AuthSecondaryButton(
+                    title: l10n.t(AccountNoticeCopy.wasMeKey),
+                    disabled: viewModel.phraseRecallBusy,
+                    action: viewModel.phraseRecallWasMe)
+                AuthPrimaryButton(
+                    title: l10n.t(RecallCopy.phraseTakeBack),
+                    busy: viewModel.phraseRecallBusy,
+                    busyTitle: l10n.t(RecallCopy.working),
+                    action: viewModel.phraseRecallTakeBack
+                )
+            } else {
+                AuthPrimaryButton(
+                    title: l10n.t("recovery.submit"),
+                    busy: viewModel.busy,
+                    busyTitle: l10n.t("common.checking"),
+                    action: viewModel.onSubmit
+                )
+            }
         }
     }
 
@@ -487,4 +527,193 @@ private struct WordsRecoverSection: View {
             }
         )
     }
+}
+
+// MARK: - Email code
+
+/// "Email code" (UX 19.3): username and address, the code, the
+/// authenticator code when the account has one, then a new password. Step 2
+/// is drawn the same whatever was typed; nothing before the new password
+/// tells which kind of account this is.
+struct EmailRecoverSection: View {
+    @ObservedObject var model: EmailRecoverModel
+    let onBackToList: () -> Void
+    @ObservedObject private var resend: RetryCountdown
+    @ObservedObject private var wait: RetryCountdown
+    @ObservedObject private var l10n = Localization.shared
+
+    init(model: EmailRecoverModel, onBackToList: @escaping () -> Void) {
+        self.model = model
+        self.onBackToList = onBackToList
+        self.resend = model.resend
+        self.wait = model.wait
+    }
+
+    var body: some View {
+        if model.state.leaveToList {
+            // The keys could not be opened: one sentence and the way back
+            // to the list.
+            line
+            AuthSecondaryButton(title: l10n.t("recovery.methods.back_to_list"), action: onBackToList)
+        } else {
+            switch model.state.step {
+            case .start: startStep
+            case .code: codeStep
+            case .totp: totpStep
+            case .newPassword: passwordStep
+            case .restoring: progress("recovery.email.restoring")
+            }
+        }
+    }
+
+    @ViewBuilder private var startStep: some View {
+        // The username is pre-filled; the address never is.
+        AuthTextField(
+            label: l10n.t("auth.username.label"),
+            text: $model.username,
+            contentType: .username,
+            disabled: model.busy
+        )
+        if let usernameError = model.usernameError {
+            AuthHint(text: usernameError.text, isError: true)
+        } else {
+            UsernameRuleHint(input: model.username)
+        }
+        AuthTextField(
+            label: l10n.t("recovery_email.field"),
+            placeholder: "name@example.com",
+            text: $model.address,
+            keyboard: .emailAddress,
+            contentType: .emailAddress,
+            disabled: model.busy,
+            submitLabel: .go,
+            onSubmit: start
+        )
+        if !model.address.isEmpty, !model.addressValid {
+            AuthHint(text: l10n.t("recovery_email.invalid"), isError: true)
+        }
+        line
+        AuthPrimaryButton(
+            title: l10n.t("recovery_email.send"),
+            busy: model.busy,
+            busyTitle: l10n.t("common.sending"),
+            disabled: !model.canStart,
+            action: start
+        )
+    }
+
+    @ViewBuilder private var codeStep: some View {
+        Text(l10n.t("recovery.email.check.title"))
+            .font(.headline)
+            .foregroundStyle(Color.lakkoText)
+            .accessibilityAddTraits(.isHeader)
+        AuthHint(text: l10n.t("recovery.email.check.body"))
+        AuthTextField(
+            label: l10n.t("recovery_email.code.title"),
+            placeholder: "123456",
+            text: $model.code,
+            keyboard: .numberPad,
+            contentType: .oneTimeCode,
+            disabled: model.busy,
+            submitLabel: .go,
+            onSubmit: verify
+        )
+        line
+        AuthPrimaryButton(
+            title: l10n.t("common.continue"),
+            busy: model.busy,
+            busyTitle: l10n.t("common.checking"),
+            disabled: EmailEnrol.normalizedCode(model.code) == nil,
+            action: verify
+        )
+        ResendRow(countdown: resend, disabled: model.busy || wait.waiting, action: start)
+        AuthLinkRow(title: l10n.t("common.back"), disabled: model.busy) { model.backToStart() }
+    }
+
+    @ViewBuilder private var totpStep: some View {
+        Text(l10n.t("recovery.email.totp.title"))
+            .font(.headline)
+            .foregroundStyle(Color.lakkoText)
+            .accessibilityAddTraits(.isHeader)
+        AuthHint(text: l10n.t("recovery.email.totp.body"))
+        AuthTextField(
+            label: l10n.t("recovery.totp.code_label"),
+            placeholder: "123456",
+            text: $model.totpCode,
+            keyboard: .numberPad,
+            contentType: .oneTimeCode,
+            disabled: model.busy,
+            submitLabel: .go,
+            onSubmit: submitTotp
+        )
+        line
+        AuthPrimaryButton(
+            title: l10n.t("common.continue"),
+            busy: model.busy,
+            busyTitle: l10n.t("common.checking"),
+            disabled: EmailEnrol.normalizedCode(model.totpCode) == nil,
+            action: submitTotp
+        )
+        // There is no way past this step without the authenticator.
+        AuthLinkRow(title: l10n.t("recovery.email.totp.lost"), disabled: model.busy, action: onBackToList)
+    }
+
+    @ViewBuilder private var passwordStep: some View {
+        Text(l10n.t("recovery.new_password.title"))
+            .font(.headline)
+            .foregroundStyle(Color.lakkoText)
+            .accessibilityAddTraits(.isHeader)
+        AuthSecureField(
+            label: l10n.t("auth.password.new.label"),
+            text: $model.password,
+            contentType: .newPassword,
+            disabled: model.busy
+        )
+        AuthHint(text: l10n.t(
+            "auth.password.hint", counts: ["count": UInt64(NewPasswordRule.minLength)]))
+        AuthSecureField(
+            label: l10n.t("auth.password.new_confirm.label"),
+            text: $model.confirmPassword,
+            contentType: .newPassword,
+            disabled: model.busy,
+            submitLabel: .go,
+            onSubmit: save
+        )
+        if let passwordError = model.passwordError {
+            AuthHint(text: passwordError.text, isError: true)
+        }
+        line
+        AuthPrimaryButton(
+            title: l10n.t("recovery.email.save"),
+            busy: model.busy,
+            busyTitle: l10n.t("common.saving"),
+            disabled: wait.waiting,
+            action: save
+        )
+    }
+
+    private func progress(_ key: String) -> some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text(l10n.t(key))
+                .font(.subheadline)
+                .foregroundStyle(Color.lakkoTextMuted)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder private var line: some View {
+        if let line = model.state.line {
+            if let key = line.key {
+                AuthHint(text: l10n.t(key), isError: true)
+            } else {
+                WaitNotice(countdown: wait)
+            }
+        }
+    }
+
+    private func start() { Task { await model.start() } }
+    private func verify() { Task { await model.verify() } }
+    private func submitTotp() { Task { await model.submitTotp() } }
+    private func save() { Task { await model.save() } }
 }

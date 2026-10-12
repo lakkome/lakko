@@ -122,6 +122,27 @@
 //! replay changes no account state: it issues credentials for the standing
 //! the recall created.
 //!
+//! # The phrase arm (ADR-0067 section 8)
+//!
+//! A person who holds the recovery phrase has the old seed without an old
+//! device, and may not know the old password. So an anchor also keeps the
+//! **recovery envelope** in force at capture, and `start` takes
+//! `proof: "phrase"`: the OPAQUE login is then run against the anchored
+//! recovery envelope instead of the password one. Everything else is the
+//! same: the statement by the anchor's key, the counters, the finish.
+//!
+//! The arm exists only for an account that had **no email vault** when the
+//! anchor was captured (`recall_anchors.mail_protected = 0`). With a vault,
+//! whoever recovers by mail holds the same phrase as the owner, so the
+//! phrase proves nothing; there the answer is the uniform `recall-refused`,
+//! and the owner has the password arm from an old device.
+//!
+//! A device with no cached account id names the account by **login handle**
+//! on `status` (`handle`): the statement it signs then carries the first 16
+//! bytes of the handle where the account id goes (it cannot know the id),
+//! and the answer, given only to a statement that verifies under an anchor's
+//! key, carries the account id for `start` and `finish`.
+//!
 //! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
 
 use std::sync::OnceLock;
@@ -198,6 +219,7 @@ pub(crate) enum Change {
 ///
 /// Any `sqlx::Error`; the caller rolls its whole change back, so a change
 /// never lands without its capture.
+#[allow(clippy::too_many_lines)] // the capture rule, one branch after another under one lock
 pub(crate) async fn capture_anchor(
     tx: &mut Transaction<'_, MySql>,
     account_id: &[u8; 16],
@@ -287,6 +309,23 @@ pub(crate) async fn capture_anchor(
         return Ok(());
     };
 
+    // ADR-0067 section 8: the recovery envelope in force now (what the
+    // phrase arm is checked against) and whether the account has an email
+    // vault (with one, the phrase arm is refused).
+    let recovery: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT registration_bytes FROM opaque_registrations \
+         WHERE account_id = ? AND kind = ? FOR UPDATE",
+    )
+    .bind(&account_id[..])
+    .bind(KIND_RECOVERY)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let mail_protected: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM email_vaults WHERE account_id = ? FOR UPDATE")
+            .bind(&account_id[..])
+            .fetch_optional(&mut **tx)
+            .await?;
+
     // Above every row the account still has, so a later standing never
     // outranks an earlier one.
     let seq: u64 = sqlx::query_scalar(
@@ -298,14 +337,17 @@ pub(crate) async fn capture_anchor(
     .await?;
     sqlx::query(
         "INSERT INTO recall_anchors \
-            (account_id, seq, identity_pubkey, password_registration, key_generation, \
+            (account_id, seq, identity_pubkey, password_registration, \
+             recovery_registration, mail_protected, key_generation, \
              created_at_ms, expires_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&account_id[..])
     .bind(seq)
     .bind(&current_key[..])
     .bind(&password)
+    .bind(recovery.as_deref())
+    .bind(mail_protected.is_some())
     .bind(key_generation)
     .bind(now)
     .bind(expires_at_ms)
@@ -387,19 +429,46 @@ struct Anchor {
     seq: u64,
     identity_pubkey: [u8; 32],
     password_registration: Vec<u8>,
+    /// The recovery envelope in force at capture (ADR-0067 section 8).
+    recovery_registration: Option<Vec<u8>>,
+    /// The account had an email vault at capture: no phrase arm.
+    mail_protected: bool,
     created_at_ms: i64,
     expires_at_ms: i64,
     attempts: u32,
 }
 
-type AnchorRow = (u64, Vec<u8>, Vec<u8>, i64, i64, u32);
+impl Anchor {
+    /// The envelope the phrase arm logs in against, when the arm exists for
+    /// this anchor.
+    fn phrase_envelope(&self) -> Option<&[u8]> {
+        if self.mail_protected {
+            None
+        } else {
+            self.recovery_registration.as_deref()
+        }
+    }
+}
+
+type AnchorRow = (u64, Vec<u8>, Vec<u8>, Option<Vec<u8>>, bool, i64, i64, u32);
 
 fn anchor_from_row(row: AnchorRow) -> Option<Anchor> {
-    let (seq, key, password_registration, created_at_ms, expires_at_ms, attempts) = row;
+    let (
+        seq,
+        key,
+        password_registration,
+        recovery_registration,
+        mail_protected,
+        created_at_ms,
+        expires_at_ms,
+        attempts,
+    ) = row;
     Some(Anchor {
         seq,
         identity_pubkey: <[u8; 32]>::try_from(key.as_slice()).ok()?,
         password_registration,
+        recovery_registration,
+        mail_protected,
         created_at_ms,
         expires_at_ms,
         attempts,
@@ -414,8 +483,8 @@ async fn live_anchor(
     now: i64,
 ) -> Result<Option<Anchor>, sqlx::Error> {
     let row: Option<AnchorRow> = sqlx::query_as(
-        "SELECT seq, identity_pubkey, password_registration, created_at_ms, expires_at_ms, \
-                attempts \
+        "SELECT seq, identity_pubkey, password_registration, recovery_registration, \
+                mail_protected, created_at_ms, expires_at_ms, attempts \
          FROM recall_anchors WHERE account_id = ? AND seq = ? AND expires_at_ms > ?",
     )
     .bind(&account_id[..])
@@ -506,6 +575,17 @@ fn decode_statement(b64: &str) -> Result<Vec<u8>, ApiError> {
         .map_err(|_| ApiError::RecallRefused)
 }
 
+/// What a `recall-status` statement carries in its account field when the
+/// device names the account by login handle (ADR-0067 section 8): the first
+/// 16 bytes of the handle. The device cannot know the account id, and the
+/// handle is a BLAKE3 output, so the value collides with a real account id
+/// with probability 2^-128; the statement authorises a read only.
+fn handle_statement_account(handle: &[u8; crate::login_handle::HANDLE_LEN]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&handle[..16]);
+    out
+}
+
 /// Decode an `account_id_b64` field: URL-safe base64, no padding, 16 bytes.
 fn decode_account_id(b64: &str) -> Result<[u8; 16], ApiError> {
     URL_SAFE_NO_PAD
@@ -534,6 +614,13 @@ pub(crate) struct StatusReq {
     /// URL-safe base64 of a 138-byte account statement: kind `recall-status`,
     /// the account, an empty body, signed by the OLD identity key.
     pub(crate) statement_b64: String,
+    /// ADR-0067 section 8: the account's login handle (32 bytes, base64url
+    /// without padding), sent by a device that holds the phrase and no
+    /// cached account id. The statement then carries the FIRST 16 BYTES OF
+    /// THE HANDLE in its account field, since the device cannot know the id;
+    /// the answer carries the id.
+    #[serde(default)]
+    pub(crate) handle: Option<String>,
 }
 
 /// Answer of `POST /account/recall/status`.
@@ -549,6 +636,13 @@ pub(crate) struct StatusRes {
     pub(crate) changed_at_ms: i64,
     /// Password attempts the anchor still admits before it is destroyed.
     pub(crate) attempts_remaining: u32,
+    /// URL-safe base64 of the 16-byte account id, for `start` and `finish`.
+    /// What a device that named the account by handle did not have.
+    pub(crate) account_id_b64: String,
+    /// Whether `start` accepts `proof: "phrase"` for this anchor (ADR-0067
+    /// section 8): the anchor holds a recovery envelope and the account had
+    /// no email vault when it was captured.
+    pub(crate) phrase_arm: bool,
 }
 
 /// `POST /account/recall/status` — anonymous, per-address limited.
@@ -582,13 +676,26 @@ pub(crate) async fn status(
     let claims =
         AccountStatement::decode_unverified(&statement).map_err(|_| ApiError::RecallRefused)?;
     let now = now_ms();
+    // By account id (the statement names it), or by login handle: then the
+    // account is the one the handle is bound to (a stand-in with no anchors
+    // for an unknown name) and the statement must name the handle's first 16
+    // bytes.
+    let (account_id, stated_account) = match req.handle.as_deref() {
+        None => (claims.account_id, claims.account_id),
+        Some(handle_b64) => {
+            let pepper = crate::login_handle::pepper(&state)?;
+            let handle = crate::login_handle::decode_handle(handle_b64)?;
+            let resolved = crate::login_handle::resolve(&state.db, &pepper, &handle).await?;
+            (resolved.account_id, handle_statement_account(&handle))
+        },
+    };
 
     let rows: Vec<AnchorRow> = sqlx::query_as(
-        "SELECT seq, identity_pubkey, password_registration, created_at_ms, expires_at_ms, \
-                attempts \
+        "SELECT seq, identity_pubkey, password_registration, recovery_registration, \
+                mail_protected, created_at_ms, expires_at_ms, attempts \
          FROM recall_anchors WHERE account_id = ? AND expires_at_ms > ? ORDER BY seq LIMIT ?",
     )
-    .bind(&claims.account_id[..])
+    .bind(&account_id[..])
     .bind(now)
     .bind(i64::try_from(MAX_ANCHORS).unwrap_or(i64::MAX))
     .fetch_all(&state.db)
@@ -604,7 +711,7 @@ pub(crate) async fn status(
             &statement,
             anchor,
             AccountStatementKind::RecallStatus,
-            &claims.account_id,
+            &stated_account,
             &[],
             now,
         ) {
@@ -629,6 +736,8 @@ pub(crate) async fn status(
         expires_at_ms: anchor.expires_at_ms,
         changed_at_ms: anchor.created_at_ms,
         attempts_remaining: MAX_ATTEMPTS.saturating_sub(anchor.attempts),
+        account_id_b64: URL_SAFE_NO_PAD.encode(account_id),
+        phrase_arm: anchor.phrase_envelope().is_some(),
     }))
 }
 
@@ -648,8 +757,13 @@ pub(crate) struct StartReq {
     /// by the OLD identity key.
     pub(crate) statement_b64: String,
     /// Standard base64 of the OPAQUE `CredentialRequest` made from the
-    /// password as it was before the change.
+    /// password as it was before the change (or, with `proof: "phrase"`,
+    /// from the 64-byte seed of the recovery phrase as it was then).
     pub(crate) login_request: String,
+    /// Which anchored envelope the login is against: `"password"` (the
+    /// default) or `"phrase"` (ADR-0067 section 8).
+    #[serde(default)]
+    pub(crate) proof: Option<String>,
     /// Standard base64 of the OPAQUE `RegistrationRequest` for the NEW
     /// password.
     pub(crate) password_request: String,
@@ -718,6 +832,11 @@ pub(crate) async fn start(
     let password_request = decode_registration_request(&req.password_request)?;
     let recovery_request = decode_registration_request(&req.recovery_request)?;
     let statement = decode_statement(&req.statement_b64)?;
+    let phrase_arm = match req.proof.as_deref() {
+        None | Some("password") => false,
+        Some("phrase") => true,
+        Some(_) => return Err(ApiError::BadInput("proof must be password or phrase").into()),
+    };
 
     let now = now_ms();
     let anchor = live_anchor(&state.db, &account_id, req.anchor_seq, now)
@@ -737,6 +856,16 @@ pub(crate) async fn start(
     let anchor = anchor.ok_or(ApiError::RecallRefused)?;
 
     // From here on the caller holds the anchor's key.
+    // The envelope this attempt is against. The phrase arm does not exist
+    // for an account that had an email vault at capture (or an anchor from
+    // before the recovery envelope was kept): the uniform refusal, with
+    // nothing counted.
+    let (anchored_envelope, anchored_kind) = if phrase_arm {
+        let envelope = anchor.phrase_envelope().ok_or(ApiError::RecallRefused)?;
+        (envelope.to_vec(), KIND_RECOVERY)
+    } else {
+        (anchor.password_registration.clone(), KIND_PASSWORD)
+    };
     let mut limit_name = [0u8; 24];
     limit_name[..16].copy_from_slice(&account_id);
     limit_name[16..].copy_from_slice(&anchor.seq.to_be_bytes());
@@ -773,20 +902,18 @@ pub(crate) async fn start(
     }
 
     // The login against the envelope the anchor holds. The credential
-    // identifier is the password kind's: it is what the envelope was
-    // registered under.
-    let registration =
-        ServerRegistration::<LakkoCipherSuite>::deserialize(&anchor.password_registration)
-            .map_err(opaque_internal(
-                "anchored registration does not deserialize",
-            ))?;
-    let password_credential_id = build_credential_id(&account_id, KIND_PASSWORD);
+    // identifier is the kind's the envelope was registered under.
+    let registration = ServerRegistration::<LakkoCipherSuite>::deserialize(&anchored_envelope)
+        .map_err(opaque_internal(
+            "anchored registration does not deserialize",
+        ))?;
+    let anchored_credential_id = build_credential_id(&account_id, anchored_kind);
     let login_start = ServerLogin::<LakkoCipherSuite>::start(
         &mut OsRng,
         &state.opaque_setup,
         Some(registration),
         login_request,
-        &password_credential_id,
+        &anchored_credential_id,
         ServerLoginStartParameters::default(),
     )
     .map_err(opaque_internal("ServerLogin::start"))?;
@@ -1297,6 +1424,11 @@ pub(crate) async fn finish(
         "DELETE FROM recall_states WHERE account_id = ?",
         "DELETE FROM totp_secrets WHERE account_id = ?",
         "DELETE FROM device_session_floors WHERE account_id = ?",
+        // ADR-0067: the displaced party may have added a recovery email of
+        // its own; a mailed code must not bring it back in. (The email vault
+        // and the tickets go with `delete_superseded_state` below.)
+        "DELETE FROM recovery_emails WHERE account_id = ?",
+        "DELETE FROM email_challenges WHERE account_id = ?",
     ] {
         sqlx::query(statement)
             .bind(&account_id[..])

@@ -12,8 +12,8 @@ import me.lakko.app.auth.FreshAuthWrongPassword
 import me.lakko.app.auth.PasskeyCancelled
 import me.lakko.app.webauthn.WebauthnHttpError
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
@@ -198,6 +198,9 @@ class ProofBlockRulesTest {
             ProofSurface.AddPasskey to "proof.add_passkey.cancelled",
             ProofSurface.ChangePassword to "proof.change_password.cancelled",
             ProofSurface.RemoveDevice to "proof.remove_device.cancelled",
+            // ADR-0067: the catalog has no cancelled line of their own.
+            ProofSurface.RecoveryEmail to "chat.record.cancelled",
+            ProofSurface.SavePhrase to "chat.record.cancelled",
         )
         assertEquals(ProofSurface.entries.toSet(), expected.keys)
         for ((surface, key) in expected) {
@@ -255,6 +258,8 @@ class ProofBlockRulesTest {
         assertEquals("proof.add_device.help", proofCopy(ProofSurface.AddDeviceScan).helper)
         assertEquals("proof.add_passkey.help", proofCopy(ProofSurface.AddPasskey).helper)
         assertEquals("proof.change_password.help", proofCopy(ProofSurface.ChangePassword).helper)
+        assertEquals("proof.recovery_email.help", proofCopy(ProofSurface.RecoveryEmail).helper)
+        assertEquals("proof.save_phrase.help", proofCopy(ProofSurface.SavePhrase).helper)
     }
 
     @Test

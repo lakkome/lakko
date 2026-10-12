@@ -453,7 +453,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 // ADR-0065 key-reset attestation (verify only).
                 .KeyResetAttestation, .KeyResetAttestationStale, .AccountStatement,
                 // ADR-0066 key-rotation envelope and root endorsement.
-                .KeyRotation:
+                .KeyRotation,
+                // ADR-0067 the email vault and the recovery-email address.
+                .EmailVaultNotOpened, .EmailVault, .RecoveryEmail:
                 return nil
             }
         }

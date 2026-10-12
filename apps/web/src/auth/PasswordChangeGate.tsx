@@ -31,6 +31,8 @@ import {
 } from "solid-js";
 
 import { useAuth } from "./AuthContext";
+import { threeWordsShown } from "./protect/account-protection";
+import { phraseProtectedHere } from "./protect/protection-state";
 import { screenText } from "./auth-error-copy";
 import { PROOF_COPY } from "./fresh-auth";
 import { listPositions } from "./phrase-confirm";
@@ -75,6 +77,10 @@ export function PasswordChangeGate(props: {
   const poll = setInterval(() => setAllowed(auth.passwordChangeAllowed()), 1000);
   onCleanup(() => clearInterval(poll));
   const [mode, setMode] = createSignal<"proof" | "words">("proof");
+  const wordsOffered = (): boolean => {
+    const s = auth.state();
+    return threeWordsShown(phraseProtectedHere(s.kind === "session" ? s.account.accountId : null));
+  };
   const [busy, setBusy] = createSignal(false);
 
   const gate = createProofGate({
@@ -126,6 +132,9 @@ export function PasswordChangeGate(props: {
       >
         <form onSubmit={(e) => void onProve(e)} class="lk-stack">
           <ProofBlock gate={gate}>
+            {/* ADR-0067 section 11: three words exist only for a
+                phrase-protected account. */}
+            <Show when={wordsOffered()}>
             <div>
               <button
                 type="button"
@@ -139,6 +148,7 @@ export function PasswordChangeGate(props: {
                 {t("proof.change_password.use_words")}
               </button>
             </div>
+            </Show>
           </ProofBlock>
           <div class="lk-actions">
             <button class="primary" type="submit" disabled={busy() || !gate.view().ready}>

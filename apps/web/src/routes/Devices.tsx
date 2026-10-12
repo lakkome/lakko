@@ -31,6 +31,8 @@ import {
 import { A } from "@solidjs/router";
 import { Icon } from "../ui/icons";
 import { useAuth } from "../auth/AuthContext";
+import { newWordsShown } from "../auth/protect/account-protection";
+import { phraseProtectedHere } from "../auth/protect/protection-state";
 import { AuthClient } from "../auth/client";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { deviceIdB64Url } from "../auth/session-device";
@@ -51,7 +53,9 @@ import {
 } from "../devices/orchestrator";
 import { listDevices, type DeviceListItem } from "../devices/remove";
 import { useKeyRotation, type RotateResult } from "../devices/key-rotation-runtime";
-import { rotationCommitted, rotationStepLine, type RotationStepLine } from "../devices/key-rotation";
+import { rotationCommitted, rotationStepLine, type RotationStepLine,
+  rotationSavesPhrase,
+} from "../devices/key-rotation";
 import { ownPairingHandle } from "../devices/pairing";
 import { recoveryHalfFor } from "../devices/recovery-sender";
 import QRCode from "qrcode";
@@ -285,7 +289,8 @@ function DevicesListView(props: {
   /** A rotation whose device was removed but whose keys were not changed. */
   const rotationLeftover = (): boolean => {
     const r = rotation.record();
-    return r !== null && !rotationCommitted(r) && r.done.includes("remove");
+    // "Save a recovery phrase" removes no device: its record is not one.
+    return r !== null && !rotationSavesPhrase(r) && !rotationCommitted(r) && r.done.includes("remove");
   };
   const activeLine = (): RotationStepLine | null => {
     const step = rotation.activeStep();
@@ -764,7 +769,11 @@ function DevicesListView(props: {
                 <Show when={!notStarted()}>
                   <p>{ROTATE_COPY.lede()}</p>
                   <ul class="lk-list tight">
-                    <For each={ROTATE_COPY.effects()}>{(line) => <li>{line}</li>}</For>
+                    <For
+                      each={ROTATE_COPY.effects(
+                        newWordsShown(phraseProtectedHere(props.accountIdB64), username().trim().length > 0),
+                      )}
+                    >{(line) => <li>{line}</li>}</For>
                   </ul>
                 </Show>
               }

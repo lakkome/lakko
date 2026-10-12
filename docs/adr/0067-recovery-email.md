@@ -3,9 +3,11 @@
 
 # ADR-0067: A recovery email, an account without a saved phrase, and taking an account back with the phrase
 
-- **Status:** Proposed (2026-10-12). The maintainer decided D1 to D8 below
-  the same day, including the exception to security invariant #2; the
-  mechanisms are this document's proposal. Nothing is built.
+- **Status:** Accepted (2026-10-12; the maintainer decided D1 to D8 below,
+  including the exception to security invariant #2, and asked for it to be
+  built). Core, `services/auth` and the three clients are built and
+  unit-tested, see "As built"; nothing was walked on a device, against a
+  server or through a mail relay.
 - **Date:** 2026-10-12
 - **Context:** account recovery, Part 6 (after
   [ADR-0064](0064-recovery-model-simplification.md),
@@ -127,7 +129,8 @@ offered.
 "lakko/auth/recovery-email/v1" ‖ login_handle(32) ‖ len(2 BE) ‖ address)`
 
 The address is normalised (trimmed, lower-cased as a whole, one `@`, 3 to
-254 bytes, no control characters; no provider rules). It is never stored or
+254 bytes, no control characters or inner white space, a non-empty part on
+each side of the `@`; no provider rules). It is never stored or
 logged. With the database and the pepper, a suspected (username, address)
 pair can be confirmed; without the pepper it cannot. Pepper unset: every
 route here answers `503 recovery-email-disabled` and an anonymous
@@ -289,6 +292,120 @@ built, naming the exception and its two adversaries.
 4. Web, iOS and Android per UX section 19, in one pass, including sign-up
    without the phrase and "Save a recovery phrase" over rotation.
 5. `lakko-security` on request; the invariant wording and the gap entry.
+
+## As built (2026-10-12): core and server
+
+Host-tested only: `lakko-mnemonic` 43 tests, `lakko-ffi-uniffi` 338,
+`lakko-ffi-wasm` 228, `lakko-svc-auth` 188 + 2 against the local MariaDB. No
+letter was ever sent through a real relay (`SmtpSender` only compiles); no
+fuzzer was run; bindings and native libraries were not rebuilt by these
+sprints.
+
+**Core** (`lakko-mnemonic`): `recovery_email::normalize_recovery_email` (the
+one address rule, used by the vault and by auth) and
+`vault::{seal,open}_entropy_under_email`; on UniFFI and wasm as
+`normalizeRecoveryEmail`, `emailVaultSeal`, `emailVaultOpen`; fuzz target
+`email_vault_open` (skips Argon2id). Differs from section 2: an HKDF step
+with its own `info` sits between Argon2id and the seal, so a passkey blob
+and an email blob never open each other; the address rule also refuses
+inner white space and an empty part before or after `@`; Argon2id runs at
+the backup's parameter set (64 MiB, t=3, p=4), not measured for this use and
+not carried in the blob.
+
+**Server** (`services/auth`, migration `0033`): the routes of sections 6, 7
+and 9, the recall phrase arm, `lettre` 0.11 for SMTP (rustls), scopes 17 to
+20. Differs from the text above:
+
+- The feature needs `LAKKO_AUTH_EMAIL_PEPPER`, `LAKKO_VAULT_ENC_KEY` and
+  `LAKKO_AUTH_HANDLE_PEPPER`.
+- `accounts.phrase_saved` records the mode, since a second device cannot
+  learn it otherwise. It is set by `phrase_saved: true` on
+  `POST /account/keys/rotate/finish` (a fresh-auth grant does not survive
+  the rotation, so a separate call could not carry one) or by
+  `DELETE /recovery-email/vault`.
+- A ticket table (`email_tickets`) rather than a rewritten challenge row.
+- A key rotation and a key reset delete the email vault (it seals the old
+  phrase); a reset keeps `recovery_emails`, a recall deletes it too. **A
+  mail-protected account therefore has no vault after a reset until the
+  person types the address again**, because no device keeps the address.
+- The recovery letter counter per account, when spent, sends nothing and
+  answers as usual (a `429` there would reveal a match).
+- `recover/verify` charges its per-handle counter after the challenge
+  lookup (it carries no handle).
+- Recall by handle: the statement carries the first 16 bytes of the handle
+  in its account field (the statement format was not changed).
+- Letters are English only; `lang` is accepted and ignored.
+
+**Accepted cost (maintainer, 2026-10-12).** ADR-0064 keeps the phrase on
+every device of the account, wrapped under the device's hardware-backed key.
+With the phrase arm, the old seed alone recalls a phrase-protected account,
+so ADR-0066's rule that a device's stored keys without the password are not
+enough no longer holds for these accounts. Reaching the seed needs code
+running as the app on an unlocked device (the storage cannot be decrypted
+elsewhere, and the app never shows the phrase without the password). The
+maintainer accepted this; an extra mailed code was considered and not added,
+since it would do nothing for an account with no email.
+
+## As built (2026-10-12): the three clients
+
+Unit tests only: web vitest 4921, iOS `LakkoTests` 3430 (0 failures, 2
+skipped), Android 3619 on the host JVM (the native `.so` was not rebuilt, so
+the vault seal / open, OPAQUE and the rotation are compiled there, never
+executed). The server suite is 190 + 2 after two additions the clients
+needed: `totp` on `GET /recovery-email` and `since_ms` on
+`GET /account/notices`. Nothing was walked; no passkey ceremony ran; the new
+routes are exercised on iOS and web through scripted ports, not against a
+stubbed server.
+
+One behaviour on the three clients:
+
+- Sign-up shows no phrase. The step after it has three rows, email, passkey
+  (added the same day at the maintainer's request, where the device can use
+  passkeys) and phrase; a confirmed email or a created passkey returns to the
+  step with the row marked done, `Continue` replaces `Not now` once a row is
+  done, a saved phrase ends the step. A guest account (call-link join) sees
+  neither the phrase nor the step.
+- `accountProtection(enabled, vault, phraseSaved)`: phrase, else email when
+  `enabled && vault`, else none; "add your email again" when
+  `enabled && !vault && !phraseSaved`. The no-way-back banner is not shown to
+  an account with a passkey.
+- The email flow: start, code, authenticator when required, new password,
+  and only then `recover/open`; vault mode runs the existing phrase restore,
+  password mode the ticket routes. A vault that does not open shows one line
+  and returns to the list. Vault calls run off the main thread.
+- Saving a phrase is the ADR-0066 rotation with no device removed and
+  `phrase_saved: true`; the words appear after the commit.
+- **New words are shown only to a phrase-protected account.** After a
+  remove-and-change-keys rotation, a reset or a recall, an account without a
+  saved phrase sees no words and is asked to add its email again.
+- The three-word surfaces and `Show phrase` exist only for a
+  phrase-protected account. Restore your keys hides the phrase row for an
+  account without one and offers `Email code` when a vault exists.
+- Notices: fetched at each landing; a device with no cursor asks for the
+  last 30 days; a device's own action is suppressed by a per-kind marker
+  for 10 minutes; `It was not me` opens one screen where the password can be
+  changed without another proof for ten minutes (reached from a notice
+  only), with remove-email and save-phrase under it.
+- Take back with the phrase on the 18.4 form and from Get back in.
+
+Not built, or different:
+
+- The username-change warning and a button behind "Choose a username
+  first": no client has a username-change or claim-username screen.
+- A reset started while the account's mode cannot be read (offline) treats
+  the account as not phrase-protected and shows no words there; they stay
+  on the device and the flag corrects at the next landing.
+- The device-less phrase recall does not replay an unanswered `finish` on
+  Android.
+- Android: the done mark is text in the row title; the email row of
+  Restore your keys uses another icon; the wordless publish-owed screen's
+  title and second paragraph are stand-in strings.
+- Web: the passkey screen opened from the step still carries the sign-up
+  era title; the passkey list is read once when the step opens.
+- No component-level tests of the new screens on any client; the pure rules
+  and step machines are tested.
+- Translations: the 85 new catalog keys exist in English and Russian
+  (machine); the other nine languages show English.
 
 ## References
 

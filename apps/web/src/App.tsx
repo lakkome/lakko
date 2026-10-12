@@ -51,6 +51,7 @@ import { ReachProvider } from "./reach/ReachProvider";
 import { ScopedDiscoveryRuntime } from "./reach/ScopedDiscoveryRuntime";
 import { OwedDeviceRemovals } from "./devices/OwedDeviceRemovals";
 import { OwedKeyRotation } from "./devices/OwedKeyRotation";
+import { AccountNotices } from "./auth/protect/AccountNotices";
 import { GroupClosedProvider } from "./chat/GroupClosedContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
 import { JournalOwnershipProvider } from "./ds/JournalOwnershipContext";
@@ -220,6 +221,13 @@ const App: Component = () => (
            */}
           <OwedDeviceRemovals />
           <OwedKeyRotation />
+          {/*
+           * ADR-0067 section 9 - how the account is protected is read at
+           * every landing, and what happened to the account (its password
+           * changed by email, a recovery email added) is shown once on each
+           * of its devices.
+           */}
+          <AccountNotices />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole

@@ -244,7 +244,12 @@ enum PasswordChangeGate {
         return nowMs >= passedAtMs && nowMs - passedAtMs < threeWordsWindowMs
     }
 
-    static func allowed(holdsLiveProof: Bool, threeWordsPassedAtMs: Int64?, nowMs: Int64) -> Bool {
+    /// - Parameter noticeAnsweredAtMs: when the person answered `It was not
+    ///   me` to an account notice (ADR-0067, UX 19.6): the same ten minutes.
+    static func allowed(
+        holdsLiveProof: Bool, threeWordsPassedAtMs: Int64?, noticeAnsweredAtMs: Int64? = nil, nowMs: Int64
+    ) -> Bool {
         holdsLiveProof || threeWordsLive(passedAtMs: threeWordsPassedAtMs, nowMs: nowMs)
+            || threeWordsLive(passedAtMs: noticeAnsweredAtMs, nowMs: nowMs)
     }
 }

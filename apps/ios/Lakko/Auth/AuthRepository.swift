@@ -149,6 +149,12 @@ public final class AuthRepository: ObservableObject {
     /// (ADR-0065 section 4.2, UX 15.4).
     @Published public private(set) var freshPublishNeedsSignIn: Bool = false
 
+    /// ADR-0067 — whether the fresh identity parked on the phrase screen
+    /// shows its words: `false` for an account that is not phrase-protected,
+    /// whose only screen there is the "finishing" one while a publish is
+    /// owed.
+    @Published public private(set) var freshShowsWords: Bool = true
+
     /// ADR-0037 §6 (G-11) — non-nil when a rolled-back / tampered backup was
     /// REFUSED at restore. An unambiguous tamper the user must be told about
     /// (distinct from a stale-and-declined outcome, which is only logged).
@@ -264,6 +270,21 @@ public final class AuthRepository: ObservableObject {
     /// The owed markers of a fresh identity (``RecoveryMarkers``).
     private let markers: RecoveryMarkers
 
+    /// ADR-0067 — what this device keeps about an account's protection: the
+    /// phrase-saved flag the three-word surfaces are gated on, the last
+    /// status read. Flags only.
+    let protectionStore: AccountProtectionStore
+
+    /// ADR-0067 — a session with keys landed for `accountIdB64`: the
+    /// composition root reads the account's protection and its notices
+    /// (``AccountProtectionCenter``). `nil` in a repository nobody wired, so
+    /// no request leaves it.
+    var onProtectedSessionLanded: (@MainActor (_ accountIdB64: String) -> Void)?
+
+    /// ADR-0067 — this device changed the account's protection (it saved a
+    /// phrase): the composition root re-reads the status.
+    var onProtectionChanged: (@MainActor () -> Void)?
+
     /// ADR-0066 section 0.4 — this device's id for an account (its
     /// conversation leaf key), or `nil` when the device identity cannot be
     /// read or minted. Injectable for tests.
@@ -336,6 +357,10 @@ public final class AuthRepository: ObservableObject {
     /// When the local three-word check last passed in front of a password
     /// change (``PasswordChangeGate``). In memory only.
     private var threeWordsPassedAtMs: Int64?
+
+    /// When `It was not me` was answered on an account notice (UX 19.6). In
+    /// memory only.
+    private var noticeAnsweredAtMs: Int64?
 
     /// Whether the account behind `sessionToken` has a passkey, or `nil`
     /// when it could not be read. Injectable for tests.
@@ -501,6 +526,7 @@ public final class AuthRepository: ObservableObject {
         removeDeliveredNotifications: @escaping () -> Void = AuthRepository.removeAllDeliveredNotifications,
         passkeyCeremony: @escaping PasskeyCeremony = AuthRepository.livePasskeyCeremony,
         markers: RecoveryMarkers = RecoveryMarkers(),
+        protectionStore: AccountProtectionStore = AccountProtectionStore(),
         tokenProvider: SessionTokenProvider = .shared,
         keyResetOperation: KeyResetOperation? = nil,
         proofLoginOperation: ProofLoginOperation? = nil,
@@ -539,6 +565,7 @@ public final class AuthRepository: ObservableObject {
         self.removeDeliveredNotifications = removeDeliveredNotifications
         self.passkeyCeremony = passkeyCeremony
         self.markers = markers
+        self.protectionStore = protectionStore
         self.ownDeviceId = ownDeviceId ?? AuthRepository.storedOwnDeviceId
         self.identityKeyMarks = identityKeyMarks
         self.logoutOwed = logoutOwed
@@ -1105,22 +1132,24 @@ public final class AuthRepository: ObservableObject {
 
         DevicePhrase.store(phrase, accountIdB64: accountIdB64, context: "signup-guest")
 
-        // Park the completion context + flip to `.saveFreshPhrase` so the UI
-        // shows the recovery phrase before the session lands (mirroring
-        // `mintFreshIdentity`); `confirmFreshPhraseSaved` builds the canonical
-        // session from the stash. Username EMPTY (unclaimed).
-        adoptSessionPair(result.session, accountIdB64: accountIdB64, context: "signupGuest")
-        pendingFreshPhrase = PendingFreshPhrase(
-            seed: accountIdentitySeed,
-            accountIdBytes: result.accountId,
-            accountIdB64: accountIdB64,
-            session: result.session,
-            username: "",
-            phrase: phrase
+        // ADR-0067 D2: the phrase is not shown at sign-up, a guest's
+        // included. The device holds it; `Save a recovery phrase` in
+        // Settings is where a person gets words to write down. The session
+        // lands directly. Username EMPTY (unclaimed); a guest has no
+        // password to replace.
+        newPasswordOwed = false
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: ""))
+        adoptIdentitySecrets(
+            IdentitySecrets(
+                accountId: result.accountId,
+                exportKey: result.exportKey,
+                accountIdentitySeed: accountIdentitySeed,
+                session: result.session
+            ),
+            context: "signupGuest"
         )
-        state = .saveFreshPhrase(
-            SessionAccount(accountIdB64: accountIdB64, username: "")
-        )
+        state = .session(SessionAccount(accountIdB64: accountIdB64, username: ""))
+        Task { await self.subscribePushBestEffort(context: "signup-guest", accountIdB64: accountIdB64) }
         return SignupOutcome(recoveryPhrase: phrase)
     }
 
@@ -1396,6 +1425,20 @@ public final class AuthRepository: ObservableObject {
     /// /vault/passkeys` with the parked session token), or `nil` when no
     /// sign-in is parked or the count could not be read. The restore prompt
     /// hides its passkey row when this is 0.
+    /// ADR-0067 — the protection of the account whose keys are being
+    /// restored (signed in, no keys here): `GET /recovery-email` with the
+    /// parked session. Stored, so the phrase-saved flag is known before any
+    /// route of the prompt runs (a reset shows its new words only to a
+    /// phrase-protected account). `nil` when it could not be read.
+    public func protectionForPendingRestore() async -> RecoveryEmailStatus? {
+        guard let pending = pendingRecovery else { return nil }
+        guard let status = try? await authClientFactory().recoveryEmailStatus(
+            sessionToken: pending.sessionToken) else { return nil }
+        guard pendingRecovery?.accountIdB64 == pending.accountIdB64 else { return nil }
+        protectionStore.setStatus(status, accountIdB64: pending.accountIdB64)
+        return status
+    }
+
     public func passkeysWithKeysForPendingRestore() async -> Int? {
         guard let token = pendingRecovery?.sessionToken else { return nil }
         do {
@@ -1503,7 +1546,8 @@ public final class AuthRepository: ObservableObject {
                   cachedUsername: cached.username,
                   phraseOnDevice: true,
                   keysOnDevice: keysOnDevice,
-                  suspended: ThreeWordsBudgetStore().isSuspended(accountIdB64: cached.accountIdB64)
+                  suspended: ThreeWordsBudgetStore().isSuspended(accountIdB64: cached.accountIdB64),
+                  phraseSaved: protectionStore.phraseSaved(accountIdB64: cached.accountIdB64)
               ) else {
             return nil
         }
@@ -1595,12 +1639,35 @@ public final class AuthRepository: ObservableObject {
     /// while a recovery-credential replace is owed (``PhraseReveal``).
     public func devicePhrase() -> String? {
         guard case .session(let account) = state else { return nil }
+        // ADR-0067: the words are shown only once the person saved them
+        // (`Save a recovery phrase`); until then the device holds them unseen.
+        guard protectionStore.phraseSaved(accountIdB64: account.accountIdB64) else { return nil }
         let phrase = DevicePhrase.read(accountIdB64: account.accountIdB64)
         guard PhraseReveal.decide(
             replaceOwed: markers.isPublishOwed(accountIdB64: account.accountIdB64),
             phraseStored: phrase != nil
         ) == .show else { return nil }
         return phrase
+    }
+
+    /// ADR-0067 section 2 — the recovery phrase this device holds for the
+    /// signed-in account, for sealing the email vault at an enrolment. Not
+    /// for display: an account whose phrase was never saved keeps its words
+    /// unseen (``devicePhrase()`` is the gated read). `nil` while a key
+    /// reset's publish is owed, when the stored words are not yet the
+    /// account's published ones.
+    func heldPhraseForEmailVault() -> String? {
+        guard case .session(let account) = state,
+              !markers.isPublishOwed(accountIdB64: account.accountIdB64) else { return nil }
+        return DevicePhrase.read(accountIdB64: account.accountIdB64)
+    }
+
+    /// ADR-0067 — whether the signed-in account's recovery phrase was saved,
+    /// as this device knows it. The new words of a rotation, a reset or a
+    /// recall, and every link to them, are shown only then.
+    public var sessionPhraseProtected: Bool {
+        guard case .session(let account) = state else { return false }
+        return protectionStore.phraseSaved(accountIdB64: account.accountIdB64)
     }
 
     /// Whether a key reset's publish is owed for the signed-in account on
@@ -2034,6 +2101,7 @@ public final class AuthRepository: ObservableObject {
         freshAuth.clear()
         sessionLanding = nil
         threeWordsPassedAtMs = nil
+        noticeAnsweredAtMs = nil
         identitySecrets = nil
         pendingRecovery = nil
         pendingFreshPhrase = nil
@@ -2090,6 +2158,7 @@ public final class AuthRepository: ObservableObject {
         freshAuth.clear()
         sessionLanding = nil
         threeWordsPassedAtMs = nil
+        noticeAnsweredAtMs = nil
         identitySecrets = nil
         // ADR-0017/0018 — drop any parked recovery context too (mirror of
         // logout + the Android forgetDevice), so an abandoned recover /
@@ -2517,6 +2586,7 @@ public final class AuthRepository: ObservableObject {
         // the "keys were changed" line survives a relaunch until dismissed.
         pruneKeyRotationPending(accountIdB64: accountIdB64)
         keysRotatedNotice = rotatedNotice.isOwed(accountIdB64: accountIdB64)
+        if case .session = state { onProtectedSessionLanded?(accountIdB64) }
         Task { [weak self] in
             guard let self else { return }
             await self.bindSessionDeviceIfNeeded(accountIdB64: accountIdB64, context: "landing")
@@ -2716,7 +2786,8 @@ public final class AuthRepository: ObservableObject {
             if let existing { return existing }
             guard let oldSeed else { return nil }
             let record = RecallRecord(
-                accountIdB64: accountIdB64, oldSeed: oldSeed, username: username, learnedAtMs: grantNowMs())
+                accountIdB64: accountIdB64, oldSeed: oldSeed, username: username, learnedAtMs: grantNowMs(),
+                phraseSaved: protectionStore.phraseSaved(accountIdB64: accountIdB64))
             do {
                 try recallRecords.put(record)
                 return record
@@ -2874,6 +2945,32 @@ public final class AuthRepository: ObservableObject {
     /// and the session is bound right after the landing, as after any
     /// sign-in that learns the account from the answer.
     public func recallTakeBack(oldPassword: Data, newPassword: Data) async {
+        await recallTakeBack(proof: .password(oldPassword), newPassword: newPassword)
+    }
+
+    /// The same, with either proof (UX 18.4, 19.7): the password from before
+    /// the reset, or the recovery phrase from before it (`Use my recovery
+    /// phrase instead`; only when the server said the anchor accepts it).
+    /// Words that are no phrase at all read as a wrong proof without a
+    /// request.
+    public func recallTakeBack(proof: RecallProof, newPassword: Data) async {
+        var oldPassword = Data()
+        var oldPhraseSeed: Data?
+        switch proof {
+        case .password(let password):
+            oldPassword = password
+        case .phrase(let phrase):
+            guard let seed = try? RecoveryMnemonic.fromPhrase(
+                phrase: phrase.trimmingCharacters(in: .whitespacesAndNewlines)).toSeed() else {
+                if let current = recall, current.step == .form {
+                    var next = current
+                    next.form = .wrongPassword(triesLeft: nil)
+                    recall = next
+                }
+                return
+            }
+            oldPhraseSeed = seed
+        }
         guard let current = recall, !recallAttemptInFlight,
               case .open(let window) = current.check,
               let working = RecallMachine.submit(current) else { return }
@@ -2898,6 +2995,7 @@ public final class AuthRepository: ObservableObject {
                     record: record,
                     anchorSeq: window.anchorSeq,
                     oldPassword: oldPassword,
+                    oldPhraseSeed: oldPhraseSeed,
                     newPassword: newPassword,
                     newSeed: seed,
                     newSignaturePubkey: newPubkey,
@@ -2922,6 +3020,11 @@ public final class AuthRepository: ObservableObject {
         recallRecords.clear(accountIdB64: record.accountIdB64)
         recall = nil
         freshAuth.put(landed.freshGrant, accountIdB64: record.accountIdB64)
+        // The staged wipe removed the phrase-saved flag; the record kept it.
+        // Taking the account back with the phrase is itself only possible
+        // for a phrase-protected account.
+        protectionStore.setPhraseSaved(
+            oldPhraseSeed != nil || record.phraseSaved == true, accountIdB64: record.accountIdB64)
         accountRecalledThisSession = true
         // The staged wipe removed the session record; a relaunch on the
         // phrase screen restores from it.
@@ -2935,6 +3038,85 @@ public final class AuthRepository: ObservableObject {
             accountIdB64: record.accountIdB64,
             username: record.username,
             context: "recall"
+        )
+    }
+
+    // MARK: - ADR-0067 section 8: taking the account back with the phrase, no old device
+
+    /// `Get back in > Recovery phrase` (UX 19.7): the words typed are not
+    /// the account's phrase NOW. Ask the server whether they were its phrase
+    /// before a reset in the last month: `POST /account/recall/status` by
+    /// login handle, the statement signed by the key derived from the typed
+    /// words. `nil` for every other answer (an unknown name, words that were
+    /// never this account's, a passed window, an account that had an email
+    /// vault, no connection): the form then says what it always says.
+    public func phraseRecallOffer(username: String, mnemonicPhrase: String) async -> PhraseRecallOffer? {
+        guard let name = try? LoginName.make(username, emptyError: SessionNotReady()),
+              let mnemonic = try? RecoveryMnemonic.fromPhrase(
+                phrase: mnemonicPhrase.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let oldKeySeed = try? Identity.fromSeed(seed: mnemonic.toSeed()).ed25519Seed(),
+              let answer = try? await recallOperations.statusByHandle(name.handle, oldKeySeed),
+              PhraseRecallOffer.offered(answer.window, nowMs: grantNowMs()) else {
+            return nil
+        }
+        return PhraseRecallOffer(accountId: answer.accountId, username: name.canonical, window: answer.window)
+    }
+
+    /// `Take the account back` on the 19.7 prompt: the recall of 18.4 with
+    /// the phrase as the proof, from a device that holds nothing else of the
+    /// account. The identity afterwards is NEW, exactly as after
+    /// ``recallTakeBack(proof:newPassword:)``: the reset's client order, the
+    /// new words shown last.
+    ///
+    /// Throws ``RecallWrongPassword`` (the words did not open the anchor) or
+    /// what the routes answered; nothing changed then.
+    public func takeBackWithPhrase(
+        offer: PhraseRecallOffer, mnemonicPhrase: String, newPassword: Data
+    ) async throws {
+        guard !recallAttemptInFlight else { return }
+        let old = try RecoveryMnemonic.fromPhrase(
+            phrase: mnemonicPhrase.trimmingCharacters(in: .whitespacesAndNewlines))
+        var oldSeed = old.toSeed()
+        defer { Self.zeroize(&oldSeed) }
+        let accountIdB64 = base64Encode(offer.accountId)
+        let record = RecallRecord(
+            accountIdB64: accountIdB64,
+            oldSeed: try Identity.fromSeed(seed: oldSeed).ed25519Seed(),
+            username: offer.username,
+            learnedAtMs: grantNowMs())
+        recallAttemptInFlight = true
+        defer { recallAttemptInFlight = false }
+
+        let mnemonic = RecoveryMnemonic.generate()
+        let phrase = mnemonic.phrase()
+        let seed = mnemonic.toSeed()
+        let newPubkey = try Identity.fromSeed(seed: seed).signaturePublicKey()
+        let landed = try await recallOperations.takeBack(
+            RecallAttempt(
+                record: record,
+                anchorSeq: offer.window.anchorSeq,
+                oldPassword: Data(),
+                oldPhraseSeed: oldSeed,
+                newPassword: newPassword,
+                newSeed: seed,
+                newSignaturePubkey: newPubkey,
+                deviceId: nil))
+        freshAuth.put(landed.freshGrant, accountIdB64: accountIdB64)
+        accountRecalledThisSession = true
+        sessionLanding = .other
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: offer.username))
+        // The new identity has a recovery phrase the person is about to be
+        // shown: the account stays phrase-protected.
+        protectionStore.setPhraseSaved(true, accountIdB64: accountIdB64)
+        await landKeyReset(
+            reset: landed.reset,
+            seed: seed,
+            phrase: phrase,
+            newPubkey: newPubkey,
+            accountIdBytes: offer.accountId,
+            accountIdB64: accountIdB64,
+            username: offer.username,
+            context: "recall by phrase"
         )
     }
 
@@ -3422,6 +3604,49 @@ public final class AuthRepository: ObservableObject {
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "totp recover")
     }
 
+    /// ADR-0067 section 7, password mode (UX 19.3 step 4, "Phrase saved"):
+    /// the mailed code (and the authenticator code, when the account has
+    /// one) was accepted and the account has a saved phrase, so the code
+    /// changes the password and nothing else. `ticket` is the one
+    /// `recover/verify` answered and `recover/open` put in password mode.
+    ///
+    /// The new password is registered under the ticket
+    /// (`POST /recovery-email/recover/password/{start,finish}`), which
+    /// answers a session and the account id, and NO fresh-auth grant. The
+    /// landing is the access-only one: a device that holds the keys lands
+    /// signed in, any other shows **Restore your keys**.
+    public func recoverPasswordByEmail(username: String, ticket: String, newPassword: Data) async throws {
+        let name = try LoginName.make(
+            username, emptyError: AuthClientError.argument("enter the username of the account to recover"))
+        let result = try await authClientFactory().recoveryEmailRecoverPassword(
+            ticket: ticket, newPassword: newPassword)
+        let accountIdBytes = result.accountId
+        let accountIdB64 = base64Encode(accountIdBytes)
+
+        restoreNotice = nil
+        // A mailed code is not a fresh-auth proof.
+        freshAuth.put(nil, accountIdB64: accountIdB64)
+        sessionLanding = .other
+        // The password was just chosen: no new-password step.
+        newPasswordOwed = false
+        if Self.readCachedAccountIdentitySeed(accountIdB64: accountIdB64, context: "email recover") != nil {
+            do {
+                try ExportKeyStore.putExportKey(accountIdB64: accountIdB64, exportKey: result.exportKey)
+            } catch {
+                NSLog("export-key persist (email recover) failed: \(error)")
+            }
+        }
+        await landAfterAccessRecovery(
+            username: name.canonical,
+            accountIdBytes: accountIdBytes,
+            accountIdB64: accountIdB64,
+            session: result.session,
+            context: "email recover",
+            pushContext: "email-recover"
+        )
+        ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "email recover")
+    }
+
     /// The landing every access-only route shares: the authenticator code,
     /// a passkey, and the sign-in that follows the local three-word check.
     /// The caller verified an access factor server-side and holds the
@@ -3515,7 +3740,11 @@ public final class AuthRepository: ObservableObject {
     /// ``AuthState/saveFreshPhrase(_:)`` screen to display. `nil` outside
     /// that flow. Kept off the ``AuthState`` so it is not threaded through
     /// the router (mirror of the web `freshPhrase()` accessor).
-    public func freshPhrase() -> String? { pendingFreshPhrase?.phrase }
+    public func freshPhrase() -> String? {
+        // ADR-0067: an account that is not phrase-protected is shown none.
+        guard let pending = pendingFreshPhrase, pending.showsWords else { return nil }
+        return pending.phrase
+    }
 
     /// "Reset account keys" (ADR-0065 section 2.3, UX 15.1): the
     /// lost-everything fallback for a person who is signed in but has NO
@@ -3672,7 +3901,12 @@ public final class AuthRepository: ObservableObject {
         }
         // The device holds the new keys, so it holds the new phrase.
         DevicePhrase.store(phrase, accountIdB64: accountIdB64, context: "fresh-identity")
-        markers.markPhraseOwed(accountIdB64: accountIdB64)
+        // ADR-0067 — the new words are shown only to a phrase-protected
+        // account. Any other account gets its new keys with no words on any
+        // screen: the device keeps them unseen, as after sign-up.
+        let showsWords = NewWordsRule.shown(
+            phraseProtected: protectionStore.phraseSaved(accountIdB64: accountIdB64))
+        if showsWords { markers.markPhraseOwed(accountIdB64: accountIdB64) }
         let record = KeyResetPublishRecord(
             attestation: reset.attestation,
             keyGeneration: reset.session.keyGeneration,
@@ -3700,8 +3934,12 @@ public final class AuthRepository: ObservableObject {
                 accountIdBytes: accountIdBytes, accountIdentitySeed: seed)
         }
 
-        // The state flips before the publish so a failure parks the phrase
-        // screen in its "could not finish publishing" form.
+        // The state flips before the publish so a failure parks the screen
+        // in its "could not finish publishing" form. For an account that is
+        // not phrase-protected that form names no words, and once the
+        // publish lands the session does too, with no phrase screen
+        // (``finishOwedPublish(accountIdB64:)``).
+        freshShowsWords = showsWords
         pendingFreshPhrase = PendingFreshPhrase(
             seed: seed,
             accountIdBytes: accountIdBytes,
@@ -3709,7 +3947,8 @@ public final class AuthRepository: ObservableObject {
             session: reset.session,
             username: username,
             phrase: phrase,
-            publishOwed: true
+            publishOwed: true,
+            showsWords: showsWords
         )
         freshPublishPending = true
         freshPublishNeedsSignIn = false
@@ -3925,14 +4164,29 @@ public final class AuthRepository: ObservableObject {
         PasswordChangeGate.allowed(
             holdsLiveProof: holdsLiveFreshAuth(),
             threeWordsPassedAtMs: threeWordsPassedAtMs,
+            noticeAnsweredAtMs: noticeAnsweredAtMs,
             nowMs: grantNowMs())
     }
 
+    /// UX 19.6 — the person answered `It was not me` to a notice that the
+    /// password was changed or the account was opened by email. The password
+    /// in force may be one they never chose, and an account without a saved
+    /// phrase has no three words to check, so the new-password form of that
+    /// one screen opens on what this device holds (the keys). Ten minutes,
+    /// in memory.
+    public func openPasswordChangeForNotice() {
+        guard case .session = state else { return }
+        noticeAnsweredAtMs = grantNowMs()
+    }
+
     /// Whether the signed-in device can run the local three-word check: it
-    /// holds the account's recovery phrase.
+    /// holds the account's recovery phrase, and the account is
+    /// phrase-protected (ADR-0067: an account whose phrase was never saved
+    /// has no words the person could know).
     public var threeWordsCheckAvailable: Bool {
         guard case .session(let account) = state else { return false }
-        return DevicePhrase.read(accountIdB64: account.accountIdB64) != nil
+        return protectionStore.phraseSaved(accountIdB64: account.accountIdB64)
+            && DevicePhrase.read(accountIdB64: account.accountIdB64) != nil
     }
 
     /// The local three-word check of the recovery phrase, for the signed-in
@@ -3984,27 +4238,7 @@ public final class AuthRepository: ObservableObject {
         }
         // The phrase was shown and confirmed on this screen.
         markers.clearPhraseOwed(accountIdB64: pending.accountIdB64)
-        // A guest account has no username and so no password to replace; a
-        // fresh identity reached through "Forgot password?" keeps the offer
-        // (its recovery credential now belongs to the new phrase, so the
-        // reset works).
-        if pending.username.isEmpty { newPasswordOwed = false }
-        pendingFreshPhrase = nil
-        freshPublishPending = false
-        freshPublishNeedsSignIn = false
-        sessionStore.save(
-            PersistedSession(
-                accountIdB64: pending.accountIdB64,
-                username: pending.username
-            )
-        )
-        finishCanonicalSession(
-            accountIdentitySeed: pending.seed,
-            accountIdBytes: pending.accountIdBytes,
-            exportKey: Data(),
-            session: pending.currentSession(tokenProvider),
-            username: pending.username
-        )
+        landPendingFreshIdentity(pending)
     }
 
     /// A fresh identity whose phrase the person never confirmed (the app
@@ -4191,6 +4425,38 @@ public final class AuthRepository: ObservableObject {
             freshPublishPending = false
         }
         freshPublishNeedsSignIn = false
+        // Not phrase-protected: there are no words to confirm, so the
+        // session lands now.
+        if let pending = pendingFreshPhrase, pending.accountIdB64 == accountIdB64, !pending.showsWords {
+            landPendingFreshIdentity(pending)
+        }
+    }
+
+    /// Land the session of a parked fresh identity (its words were
+    /// confirmed, or it shows none).
+    private func landPendingFreshIdentity(_ pending: PendingFreshPhrase) {
+        // A guest account has no username and so no password to replace; a
+        // fresh identity reached through "Forgot password?" keeps the offer
+        // (its recovery credential now belongs to the new phrase, so the
+        // reset works).
+        if pending.username.isEmpty { newPasswordOwed = false }
+        pendingFreshPhrase = nil
+        freshShowsWords = true
+        freshPublishPending = false
+        freshPublishNeedsSignIn = false
+        sessionStore.save(
+            PersistedSession(
+                accountIdB64: pending.accountIdB64,
+                username: pending.username
+            )
+        )
+        finishCanonicalSession(
+            accountIdentitySeed: pending.seed,
+            accountIdBytes: pending.accountIdBytes,
+            exportKey: Data(),
+            session: pending.currentSession(tokenProvider),
+            username: pending.username
+        )
     }
 
     /// ADR-0036 (S6) — mint an auth-attested genesis proof binding the
@@ -4792,14 +5058,12 @@ public struct IdentitySecrets: Equatable {
     public var sessionExpiresAtMs: Int64 { session.sessionExpiresAtMs }
 }
 
-/// Result handed back to the signup ViewModel so it can show the
-/// freshly-generated 12-word recovery phrase.
+/// Result of a sign-up.
 public struct SignupOutcome: Equatable {
-    /// The 12-word BIP39 recovery phrase. The UI MUST display this
-    /// to the user and require the three-word confirmation before
-    /// navigating away. The device keeps a copy (``DevicePhrase``):
-    /// Settings > Security > Recovery shows it again after the device
-    /// confirmed its owner.
+    /// The 12-word BIP39 recovery phrase the device generated and keeps
+    /// (``DevicePhrase``). ADR-0067 D2: it is NOT shown at sign-up; the
+    /// person may save a phrase later (`Save a recovery phrase`, which
+    /// gives the account new keys and new words).
     public let recoveryPhrase: String
 
     public init(recoveryPhrase: String) {
@@ -4855,6 +5119,10 @@ struct PendingFreshPhrase {
     /// session does not land until it is `false`. Always `false` for a
     /// guest signup, which publishes at creation.
     var publishOwed: Bool = false
+    /// ADR-0067 — `false` for an account that is not phrase-protected: its
+    /// new words are shown on no screen, and the session lands as soon as
+    /// the publish did.
+    var showsWords: Bool = true
 
     var sessionToken: String { session.sessionToken }
 

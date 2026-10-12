@@ -49,6 +49,7 @@ pub mod discover;
 pub mod discovery;
 pub mod ds_proof;
 pub mod ds_statement;
+pub mod email_vault;
 pub mod feed;
 pub mod key_reset;
 pub mod key_rotation;
@@ -664,6 +665,29 @@ pub enum FfiError {
     /// `same-key`.
     #[error("{0}")]
     KeyRotation(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0067 email vault and recovery address — appended, for the
+    // ordinal reason above.
+    // ------------------------------------------------------------------
+    /// The email vault did not open under this login handle, address and
+    /// salt: a wrong address, a wrong username or a damaged blob. Which of
+    /// them is deliberately not reported.
+    #[error("the email vault did not open")]
+    EmailVaultNotOpened,
+
+    /// An email-vault call was handed malformed input, or a primitive
+    /// refused. The message is `"<code>: <reason>"` with the stable codes
+    /// `bad-handle-length`, `bad-salt-length`, `bad-sealed-length`, `kdf`,
+    /// `seal`.
+    #[error("{0}")]
+    EmailVault(String),
+
+    /// A recovery email address was refused. The message is
+    /// `"<code>: <reason>"` with the stable codes `too-short`, `too-long`,
+    /// `control-character`, `whitespace`, `not-one-at-sign`, `empty-part`.
+    #[error("{0}")]
+    RecoveryEmail(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

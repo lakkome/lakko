@@ -123,6 +123,13 @@ public object AccountLocalWipe {
             me.lakko.app.auth.ThreeWordsBudgetStore.onDevice(ctx).clearAccount(acct)
         },
         Step("recovery-owed") { ctx, acct -> me.lakko.app.auth.RecoveryOwedStore.onDevice(ctx).clearAccount(acct) },
+        // ADR-0067: how the account is protected as last learned (flags and
+        // times, never the address), and the notice cursor with the
+        // own-action markers.
+        Step("account-protection") { ctx, acct ->
+            me.lakko.app.auth.AccountProtectionStore.onDevice(ctx).clearAccount(acct)
+        },
+        Step("account-notices") { ctx, acct -> me.lakko.app.auth.AccountNoticeStore.onDevice(ctx).clearAccount(acct) },
         // ADR-0065: the attestation and the step markers of a reset whose
         // publish is still owed.
         Step("key-reset-owed") { ctx, acct -> me.lakko.app.auth.KeyResetOwedStore.onDevice(ctx).clear(acct) },

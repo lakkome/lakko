@@ -34,8 +34,9 @@ import me.lakko.app.profile.usernameFieldErrorText
  *
  * Mirror of `apps/web/src/routes/Signup.tsx`'s `createSignal`
  * collection. The form is the only stage here: on success the
- * repository holds the recovery phrase ([AuthRepository.signupPhrase]) and
- * the app root shows the guided phrase screen ([RecoveryPhraseOnboarding])
+ * repository records that the "Protect your account" step is owed
+ * ([AuthRepository.protectStepOwed], ADR-0067) and the app root shows it
+ * ([ProtectAccountStep])
  * before the session is usable.
  */
 public class SignupViewModel internal constructor(
@@ -111,7 +112,7 @@ public class SignupViewModel internal constructor(
      * Submit the signup form.
      *
      * Validates locally (password length, confirm match), drives
-     * [AuthRepository.signup], parks the recovery phrase on success. Errors surface in the UI as
+     * [AuthRepository.signup]; no recovery phrase is shown. Errors surface in the UI as
      * inline form messages. The password fields are cleared on
      * success so the textfields don't keep the bytes alive longer
      * than necessary — same posture as the web side.
@@ -184,8 +185,8 @@ public class SignupViewModel internal constructor(
                         // best-effort
                     }
                 }
-                // The guided phrase step renders above the session from here
-                // (the repository holds the phrase until it is confirmed).
+                // The "Protect your account" step renders above the session
+                // from here (the repository records that it is owed).
                 mutableState.update {
                     it.copy(
                         busy = false,

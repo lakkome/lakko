@@ -102,6 +102,9 @@ public fun SettingsScreen(
     onOpenChatFolders: () -> Unit = {},
     /** `docs/ux/who-can-find-me.md` section 2 — Settings > Privacy. */
     onOpenWhoCanFindMe: () -> Unit = {},
+    /** ADR-0067 / UX 19.1 — Settings > Account: how the account is
+     *  protected (status line, banner, recovery email, recovery phrase). */
+    accountProtection: @Composable () -> Unit = {},
 ) {
     val mode by ThemePreference.mode.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -176,6 +179,7 @@ public fun SettingsScreen(
 
             SectionLabel(t("settings.section.account"))
             SettingsRow(t("settings.section.profile"), Icons.Filled.Person, onOpenProfile)
+            accountProtection()
 
             // docs/ux/who-can-find-me.md section 2 — Privacy, after Profile: it
             // is about people, not keys, which is why it is not under Security.

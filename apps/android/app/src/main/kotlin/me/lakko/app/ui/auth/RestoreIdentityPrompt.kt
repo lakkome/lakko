@@ -82,6 +82,34 @@ public fun RestoreIdentityPrompt(
 
     BackHandler(enabled = way != null && !state.busy) { closeWay() }
 
+    // ADR-0067 / UX section 8 - which rows this account has: the 12-word
+    // phrase only when its owner saved one, `Email code` only while a mailed
+    // code brings the keys. Read with the parked session.
+    val protection by androidx.compose.runtime.produceState<me.lakko.app.auth.RecoveryEmailStatus?>(
+        initialValue = null,
+        viewModel.repository,
+        accountIdB64,
+    ) { value = viewModel.repository.restoreKeysStatus() }
+    val accountRows = me.lakko.app.auth.restoreKeysRows(protection)
+    // The email flow of "Get back in", with the username pre-filled.
+    val emailVm = remember(viewModel.repository, username) { RecoverViewModel(viewModel.repository, username) }
+    val emailState by emailVm.state.collectAsStateWithLifecycle()
+    var emailOpen by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(emailState.email.step) {
+        if (emailState.email.step is me.lakko.app.auth.EmailRecoverStep.Closed) emailOpen = false
+    }
+    if (emailOpen && way == null) {
+        BackHandler(enabled = !emailState.email.busy) { emailOpen = false }
+        EmailCodeForm(
+            state = emailState,
+            cachedUsername = username,
+            viewModel = emailVm,
+            onBack = { if (!emailState.email.busy) emailOpen = false },
+            modifier = modifier,
+        )
+        return
+    }
+
     when (way) {
         null -> AuthScaffold(title = t("restore_identity.title"), onBack = null, modifier = modifier) {
             when (restoreNotice) {
@@ -111,12 +139,26 @@ public fun RestoreIdentityPrompt(
                     onClick = { way = RestoreWay.Passkey },
                 )
             }
-            MethodRow(
-                icon = Icons.AutoMirrored.Filled.Notes,
-                title = t("recovery.method.phrase.title"),
-                subtitle = t("recovery.method.phrase.restore_sub"),
-                onClick = { way = RestoreWay.Phrase },
-            )
+            if (accountRows.emailCode) {
+                MethodRow(
+                    icon = Icons.Filled.Key,
+                    title = t("recovery.email.row.title"),
+                    subtitle = t("recovery.email.row.body"),
+                    onClick = {
+                        emailVm.openEmail()
+                        emailOpen = true
+                    },
+                )
+            }
+            if (accountRows.phrase) {
+                MethodRow(
+                    icon = Icons.AutoMirrored.Filled.Notes,
+                    title = t("recovery.method.phrase.title"),
+                    subtitle = t("recovery.method.phrase.restore_sub"),
+                    onClick = { way = RestoreWay.Phrase },
+                )
+            }
+            FormError(emailState.listLine)
             MethodRow(
                 icon = Icons.Outlined.ErrorOutline,
                 title = t("restore_identity.lost.summary"),

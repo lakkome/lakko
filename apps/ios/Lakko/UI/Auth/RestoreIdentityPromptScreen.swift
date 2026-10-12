@@ -56,9 +56,12 @@ public struct RestoreIdentityPromptScreen: View {
             }
         }
         .task { await viewModel.loadPasskeysWithKeys() }
+        .task { await viewModel.loadProtection() }
         .onChange(of: method) { _, _ in
             // A stale error from another method should not linger.
             viewModel.clearError()
+            // Nothing typed for the email code outlives its form.
+            if method != .email { viewModel.email.backToStart() }
         }
         .onChange(of: showingStartOver) { _, showing in
             // UX 15.1a — the password is never kept after the panel closes.
@@ -112,6 +115,12 @@ public struct RestoreIdentityPromptScreen: View {
 
     private func row(for method: RestoreIdentityPromptViewModel.Method) -> RecoveryMethodRow {
         switch method {
+        case .email:
+            return RecoveryMethodRow(
+                id: method.rawValue,
+                systemImage: "envelope",
+                title: l10n.t("recovery.email.row.title"),
+                detail: l10n.t("recovery.email.row.body"))
         case .device:
             return RecoveryMethodRow(
                 id: method.rawValue,
@@ -150,6 +159,11 @@ public struct RestoreIdentityPromptScreen: View {
         AuthTitle(title: row(for: picked).title)
 
         switch picked {
+        case .email:
+            EmailRecoverSection(model: viewModel.email, onBackToList: {
+                viewModel.email.backToStart()
+                method = nil
+            })
         case .device:
             deviceForm
         case .passkey:

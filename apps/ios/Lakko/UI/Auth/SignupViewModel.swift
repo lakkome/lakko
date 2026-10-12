@@ -11,16 +11,10 @@ import Foundation
 ///     (1.17d6)
 ///   * `apps/android/.../ui/auth/SignupViewModel.kt` (1.15d4)
 ///
-/// Same fields, same transitions, same two-stage shape
-/// (`form` → `phrase`).
-///
-/// The two-stage local state machine is intentional. Splitting
-/// signup from "save your recovery phrase" guarantees the user sees
-/// the 12 words and confirms having written them down before
-/// navigating into the authenticated app. This view model keeps no
-/// copy past ``onAcknowledge()``; the device itself keeps the phrase
-/// (``DevicePhrase``), and Settings > Security > Recovery can show it
-/// again.
+/// ADR-0067 D2: the recovery phrase is NOT shown at sign-up. The device
+/// generates and keeps it (``DevicePhrase``); this view model never sees
+/// it. What follows the form is "Protect your account" (UX 19.1a), which
+/// the app root shows over the landed session.
 @MainActor
 public final class SignupViewModel: ObservableObject {
 
@@ -32,7 +26,6 @@ public final class SignupViewModel: ObservableObject {
     @Published public var displayName: String = ""
     @Published public var password: String = ""
     @Published public var confirm: String = ""
-    @Published public var acknowledged: Bool = false
 
     // MARK: - Internal status
 
@@ -55,26 +48,21 @@ public final class SignupViewModel: ObservableObject {
     /// late never touches the state of the next one.
     private var attempt = 0
 
-    /// Two-stage signup state machine. ``Stage/form`` collects the
-    /// username + password; ``Stage/phrase(_:)`` displays the BIP39
-    /// mnemonic post-signup.
-    @Published public private(set) var stage: Stage = .form
-
     // MARK: - Wiring
 
     private let repository: AuthRepository
     private let l10n = Localization.shared
 
-    /// Called once with the 12-word phrase right after a successful sign-up.
-    /// The repository lands the session inside `signup`, which replaces the
-    /// anonymous stack (and this view model's screen) at the next render, so
-    /// the phrase step cannot live here; the app root receives it through
-    /// this hook and shows ``SignupPhraseScreen`` over the session.
-    public var onPhraseReady: ((String) -> Void)?
+    /// Called once right after a successful sign-up. The repository lands
+    /// the session inside `signup`, which replaces the anonymous stack (and
+    /// this view model's screen) at the next render, so the step that
+    /// follows cannot live here; the app root shows ``SignupProtectScreen``
+    /// over the session.
+    public var onSignedUp: (() -> Void)?
 
-    public init(repository: AuthRepository, onPhraseReady: ((String) -> Void)? = nil) {
+    public init(repository: AuthRepository, onSignedUp: (() -> Void)? = nil) {
         self.repository = repository
-        self.onPhraseReady = onPhraseReady
+        self.onSignedUp = onSignedUp
     }
 
     // MARK: - Submit
@@ -82,8 +70,8 @@ public final class SignupViewModel: ObservableObject {
     /// Submit the signup form.
     ///
     /// Validates locally (password length, confirm match), drives
-    /// ``AuthRepository/signup(username:password:)``, transitions
-    /// ``stage`` to ``Stage/phrase(_:)`` on success. Errors surface
+    /// ``AuthRepository/signup(username:password:)``, and tells the app
+    /// root on success (``onSignedUp``). Errors surface
     /// in ``error`` as inline form messages. The password fields
     /// are cleared on success so the textfields don't keep the
     /// bytes alive longer than necessary — same posture as the
@@ -129,7 +117,7 @@ public final class SignupViewModel: ObservableObject {
         let thisAttempt = attempt
         signupTask = Task {
             do {
-                let outcome = try await repository.signup(
+                _ = try await repository.signup(
                     username: usernameSnapshot,
                     password: passwordBytes,
                     onCommitting: {
@@ -142,12 +130,7 @@ public final class SignupViewModel: ObservableObject {
                 password = ""
                 confirm = ""
                 saveDisplayName(displayNameSnapshot)
-                if let onPhraseReady {
-                    // The owner shows the phrase step; keep no second copy here.
-                    onPhraseReady(outcome.recoveryPhrase)
-                } else {
-                    stage = .phrase(outcome.recoveryPhrase)
-                }
+                onSignedUp?()
             } catch {
                 guard attempt == thisAttempt else { return }
                 cancellable = false
@@ -188,18 +171,6 @@ public final class SignupViewModel: ObservableObject {
     /// The working-state copy (`docs/ux/anti-abuse.md` section 1).
     public static var workingTitle: String { Localization.shared.t("auth.signup.working.title") }
     public static var workingNote: String { Localization.shared.t("auth.signup.working.line") }
-
-    /// Called when the user has confirmed they wrote the recovery
-    /// phrase down. Drops the in-memory phrase reference + signals
-    /// the screen to navigate forward. The auth state was already
-    /// flipped to ``AuthState/session(_:)`` inside
-    /// ``AuthRepository/signup(username:password:)``; the
-    /// app-level router will snap to the home destination
-    /// automatically once we clear the local stage.
-    public func onAcknowledge() {
-        stage = .form
-        acknowledged = false
-    }
 
     // MARK: - ADR-0048 profile name
 
@@ -243,10 +214,3 @@ public final class SignupViewModel: ObservableObject {
     public static let minPasswordLength: Int = 8
 }
 
-/// Two-stage signup state machine.
-public enum Stage: Equatable {
-    /// Collect the username + password.
-    case form
-    /// Display the freshly-generated 12-word BIP39 mnemonic.
-    case phrase(String)
-}

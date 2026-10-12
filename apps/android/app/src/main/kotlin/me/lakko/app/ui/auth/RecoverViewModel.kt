@@ -378,7 +378,7 @@ public class RecoverViewModel(
                 }
                 return
             }
-            RecoverMode.Passkey, RecoverMode.Words -> {
+            RecoverMode.Passkey, RecoverMode.Words, RecoverMode.Email -> {
                 // These sign in without a new password ([onSubmitPasskey],
                 // [onSubmitWords]). Defensive no-op.
                 mutableState.update { it.copy(error = UiText("recovery.error.generic")) }
@@ -438,8 +438,17 @@ public class RecoverViewModel(
                     )
                 }
             } catch (err: AuthHttpError) {
+                // ADR-0067 section 8 / UX 19.7 - the words are not the
+                // current account's. Were they its phrase before a reset in
+                // the last month? Asked by login handle with a statement
+                // signed by the key the typed phrase derives.
+                val offer = if (phraseMayBeFromBeforeReset(err)) {
+                    repo.phraseRecallOffer(recoverUsername ?: cachedUsername.orEmpty(), resolvedPhrase)
+                } else {
+                    null
+                }
                 mutableState.update {
-                    it.copy(busy = false, error = userFacingHttpError(err))
+                    it.copy(busy = false, error = if (offer == null) userFacingHttpError(err) else null, phraseRecall = offer)
                 }
             } catch (_: AuthNetworkError) {
                 mutableState.update {
@@ -455,6 +464,241 @@ public class RecoverViewModel(
             } finally {
                 passwordBytes.fill(0)
             }
+        }
+    }
+
+    /** `It was me` on the 19.7 prompt: back to the form, which says the
+     *  words are not this account's. */
+    public fun onPhraseRecallDeclined() {
+        mutableState.update { it.copy(phraseRecall = null, error = UiText("recall.phrase.wrong")) }
+    }
+
+    /**
+     * `Take the account back` (UX 19.7): the recall with the typed phrase as
+     * the proof and the new password of the form. On success the repository
+     * runs the key reset's client order and the app root shows the new
+     * phrase; a failure leaves its line on the prompt.
+     */
+    public fun onPhraseRecallTakeBack() {
+        val snapshot = mutableState.value
+        val offer = snapshot.phraseRecall ?: return
+        if (snapshot.busy) return
+        mutableState.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            val passwordBytes = snapshot.password.toByteArray(Charsets.UTF_8)
+            try {
+                repo.phraseRecallSubmit(offer, snapshot.phrase, passwordBytes)
+                mutableState.update {
+                    it.copy(busy = false, phraseRecall = null, phrase = "", password = "", confirm = "", username = "")
+                }
+            } catch (err: Throwable) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                val line = when (val failure = me.lakko.app.auth.recallFailureOf(err)) {
+                    me.lakko.app.auth.RecallFailure.Refused -> UiText("devices.recall.error.closed")
+                    me.lakko.app.auth.RecallFailure.WrongPassword -> UiText("recall.phrase.wrong")
+                    is me.lakko.app.auth.RecallFailure.RateLimited -> UiText("common.error.too_many_attempts")
+                    me.lakko.app.auth.RecallFailure.Offline -> OFFLINE
+                    me.lakko.app.auth.RecallFailure.Other -> UiText("recovery.error.generic")
+                }
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = line,
+                        // A closed window ends the offer.
+                        phraseRecall = offer.takeIf { line.key != "devices.recall.error.closed" },
+                    )
+                }
+            } finally {
+                passwordBytes.fill(0)
+            }
+        }
+    }
+
+    // ---- email code (ADR-0067 section 7, UX 19.3) -------------------------
+
+    public fun onEmailAddressChange(value: String) {
+        mutableState.update { it.copy(emailAddress = value, email = it.email.copy(error = null)) }
+    }
+
+    public fun onEmailCodeChange(value: String) {
+        mutableState.update {
+            it.copy(
+                emailCode = value.filter { c -> c.isDigit() }.take(me.lakko.app.auth.EMAIL_CODE_DIGITS),
+                email = it.email.copy(error = null),
+            )
+        }
+    }
+
+    /** Open the email form afresh: nothing typed for another attempt stays. */
+    public fun openEmail() {
+        mutableState.update {
+            it.copy(email = me.lakko.app.auth.EmailRecoverState(), emailAddress = "", emailCode = "", listLine = null)
+        }
+    }
+
+    /** `Back` on the code step: to the username and address. */
+    public fun onEmailBackToAddress() {
+        mutableState.update { it.copy(email = me.lakko.app.auth.EmailRecoverState(), emailCode = "") }
+    }
+
+    private fun emailFailed(call: me.lakko.app.auth.EmailRecoverCall, err: Throwable) {
+        val failure = me.lakko.app.auth.emailRecoverFailureOf(call, err)
+        mutableState.update {
+            it.copy(
+                email = me.lakko.app.auth.afterEmailRecoverFailure(it.email, failure, nowMs()),
+                emailCode = if (me.lakko.app.auth.emailFailureClearsCode(failure)) "" else it.emailCode,
+            )
+        }
+    }
+
+    /**
+     * Step 1 (and `Send again`): the username (cached, else typed) and the
+     * address. Whatever the server found, the next step is the same.
+     */
+    public fun onSubmitEmailAddress() {
+        val snapshot = mutableState.value
+        if (snapshot.email.busy) return
+        val typedUser = (cachedUsername ?: snapshot.username).trim()
+        if (typedUser.isEmpty()) {
+            mutableState.update { it.copy(email = it.email.copy(error = UiText("recovery.username_required"))) }
+            return
+        }
+        val user = when (val decision = me.lakko.app.profile.searchDecision(typedUser, validateUsername)) {
+            is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
+            is me.lakko.app.profile.SearchDecision.Refuse -> {
+                mutableState.update { it.copy(email = it.email.copy(error = decision.text)) }
+                return
+            }
+        }
+        val address = snapshot.emailAddress.trim()
+        if (!me.lakko.app.auth.recoveryEmailPlausible(address)) {
+            mutableState.update { it.copy(email = it.email.copy(error = UiText("recovery_email.invalid"))) }
+            return
+        }
+        mutableState.update { it.copy(email = it.email.copy(busy = true, error = null), emailCode = "") }
+        viewModelScope.launch {
+            try {
+                val answer = repo.emailRecoverStart(user, address)
+                mutableState.update {
+                    it.copy(
+                        email = me.lakko.app.auth.afterEmailRecoverStart(
+                            challengeId = answer.challenge_id,
+                            resendAfterSecs = answer.resend_after_secs,
+                            expiresInSecs = answer.expires_in_secs,
+                            nowMs = nowMs(),
+                        ),
+                    )
+                }
+            } catch (err: Throwable) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                emailFailed(me.lakko.app.auth.EmailRecoverCall.Start, err)
+            }
+        }
+    }
+
+    /** Steps 2 and 3: the mailed code, then (only when the account has an
+     *  authenticator) its code. */
+    public fun onSubmitEmailCode() {
+        val snapshot = mutableState.value
+        if (snapshot.email.busy) return
+        val digits = me.lakko.app.auth.normalizeEmailCode(snapshot.emailCode) ?: return
+        val step = snapshot.email.step
+        if (step is me.lakko.app.auth.EmailRecoverStep.Code && me.lakko.app.auth.emailCodeExpired(step, nowMs())) {
+            mutableState.update {
+                it.copy(email = it.email.copy(error = UiText("recovery_email.code.expired")), emailCode = "")
+            }
+            return
+        }
+        mutableState.update { it.copy(email = it.email.copy(busy = true, error = null)) }
+        viewModelScope.launch {
+            when (step) {
+                is me.lakko.app.auth.EmailRecoverStep.Code -> try {
+                    val answer = repo.emailRecoverVerify(step.challengeId, digits)
+                    mutableState.update {
+                        it.copy(
+                            email = me.lakko.app.auth.afterEmailRecoverVerify(answer.ticket, answer.totp_required),
+                            emailCode = "",
+                        )
+                    }
+                } catch (err: Throwable) {
+                    if (err is kotlinx.coroutines.CancellationException) throw err
+                    emailFailed(me.lakko.app.auth.EmailRecoverCall.Verify, err)
+                }
+                is me.lakko.app.auth.EmailRecoverStep.Totp -> try {
+                    repo.emailRecoverTotp(step.ticket, digits)
+                    mutableState.update {
+                        it.copy(email = me.lakko.app.auth.afterEmailRecoverTotp(step.ticket), emailCode = "")
+                    }
+                } catch (err: Throwable) {
+                    if (err is kotlinx.coroutines.CancellationException) throw err
+                    emailFailed(me.lakko.app.auth.EmailRecoverCall.Totp, err)
+                }
+                else -> mutableState.update { it.copy(email = it.email.copy(busy = false)) }
+            }
+        }
+    }
+
+    /**
+     * Step 4: the new password. Only now is the server asked what the code
+     * brings (`recover/open`): the sealed keys, opened off the main thread
+     * and restored through the existing phrase path, or the password alone.
+     * A vault that does not open ends the flow on the list of methods with
+     * "This method is not available right now"; nothing changed on the server.
+     */
+    public fun onSubmitEmailPassword() {
+        val snapshot = mutableState.value
+        val step = snapshot.email.step as? me.lakko.app.auth.EmailRecoverStep.NewPassword ?: return
+        if (snapshot.email.busy) return
+        newPasswordProblem(snapshot.password, snapshot.confirm)?.let { problem ->
+            mutableState.update { it.copy(email = it.email.copy(error = problem)) }
+            return
+        }
+        val user = (cachedUsername ?: snapshot.username).trim()
+        val address = snapshot.emailAddress.trim()
+        mutableState.update {
+            it.copy(email = me.lakko.app.auth.EmailRecoverState(step = me.lakko.app.auth.EmailRecoverStep.Restoring, busy = true))
+        }
+        viewModelScope.launch {
+            val passwordBytes = snapshot.password.toByteArray(Charsets.UTF_8)
+            try {
+                val outcome = repo.emailRecoverFinish(user, address, step.ticket, passwordBytes)
+                val next = when (outcome) {
+                    AuthRepository.EmailRecoverOutcome.VaultNotOpened -> me.lakko.app.auth.afterEmailVaultNotOpened()
+                    // The repository flipped the auth state; the router
+                    // replaces this screen.
+                    else -> me.lakko.app.auth.EmailRecoverState()
+                }
+                closeEmail(next)
+            } catch (err: Throwable) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                // The ticket may be spent: the flow ends on the list with
+                // the reason, never half-way.
+                val failure = me.lakko.app.auth.emailRecoverFailureOf(me.lakko.app.auth.EmailRecoverCall.Open, err)
+                val line = when (failure) {
+                    is me.lakko.app.auth.EmailRecoverFailure.Line -> failure.text
+                    is me.lakko.app.auth.EmailRecoverFailure.WrongCode -> failure.text
+                    is me.lakko.app.auth.EmailRecoverFailure.Restart -> failure.text
+                    is me.lakko.app.auth.EmailRecoverFailure.Wait -> UiText("common.error.too_many_attempts")
+                    me.lakko.app.auth.EmailRecoverFailure.Unavailable -> UiText("recovery_email.unavailable")
+                }
+                closeEmail(me.lakko.app.auth.EmailRecoverState(step = me.lakko.app.auth.EmailRecoverStep.Closed(line)))
+            } finally {
+                passwordBytes.fill(0)
+            }
+        }
+    }
+
+    /** End the email flow: every typed secret and the address are dropped. */
+    private fun closeEmail(next: me.lakko.app.auth.EmailRecoverState) {
+        mutableState.update {
+            it.copy(
+                email = next,
+                emailAddress = "",
+                emailCode = "",
+                password = "",
+                confirm = "",
+                listLine = (next.step as? me.lakko.app.auth.EmailRecoverStep.Closed)?.line,
+            )
         }
     }
 
@@ -569,7 +813,16 @@ public class RecoverViewModel(
  * on this device; listed only where the device holds the phrase and the
  * keys), [Authenticator] (a six-digit code).
  */
-public enum class RecoverMode { Phrase, AnotherDevice, Passkey, Words, Authenticator }
+public enum class RecoverMode { Phrase, AnotherDevice, Passkey, Words, Authenticator, Email }
+
+/**
+ * Whether a refused phrase recover may be the phrase of the account as it
+ * was BEFORE a key reset (UX 19.7): the server refused the recovery login
+ * (`401` / `400` / `404`), not a limit and not an outage. Only then is
+ * `recall/status` asked.
+ */
+public fun phraseMayBeFromBeforeReset(err: AuthHttpError): Boolean =
+    err.status == 401 || err.status == 400 || err.status == 404
 
 /** The three-word form. */
 public data class ThreeWordsUi(
@@ -696,4 +949,17 @@ public data class RecoverUiState(
     val wordsRevision: Int = 0,
     /** Passkeys are switched off on this server: the form offers the list. */
     val passkeyUnavailable: Boolean = false,
-)
+    /** ADR-0067 - the email-code flow's step and its line. */
+    val email: me.lakko.app.auth.EmailRecoverState = me.lakko.app.auth.EmailRecoverState(),
+    /** The address as typed. Memory only: never saved, never pre-filled. */
+    val emailAddress: String = "",
+    /** The mailed code, then the authenticator code. */
+    val emailCode: String = "",
+    /** One line above the list of methods (a flow that ended there). */
+    val listLine: UiText? = null,
+    /** UX 19.7 - the typed phrase was this account's before a reset in the
+     *  window: the form shows the take-back prompt. */
+    val phraseRecall: AuthRepository.PhraseRecallOffer? = null,
+) {
+    override fun toString(): String = "RecoverUiState(<redacted>)"
+}

@@ -13,6 +13,8 @@ import { Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
+import { newWordsShown } from "../auth/protect/account-protection";
+import { phraseProtectedHere } from "../auth/protect/protection-state";
 import { t } from "../l10n";
 import { paths } from "../routes/paths";
 
@@ -20,6 +22,13 @@ export function KeysRotatedNotice(): JSX.Element {
   const auth = useAuth();
   const navigate = useNavigate();
   const inSession = (): boolean => auth.state().kind === "session";
+  const wordsShown = (): boolean => {
+    const s = auth.state();
+    return (
+      s.kind === "session" &&
+      newWordsShown(phraseProtectedHere(s.account.accountId), s.account.username.trim().length > 0)
+    );
+  };
   return (
     <>
       <Show when={inSession() && auth.keyRotation.updating()}>
@@ -31,13 +40,16 @@ export function KeysRotatedNotice(): JSX.Element {
         {/* Polite: announced once when it appears, never takes focus. */}
         <div class="lk-alert accent" role="status" aria-live="polite">
           <div class="lk-fill">{t("devices.rotated.notice")}</div>
-          <button
-            type="button"
-            class="small"
-            onClick={() => navigate(paths.settingsSection("recovery"))}
-          >
-            {t("devices.rotated.show_phrase")}
-          </button>
+          {/* ADR-0067: only a phrase-protected account has words to show. */}
+          <Show when={wordsShown()}>
+            <button
+              type="button"
+              class="small"
+              onClick={() => navigate(paths.settingsSection("recovery"))}
+            >
+              {t("devices.rotated.show_phrase")}
+            </button>
+          </Show>
           <button type="button" class="small ghost" onClick={() => auth.keyRotation.dismissNotice()}>
             {t("common.dismiss")}
           </button>

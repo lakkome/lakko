@@ -67,6 +67,8 @@ public struct ChatListScreen: View {
     /// back on this device (``RecalledNoticeBanner``). A view of its own, so
     /// this screen is not re-evaluated by it; `nil` draws nothing.
     var recalledNotice: RecalledNoticeBanner?
+    /// UX 19.6 — what the account's devices are told (ADR-0067).
+    var accountNotice: AccountNoticeBanner?
     /// UX 18.3 — `Updating keys...` in the header while a kept device adopts
     /// the account's new keys (``KeysUpdatingLabel``); `nil` draws nothing.
     var keysUpdatingLabel: KeysUpdatingLabel?
@@ -97,6 +99,7 @@ public struct ChatListScreen: View {
         onFoundPerson: @escaping (String) -> Void,
         onOpenFolderSettings: @escaping (Bool) -> Void = { _ in },
         onOpenDevices: @escaping () -> Void = {},
+        accountNotice: AccountNoticeBanner? = nil,
         recalledNotice: RecalledNoticeBanner? = nil,
         keysUpdatingLabel: KeysUpdatingLabel? = nil,
         peopleSearch: PeopleSearchActions? = nil
@@ -111,6 +114,7 @@ public struct ChatListScreen: View {
         self.onOpenFolderSettings = onOpenFolderSettings
         self.onOpenDevices = onOpenDevices
         self.recalledNotice = recalledNotice
+        self.accountNotice = accountNotice
         self.keysUpdatingLabel = keysUpdatingLabel
         self.peopleSearch = peopleSearch
     }
@@ -148,6 +152,7 @@ public struct ChatListScreen: View {
                 // folder bar. Its own view observes the notice, so this
                 // screen is not re-evaluated by it.
                 NewDeviceNoticeBanner(center: .shared, onOpenDevices: onOpenDevices)
+                if let accountNotice { accountNotice }
                 if let recalledNotice { recalledNotice }
                 if showsFolderBar {
                     FolderBar(

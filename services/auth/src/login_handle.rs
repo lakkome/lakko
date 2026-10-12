@@ -37,6 +37,12 @@
 //! same unknown name gets the same OPRF key every time), the same dummy
 //! verify. Nothing a caller can observe says whether a handle is bound.
 //!
+//! **A change of handle turns the recovery email off** (ADR-0067 section 6):
+//! re-binding to another handle, or removing the handle, deletes the
+//! account's `recovery_emails` and `email_vaults` rows (and its challenges
+//! and tickets) in the same transaction and writes the "recovery email
+//! removed" notice. Both were derived from the old name.
+//!
 //! **Without the pepper** (`LAKKO_AUTH_HANDLE_PEPPER` unset) every name route
 //! and both handle routes answer `503 {"error":"login-by-name-disabled"}`,
 //! logged loudly at startup.
@@ -85,7 +91,7 @@ pub(crate) fn load_handle_pepper() -> anyhow::Result<Option<[u8; 32]>> {
         .ok_or_else(|| anyhow::anyhow!("{PEPPER_VAR} must be 64 hex characters (32 bytes)"))
 }
 
-fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+pub(crate) fn parse_hex32(s: &str) -> Option<[u8; 32]> {
     fn nibble(c: u8) -> Option<u8> {
         match c {
             b'0'..=b'9' => Some(c - b'0'),
@@ -382,6 +388,14 @@ async fn bind_once(
         },
         Err(e) => return Err(e.into()),
     }
+    if current.is_some() {
+        // ADR-0067 section 6: the recovery email was made from the old name
+        // (the server's `email_key` and the client's vault key both take the
+        // handle), so a change of handle turns it off in this transaction.
+        // Nothing here inserts into those tables, so the deletes' gap locks
+        // cannot deadlock two accounts' binds.
+        crate::recovery_email::drop_for_handle_change(&mut tx, account_id).await?;
+    }
     sqlx::query(
         "INSERT INTO login_handle_changes (account_id, last_changed_at, previous_handle_key) \
          VALUES (?, NOW(3), ?) \
@@ -493,6 +507,8 @@ async fn remove(pool: &MySqlPool, account_id: &[u8; ACCOUNT_ID_LEN]) -> Result<b
         .bind(account_id.as_slice())
         .execute(&mut *tx)
         .await?;
+    // ADR-0067 section 6: without the handle the recovery email names nobody.
+    crate::recovery_email::drop_for_handle_change(&mut tx, account_id).await?;
     sqlx::query(
         "INSERT INTO login_handle_changes (account_id, last_changed_at, previous_handle_key) \
          VALUES (?, NULL, ?) \

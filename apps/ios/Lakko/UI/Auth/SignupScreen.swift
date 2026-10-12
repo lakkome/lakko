@@ -7,12 +7,11 @@ import SwiftUI
 /// availability hint, name, password, confirm, Create account. Pushed
 /// from ``WelcomeScreen``.
 ///
-/// The steps that follow a successful sign-up (the recovery phrase, its
-/// confirmation, the passkey offer) are NOT rendered here: the repository
-/// lands the session as part of sign-up, which replaces the anonymous
-/// stack, so the phrase is handed up through
-/// ``SignupViewModel/onPhraseReady`` and the app root shows
-/// ``SignupPhraseScreen`` over the session until the user is through.
+/// The step that follows a successful sign-up ("Protect your account") is
+/// NOT rendered here: the repository lands the session
+/// as part of sign-up, which replaces the anonymous stack, so the app root
+/// is told through ``SignupViewModel/onSignedUp`` and shows
+/// ``SignupProtectScreen`` over the session until the user is through.
 public struct SignupScreen: View {
 
     @ObservedObject public var viewModel: SignupViewModel
@@ -115,74 +114,103 @@ public struct SignupScreen: View {
     }
 }
 
-/// The guided steps after sign-up, shown by the app root over the freshly
-/// landed session; `onDone` lets the session through.
+/// The step after sign-up, shown by the app root over the freshly landed
+/// session; `onDone` lets the session through (UX 19.1a).
 ///
-///   1. The 12 words in a grid, Copy, the explanation.
-///   2. The three-word confirmation.
-///   3. "Add a passkey" / "Not now" (accounts with a username), followed by
-///      the opt-in choice of letting that passkey restore keys when the
-///      platform can protect keys with it.
-struct SignupPhraseScreen: View {
-    let phrase: String
+/// "Protect your account": `Add an email`, the passkey row, `Save a
+/// recovery phrase`. The recovery phrase is NOT shown here (ADR-0067 D2):
+/// the device keeps it unseen, and saving a phrase gives the account new
+/// keys and new words. The email and the passkey return to the step with
+/// their row marked done and `Continue` under the rows; saving a phrase
+/// lands in the app directly. The passkey row runs the existing passkey
+/// creation (with its "restore keys with this passkey" choice) under
+/// sign-up's fresh grant.
+struct SignupProtectScreen: View {
     @ObservedObject var authRepository: AuthRepository
+    @ObservedObject var center: AccountProtectionCenter
+    let rotation: KeyRotationRunner
     let onDone: () -> Void
 
     private enum Step: Equatable {
+        case protect
+        case email
         case phrase
         case passkey
         case keysChoice(AddedPasskey)
-        /// The result line of the passkey step, then Done.
+        /// The result line of the passkey step, then back to the step.
         case result(String)
     }
 
-    @State private var step: Step = .phrase
+    @State private var step: Step = .protect
     @State private var busy = false
     @State private var error: UiText?
     /// UX 17.1 — the proof block of the passkey step, the same one Settings
     /// > Passkeys draws. Absent while the proof of the signup finish is
-    /// live; on screen once the onboarding sat open past its ten minutes.
+    /// live; on screen once the step sat open past its ten minutes.
     @StateObject private var proof: FreshAuthProofModel
     @ObservedObject private var l10n = Localization.shared
 
-    init(phrase: String, authRepository: AuthRepository, onDone: @escaping () -> Void) {
-        self.phrase = phrase
+    init(
+        authRepository: AuthRepository,
+        center: AccountProtectionCenter,
+        rotation: KeyRotationRunner,
+        onDone: @escaping () -> Void
+    ) {
         self.authRepository = authRepository
+        self.center = center
+        self.rotation = rotation
         self.onDone = onDone
         self._proof = StateObject(
             wrappedValue: FreshAuthProofModel(surface: .addPasskey, repository: authRepository))
     }
 
-    /// The session account, when it has a username: a guest account is not
-    /// offered a passkey here.
-    private var namedAccount: SessionAccount? {
-        guard case .session(let account) = authRepository.state, !account.username.isEmpty else {
-            return nil
-        }
+    private var account: SessionAccount? {
+        guard case .session(let account) = authRepository.state else { return nil }
         return account
     }
 
-    private var totalSteps: Int { namedAccount == nil ? 2 : 3 }
+    /// Back to the step with the passkey row marked done.
+    private func passkeyDone() {
+        center.passkeyAdded()
+        step = .protect
+    }
 
     var body: some View {
         switch step {
-        case .phrase:
-            RecoveryPhraseGuide(
-                phrase: phrase,
-                title: l10n.t("recovery_phrase.save.title"),
-                intro: l10n.t("recovery_phrase.save.lede"),
-                totalSteps: totalSteps,
-                extra: { EmptyView() },
-                onDone: {
-                    if namedAccount == nil { onDone() } else { step = .passkey }
-                }
+        case .protect:
+            ProtectAccountScreen(
+                center: center,
+                hasUsername: account?.username.isEmpty == false,
+                onAddEmail: { step = .email },
+                onAddPasskey: {
+                    error = nil
+                    step = .passkey
+                },
+                onSavePhrase: { step = .phrase },
+                onLeave: onDone
             )
+        case .email:
+            // Sign-up counts as the proof: nothing more is asked here.
+            VStack(spacing: 0) {
+                RecoveryEmailScreen(
+                    authRepository: authRepository, center: center, onDone: { step = .protect })
+                AuthLinkRow(title: l10n.t("common.back"), action: { step = .protect })
+                    .padding(.bottom, 16)
+            }
+            .background(Color.lakkoBackground.ignoresSafeArea())
+        case .phrase:
+            VStack(spacing: 0) {
+                SavePhraseScreen(
+                    authRepository: authRepository, center: center, rotation: rotation, onDone: onDone)
+                AuthLinkRow(title: l10n.t("common.back"), action: { step = .protect })
+                    .padding(.bottom, 16)
+            }
+            .background(Color.lakkoBackground.ignoresSafeArea())
         case .passkey:
             AuthScreen {
-                PhraseStepLabel(current: 3, total: 3)
                 AuthTitle(
-                    title: l10n.t("auth.signup.passkey.title"),
-                    subtitle: l10n.t("auth.signup.passkey.lede"))
+                    title: l10n.t("protect.passkey.title"),
+                    subtitle: l10n.t("protect.passkey.body"))
                 FreshAuthBlock(model: proof, onSubmit: addPasskey)
                 if let error {
                     AuthHint(text: error.text, isError: true)
@@ -195,13 +223,12 @@ struct SignupPhraseScreen: View {
                     disabled: !proof.layout.ready,
                     action: addPasskey
                 )
-                AuthSecondaryButton(title: l10n.t("common.not_now"), disabled: busy, action: onDone)
+                AuthLinkRow(title: l10n.t("common.back"), disabled: busy, action: { step = .protect })
             }
             .task { await proof.opened() }
             .onDisappear { proof.closed() }
         case .keysChoice(let added):
             AuthScreen {
-                PhraseStepLabel(current: 3, total: 3)
                 PasskeyKeysChoiceView(
                     credentialIdB64: added.credentialIdB64,
                     nickname: added.nickname,
@@ -211,24 +238,23 @@ struct SignupPhraseScreen: View {
                         if let key = result.messageKey {
                             step = .result(key)
                         } else {
-                            onDone()
+                            passkeyDone()
                         }
                     }
                 )
             }
         case .result(let messageKey):
             AuthScreen {
-                PhraseStepLabel(current: 3, total: 3)
-                AuthTitle(title: l10n.t("auth.signup.passkey.title"))
+                AuthTitle(title: l10n.t("protect.passkey.title"))
                 AuthHint(text: l10n.t(messageKey))
-                AuthPrimaryButton(title: l10n.t("common.done"), action: onDone)
+                AuthPrimaryButton(title: l10n.t("protect.continue"), action: passkeyDone)
             }
         }
     }
 
     private func addPasskey() {
         guard !busy, proof.layout.ready else { return }
-        guard let account = namedAccount, let secrets = authRepository.identitySecrets else {
+        guard let account, let secrets = authRepository.identitySecrets else {
             error = .key("common.error.session_not_ready")
             return
         }
@@ -279,7 +305,7 @@ struct SignupPhraseScreen: View {
     }
 }
 
-/// The pure decisions of the onboarding's passkey step.
+/// The pure decisions of the passkey row's sub-step.
 enum SignupPasskeyStep {
 
     enum Failure: Equatable {

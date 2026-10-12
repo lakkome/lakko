@@ -19,6 +19,9 @@ import {
   recallStatusVerdict,
   signOutWipe,
   type RecallCheck,
+  asksPhraseRecall,
+  parseRecallStatus,
+  phraseRecallOffered,
   type RecallEvent,
   type RecallScreen,
   type RecallStatus,
@@ -31,6 +34,8 @@ const STATUS: RecallStatus = {
   expiresAtMs: NOW + 10 * 86_400_000,
   changedAtMs: NOW - 86_400_000,
   attemptsRemaining: 20,
+  phraseArm: false,
+  accountIdB64Url: null,
 };
 const OPEN: RecallCheck = { kind: "open", status: STATUS };
 const body = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -366,5 +371,51 @@ describe("account deletion while the account can be taken back", () => {
     expect(deleteBlockedUntilMs(409, JSON.stringify({ error: "recall-window-open", until_ms: "soon" }))).toBeNull();
     expect(deleteBlockedUntilMs(409, "not json")).toBeNull();
     expect(deleteBlockedUntilMs(204, "")).toBeNull();
+  });
+});
+
+// ADR-0067 section 8 (UX 19.7): taking the account back with the phrase.
+describe("the phrase arm", () => {
+  it("reads the arm and the account id from the status answer", () => {
+    const id = "A".repeat(22);
+    expect(parseRecallStatus(body({ phrase_arm: true, account_id_b64: id }))).toMatchObject({
+      phraseArm: true,
+      accountIdB64Url: id,
+    });
+    // An older server says neither: no arm, no id.
+    expect(parseRecallStatus(body())).toMatchObject({ phraseArm: false, accountIdB64Url: null });
+    // An account id that is not 16 bytes of URL-safe base64 is not taken.
+    expect(parseRecallStatus(body({ account_id_b64: "short" }))?.accountIdB64Url).toBeNull();
+  });
+
+  it("is offered only when the server said so for this anchor", () => {
+    expect(phraseRecallOffered({ kind: "open", status: { ...STATUS, phraseArm: true } })).toBe(true);
+    // A mail-protected account: whoever came in by email holds the same words.
+    expect(phraseRecallOffered(OPEN)).toBe(false);
+    expect(phraseRecallOffered({ kind: "closed" })).toBe(false);
+    expect(phraseRecallOffered({ kind: "unknown", offline: true })).toBe(false);
+    expect(phraseRecallOffered(null)).toBe(false);
+  });
+
+  it("the 12 words stand in for the old password on the form", () => {
+    const words = "a b c d e f g h i j k l";
+    const base = { oldPassword: "", newPassword: "longenough1", repeatPassword: "longenough1" };
+    expect(recallFormReady({ ...base, phrase: words })).toBe(true);
+    expect(recallFormReady({ ...base, phrase: "a b c" })).toBe(false);
+    // Without the phrase arm the old password is still required.
+    expect(recallFormReady(base)).toBe(false);
+    expect(recallFormReady({ ...base, phrase: null })).toBe(false);
+    expect(recallFormReady({ ...base, phrase: words, repeatPassword: "different12" })).toBe(false);
+  });
+
+  it("Get back in asks about a reset only when the words were refused as not the account's", () => {
+    expect(asksPhraseRecall({ status: 401, offline: false, localFailure: false })).toBe(true);
+    // The OPAQUE exchange could not finish on this device: a wrong phrase.
+    expect(asksPhraseRecall({ status: null, offline: false, localFailure: true })).toBe(true);
+    // A limit, a server error, no connection: nothing is asked.
+    expect(asksPhraseRecall({ status: 429, offline: false, localFailure: false })).toBe(false);
+    expect(asksPhraseRecall({ status: 503, offline: false, localFailure: false })).toBe(false);
+    expect(asksPhraseRecall({ status: null, offline: true, localFailure: false })).toBe(false);
+    expect(asksPhraseRecall({ status: null, offline: false, localFailure: false })).toBe(false);
   });
 });

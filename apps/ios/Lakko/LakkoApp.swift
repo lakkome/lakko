@@ -322,9 +322,20 @@ struct LakkoApp: App {
             deviceRemoval: deviceRemoval,
             keyRotation: KeyRotationRunner(
                 ports: .live(
-                    auth: auth, chat: chat, contacts: contacts, sync: sync, removal: deviceRemoval))
+                    auth: auth, chat: chat, contacts: contacts, sync: sync, removal: deviceRemoval)),
+            accountProtection: AccountProtectionCenter(ports: .live(auth))
         )
         self.services = services
+        // ADR-0067 — at every landing of a session with keys: what protects
+        // the account (the recovery email, a saved phrase) and what its
+        // devices are to be told.
+        let accountProtection = services.accountProtection
+        auth.onProtectedSessionLanded = { accountIdB64 in
+            accountProtection.landed(accountIdB64: accountIdB64)
+        }
+        auth.onProtectionChanged = {
+            Task { await accountProtection.refresh() }
+        }
         // ADR-0066 section 3.3 — a kept device: the account's own
         // `key-rotation` envelope arrives in the DeviceGroup and nowhere
         // else, and is kept as pending until the server side shows its key
@@ -349,6 +360,11 @@ struct LakkoApp: App {
                 ReachCenter.shared.rekey(accountIdB64: accountIdB64, accountIdentity: rotated)
             }
             chat?.adoptRotatedAccount(secrets: secrets, predecessorSeed: predecessorSeed)
+            // ADR-0067 — a rotation deletes the email vault of the old phrase
+            // (and "Save a recovery phrase" marks the account
+            // phrase-protected): read the protection again, on the rotating
+            // and a kept device.
+            Task { await accountProtection.refresh() }
             // Rule 5 — the links this session generated name the old mailbox:
             // they leave the list at once, on the rotating and a kept device.
             contacts?.dropSpentLinksFromList()
@@ -609,7 +625,9 @@ struct AppRoot: View, Equatable {
     /// the next render, so the phrase step is shown from here, over the
     /// session, rather than from the sign-up screen. Held in memory only and
     /// dropped on confirm.
-    @State private var pendingSignupPhrase: String?
+    /// ADR-0067 D2 — a sign-up just landed: "Protect your account" comes
+    /// before the app. The phrase is not shown at sign-up.
+    @State private var pendingSignupProtect = false
 
     /// Mirror of ``DeviceGroupSyncRepository/deviceRemoved`` (UX spec
     /// second-device section 3.1). Received rather than observed: observing
@@ -765,7 +783,8 @@ struct AppRoot: View, Equatable {
                     AnonRoot(
                         repository: authRepository,
                         cachedUsername: cachedUsername,
-                        onSignupPhrase: { pendingSignupPhrase = $0 }
+                        accountProtection: services.accountProtection,
+                        onSignedUp: { pendingSignupProtect = true }
                     )
                 }
             }
@@ -782,6 +801,8 @@ struct AppRoot: View, Equatable {
                 services.deviceGroupSync.clear()
                 // No account, no feed checks to report.
                 services.feedRefresh.reset()
+                // ADR-0067 — no account, no protection or notices to show.
+                services.accountProtection.reset()
                 // ADR-0048 — no account, no own profile to publish.
                 ProfileDirectory.shared.deactivate()
                 // ADR-0060 — no account, no reach keys to register.
@@ -801,14 +822,15 @@ struct AppRoot: View, Equatable {
                 CallKitCallRegistry.shared.reset()
             }
 
-        case .session(let account) where pendingSignupPhrase != nil:
-            // The sign-up phrase step: the session is live, but the user has
-            // not yet confirmed the phrase. Nothing else of the session
-            // mounts until they have.
-            SignupPhraseScreen(
-                phrase: pendingSignupPhrase ?? "",
+        case .session(let account) where pendingSignupProtect:
+            // The step after sign-up (UX 19.1a): the session is live, and
+            // "Protect your account" comes before the app. Nothing else of
+            // the session mounts until the person is through it.
+            SignupProtectScreen(
                 authRepository: authRepository,
-                onDone: { pendingSignupPhrase = nil }
+                center: services.accountProtection,
+                rotation: services.keyRotation,
+                onDone: { pendingSignupProtect = false }
             )
             .id(account.accountIdB64)
 
@@ -865,7 +887,8 @@ struct AppRoot: View, Equatable {
                 viewModel: RestoreIdentityPromptViewModel(
                     repository: authRepository,
                     username: account.username,
-                    accountIdB64: account.accountIdB64
+                    accountIdB64: account.accountIdB64,
+                    noteOwnAction: { [center = services.accountProtection] in center.noteOwnAction($0) }
                 )
             )
             .id(account.accountIdB64)
@@ -875,8 +898,9 @@ struct AppRoot: View, Equatable {
                 services.deviceGroupSync.clear()
             }
         case .saveFreshPhrase(let account):
-            // A fresh phrase to confirm: after a guest signup, or after the
-            // person started over with a new identity (already published).
+            // A fresh phrase to confirm: after the person started over with
+            // a new identity (already published), or took the account back.
+            // Not after a sign-up (ADR-0067 D2), a guest's included.
             // The phrase comes before the session lands; while the new
             // phrase is not yet the account's recovery credential the
             // screen withholds the words and offers "Try again".
@@ -931,6 +955,15 @@ enum TabRoute: Hashable {
     case devices
     case addDevice
     case recoveryFactors
+    /// ADR-0067 — "Protect your account" behind the banner's `Protect it`.
+    case protectAccount
+    /// Settings > Account > Recovery email: add or replace, or (`remove`)
+    /// the removal confirmation.
+    case recoveryEmail(remove: Bool)
+    /// Settings > Account > Save a recovery phrase.
+    case savePhrase
+    /// `It was not me` on an account notice.
+    case secureAccount
     /// Settings > Security > Password: choose a new password from a device
     /// that holds the account's keys.
     case password
@@ -1181,6 +1214,7 @@ private struct SessionRoot: View, Equatable {
                         push(.chatFolders(reorder: reorder), on: .chats)
                     },
                     onOpenDevices: { openDevices() },
+                    accountNotice: AccountNoticeBanner(center: services.accountProtection),
                     recalledNotice: RecalledNoticeBanner(
                         authRepository: authRepository,
                         // UX 18.3 — `Show new phrase` opens Settings >
@@ -1292,6 +1326,7 @@ private struct SessionRoot: View, Equatable {
                 SettingsScreen(
                     account: account,
                     authRepository: authRepository,
+                    accountProtection: services.accountProtection,
                     onOpen: { settingsPath.append($0) },
                     onLogout: authRepository.logout,
                     onForgetDevice: forgetDevice,
@@ -1323,6 +1358,17 @@ private struct SessionRoot: View, Equatable {
                 }
                 await Task.yield()
             }
+        }
+        // UX 19.6 — `It was not me` on an account notice opens the one
+        // screen that secures the account.
+        .onReceive(services.accountProtection.$secureRequested) { requested in
+            guard requested else { return }
+            services.accountProtection.secureRequested = false
+            // Reached from a notice: the password form of that one screen is
+            // open for ten minutes without another proof.
+            authRepository.openPasswordChangeForNotice()
+            selectedTab = .settings
+            settingsPath = [.secureAccount]
         }
         .onReceive(NewDeviceNoticeCenter.shared.$openDevicesRequested) { requested in
             guard requested else { return }
@@ -1783,6 +1829,34 @@ private struct SessionRoot: View, Equatable {
                 authRepository: authRepository,
                 onOpen: { push($0, on: tab) }
             )
+        case .protectAccount:
+            ProtectAccountScreen(
+                center: services.accountProtection,
+                hasUsername: !account.username.isEmpty,
+                onAddEmail: { push(.recoveryEmail(remove: false), on: tab) },
+                onAddPasskey: { push(.passkeys, on: tab) },
+                onSavePhrase: { push(.savePhrase, on: tab) }
+            )
+        case .recoveryEmail(let remove):
+            RecoveryEmailScreen(
+                authRepository: authRepository,
+                center: services.accountProtection,
+                startsRemoving: remove,
+                onDone: { pop(.recoveryEmail(remove: remove), from: tab) }
+            )
+        case .savePhrase:
+            SavePhraseScreen(
+                authRepository: authRepository,
+                center: services.accountProtection,
+                rotation: services.keyRotation,
+                onDone: { pop(.savePhrase, from: tab) }
+            )
+        case .secureAccount:
+            SecureAccountScreen(
+                authRepository: authRepository,
+                center: services.accountProtection,
+                onOpen: { push($0, on: tab) }
+            )
         case .password:
             PasswordSettingsScreen(authRepository: authRepository)
         case .antiCensorship:
@@ -2028,10 +2102,11 @@ private struct AnonRoot: View {
     init(
         repository: AuthRepository,
         cachedUsername: String?,
-        onSignupPhrase: @escaping (String) -> Void
+        accountProtection: AccountProtectionCenter,
+        onSignedUp: @escaping () -> Void
     ) {
         self._signupVM = StateObject(
-            wrappedValue: SignupViewModel(repository: repository, onPhraseReady: onSignupPhrase)
+            wrappedValue: SignupViewModel(repository: repository, onSignedUp: onSignedUp)
         )
         self._loginVM = StateObject(
             wrappedValue: LoginViewModel(
@@ -2042,7 +2117,8 @@ private struct AnonRoot: View {
         self._recoverVM = StateObject(
             wrappedValue: RecoverViewModel(
                 repository: repository,
-                cachedUsername: cachedUsername
+                cachedUsername: cachedUsername,
+                noteOwnAction: { [weak accountProtection] in accountProtection?.noteOwnAction($0) }
             )
         )
         // A returning user lands on Log in; a fresh device on Welcome.

@@ -467,4 +467,16 @@ class RecallTest {
         for (key in keys) assertTrue("missing catalog key $key", catalog.contains("\"$key\": {"))
         assertNotNull(recallEndLine(RecallEnd.Closed))
     }
+
+    // ---- ADR-0067 section 8 / UX 19.7 --------------------------------------
+
+    @Test
+    fun `the phrase is offered on the form only when the server opened that arm`() {
+        assertFalse(recallOffersPhrase(ui(RecallStage.Form)))
+        assertFalse(recallOffersPhrase(ui(RecallStage.Form, RecallAvailability.Offline)))
+        assertFalse(recallOffersPhrase(ui(RecallStage.Form, RecallAvailability.Open(status()))))
+        assertTrue(
+            recallOffersPhrase(ui(RecallStage.Form, RecallAvailability.Open(status().copy(phraseArm = true)))),
+        )
+    }
 }

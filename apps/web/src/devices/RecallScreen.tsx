@@ -32,6 +32,7 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import {
   RECALL_SCREEN_START,
+  phraseRecallOffered,
   recallExpired,
   recallFormReady,
   recallNoEnabled,
@@ -45,6 +46,7 @@ import { currentLanguage, t } from "../l10n";
 import { tRich } from "../l10n/rich";
 import { AuthLayout } from "../ui/AuthLayout";
 import { PasswordField } from "../ui/PasswordField";
+import { PhraseInput } from "../ui/PhraseInput";
 import { SIGNED_OUT_COPY } from "./sync/removed-device";
 
 /** How often an unanswered check is repeated, and the record's own end is
@@ -69,6 +71,10 @@ export function RecallScreen(props: {
   const [oldPassword, setOldPassword] = createSignal("");
   const [newPassword, setNewPassword] = createSignal("");
   const [repeatPassword, setRepeatPassword] = createSignal("");
+  // ADR-0067 section 8 (UX 19.7): "Use my recovery phrase instead". The 12
+  // words from before the reset stand in for the old password.
+  const [usePhrase, setUsePhrase] = createSignal(false);
+  const [oldPhrase, setOldPhrase] = createSignal("");
   // The end of a rate limit, unix ms, and a tick that redraws the countdown.
   const [waitUntilMs, setWaitUntilMs] = createSignal(0);
   const [nowMs, setNowMs] = createSignal(Date.now());
@@ -165,15 +171,25 @@ export function RecallScreen(props: {
       oldPassword: oldPassword(),
       newPassword: newPassword(),
       repeatPassword: repeatPassword(),
+      phrase: usePhrase() ? oldPhrase() : null,
     });
+  /** The phrase may prove it only when the server said so for this anchor. */
+  const phraseOffered = (): boolean => {
+    const current = form();
+    return current !== null && phraseRecallOffered({ kind: "open", status: current.status });
+  };
 
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     const current = form();
     if (current === null || current.working || !formReady() || waitRemainingMs() > 0) return;
     dispatch({ type: "submitted" });
-    const failure = await auth.recall.takeBack(oldPassword(), newPassword());
+    const byPhrase = usePhrase() && phraseOffered();
+    const failure = byPhrase
+      ? await auth.recall.takeBack("", newPassword(), { phrase: oldPhrase() })
+      : await auth.recall.takeBack(oldPassword(), newPassword());
     if (failure === null) {
+      setOldPhrase("");
       setOldPassword("");
       setNewPassword("");
       setRepeatPassword("");
@@ -270,15 +286,32 @@ export function RecallScreen(props: {
             <form onSubmit={(e) => void onSubmit(e)}>
               <h1>{t("devices.recall.form.title")}</h1>
               <p class="lk-auth-lede">{t("devices.recall.form.lede")}</p>
-              <PasswordField
-                label={t("devices.recall.form.old_password")}
-                autocomplete="current-password"
-                value={oldPassword}
-                setValue={setOldPassword}
-                disabled={() => current().working}
-                inputRef={(el) => (oldPasswordInput = el)}
-                describedBy="lk-recall-old-password-error"
-              />
+              <Show
+                when={usePhrase() && phraseOffered()}
+                fallback={
+                  <PasswordField
+                    label={t("devices.recall.form.old_password")}
+                    autocomplete="current-password"
+                    value={oldPassword}
+                    setValue={setOldPassword}
+                    disabled={() => current().working}
+                    inputRef={(el) => (oldPasswordInput = el)}
+                    describedBy="lk-recall-old-password-error"
+                  />
+                }
+              >
+                <PhraseInput value={oldPhrase} setValue={setOldPhrase} disabled={() => current().working} />
+              </Show>
+              <Show when={phraseOffered()}>
+                <button
+                  type="button"
+                  class="ghost"
+                  disabled={current().working}
+                  onClick={() => setUsePhrase((v) => !v)}
+                >
+                  {usePhrase() ? t("proof.password.use") : t("recall.phrase.use")}
+                </button>
+              </Show>
               <div id="lk-recall-old-password-error">
                 <Show
                   when={(() => {
@@ -289,7 +322,9 @@ export function RecallScreen(props: {
                   {(error) => (
                     <>
                       <div class="form-error" role="alert">
-                        {t("devices.recall.error.wrong_password")}
+                        {usePhrase() && phraseOffered()
+                          ? t("recall.phrase.wrong")
+                          : t("devices.recall.error.wrong_password")}
                       </div>
                       <Show when={error().triesLeft}>
                         {(left) => (

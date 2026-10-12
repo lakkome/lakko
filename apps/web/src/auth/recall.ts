@@ -87,6 +87,13 @@ export interface RecallStatus {
   readonly changedAtMs: number;
   /** Wrong old passwords still allowed on this anchor. */
   readonly attemptsRemaining: number;
+  /** ADR-0067 section 8: `start` accepts `proof: "phrase"` for this anchor
+   *  (the account had a saved phrase and no email vault when the anchor was
+   *  captured). `false` when the server did not say. */
+  readonly phraseArm: boolean;
+  /** The account id (URL-safe base64, no padding), for a device that named
+   *  the account by login handle; `null` when the server did not say. */
+  readonly accountIdB64Url: string | null;
 }
 
 /** What the device knows about taking the account back. */
@@ -116,7 +123,16 @@ export function parseRecallStatus(body: unknown): RecallStatus | null {
   const attemptsRemaining = finiteInt(b["attempts_remaining"]);
   if (anchorSeq === null || anchorSeq < 0 || expiresAtMs === null || changedAtMs === null) return null;
   if (attemptsRemaining === null) return null;
-  return { anchorSeq, expiresAtMs, changedAtMs, attemptsRemaining };
+  const accountId = b["account_id_b64"];
+  return {
+    anchorSeq,
+    expiresAtMs,
+    changedAtMs,
+    attemptsRemaining,
+    phraseArm: b["phrase_arm"] === true,
+    accountIdB64Url:
+      typeof accountId === "string" && /^[A-Za-z0-9_-]{22}$/.test(accountId) ? accountId : null,
+  };
 }
 
 /**
@@ -181,6 +197,37 @@ export function recallAttemptFailure(input: {
   return { kind: "error" };
 }
 
+/**
+ * ADR-0067 section 8 (UX 19.7): whether the phrase may stand in for the old
+ * password on this anchor. Only when the server said so: for an account
+ * that was mail-protected, whoever came in by email holds the same words, so
+ * they prove nothing.
+ */
+export function phraseRecallOffered(check: RecallCheck | null): boolean {
+  return check !== null && check.kind === "open" && check.status.phraseArm;
+}
+
+/**
+ * What Get back in > Recovery phrase does when the typed words were refused
+ * as "not this account's": ask whether they are the account's phrase from
+ * before a reset (UX 19.7). Only a refusal of the credentials leads there:
+ * the server's `401`, or the OPAQUE exchange failing to finish on this
+ * device (which is how a wrong phrase shows itself: `localFailure`). A
+ * limit, a lost connection or a server error do not.
+ */
+export function asksPhraseRecall(refusal: {
+  /** The HTTP status, or `null` when the failure was not an answer. */
+  readonly status: number | null;
+  readonly offline: boolean;
+  /** The failure happened on this device, with no answer and no network
+   *  error. */
+  readonly localFailure: boolean;
+}): boolean {
+  if (refusal.offline) return false;
+  if (refusal.status !== null) return refusal.status === 401;
+  return refusal.localFailure;
+}
+
 /** Below this many tries left, the form says how many (UX 18.4). */
 export const TRIES_LEFT_SHOWN_BELOW = 5;
 
@@ -189,14 +236,22 @@ export const TRIES_LEFT_SHOWN_BELOW = 5;
 // ---------------------------------------------------------------------------
 
 /** Whether the main button is enabled: the three fields are filled, the new
- *  password passes the sign-up rule, and the two match. */
+ *  password passes the sign-up rule, and the two match. With `phrase`
+ *  (UX 19.7, "Use my recovery phrase instead") the 12 words stand in for the
+ *  old password. */
 export function recallFormReady(fields: {
   readonly oldPassword: string;
   readonly newPassword: string;
   readonly repeatPassword: string;
+  /** The typed phrase when the form is on the phrase arm; else absent. */
+  readonly phrase?: string | null;
 }): boolean {
+  const proofFilled =
+    fields.phrase === undefined || fields.phrase === null
+      ? fields.oldPassword.length > 0
+      : fields.phrase.trim().split(/\s+/).filter((w) => w.length > 0).length === 12;
   return (
-    fields.oldPassword.length > 0 &&
+    proofFilled &&
     fields.newPassword.length >= MIN_PASSWORD_LENGTH &&
     fields.newPassword === fields.repeatPassword
   );

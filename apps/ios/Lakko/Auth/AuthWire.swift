@@ -832,11 +832,15 @@ public struct KeyRotateFinishRequest: Codable, Equatable {
     /// URL-safe base64 (no pad) device ids (at most 8) that get a session
     /// floor in the same transaction: a removal that raced the commit.
     public let revokeDeviceIdsB64: [String]
+    /// ADR-0067 section 3 — `true` when this rotation is "Save a recovery
+    /// phrase"; absent otherwise.
+    public let phraseSaved: Bool?
 
     public init(
         freshGrant: String, recoveryUpload: String, newSignaturePubkeyB64: String,
-        supersessionProofB64: String, revokeDeviceIdsB64: [String]
+        supersessionProofB64: String, revokeDeviceIdsB64: [String], phraseSaved: Bool? = nil
     ) {
+        self.phraseSaved = phraseSaved
         self.freshGrant = freshGrant
         self.recoveryUpload = recoveryUpload
         self.newSignaturePubkeyB64 = newSignaturePubkeyB64
@@ -850,6 +854,7 @@ public struct KeyRotateFinishRequest: Codable, Equatable {
         case newSignaturePubkeyB64 = "new_signature_pubkey_b64"
         case supersessionProofB64 = "supersession_proof_b64"
         case revokeDeviceIdsB64 = "revoke_device_ids_b64"
+        case phraseSaved = "phrase_saved"
     }
 }
 

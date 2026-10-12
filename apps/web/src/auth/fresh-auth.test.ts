@@ -7,8 +7,12 @@
  * holder, the shared block's decision, each surface's "what is shown", the
  * failure mapping and the password-change gate.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+
+/** `apps/web/src`. */
+const SRC_ROOT = fileURLToPath(new URL("..", import.meta.url));
 import { describe, expect, it } from "vitest";
 
 import {
@@ -551,7 +555,32 @@ describe("the grant stays in memory and reaches every gated route", () => {
     const ctx = read("./AuthContext.tsx");
     const start = ctx.indexOf("async replacePassword(");
     const end = ctx.indexOf("\n    async ", start + 10);
-    expect(ctx.slice(start, end).includes("if (!api.passwordChangeAllowed()) throw new FreshAuthRequiredError();")).toBe(true);
+    const body = ctx.slice(start, end);
+    // The one exception is the "It was not me" screen of an account notice
+    // (ADR-0067, UX 19.6), which asks nothing but the new password.
+    expect(
+      body.includes("if (options?.afterAccountNotice !== true && !api.passwordChangeAllowed()) {"),
+    ).toBe(true);
+    expect(body.includes("throw new FreshAuthRequiredError();")).toBe(true);
+  });
+
+  it("only the account notice's screen replaces the password without the gate", () => {
+    const users: string[] = [];
+    const walk = (dir: string): void => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.tsx?$/.test(name) && !/\.test\./.test(name)) {
+          if (readFileSync(p, "utf8").includes("afterAccountNotice")) users.push(relative(SRC_ROOT, p));
+        }
+      }
+    };
+    walk(SRC_ROOT);
+    expect(users.sort()).toEqual([
+      "auth/AuthContext.tsx",
+      "auth/NewPasswordForm.tsx",
+      "auth/protect/AccountNotices.tsx",
+    ]);
   });
 
   it("the owed-publish retry asks for no grant", () => {

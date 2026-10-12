@@ -146,6 +146,9 @@ enum RotateSheetRules {
         case .rotatedPublishOwed: return .publishOwed
         case .removedNotRotated(let outcome): return .notStarted(line: causeLine(outcome))
         case .notRemoved, .freshAuthRequired: return nil
+        // ADR-0067: not phrase-protected, so no words and no withheld-words
+        // state; the sheet closes as done.
+        case .rotatedNoWords: return nil
         }
     }
 
@@ -622,6 +625,9 @@ struct RemoveDeviceSheet: View {
             }
             rotate = .idle
             switch result {
+            case .rotatedNoWords:
+                proof.closed()
+                onRotationClosed(true)
             case .freshAuthRequired:
                 proof.proofExpired()
             case .notRemoved(let removal):
@@ -645,6 +651,10 @@ struct RemoveDeviceSheet: View {
             await rotationRunner.resumeOwed()
             if let phrase = rotationRunner.wordsToShow() {
                 rotate = .words(phrase)
+            } else if rotationRunner.resume == .nothing {
+                // Nothing is owed and no words are shown (ADR-0067).
+                rotate = .idle
+                onRotationClosed(true)
             } else {
                 rotate = .publishOwed
             }

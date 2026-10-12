@@ -23,7 +23,9 @@
  * from `auth.freshPhrase()`, lives in memory only and is gone once the
  * session lands.
  */
-import { createSignal, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, Show, type JSX } from "solid-js";
+import { newWordsShown, publishOwedTextKey } from "./protect/account-protection";
+import { phraseProtectedHere } from "./protect/protection-state";
 import { useAuth } from "./AuthContext";
 import { AuthLayout } from "../ui/AuthLayout";
 import { PhraseGrid } from "../ui/PhraseGrid";
@@ -49,6 +51,25 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
     return s.kind === "save-fresh-phrase" ? s.account.username : "";
   };
   const words = (): string[] => phraseWords(phrase());
+  // ADR-0067 (alignment A and I): the words are shown only to a
+  // phrase-protected account. A guest sign-up, and a key reset or a recall
+  // on an account whose owner never saved a phrase, show none: the session
+  // lands at once (once nothing is owed), and the account reads "Not
+  // protected" in Settings.
+  const wordsShown = (): boolean => {
+    const s = auth.state();
+    if (s.kind !== "save-fresh-phrase") return true;
+    return newWordsShown(phraseProtectedHere(s.account.accountId), s.account.username.trim().length > 0);
+  };
+  let landing = false;
+  createEffect(() => {
+    if (wordsShown() || auth.freshPublishOwed() || landing || error() !== null) return;
+    if (auth.state().kind !== "save-fresh-phrase") return;
+    landing = true;
+    void onDone().finally(() => {
+      landing = false;
+    });
+  });
 
   const wait = createRetryCountdown();
   const [retryBusy, setRetryBusy] = createSignal(false);
@@ -97,11 +118,16 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
         when={!auth.freshPublishOwed()}
         fallback={
           <>
-            <h1>{t("recovery_phrase.fresh.title")}</h1>
+            {/* ADR-0067 (alignment P): an account that is not phrase-protected
+                is told its keys changed and the change is finishing, with no
+                mention of words; it was never shown any. */}
+            <Show when={wordsShown()}>
+              <h1>{t("recovery_phrase.fresh.title")}</h1>
+            </Show>
             <div class="lk-alert danger" role="alert">
               {auth.freshPublishSignInNeeded()
                 ? t("recovery_phrase.fresh.sign_in_to_finish")
-                : t("recovery_phrase.fresh.publish_owed")}
+                : t(publishOwedTextKey(wordsShown()))}
             </div>
             <Show when={retryError() !== null}>
               <div class="form-error" role="alert">
@@ -126,11 +152,21 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
         }
       >
       <Show
-        when={username() !== ""}
+        when={wordsShown()}
         fallback={
+          // No words for this account: the session lands by itself.
           <>
-            <h1>{t("recovery_phrase.save.title")}</h1>
-            <p class="lk-auth-lede">{t("recovery_phrase.guest.lede")}</p>
+            <p class="form-info" role="status" aria-live="polite">
+              {t("common.loading")}
+            </p>
+            <Show when={error() !== null}>
+              <div class="form-error" role="alert">
+                {error()}
+              </div>
+              <button class="primary" type="button" disabled={busy()} onClick={() => void onDone()}>
+                {t("common.try_again")}
+              </button>
+            </Show>
           </>
         }
       >
@@ -140,7 +176,6 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
         </p>
         <p class="form-info">{t("recovery_phrase.fresh.safety_note")}</p>
         <p class="form-info">{t("recovery_phrase.fresh.devices_signed_out")}</p>
-      </Show>
 
       <PhraseGrid words={words} />
       <p class="form-info">{t("recovery_phrase.save.no_screenshot")}</p>
@@ -169,6 +204,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
       >
         {busy() ? t("recovery_phrase.fresh.finishing") : t("common.done")}
       </button>
+      </Show>
       </Show>
     </AuthLayout>
   );

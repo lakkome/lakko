@@ -968,7 +968,8 @@ public final class AuthClient {
         seed: Data,
         newSignaturePubkey: Data,
         supersessionProof: Data,
-        revokeDeviceIds: [Data]
+        revokeDeviceIds: [Data],
+        phraseSaved: Bool = false
     ) async throws -> KeyResetResult {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
@@ -1003,7 +1004,8 @@ public final class AuthClient {
                 recoveryUpload: upload,
                 newSignaturePubkeyB64: base64UrlEncodeNoPad(newSignaturePubkey),
                 supersessionProofB64: base64UrlEncodeNoPad(supersessionProof),
-                revokeDeviceIdsB64: revokeDeviceIds.map(base64UrlEncodeNoPad)),
+                revokeDeviceIdsB64: revokeDeviceIds.map(base64UrlEncodeNoPad),
+                phraseSaved: phraseSaved ? true : nil),
             bearer: sessionToken)
         guard let attestation = base64UrlDecodeNoPad(finish.keyResetAttestB64),
               attestation.count == KeyResetResult.attestationLength else {
@@ -1081,6 +1083,40 @@ public final class AuthClient {
         return response.window
     }
 
+    /// `POST /account/recall/status` for a device that holds the recovery
+    /// phrase and no account id (ADR-0067 section 8): the account is named
+    /// by `handle`, and the statement, signed by the key derived from the
+    /// typed phrase, carries the first 16 bytes of the handle where the
+    /// account id goes. The answer carries the account id.
+    ///
+    /// `401 {"error":"recall-refused"}` is the one answer for an unknown
+    /// name, words that were never this account's, and a passed window.
+    public func recallStatusByHandle(handle: Data, oldEd25519Seed: Data) async throws -> RecallByHandle {
+        try requireHandle(handle)
+        guard oldEd25519Seed.count == RecallRecord.seedLength else {
+            throw AuthClientError.argument("the account key seed must be 32 bytes")
+        }
+        let stated = Data(handle.prefix(accountIdLength))
+        let wire = base64UrlEncodeNoPad(handle)
+        let response: RecallStatusResponse = try await StatementStale.retrying { serverTimeMs in
+            let statement = try serverTimeMs.map {
+                try signAccountStatementAt(
+                    accountSeed: oldEd25519Seed, kind: .recallStatus, accountId: stated,
+                    body: Data(), unixMs: $0)
+            } ?? signAccountStatement(
+                accountSeed: oldEd25519Seed, kind: .recallStatus, accountId: stated, body: Data())
+            return try await self.post(
+                endpoint: "/account/recall/status",
+                body: RecallStatusRequest(statementB64: base64UrlEncodeNoPad(statement), handle: wire))
+        }
+        guard let accountId = response.accountIdB64.flatMap(base64UrlDecodeNoPad),
+              accountId.count == accountIdLength else {
+            throw AuthClientError.http(
+                status: 200, endpoint: "/account/recall/status", body: "malformed account_id_b64 in response")
+        }
+        return RecallByHandle(window: response.window, accountId: accountId)
+    }
+
     /// Take the account back (ADR-0066 section 1.2, "T3 as built"):
     ///
     /// ```text
@@ -1103,7 +1139,10 @@ public final class AuthClient {
               attempt.record.oldSeed.count == RecallRecord.seedLength else {
             throw AuthClientError.argument("the recall record is malformed")
         }
-        guard !attempt.oldPassword.isEmpty, !attempt.newPassword.isEmpty else {
+        // ADR-0067 section 8 — the proof is the old password, or the seed of
+        // the recovery phrase as it was before the reset.
+        let loginSecret = attempt.oldPhraseSeed ?? attempt.oldPassword
+        guard !loginSecret.isEmpty, !attempt.newPassword.isEmpty else {
             throw AuthClientError.argument("both passwords must be non-empty")
         }
         guard attempt.newSignaturePubkey.count == 32 else {
@@ -1112,7 +1151,9 @@ public final class AuthClient {
         let oldSeed = attempt.record.oldSeed
         let accountIdB64 = base64UrlEncodeNoPad(accountId)
 
-        let login = try OpaqueLogin.startPassword(password: attempt.oldPassword)
+        let login = try attempt.oldPhraseSeed.map { try OpaqueLogin.startRecovery(seed: $0) }
+            ?? OpaqueLogin.startPassword(password: attempt.oldPassword)
+        let proof: String? = attempt.oldPhraseSeed == nil ? nil : "phrase"
         let passwordReg = try OpaqueRegister.startPassword(password: attempt.newPassword)
         let recoveryReg = try OpaqueRegister.startRecovery(seed: attempt.newSeed)
         let loginRequest = login.requestB64()
@@ -1137,6 +1178,7 @@ public final class AuthClient {
                     anchorSeq: attempt.anchorSeq,
                     statementB64: base64UrlEncodeNoPad(startStatement),
                     loginRequest: loginRequest,
+                    proof: proof,
                     passwordRequest: passwordRequest,
                     recoveryRequest: recoveryRequest))
         }
@@ -1145,7 +1187,7 @@ public final class AuthClient {
         // before the reset.
         let loginOut: OpaqueLoginOutput
         do {
-            loginOut = try login.finish(secret: attempt.oldPassword, serverResponseB64: start.loginResponse)
+            loginOut = try login.finish(secret: loginSecret, serverResponseB64: start.loginResponse)
         } catch {
             throw RecallWrongPassword()
         }
@@ -1332,7 +1374,7 @@ public final class AuthClient {
 
     // MARK: - Internal HTTP helpers
 
-    private func requireHandle(_ handle: Data) throws {
+    func requireHandle(_ handle: Data) throws {
         guard handle.count == loginHandleLength else {
             throw AuthClientError.argument("handle must be \(loginHandleLength) bytes")
         }
@@ -1350,7 +1392,7 @@ public final class AuthClient {
         return bytes
     }
 
-    private func post<Req: Encodable, Res: Decodable>(
+    func post<Req: Encodable, Res: Decodable>(
         endpoint: String,
         body: Req,
         bearer: String? = nil
@@ -1358,7 +1400,7 @@ public final class AuthClient {
         try await send(method: "POST", endpoint: endpoint, body: body, bearer: bearer)
     }
 
-    private func send<Req: Encodable, Res: Decodable>(
+    func send<Req: Encodable, Res: Decodable>(
         method: String,
         endpoint: String,
         body: Req,
@@ -1426,7 +1468,7 @@ public final class AuthClient {
         return try await execute(endpoint: endpoint, request: request)
     }
 
-    private func buildURL(endpoint: String) throws -> URL {
+    func buildURL(endpoint: String) throws -> URL {
         guard let url = URL(string: baseURL + endpoint) else {
             throw AuthClientError.argument(
                 "invalid baseURL '\(baseURL)' or endpoint '\(endpoint)'"
@@ -1435,7 +1477,7 @@ public final class AuthClient {
         return url
     }
 
-    private func execute<Res: Decodable>(
+    func execute<Res: Decodable>(
         endpoint: String,
         request: URLRequest
     ) async throws -> Res {
@@ -1478,7 +1520,7 @@ public final class AuthClient {
     }
 
     /// Send a request whose success carries no body (`204`).
-    private func executeNoContent(endpoint: String, request: URLRequest) async throws {
+    func executeNoContent(endpoint: String, request: URLRequest) async throws {
         let raw: (Data, URLResponse)
         do {
             raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)

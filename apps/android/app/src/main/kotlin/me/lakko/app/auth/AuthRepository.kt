@@ -334,9 +334,9 @@ public class AuthRepository(
     }
 
     /**
-     * The recovery phrase a sign-up (or a fresh identity whose screen was
-     * left) generated, until the person confirms they saved it; `null`
-     * otherwise. While non-null the app root shows the phrase step instead
+     * The recovery phrase a fresh identity generated and whose screen was
+     * left, until the person confirms they saved it; `null` otherwise. (A
+     * sign-up shows no phrase: ADR-0067 D2.) While non-null the app root shows the phrase step instead
      * of the app. The fact that it is owed survives a restart
      * ([RecoveryOwedStore]); the phrase itself is read back from the phrase
      * store when the next session for the account lands.
@@ -345,16 +345,35 @@ public class AuthRepository(
 
     public val signupPhrase: StateFlow<String?> = mutableSignupPhrase.asStateFlow()
 
-    /**
-     * Where the phrase [signupPhrase] holds came from, so the app root shows
-     * it with the matching words: a phrase a fresh identity made, brought
-     * back after a restart, reads as a NEW phrase that replaced an older
-     * one, not as a sign-up's first phrase.
-     */
-    private val mutableSignupPhraseOrigin: MutableStateFlow<OwedPhraseOrigin> =
-        MutableStateFlow(OwedPhraseOrigin.Signup)
+    // ---- ADR-0067: how the account is protected --------------------------
 
-    public val signupPhraseOrigin: StateFlow<OwedPhraseOrigin> = mutableSignupPhraseOrigin.asStateFlow()
+    private val protectionStore: AccountProtectionStore by lazy { AccountProtectionStore.onDevice(applicationContext) }
+
+    private val noticeStore: AccountNoticeStore by lazy { AccountNoticeStore.onDevice(applicationContext) }
+
+    /** `GET /recovery-email` of the signed-in account as last read; `null`
+     *  until a landing (or Settings) read it. Never the address. */
+    private val mutableRecoveryEmail: MutableStateFlow<RecoveryEmailStatus?> = MutableStateFlow(null)
+
+    public val recoveryEmail: StateFlow<RecoveryEmailStatus?> = mutableRecoveryEmail.asStateFlow()
+
+    /** `true` while the "Protect your account" step of sign-up (UX 19.1a) is
+     *  not answered: the app root shows it instead of the app. Survives a
+     *  restart ([AccountProtectionStore]). */
+    private val mutableProtectStepOwed: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    public val protectStepOwed: StateFlow<Boolean> = mutableProtectStepOwed.asStateFlow()
+
+    /** What happened to the account elsewhere and was not shown here yet
+     *  (UX 19.2 / 19.5 / 19.6), oldest first. Memory only: the cursor is
+     *  stored once a notice is fetched, so each is shown once. */
+    private val mutableAccountNotices: MutableStateFlow<List<AccountNotice>> = MutableStateFlow(emptyList())
+
+    public val accountNotices: StateFlow<List<AccountNotice>> = mutableAccountNotices.asStateFlow()
+
+    /** Until when "It was not me" lets this device choose a new password
+     *  without another proof (UX 19.6: the device holds the keys). */
+    private val noticePasswordUnlockUntilMs: MutableMap<String, Long> = java.util.concurrent.ConcurrentHashMap()
 
     /** Bumped whenever the publish debt of the signed-in account may have
      *  changed, so a screen that shows it reads it again. */
@@ -670,6 +689,11 @@ public class AuthRepository(
         mutableIdentitySecrets.value = secrets
         settleOwedPublish(accountIdB64, secrets.accountId, secrets.accountIdentitySeed)
         runSessionDuties(secrets)
+        // ADR-0067 - how the account is protected, and what happened to it
+        // elsewhere, read at every landing.
+        mutableProtectStepOwed.value = protectionStore.protectStepOwed(accountIdB64)
+        mutableRecoveryEmail.value = null
+        pushScope.launch { refreshAccountProtection(accountIdB64) }
         // ADR-0066 section 3.3 - a pending key rotation whose key the
         // directory already serves is adopted at the landing.
         pushScope.launch {
@@ -967,6 +991,11 @@ public class AuthRepository(
     private fun restoreOwedPhrase(accountIdB64: String) {
         if (mutableSignupPhrase.value != null) return
         if (!owedStore.phraseShowable(accountIdB64)) return
+        // ADR-0067 - new words are shown only to a phrase-protected account.
+        if (!showsNewWords(protectionStore.phraseSaved(accountIdB64))) {
+            owedStore.clearPhraseOwed(accountIdB64)
+            return
+        }
         val phrase = DevicePhrase.read(applicationContext, accountIdB64)
         if (phrase == null) {
             Log.w(
@@ -975,7 +1004,6 @@ public class AuthRepository(
             )
             return
         }
-        mutableSignupPhraseOrigin.value = owedStore.owedPhraseOrigin(accountIdB64) ?: OwedPhraseOrigin.Signup
         mutableSignupPhrase.value = phrase
     }
 
@@ -1175,8 +1203,9 @@ public class AuthRepository(
      *   6. Zeroize the OPAQUE export key + the derived root key.
      *   6a. Publish the identity bundle (genesis, fail loud).
      *   7. Flip state to [AuthState.Session].
-     *   8. Return the 12-word recovery phrase for the UI to
-     *      display **once**.
+     *   8. Record that the "Protect your account" step is owed (ADR-0067).
+     *      The 12-word phrase is generated and stored on the device as
+     *      before, and is NOT shown or returned (D2).
      *
      * The order matters. We persist the marker BEFORE deriving
      * the device key so a crash between (3) and (5) leaves the
@@ -1345,13 +1374,12 @@ public class AuthRepository(
                     accountIdentitySeed.fill(0)
                     throw cause
                 }
-                // The phrase is owed to the person until they confirm they
-                // saved it: up before the session lands (the app root shows
-                // the phrase step instead of the app), and recorded so a
-                // restart shows it again.
-                owedStore.markPhraseOwed(accountIdB64, OwedPhraseOrigin.Signup)
-                mutableSignupPhraseOrigin.value = OwedPhraseOrigin.Signup
-                mutableSignupPhrase.value = phrase
+                // ADR-0067 D2 - the phrase is NOT shown at sign-up. It is
+                // stored on this device as before; what the person owes is
+                // the "Protect your account" step (UX 19.1a), up before the
+                // session lands and recorded so a restart shows it again.
+                protectionStore.setPhraseSaved(accountIdB64, false)
+                protectionStore.setProtectStepOwed(accountIdB64, true)
                 // Stash the export key + the phrase seed for
                 // ContactsClient / future ChatClient + the like. The
                 // bytes survive until logout / forgetDevice clears the
@@ -1388,7 +1416,7 @@ public class AuthRepository(
                     phrase = phrase,
                     context = "signup",
                 )
-                SignupOutcome(recoveryPhrase = phrase)
+                SignupOutcome(accountIdB64 = accountIdB64)
             } finally {
                 // The original OPAQUE export key buffer drops out
                 // of scope here. We already cloned it into
@@ -1409,10 +1437,9 @@ public class AuthRepository(
      * user never sees) + device-root-key derivation + the AccountIdentity-seed
      * cache + the first-ever identity-bundle publish (with the genesis
      * `leafAuth`) — but SKIPS the username claim, yielding a username-less
-     * account. It then parks the recovery phrase and flips to
-     * [AuthState.SaveFreshPhrase] (like [mintFreshIdentity]) instead of landing
-     * the session directly, so the existing SaveFreshPhraseScreen +
-     * [confirmFreshPhraseSaved] render + land it unchanged.
+     * account. The recovery phrase is stored on the device and NOT shown
+     * (ADR-0067 D2); the session lands at once through the shared completion
+     * ([confirmFreshPhraseSaved]).
      *
      * SECURITY: guest creation routes through the SAME PoW-gated signup — no
      * bypass. The password is 32 random bytes; recovery is phrase-only,
@@ -1420,7 +1447,7 @@ public class AuthRepository(
      * No username is claimed; the account is username-less until a later
      * "claim your username" onboarding step.
      *
-     * @return the 12-word recovery phrase (also surfaced by [freshPhrase]).
+     * @return the new account (no phrase is handed to the screen).
      */
     public suspend fun signupGuest(onProofSolved: () -> Unit = {}): SignupOutcome {
         // 32 random bytes the user NEVER sees — recovery is phrase-only.
@@ -1499,19 +1526,15 @@ public class AuthRepository(
                     accountId = result.accountId,
                     accountIdentitySeed = accountIdentitySeed,
                 )
-                // Owed until confirmed on the phrase screen. The session is
-                // persisted now, so a restart before that restores it and
-                // shows the phrase first: a guest has no password to sign in
-                // with again, and would otherwise be left with an account
-                // whose only way back (the phrase) was never shown.
+                // ADR-0067 D2 - the phrase is not shown at sign-up, a guest's
+                // included: it stays stored on this device and the person
+                // may save one later in Settings (the no-protection banner
+                // says so). The session is persisted and landed at once
+                // through the shared completion ([confirmFreshPhraseSaved]),
+                // which owns the seed from here on.
                 persistSessionPairBestEffort(accountIdB64, result.session)
                 installSessionPair(accountIdB64, result.session)
-                owedStore.markPhraseOwed(accountIdB64, OwedPhraseOrigin.Signup)
-                // Park the completion context + flip to SaveFreshPhrase so the
-                // UI shows the recovery phrase before the session lands (the
-                // SaveFreshPhraseScreen -> confirmFreshPhraseSaved path lands
-                // the canonical session; the seed is owned by the pending
-                // record thereafter, so it is not wiped here).
+                protectionStore.setPhraseSaved(accountIdB64, false)
                 pendingFreshPhrase.set(
                     PendingFreshPhrase(
                         seed = accountIdentitySeed,
@@ -1526,10 +1549,8 @@ public class AuthRepository(
                     ),
                 )
                 mutablePublishOwedReason.value = null
-                mutableState.value = AuthState.SaveFreshPhrase(
-                    account = SessionAccount(accountIdB64 = accountIdB64, username = ""),
-                )
-                SignupOutcome(recoveryPhrase = phrase)
+                confirmFreshPhraseSaved()
+                SignupOutcome(accountIdB64 = accountIdB64)
             } finally {
                 result.exportKey.fill(0)
             }
@@ -2212,6 +2233,9 @@ public class AuthRepository(
             phraseOnDevice = phrase != null,
             keysOnDevice = keysOnDevice,
             suspended = threeWordsBudgetStore.isSuspended(cached.accountIdB64),
+            // ADR-0067 - only a phrase-protected account has words the
+            // person was ever shown.
+            phraseSaved = protectionStore.phraseSaved(cached.accountIdB64),
         )
         if (phrase == null || !offered) return null
         return ThreeWordsContext(cached.accountIdB64, cached.username, phrase)
@@ -2360,6 +2384,468 @@ public class AuthRepository(
                 ThreeWordsSuspendedError(cause)
             }
         }
+
+
+    // -----------------------------------------------------------------
+    // ADR-0067: the recovery email, the account's protection, its notices
+    // -----------------------------------------------------------------
+
+    private fun deviceLanguageTag(): String? =
+        me.lakko.app.l10n.Localization.strings.value.language.takeIf { it.isNotBlank() }
+
+    /** Whether this server can mail a recovery code (anonymous). `false`
+     *  when it cannot be asked. */
+    public suspend fun mailAvailable(): Boolean = try {
+        authClientFactory().use { it.recoveryEmailAvailable() }
+    } catch (cause: Throwable) {
+        if (cause is kotlinx.coroutines.CancellationException) throw cause
+        false
+    }
+
+    /** Read the account's mode with [sessionToken] and keep the flag; a
+     *  failure leaves the flag as last learned. */
+    private suspend fun learnPhraseSaved(accountIdB64: String, sessionToken: String): RecoveryEmailStatus? = try {
+        authClientFactory().use { it.recoveryEmailStatus(sessionToken) }.also {
+            protectionStore.setPhraseSaved(accountIdB64, it.phraseSaved)
+        }
+    } catch (cause: Throwable) {
+        if (cause is kotlinx.coroutines.CancellationException) throw cause
+        Log.w("lakko-auth", "account mode not read: ${cause.javaClass.simpleName}")
+        null
+    }
+
+    /**
+     * "Restore your keys" (UX section 8): `GET /recovery-email` for the
+     * account that is signed in without keys, read with the parked session.
+     * `null` when nothing is parked or the server could not be asked.
+     */
+    public suspend fun restoreKeysStatus(): RecoveryEmailStatus? {
+        val pending = pendingRecovery.get() ?: return null
+        return learnPhraseSaved(pending.accountIdB64, pending.sessionToken)
+    }
+
+    /** Whether new words are shown on this device after its account's keys
+     *  changed (ADR-0067: only to a phrase-protected account). */
+    public fun showsNewWordsHere(): Boolean = showsNewWords(phraseProtected())
+
+    /** Whether the account on this device is phrase-protected, as last
+     *  learned (a local flag: the three-word surfaces read it). */
+    public fun phraseProtected(): Boolean {
+        val accountIdB64 = signedInAccountIdB64()
+            ?: pendingFreshPhrase.get()?.accountIdB64
+            ?: sessionStore.load()?.accountIdB64
+            ?: return false
+        return protectionStore.phraseSaved(accountIdB64)
+    }
+
+    /** Read `GET /recovery-email` for the signed-in account and the notices
+     *  waiting for this device. Best effort; every failure is retried at
+     *  the next landing or when Settings opens. */
+    private suspend fun refreshAccountProtection(accountIdB64: String) {
+        try {
+            refreshRecoveryEmail()
+            fetchAccountNotices(accountIdB64)
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "account protection not read: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * `GET /recovery-email` for the signed-in account; updates [recoveryEmail]
+     * and the local phrase-saved flag. `null` when there is no session or
+     * the server could not be asked (the last answer stays).
+     */
+    public suspend fun refreshRecoveryEmail(): RecoveryEmailStatus? {
+        // The live secrets, not the auth state: a landing publishes its
+        // secrets a moment before the state flips.
+        val accountIdB64 = mutableIdentitySecrets.value?.let { base64Encode(it.accountId) } ?: return null
+        val token = sessionTokenProvider.current() ?: return null
+        val status = try {
+            authClientFactory().use { it.recoveryEmailStatus(token) }
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "recovery email status not read: ${cause.javaClass.simpleName}")
+            return null
+        }
+        if (!secretsAreFor(accountIdB64)) return null
+        protectionStore.setPhraseSaved(accountIdB64, status.phraseSaved)
+        mutableRecoveryEmail.value = status
+        return status
+    }
+
+    private suspend fun fetchAccountNotices(accountIdB64: String) {
+        val token = sessionTokenProvider.current() ?: return
+        val cursor = noticeStore.cursor(accountIdB64)
+        noticeStore.pruneOwn(accountIdB64, System.currentTimeMillis())
+        val rows = mutableListOf<WireAccountNotice>()
+        // A device with no cursor asks by time (the last 30 days) once, then
+        // pages by the cursor the answer gives.
+        val first = noticeQuery(cursor, System.currentTimeMillis())
+        var after: Long? = first.after
+        var sinceMs: Long? = first.sinceMs
+        var nextAfter = cursor ?: 0L
+        authClientFactory().use { client ->
+            repeat(NOTICE_MAX_PAGES) {
+                val page = client.accountNotices(token, after, sinceMs)
+                sinceMs = null
+                rows += page.notices.map { WireAccountNotice(id = it.id, kind = it.kind, atMs = it.at_ms) }
+                nextAfter = maxOf(nextAfter, page.next_after)
+                if (!page.more) return@use
+                after = page.next_after
+            }
+        }
+        val selection = selectAccountNotices(rows, nextAfter, cursor, noticeStore.ownActions(accountIdB64))
+        noticeStore.setCursor(accountIdB64, selection.cursor)
+        noticeStore.clearOwn(accountIdB64, selection.spentOwn)
+        // A phrase was saved for the account (here or elsewhere): this
+        // device's phrase-saved flag is read again.
+        if (rows.any { it.kind == AccountNoticeKind.PhraseSaved.wire }) refreshRecoveryEmail()
+        if (!secretsAreFor(accountIdB64) || selection.show.isEmpty()) return
+        mutableAccountNotices.value = mutableAccountNotices.value + selection.show
+    }
+
+    /** The notice was answered (`It was me`, `OK`, or `It was not me`). */
+    public fun dismissAccountNotice(id: Long) {
+        mutableAccountNotices.value = mutableAccountNotices.value.filterNot { it.id == id }
+    }
+
+    /**
+     * `It was not me` on a password / opened-by-email notice (UX 19.6): this
+     * device holds the keys, so the new-password form asks nothing else for
+     * the next ten minutes. Only a device with the account's keys.
+     */
+    public fun unlockPasswordChangeAfterNotice() {
+        val accountIdB64 = signedInAccountIdB64() ?: return
+        if (!canReplacePassword()) return
+        noticePasswordUnlockUntilMs[accountIdB64] = System.currentTimeMillis() + FRESH_AUTH_WINDOW_MS
+    }
+
+    /** The "Protect your account" step was answered (any of its outcomes). */
+    public fun finishProtectStep() {
+        signedInAccountIdB64()?.let { protectionStore.setProtectStepOwed(it, false) }
+        mutableProtectStepOwed.value = false
+    }
+
+    /** When the no-protection banner was dismissed on this device, or `null`. */
+    public fun protectBannerDismissedAtMs(): Long? =
+        signedInAccountIdB64()?.let { protectionStore.bannerDismissedAtMs(it) }
+
+    public fun dismissProtectBanner() {
+        signedInAccountIdB64()?.let { protectionStore.dismissBanner(it, System.currentTimeMillis()) }
+    }
+
+    /**
+     * `POST /recovery-email/enrol/start` for the signed-in account: mail a
+     * code to [address]. The address is passed through and kept nowhere.
+     *
+     * @throws FreshAuthRequired without a live proof (nothing was sent).
+     * @throws AuthClientArgError for a guest account (no username).
+     */
+    public suspend fun recoveryEmailEnrolStart(address: String): RecoveryEmailEnrolStart {
+        val session = mutableState.value as? AuthState.Session
+            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        if (session.account.username.isBlank()) {
+            throw AuthClientArgError("a guest has no username", me.lakko.app.l10n.UiText("recovery_email.needs_username"))
+        }
+        val grant = freshGrant() ?: throw FreshAuthRequired()
+        val token = sessionTokenProvider.current()
+            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        val named = resolveNamedSignIn(null, session.account.username, loginHandleSource)
+        return try {
+            authClientFactory().use {
+                it.recoveryEmailEnrolStart(token, grant, named.handle, address, deviceLanguageTag())
+            }
+        } catch (err: AuthHttpError) {
+            if (isFreshAuthRequired(err)) {
+                dropFreshProof()
+                throw FreshAuthRequired()
+            }
+            throw err
+        }
+    }
+
+    /**
+     * `POST /recovery-email/enrol/finish`: the mailed [code], and - only
+     * while no phrase is saved ([enrolSealsVault]) - the email vault sealed
+     * under the username and [address] with the start's salt. The seal runs
+     * 64 MiB Argon2id and is done off the main thread here. An account whose
+     * phrase was saved meanwhile (`409 phrase-saved`) is finished again
+     * without a vault.
+     */
+    public suspend fun recoveryEmailEnrolFinish(start: RecoveryEmailEnrolStart, address: String, code: String) {
+        val session = mutableState.value as? AuthState.Session
+            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        val accountIdB64 = session.account.accountIdB64
+        val token = sessionTokenProvider.current()
+            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        val before = mutableRecoveryEmail.value ?: refreshRecoveryEmail()
+        val phraseSaved = before?.phraseSaved ?: protectionStore.phraseSaved(accountIdB64)
+        val sealed: ByteArray? = if (enrolSealsVault(phraseSaved)) {
+            val named = resolveNamedSignIn(null, session.account.username, loginHandleSource)
+            withContext(Dispatchers.Default) {
+                val phrase = DevicePhrase.read(applicationContext, accountIdB64)
+                    ?: throw AuthClientArgError("this device holds no phrase to seal")
+                RecoveryMnemonic.fromPhrase(phrase).use {
+                    uniffi.lakko_ffi_uniffi.emailVaultSeal(it, named.handle, address, start.vaultSalt)
+                }
+            }
+        } else {
+            null
+        }
+        val kind = if (before?.enabled == true) AccountNoticeKind.EmailReplaced else AccountNoticeKind.EmailAdded
+        noticeStore.markOwn(accountIdB64, kind, System.currentTimeMillis())
+        val vault = authClientFactory().use { client ->
+            try {
+                client.recoveryEmailEnrolFinish(token, start.challengeId, code, sealed)
+            } catch (err: AuthHttpError) {
+                if (err.code != "phrase-saved" || sealed == null) throw err
+                protectionStore.setPhraseSaved(accountIdB64, true)
+                client.recoveryEmailEnrolFinish(token, start.challengeId, code, null)
+            }
+        }
+        mutableRecoveryEmail.value = RecoveryEmailStatus(
+            available = true,
+            enabled = true,
+            vault = vault,
+            phraseSaved = protectionStore.phraseSaved(accountIdB64),
+        )
+    }
+
+    /** `DELETE /recovery-email` for the signed-in account.
+     *  @throws FreshAuthRequired without a live proof. */
+    public suspend fun recoveryEmailRemove() {
+        val accountIdB64 = signedInAccountIdB64()
+            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        val grant = freshGrant() ?: throw FreshAuthRequired()
+        val token = sessionTokenProvider.current()
+            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        noticeStore.markOwn(accountIdB64, AccountNoticeKind.EmailRemoved, System.currentTimeMillis())
+        try {
+            authClientFactory().use { it.recoveryEmailRemove(token, grant) }
+        } catch (err: AuthHttpError) {
+            if (isFreshAuthRequired(err)) {
+                dropFreshProof()
+                throw FreshAuthRequired()
+            }
+            throw err
+        }
+        mutableRecoveryEmail.value = mutableRecoveryEmail.value?.copy(enabled = false, vault = false)
+    }
+
+    // ---- Get back in > Email code (UX 19.3) -------------------------------
+
+    /** Step 1: `recover/start` for the typed [username] and [address]. The
+     *  answer is the same whatever was typed. */
+    public suspend fun emailRecoverStart(username: String, address: String): EmailRecoverStartResponse {
+        val named = resolveNamedSignIn(null, username, loginHandleSource)
+        return authClientFactory().use { it.emailRecoverStart(named.handle, address, deviceLanguageTag()) }
+    }
+
+    public suspend fun emailRecoverVerify(challengeId: String, code: String): EmailRecoverVerifyResponse =
+        authClientFactory().use { it.emailRecoverVerify(challengeId, code) }
+
+    public suspend fun emailRecoverTotp(ticket: String, code: String): Unit =
+        authClientFactory().use { it.emailRecoverTotp(ticket, code) }
+
+    /** How [emailRecoverFinish] ended. */
+    public enum class EmailRecoverOutcome {
+        /** The vault opened and the phrase restore landed the session. */
+        Restored,
+
+        /** The new password was set and the session landed (a device
+         *  without keys shows "Restore your keys" next). */
+        PasswordSet,
+
+        /** The vault did not open under the typed username and address. The
+         *  ticket is spent; nothing changed on the server. */
+        VaultNotOpened,
+    }
+
+    /**
+     * Step 4 onward: ask `recover/open` under [ticket] and do what it says
+     * ([emailRecoverAction]).
+     *
+     *   - the vault: opened with the login handle of [username] and
+     *     [address] off the main thread (64 MiB Argon2id), the phrase is
+     *     rebuilt and the EXISTING phrase restore runs with [newPassword]
+     *     ([recover]: bundle check, recovery login, backup restore);
+     *   - the password mode: `password/start|finish` under the ticket, then
+     *     the usual ACCESS landing.
+     */
+    public suspend fun emailRecoverFinish(
+        username: String,
+        address: String,
+        ticket: String,
+        newPassword: ByteArray,
+    ): EmailRecoverOutcome {
+        val named = resolveNamedSignIn(null, username, loginHandleSource)
+        val candidate = candidateAccount(named.username)
+        val opened = authClientFactory().use { it.emailRecoverOpen(ticket) }
+        return when (emailRecoverAction(opened)) {
+            EmailRecoverAction.RestoreFromVault -> {
+                opened as EmailRecoverOpen.Vault
+                val phrase = try {
+                    withContext(Dispatchers.Default) {
+                        uniffi.lakko_ffi_uniffi.emailVaultOpen(
+                            named.handle,
+                            address,
+                            opened.vaultSalt,
+                            opened.sealedEntropy,
+                        ).use { it.phrase() }
+                    }
+                } catch (_: FfiException) {
+                    return EmailRecoverOutcome.VaultNotOpened
+                } finally {
+                    opened.sealedEntropy.fill(0)
+                }
+                // The server recorded "account opened by email" at `open`:
+                // this device's own action.
+                candidate?.let {
+                    noticeStore.markOwn(it, AccountNoticeKind.AccountOpenedByEmail, System.currentTimeMillis())
+                }
+                recover(phrase, newPassword, named.username)
+                // Reached from "Restore your keys": the parked sign-in without
+                // keys is answered by the session that just landed.
+                if (pendingRecovery.get() != null) clearPendingRecovery()
+                signedInAccountIdB64()?.let { accountIdB64 ->
+                    noticeStore.markOwn(accountIdB64, AccountNoticeKind.AccountOpenedByEmail, System.currentTimeMillis())
+                    protectionStore.setPhraseSaved(accountIdB64, false)
+                }
+                EmailRecoverOutcome.Restored
+            }
+            EmailRecoverAction.SetPassword -> {
+                val result = authClientFactory().use {
+                    it.emailRecoverSetPassword(ticket, newPassword, landingDeviceId(candidate))
+                }
+                val accountIdB64 = base64Encode(result.accountId)
+                noticeStore.markOwn(accountIdB64, AccountNoticeKind.PasswordChangedByEmail, System.currentTimeMillis())
+                protectionStore.setPhraseSaved(accountIdB64, true)
+                mutableRestoreNotice.value = null
+                // A mailed code proves the mailbox, nothing more (the answer
+                // carries no fresh-auth grant).
+                freshAuth.onSignInWithoutProof(accountIdB64)
+                sessionLandingKind = SessionLanding.Other
+                // The password was just chosen: no new-password step is owed.
+                mutableNewPasswordOwed.value = false
+                rebindLoginHandleInBackground(result.sessionToken, named.handle)
+                landAfterAccessRecovery(
+                    username = named.username,
+                    accountIdBytes = result.accountId,
+                    accountIdB64 = accountIdB64,
+                    session = result.session,
+                    pushContext = "email-recover",
+                )
+                EmailRecoverOutcome.PasswordSet
+            }
+        }
+    }
+
+    // ---- taking the account back with the phrase (UX 19.7) ----------------
+
+    /** What `recall/status` by login handle answered for a typed phrase. */
+    public class PhraseRecallOffer(
+        public val username: String,
+        public val accountId: ByteArray,
+        public val status: RecallStatus,
+    )
+
+    /**
+     * Get back in > Recovery phrase, when the words are not the current
+     * account's: ask `recall/status` by the login handle of [username] with
+     * a statement signed by the key derived from [phrase]. Non-null only
+     * when the words were this account's phrase before a reset in the
+     * window AND the phrase arm is open; every other answer (and every
+     * failure) is `null`, and the form keeps its "not this account's" line.
+     */
+    public suspend fun phraseRecallOffer(username: String, phrase: String): PhraseRecallOffer? {
+        val named = try {
+            resolveNamedSignIn(sessionStore.load()?.let { CachedAccount(it.accountIdB64, it.username) }, username, loginHandleSource)
+        } catch (_: AuthClientArgError) {
+            return null
+        }
+        val signingSeed = try {
+            val seed = RecoveryMnemonic.fromPhrase(phrase).use { it.toSeed() }
+            try {
+                Identity.fromSeed(seed).use { it.ed25519Seed() }
+            } finally {
+                seed.fill(0)
+            }
+        } catch (_: FfiException) {
+            return null
+        }
+        return try {
+            val status = authClientFactory().use {
+                it.recallStatus(ByteArray(0), signingSeed, handle = named.handle)
+            }
+            val accountId = status.accountId
+            if (!status.phraseArm || accountId == null) null else PhraseRecallOffer(named.username, accountId, status)
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            null
+        } finally {
+            signingSeed.fill(0)
+        }
+    }
+
+    /**
+     * `Take the account back` from a device that holds no record: the recall
+     * with `proof: "phrase"` (the OPAQUE login is made from the old recovery
+     * seed), then the key reset's client order ([landKeyReset]): new keys, a
+     * new phrase shown last, every other device signed out.
+     *
+     * @throws AuthHttpError / AuthNetworkError / RecallWrongPassword as the
+     *   recall routes answer; nothing changed unless `finish` answered.
+     */
+    public suspend fun phraseRecallSubmit(offer: PhraseRecallOffer, oldPhrase: String, newPassword: ByteArray) {
+        val accountIdB64 = base64Encode(offer.accountId)
+        val oldRecoverySeed = RecoveryMnemonic.fromPhrase(oldPhrase).use { it.toSeed() }
+        val oldAccountSeed = Identity.fromSeed(oldRecoverySeed).use { it.ed25519Seed() }
+        val (newPhrase, newSeed) = RecoveryMnemonic.generate().use { it.phrase() to it.toSeed() }
+        var handedOff = false
+        try {
+            val newSignaturePubkey = Identity.fromSeed(newSeed).use { it.signaturePublicKey() }
+            val seedCopy = newSeed.copyOf()
+            val recalled = try {
+                authClientFactory().use {
+                    it.recallAccount(
+                        accountId = offer.accountId,
+                        oldAccountSeed = oldAccountSeed,
+                        anchorSeq = offer.status.anchorSeq,
+                        oldPassword = ByteArray(0),
+                        newPassword = newPassword,
+                        newSeed = seedCopy,
+                        newSignaturePubkey = newSignaturePubkey,
+                        deviceId = landingDeviceId(accountIdB64),
+                        oldRecoverySeed = oldRecoverySeed,
+                    )
+                }
+            } finally {
+                seedCopy.fill(0)
+            }
+            val nowMs = System.currentTimeMillis()
+            freshAuth.put(accountIdB64, recalled.freshGrant, recalled.freshGrantExpiresAtMs, nowMs)
+            sessionLandingKind = SessionLanding.Password
+            mutableRecallDone.value = true
+            handedOff = true
+            // The phrase arm exists only for a phrase-protected account.
+            protectionStore.setPhraseSaved(accountIdB64, true)
+            landKeyReset(
+                accountIdB64 = accountIdB64,
+                accountIdBytes = offer.accountId,
+                username = offer.username,
+                seed = newSeed,
+                phrase = newPhrase,
+                newSignaturePubkey = newSignaturePubkey,
+                reset = recalled.reset,
+                context = "phrase-recall",
+            )
+        } finally {
+            oldRecoverySeed.fill(0)
+            oldAccountSeed.fill(0)
+            if (!handedOff) newSeed.fill(0)
+        }
+    }
 
     // -----------------------------------------------------------------
     // The phrase on this device; choosing a new password
@@ -2898,6 +3384,10 @@ public class AuthRepository(
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
         val proof = freshAuth.live(pending.accountIdB64, System.currentTimeMillis())
             ?: throw FreshAuthRequired()
+        // ADR-0067 - whether the new words will be shown depends on the
+        // account's mode, read with the parked session before the reset
+        // (best effort: the flag as last learned otherwise).
+        learnPhraseSaved(pending.accountIdB64, pending.sessionToken)
 
         // Generate a fresh 12-word recovery phrase + its seed (same client-
         // side generation signup uses), and the identity it seeds.
@@ -3279,6 +3769,8 @@ public class AuthRepository(
     public fun passwordChangeUnlocked(): Boolean {
         val accountIdB64 = signedInAccountIdB64() ?: return false
         val now = System.currentTimeMillis()
+        // UX 19.6 - "It was not me" on a device that holds the keys.
+        if ((noticePasswordUnlockUntilMs[accountIdB64] ?: 0L) > now) return true
         return passwordChangeAllowed(
             proofLive = freshAuth.hasLive(accountIdB64, now),
             wordsCheckedAtMs = wordsCheckedAtMs[accountIdB64],
@@ -3297,6 +3789,7 @@ public class AuthRepository(
      */
     public fun checkThreeWordsForPasswordChange(positions: ByteArray, words: List<String>): Boolean? {
         val accountIdB64 = (mutableState.value as? AuthState.Session)?.account?.accountIdB64 ?: return null
+        if (!protectionStore.phraseSaved(accountIdB64)) return null
         val phrase = DevicePhrase.read(applicationContext, accountIdB64) ?: return null
         val matched = RecoveryMnemonic.fromPhrase(phrase).use { phraseCheckWords(it, positions, words) }
         if (matched) {
@@ -3310,6 +3803,8 @@ public class AuthRepository(
      *  account (so the three-word check can be offered). Off the main thread. */
     public fun holdsPhraseForPasswordChange(): Boolean {
         val accountIdB64 = (mutableState.value as? AuthState.Session)?.account?.accountIdB64 ?: return false
+        // ADR-0067 - three words exist only for a phrase-protected account.
+        if (!threeWordsSurfaceOffered(protectionStore.phraseSaved(accountIdB64))) return false
         return DevicePhrase.read(applicationContext, accountIdB64) != null
     }
 
@@ -4487,6 +4982,9 @@ public class AuthRepository(
         me.lakko.app.anon.AnonTokens.releaseSession()
         // ADR-0017: drop any parked fresh-device fail-safe context.
         clearPendingRecovery()
+        mutableProtectStepOwed.value = false
+        mutableRecoveryEmail.value = null
+        mutableAccountNotices.value = emptyList()
         mutableState.value = AuthState.Anon()
         // 1.20d — full push wipe. Fire-and-forget — the local
         // `DevicePushId.clear()` inside the subscriber runs
@@ -4788,7 +5286,9 @@ public class AuthRepository(
      */
     public suspend fun rotationCommit(
         freshGrant: String,
-        revokeDeviceId: ByteArray,
+        revokeDeviceId: ByteArray?,
+        /** ADR-0067 section 3: this rotation is "Save a recovery phrase". */
+        phraseSaved: Boolean = false,
     ): me.lakko.app.devices.CommitAnswer.Committed {
         val secrets = rotationSecrets()
         val accountIdB64 = base64Encode(secrets.accountId)
@@ -4804,8 +5304,16 @@ public class AuthRepository(
                     seed = newSeed,
                     newSignaturePubkey = newPubkey,
                     supersessionProof = prepared.supersessionProof,
-                    revokeDeviceIds = listOf(revokeDeviceId),
+                    revokeDeviceIds = listOfNotNull(revokeDeviceId),
+                    phraseSaved = phraseSaved,
                 )
+            }
+            if (phraseSaved) {
+                // The account is phrase-protected from this answer on, and
+                // the notice it causes is this device's own action.
+                protectionStore.setPhraseSaved(accountIdB64, true)
+                noticeStore.markOwn(accountIdB64, AccountNoticeKind.PhraseSaved, System.currentTimeMillis())
+                mutableRecoveryEmail.value = mutableRecoveryEmail.value?.copy(vault = false, phraseSaved = true)
             }
             // The grant the rotation used is of the previous generation and
             // is spent; the answer carries none.
@@ -5661,7 +6169,37 @@ public class AuthRepository(
      * A failure leaves its line on the form ([recallAfterFailure]) or ends
      * the recall; nothing is thrown for the screen to map.
      */
-    public suspend fun recallSubmit(oldPassword: ByteArray, newPassword: ByteArray) {
+    public suspend fun recallSubmit(
+        oldPassword: ByteArray,
+        newPassword: ByteArray,
+        /** ADR-0067 section 8 / UX 19.7: `Use my recovery phrase instead` -
+         *  the 12 words the account had before the reset, in place of the
+         *  password. A phrase that does not parse is a wrong proof. */
+        oldPhrase: String? = null,
+    ) {
+        val oldRecoverySeed: ByteArray? = if (oldPhrase == null) {
+            null
+        } else {
+            try {
+                RecoveryMnemonic.fromPhrase(oldPhrase).use { it.toSeed() }
+            } catch (_: FfiException) {
+                mutableRecall.value?.let { ui ->
+                    applyRecallStep(
+                        recallAfterFailure(ui, RecallFailure.WrongPassword, null, System.currentTimeMillis()),
+                        ui,
+                    )
+                }
+                return
+            }
+        }
+        try {
+            recallSubmitWith(oldPassword, newPassword, oldRecoverySeed)
+        } finally {
+            oldRecoverySeed?.fill(0)
+        }
+    }
+
+    private suspend fun recallSubmitWith(oldPassword: ByteArray, newPassword: ByteArray, oldRecoverySeed: ByteArray?) {
         val ui = mutableRecall.value ?: return
         val open = ui.availability as? RecallAvailability.Open ?: return
         if (ui.working) return
@@ -5736,6 +6274,7 @@ public class AuthRepository(
                             newSeed = seedCopy,
                             newSignaturePubkey = newSignaturePubkey,
                             deviceId = landingDeviceId(ui.accountIdB64),
+                            oldRecoverySeed = oldRecoverySeed,
                         )
                     }
                 } finally {
@@ -5789,6 +6328,10 @@ public class AuthRepository(
         // record has done its work.
         record.zero()
         recallStore.delete(ui.accountIdB64)
+        // ADR-0067 - the staged wipe dropped this device's phrase-saved
+        // flag; the anchor's phrase arm says whether the account had a
+        // saved phrase, and so whether the new words are shown.
+        protectionStore.setPhraseSaved(ui.accountIdB64, open.status.phraseArm)
         val nowMs = System.currentTimeMillis()
         freshAuth.put(ui.accountIdB64, recalled.freshGrant, recalled.freshGrantExpiresAtMs, nowMs)
         sessionLandingKind = SessionLanding.Password
@@ -6171,6 +6714,10 @@ public class AuthRepository(
             secrets.accountId.fill(0)
         }
         mutableIdentitySecrets.value = null
+        // ADR-0067 - what was read for the departing session goes with it.
+        mutableRecoveryEmail.value = null
+        mutableAccountNotices.value = emptyList()
+        mutableProtectStepOwed.value = false
         // No session, no contact list: an account-less read is empty and an
         // account-less write is refused until the next landing binds again.
         me.lakko.app.contacts.AcceptedContactsStore.unbind()
@@ -6326,6 +6873,9 @@ private const val HTTP_NOT_FOUND: Int = 404
 private const val HTTP_SERVICE_UNAVAILABLE: Int = 503
 private const val ACCOUNT_ID_LENGTH: Int = 16
 
+/** How many pages of account notices one landing reads at most. */
+private const val NOTICE_MAX_PAGES: Int = 5
+
 /** Account record exposed to the UI when a session is active.
  *  Mirror of `apps/web`'s `SessionAccount`. */
 public data class SessionAccount(
@@ -6478,15 +7028,11 @@ public fun signOutKindFor(refusal: SessionRefusal): KeyResetSignOut.Kind? = when
     SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized -> null
 }
 
-/** Result handed back to the signup ViewModel so it can show
- *  the freshly-generated 12-word recovery passphrase exactly once. */
+/** Result of a sign-up. The recovery phrase is generated and stored on the
+ *  device but NOT handed to the screen (ADR-0067 D2): it is shown only when
+ *  the person saves it (UX 19.5). */
 public data class SignupOutcome(
-    /** The 12-word BIP39 recovery phrase. The UI MUST display this
-     *  to the user and require an explicit "I have written it
-     *  down" acknowledgement before navigating away. Re-display
-     *  is impossible — the words live in memory only and drop the
-     *  moment the user moves on. */
-    val recoveryPhrase: String,
+    val accountIdB64: String,
 )
 
 /**

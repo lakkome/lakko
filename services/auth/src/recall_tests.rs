@@ -50,14 +50,14 @@ use crate::recall::{MAX_ANCHORS, MAX_ATTEMPTS};
 use crate::session::now_ms;
 use crate::AppState;
 
-const OWNER_DEVICE: [u8; 32] = [0xA1; 32];
+pub(crate) const OWNER_DEVICE: [u8; 32] = [0xA1; 32];
 const ATTACKER_DEVICE: [u8; 32] = [0xE7; 32];
-const NEW_DEVICE: [u8; 32] = [0xB2; 32];
+pub(crate) const NEW_DEVICE: [u8; 32] = [0xB2; 32];
 
 /// The one body every refusal that is not a wrong password carries.
 const REFUSED: &str = r#"{"error":"recall-refused"}"#;
 
-async fn pool() -> Option<MySqlPool> {
+pub(crate) async fn pool() -> Option<MySqlPool> {
     let url = std::env::var("LAKKO_AUTH_TEST_DATABASE_URL").ok()?;
     let pool = MySqlPoolOptions::new()
         .max_connections(8)
@@ -83,7 +83,7 @@ macro_rules! db_or_skip {
 }
 
 /// Limits wide enough that only the limit a test is about can trip.
-fn roomy() -> Limits {
+pub(crate) fn roomy() -> Limits {
     Limits::defaults()
         .with_ip_window(Category::Attempt, Window::new(100_000, 60))
         .with_name_window(Scope::LoginPassword, Window::new(1000, 900))
@@ -93,7 +93,7 @@ fn roomy() -> Limits {
         .with_name_window(Scope::Recall, Window::new(1000, 900))
 }
 
-fn build_state(pool: MySqlPool, limits: Limits) -> AppState {
+pub(crate) fn build_state(pool: MySqlPool, limits: Limits) -> AppState {
     let token_secret = lakko_auth_token::TokenSecret::new(vec![7u8; 64]).expect("token secret");
     AppState {
         db: pool,
@@ -113,32 +113,33 @@ fn build_state(pool: MySqlPool, limits: Limits) -> AppState {
         backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
         anon_tokens: None,
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
+        recovery_email: None,
         limits: Arc::new(limits),
     }
 }
 
-fn b64u(bytes: &[u8]) -> String {
+pub(crate) fn b64u(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// A random identity key: accounts of different tests must not share one.
-fn fresh_key() -> SigningKey {
+pub(crate) fn fresh_key() -> SigningKey {
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     SigningKey::from_seed(&seed)
 }
 
-fn pubkey(key: &SigningKey) -> [u8; 32] {
+pub(crate) fn pubkey(key: &SigningKey) -> [u8; 32] {
     key.verifying_key().to_bytes()
 }
 
-fn fresh_seed() -> Vec<u8> {
+pub(crate) fn fresh_seed() -> Vec<u8> {
     let mut seed = vec![0u8; 64];
     OsRng.fill_bytes(&mut seed);
     seed
 }
 
-async fn call(
+pub(crate) async fn call(
     state: &AppState,
     method: Method,
     uri: &str,
@@ -169,7 +170,7 @@ async fn call(
     (status, bytes)
 }
 
-async fn post(
+pub(crate) async fn post(
     state: &AppState,
     uri: &str,
     bearer: Option<&str>,
@@ -178,18 +179,18 @@ async fn post(
     call(state, Method::POST, uri, bearer, None, Some(body)).await
 }
 
-fn json_of(bytes: &Bytes) -> Value {
+pub(crate) fn json_of(bytes: &Bytes) -> Value {
     serde_json::from_slice(bytes).unwrap_or(Value::Null)
 }
 
-fn code(bytes: &Bytes) -> String {
+pub(crate) fn code(bytes: &Bytes) -> String {
     json_of(bytes)["error"]
         .as_str()
         .unwrap_or_default()
         .to_string()
 }
 
-fn text(bytes: &Bytes) -> String {
+pub(crate) fn text(bytes: &Bytes) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
@@ -233,12 +234,12 @@ fn registration(state: &AppState, account: &[u8; 16], kind: u8, secret: &[u8]) -
         .to_vec()
 }
 
-fn reg_start(secret: &[u8]) -> (ClientRegistration<LakkoCipherSuite>, String) {
+pub(crate) fn reg_start(secret: &[u8]) -> (ClientRegistration<LakkoCipherSuite>, String) {
     let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut OsRng, secret).unwrap();
     (cs.state, B64.encode(cs.message.serialize()))
 }
 
-fn reg_finish(
+pub(crate) fn reg_finish(
     cs: ClientRegistration<LakkoCipherSuite>,
     secret: &[u8],
     response_b64: &str,
@@ -259,7 +260,7 @@ fn reg_finish(
 
 /// Finish a client login; `None` when the secret is wrong (the client learns
 /// that here, before it sends anything).
-fn login_finish(
+pub(crate) fn login_finish(
     cl: ClientLogin<LakkoCipherSuite>,
     secret: &[u8],
     response_b64: &str,
@@ -309,15 +310,15 @@ fn unrelated_finalization() -> String {
 // Accounts and the ordinary routes
 // ----------------------------------------------------------------
 
-struct Account {
-    id: [u8; 16],
-    handle: String,
+pub(crate) struct Account {
+    pub(crate) id: [u8; 16],
+    pub(crate) handle: String,
 }
 
 /// Insert an account with a password, a recovery credential, a login handle
 /// and `key` recorded as its identity key (what a signup followed by the
 /// genesis mint leaves).
-async fn new_account(
+pub(crate) async fn new_account(
     state: &AppState,
     password: &[u8],
     recovery_seed: &[u8],
@@ -348,7 +349,7 @@ async fn new_account(
 }
 
 /// A full password login. `None` when the password is wrong.
-async fn login(
+pub(crate) async fn login(
     state: &AppState,
     handle: &str,
     password: &[u8],
@@ -381,7 +382,7 @@ async fn login(
 }
 
 /// A recovery-phrase login; `true` when it lands a session.
-async fn recovery_login(state: &AppState, handle: &str, seed: &[u8]) -> bool {
+pub(crate) async fn recovery_login(state: &AppState, handle: &str, seed: &[u8]) -> bool {
     let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, seed).unwrap();
     let (st, body) = post(
         state,
@@ -405,7 +406,7 @@ async fn recovery_login(state: &AppState, handle: &str, seed: &[u8]) -> bool {
     st == StatusCode::OK
 }
 
-fn token(v: &Value) -> String {
+pub(crate) fn token(v: &Value) -> String {
     v["session_token"].as_str().unwrap().to_string()
 }
 
@@ -413,12 +414,12 @@ fn refresh_token(v: &Value) -> String {
     v["refresh_token"].as_str().unwrap().to_string()
 }
 
-fn grant(v: &Value) -> String {
+pub(crate) fn grant(v: &Value) -> String {
     v["fresh_grant"].as_str().unwrap().to_string()
 }
 
 /// Reset the account keys from a signed-in session with a live grant.
-async fn reset_keys(
+pub(crate) async fn reset_keys(
     state: &AppState,
     session: &Value,
     new_seed: &[u8],
@@ -457,7 +458,7 @@ async fn reset_keys(
 
 /// Sign in with the password and reset the keys: what someone who knows only
 /// the password does. Returns the session the reset answered with.
-async fn takeover(
+pub(crate) async fn takeover(
     state: &AppState,
     account: &Account,
     password: &[u8],
@@ -519,7 +520,7 @@ async fn reset_password(
 // The recall, client side
 // ----------------------------------------------------------------
 
-fn statement(
+pub(crate) fn statement(
     key: &SigningKey,
     kind: AccountStatementKind,
     account: &[u8; 16],
@@ -557,11 +558,11 @@ async fn anchor_seq(state: &AppState, key: &SigningKey, account: &[u8; 16]) -> O
 
 /// One opened attempt: what `recall/start` answered and what the client
 /// keeps to finish it.
-struct Attempt {
-    login: ClientLogin<LakkoCipherSuite>,
-    password_reg: ClientRegistration<LakkoCipherSuite>,
-    recovery_reg: ClientRegistration<LakkoCipherSuite>,
-    answer: Value,
+pub(crate) struct Attempt {
+    pub(crate) login: ClientLogin<LakkoCipherSuite>,
+    pub(crate) password_reg: ClientRegistration<LakkoCipherSuite>,
+    pub(crate) recovery_reg: ClientRegistration<LakkoCipherSuite>,
+    pub(crate) answer: Value,
 }
 
 async fn recall_start(
@@ -610,7 +611,7 @@ async fn recall_start(
 
 /// The body of `recall/finish` for an opened attempt, or `None` when the old
 /// password is wrong (the client cannot finish the login).
-fn finish_body(
+pub(crate) fn finish_body(
     attempt: Attempt,
     key: &SigningKey,
     account: &[u8; 16],
@@ -740,7 +741,7 @@ async fn anchors(pool: &MySqlPool, account: &[u8; 16]) -> Vec<(u64, Vec<u8>, Vec
     .expect("anchors")
 }
 
-async fn password_registration(pool: &MySqlPool, account: &[u8; 16]) -> Vec<u8> {
+pub(crate) async fn password_registration(pool: &MySqlPool, account: &[u8; 16]) -> Vec<u8> {
     sqlx::query_scalar(
         "SELECT registration_bytes FROM opaque_registrations WHERE account_id = ? AND kind = ?",
     )
@@ -759,7 +760,7 @@ async fn identity_of(pool: &MySqlPool, account: &[u8; 16]) -> (u64, Vec<u8>) {
         .expect("account row")
 }
 
-async fn count(pool: &MySqlPool, table: &str, account: &[u8; 16]) -> i64 {
+pub(crate) async fn count(pool: &MySqlPool, table: &str, account: &[u8; 16]) -> i64 {
     // `table` is a literal chosen by the test below, never input.
     let sql = match table {
         "totp_secrets" => "SELECT COUNT(*) FROM totp_secrets WHERE account_id = ?",

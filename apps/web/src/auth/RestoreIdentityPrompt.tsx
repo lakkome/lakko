@@ -38,6 +38,8 @@ import {
   type JSX,
 } from "solid-js";
 import { useAuth } from "./AuthContext";
+import { refreshProtection } from "./protect/protection-state";
+import { EmailRecover } from "./recover/EmailRecover";
 import { AuthLayout } from "../ui/AuthLayout";
 import { MethodHead, MethodList } from "../ui/MethodList";
 import { PhraseInput } from "../ui/PhraseInput";
@@ -125,11 +127,25 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       }
     },
   );
+  // ADR-0067 (alignment J): how the account is protected, read with the
+  // session this device holds. It decides the phrase row and the email row,
+  // and keeps the device's "phrase-protected" flag in step, which is what
+  // decides whether new words are shown should the keys be reset from here.
+  const [protection] = createResource(
+    () => account()?.accountIdB64 ?? null,
+    async (accountIdB64) => {
+      const token = auth.pendingSessionToken();
+      return token === null ? null : refreshProtection(accountIdB64, token);
+    },
+  );
   const methods = (): readonly RecoverMethod[] =>
     restoreIdentityMethods({
       passkeysSupported: WebauthnClient.isWebauthnAvailable(),
       passkeysWithKeys: passkeysWithKeys() ?? null,
+      protection: protection() ?? null,
     });
+  // The email flow's username field, pre-filled with the account's.
+  const [emailUsername, setEmailUsername] = createSignal(account()?.username ?? "");
 
   function pick(id: RecoverMethodId): void {
     setError(null);
@@ -258,6 +274,16 @@ export default function RestoreIdentityPrompt(): JSX.Element {
               disabled={() => busy() || passkeyBusy()}
             />
             <Switch>
+              <Match when={picked() === "email"}>
+                {/* The same email flow as on Get back in. It ends in the
+                    phrase restore, which lands the session with the keys. */}
+                <EmailRecover
+                  username={emailUsername}
+                  setUsername={setEmailUsername}
+                  onBack={() => setMethod(null)}
+                  onDone={() => undefined}
+                />
+              </Match>
               <Match when={picked() === "device"}>
                 <div class="lk-stack">
                   <p class="lk-muted">{t("restore_identity.device_intro")}</p>

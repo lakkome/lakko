@@ -29,6 +29,9 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
 
     /// The routes of the prompt.
     public enum Method: String, Hashable, CaseIterable {
+        /// ADR-0067 — a code sent to the recovery email, while the server
+        /// holds the email vault: the same flow as in **Get back in**.
+        case email
         case device
         case passkey
         case phrase
@@ -89,12 +92,16 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     public init(
         repository: AuthRepository,
         username: String,
-        accountIdB64: String
+        accountIdB64: String,
+        noteOwnAction: @escaping @MainActor (AccountNoticeKind) -> Void = { _ in }
     ) {
         self.repository = repository
         self.username = username
         self.accountIdB64 = accountIdB64
         self.resetProof = FreshAuthProofModel(surface: .reset, repository: repository)
+        self.email = EmailRecoverModel(
+            ports: .live(repository: repository, noteOwnAction: noteOwnAction),
+            cachedUsername: username.isEmpty ? nil : username)
         // The block's fields decide whether the button is enabled.
         proofSink = resetProof.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -107,11 +114,28 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// supported on every iOS version this app runs on, so the passkey row
     /// depends only on whether the account has a passkey that carries keys.
     public var methods: [Method] {
-        Method.allCases.filter { method in
-            method != .passkey
-                || PasskeyVault.restoreOffersPasskey(
+        let rows = RestoreKeysRows.decide(protection)
+        return Method.allCases.filter { method in
+            switch method {
+            case .email: return rows.showsEmailCode
+            case .device: return true
+            case .passkey:
+                return PasskeyVault.restoreOffersPasskey(
                     passkeysSupported: true, passkeysWithKeys: passkeysWithKeys)
+            case .phrase: return rows.showsPhrase
+            }
         }
+    }
+
+    /// The account's protection (`GET /recovery-email`); `nil` until read.
+    @Published public private(set) var protection: RecoveryEmailStatus?
+
+    /// The email-code route, with the username pre-filled.
+    let email: EmailRecoverModel
+
+    /// Read the account's protection with the parked session.
+    public func loadProtection() async {
+        if let status = await repository.protectionForPendingRestore() { protection = status }
     }
 
     /// Ask which of the account's passkeys carry keys (with the parked

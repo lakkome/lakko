@@ -186,9 +186,17 @@ final class FreshAuthBlockTests: XCTestCase {
         for surface in [FreshAuthSurface.reset, .deleteAccount, .addDeviceRequest, .addDeviceScan,
                         .addPasskey, .changePassword] {
             keys.append(surface.wrongPasswordKey)
-            keys.append(surface.helpKey)
-            keys.append(surface.cancelledKey)
+            keys.append(contentsOf: [surface.helpKey, surface.cancelledKey].compactMap { $0 })
         }
+        // ADR-0067 — the recovery-email and save-phrase surfaces: their own
+        // helpers, no "cancelled" line.
+        for surface in [FreshAuthSurface.recoveryEmail, .savePhrase] {
+            keys.append(surface.wrongPasswordKey)
+            keys.append(contentsOf: [surface.helpKey].compactMap { $0 })
+            XCTAssertNil(surface.cancelledKey)
+        }
+        XCTAssertEqual(FreshAuthSurface.recoveryEmail.helpKey, "proof.recovery_email.help")
+        XCTAssertEqual(FreshAuthSurface.savePhrase.helpKey, "proof.save_phrase.help")
         for key in keys {
             XCTAssertNotEqual(Localization.text(key), key, "\(key) is missing from the catalog")
         }
@@ -494,9 +502,9 @@ final class FreshAuthBlockTests: XCTestCase {
         XCTAssertEqual(G.deleteLabelKey(busy: true), "settings.account.delete.working")
     }
 
-    // MARK: - The onboarding's passkey step
+    // MARK: - The passkey row of "Protect your account"
 
-    func testTheSignupPasskeyStepFailures() {
+    func testThePasskeyRowFailures() {
         XCTAssertEqual(
             SignupPasskeyStep.failure(WebauthnRegistration.RegistrationError.cancelled), .stay,
             "a dismissed sheet is not an error")
@@ -513,8 +521,10 @@ final class FreshAuthBlockTests: XCTestCase {
         XCTAssertEqual(SignupPasskeyStep.busyTitleKey(checkingProof: false), "recovery.passkey.waiting")
     }
 
-    /// Past the proof's ten minutes the onboarding step draws the same block
-    /// as Settings > Passkeys: the password field with the add-passkey helper.
+    // MARK: - The add-passkey block
+
+    /// Without a live proof Settings > Passkeys draws the block: the password
+    /// field with the add-passkey helper.
     func testTheAddPasskeyBlockWithoutAProof() {
         let l = layout(.addPasskey)
         XCTAssertTrue(l.showsBlock)

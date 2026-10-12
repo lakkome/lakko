@@ -15,15 +15,21 @@
  *   - routes that only sign the person in: three words from the phrase
  *     and an authenticator code.
  *
+ * Above both stands one row, "Email code" (ADR-0067, UX 19.3): a code sent
+ * to the recovery email. It is in neither group because what it brings
+ * depends on the account.
+ *
  * Nothing in the list depends on server state: before a session the server
- * must not say whether an account has other devices, a passkey or an
- * authenticator, so no row is hidden or badged from it.
+ * must not say whether an account has other devices, a passkey, an
+ * authenticator or a recovery email, so no row is hidden or badged from it.
  *
  * One row depends on a LOCAL fact. "Three words from your phrase"
  * (maintainer decision 2026-10-02, `three-words.ts`) is checked on the
  * device against the recovery phrase the device holds, so it is listed only
  * on a device that holds the phrase and the keys for its cached account,
- * and is absent everywhere else. The note under the list follows: it
+ * and only when that account is phrase-protected (ADR-0067 section 11: an
+ * account whose phrase was never shown has no words to type). It is absent
+ * everywhere else. The note under the list follows: it
  * mentions three words only where the row is.
  *
  * The restore prompt never offers a sign-in-only route: it cannot restore
@@ -33,6 +39,7 @@ import { t } from "../../l10n";
 import type { IconName } from "../../ui/icons";
 
 export type RecoverMethodId =
+  | "email"
   | "device"
   | "passkey"
   | "phrase"
@@ -48,8 +55,9 @@ export interface RecoverMethod {
 
 /** A labelled run of rows on the recovery screen. */
 export interface RecoverMethodGroup {
-  readonly id: "keys" | "signin";
-  /** The plain-text heading over the rows. */
+  readonly id: "email" | "keys" | "signin";
+  /** The plain-text heading over the rows; empty for the email row, which
+   *  stands above both groups with no heading. */
   readonly label: string;
   readonly methods: readonly RecoverMethod[];
 }
@@ -73,6 +81,16 @@ const DEVICE = method("device", "devices", "recovery.method.device.title", "reco
 
 const WORDS = method("words", "lines", "recovery.method.words.title", "recovery.method.words.sub");
 const TOTP = method("totp", "shield", "recovery.method.totp.title", "recovery.method.totp.sub");
+
+// ADR-0067 (UX 19.3): first in the list, above both groups, since what it
+// brings depends on the account (the keys while no phrase is saved, a new
+// password only once one is) and nothing may say which before the code was
+// accepted. Always shown: no row depends on server state.
+const EMAIL_GROUP: RecoverMethodGroup = {
+  id: "email",
+  label: "",
+  methods: [method("email", "mail", "recovery.email.row.title", "recovery.email.row.body")],
+};
 
 const KEYS_GROUP: RecoverMethodGroup = {
   id: "keys",
@@ -104,7 +122,7 @@ function signinGroup(threeWords: boolean): RecoverMethodGroup {
 export function recoverMethodGroups(device: {
   readonly threeWords: boolean;
 }): readonly RecoverMethodGroup[] {
-  return [KEYS_GROUP, signinGroup(device.threeWords)];
+  return [EMAIL_GROUP, KEYS_GROUP, signinGroup(device.threeWords)];
 }
 
 /** The catalog key of the note under the list: it names three words only
@@ -143,6 +161,9 @@ export const RESTORE_IDENTITY_METHODS: readonly RecoverMethod[] = [
   method("phrase", "key", "recovery.method.phrase.title", "recovery.method.phrase.restore_sub"),
 ];
 
+/** The restore prompt's email row (ADR-0067, alignment J). */
+const RESTORE_EMAIL = EMAIL_GROUP.methods[0] as RecoverMethod;
+
 /**
  * The restore prompt's rows for this device and account.
  *
@@ -153,14 +174,34 @@ export const RESTORE_IDENTITY_METHODS: readonly RecoverMethod[] = [
  * This is how "hidden when the passkey just tried is the only one" is
  * decided on web, which cannot count the passkeys a device holds: a passkey
  * that did not carry keys is not in that count.
+ *
+ * ADR-0067: the device is signed in, so it may read `GET /recovery-email`
+ * (`protection`; `null` while it is not known, which changes nothing).
+ *
+ *   - The 12-word phrase row is dropped when no phrase is saved: the owner
+ *     of such an account was never shown words.
+ *   - `Email code` is added, first, when the account has an email AND its
+ *     vault: there a mailed code brings the keys back. Without the vault it
+ *     would only change the password, which restores nothing.
  */
 export function restoreIdentityMethods(args: {
   readonly passkeysSupported: boolean;
   readonly passkeysWithKeys: number | null;
+  readonly protection?: {
+    readonly enabled: boolean;
+    readonly vault: boolean;
+    readonly phraseSaved: boolean;
+  } | null;
 }): readonly RecoverMethod[] {
   const offerPasskey =
     args.passkeysSupported && (args.passkeysWithKeys === null || args.passkeysWithKeys > 0);
-  return RESTORE_IDENTITY_METHODS.filter((m) => m.id !== "passkey" || offerPasskey);
+  const protection = args.protection ?? null;
+  const offerPhrase = protection === null || protection.phraseSaved;
+  const offerEmail = protection !== null && protection.enabled && protection.vault;
+  const rows = RESTORE_IDENTITY_METHODS.filter(
+    (m) => (m.id !== "passkey" || offerPasskey) && (m.id !== "phrase" || offerPhrase),
+  );
+  return offerEmail ? [RESTORE_EMAIL, ...rows] : rows;
 }
 
 export function recoverMethod(id: RecoverMethodId): RecoverMethod {
@@ -172,7 +213,7 @@ export function recoverMethod(id: RecoverMethodId): RecoverMethod {
 /** The restore prompt's row for `id` (its subtitles differ from the
  *  recovery screen's). */
 export function restoreMethod(id: RecoverMethodId): RecoverMethod {
-  const found = RESTORE_IDENTITY_METHODS.find((m) => m.id === id);
+  const found = [RESTORE_EMAIL, ...RESTORE_IDENTITY_METHODS].find((m) => m.id === id);
   if (found === undefined) throw new Error(`unknown restore method ${id}`);
   return found;
 }

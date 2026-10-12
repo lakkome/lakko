@@ -27,6 +27,10 @@ struct RecallScreen: View {
     @State private var oldPassword = ""
     @State private var newPassword = ""
     @State private var repeated = ""
+    /// UX 19.7 — `Use my recovery phrase instead`: the 12 words stand where
+    /// the old password does.
+    @State private var usePhrase = false
+    @State private var phrase = ""
     @StateObject private var wait = RetryCountdown()
     @ObservedObject private var l10n = Localization.shared
     @Environment(\.scenePhase) private var scenePhase
@@ -73,6 +77,8 @@ struct RecallScreen: View {
                 oldPassword = ""
                 newPassword = ""
                 repeated = ""
+                phrase = ""
+                usePhrase = false
             }
         }
     }
@@ -135,8 +141,21 @@ struct RecallScreen: View {
 
     private var locked: Bool { RecallForm.locked(state.form) }
 
+    /// Whether the server said this anchor accepts the phrase as the proof.
+    private var phraseArm: Bool {
+        if case .open(let window) = state.check { return window.phraseArm }
+        return false
+    }
+
+    private var phraseProof: Bool { usePhrase && phraseArm }
+
     private var canSubmit: Bool {
-        RecallForm.canSubmit(
+        if phraseProof {
+            return RecallForm.canSubmit(
+                phrase: phrase, newPassword: newPassword, repeated: repeated,
+                status: state.form, waiting: wait.waiting)
+        }
+        return RecallForm.canSubmit(
             oldPassword: oldPassword, newPassword: newPassword, repeated: repeated,
             status: state.form, waiting: wait.waiting)
     }
@@ -146,14 +165,22 @@ struct RecallScreen: View {
 
         // None is pre-filled. The first offers the saved password, the other
         // two a new one.
-        AuthSecureField(
-            label: l10n.t(RecallCopy.oldPassword),
-            text: $oldPassword,
-            contentType: .password,
-            disabled: locked
-        )
-        if let key = RecallCopy.formErrorKey(state.form) {
+        if phraseProof {
+            PhraseEntryGrid(phrase: $phrase, disabled: locked)
+        } else {
+            AuthSecureField(
+                label: l10n.t(RecallCopy.oldPassword),
+                text: $oldPassword,
+                contentType: .password,
+                disabled: locked
+            )
+        }
+        if let key = RecallCopy.formErrorKey(state.form, phraseProof: phraseProof) {
             AuthHint(text: l10n.t(key), isError: true)
+        }
+        if phraseArm, !phraseProof {
+            // Only for an account that had a saved phrase before the reset.
+            AuthLinkRow(title: l10n.t(RecallCopy.usePhrase), disabled: locked) { usePhrase = true }
         }
         if case .wrongPassword(let triesLeft) = state.form, let triesLeft {
             AuthHint(text: l10n.t(RecallCopy.triesLeft, counts: ["count": UInt64(max(0, triesLeft))]))
@@ -221,9 +248,9 @@ struct RecallScreen: View {
 
     private func submit() {
         guard canSubmit else { return }
-        let old = Data(oldPassword.utf8)
+        let proof: RecallProof = phraseProof ? .phrase(phrase) : .password(Data(oldPassword.utf8))
         let new = Data(newPassword.utf8)
-        Task { await authRepository.recallTakeBack(oldPassword: old, newPassword: new) }
+        Task { await authRepository.recallTakeBack(proof: proof, newPassword: new) }
     }
 }
 
@@ -255,10 +282,13 @@ struct RecalledNoticeBanner: View {
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
-                Button(l10n.t(KeysRotatedCopy.showPhrase)) { onShowNewPhrase() }
-                    .font(.footnote.weight(.medium))
-                    .frame(minHeight: 44)
-                    .contentShape(Rectangle())
+                // ADR-0067 — only a phrase-protected account has words to show.
+                if authRepository.sessionPhraseProtected {
+                    Button(l10n.t(KeysRotatedCopy.showPhrase)) { onShowNewPhrase() }
+                        .font(.footnote.weight(.medium))
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)

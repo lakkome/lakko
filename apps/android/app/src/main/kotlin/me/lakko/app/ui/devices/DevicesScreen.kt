@@ -1076,7 +1076,15 @@ private fun DevicesList(
             chatRepository = chatRepository,
             onRotated = { withheld ->
                 confirming = null
-                rotatedPhrase = withheld
+                // ADR-0067 - new words are shown only to a phrase-protected
+                // account; otherwise the change is done as far as the person
+                // is concerned.
+                if (authRepository.showsNewWordsHere()) {
+                    rotatedPhrase = withheld
+                } else {
+                    rotatedDone = true
+                    refresh()
+                }
             },
             device = device,
             label = label,
@@ -1420,11 +1428,17 @@ private fun RemovalReasonPair(
  * repeats only the steps that did not land.
  */
 @Composable
-private fun RotatedPhraseScreen(
+internal fun RotatedPhraseScreen(
     authRepository: AuthRepository,
     chatRepository: me.lakko.app.chat.ChatRepository?,
     initiallyWithheld: Boolean,
     onClosed: () -> Unit,
+    /** ADR-0067 / UX 19.5 - "Save a recovery phrase" shows the same screen
+     *  with its own words around the grid. */
+    title: String = t(me.lakko.app.devices.RotationCopy.PHRASE_TITLE),
+    lead: String = t("devices.rotate.effect_phrase") + "\n\n" + t("devices.rotate.effect_devices"),
+    /** The line while the publish of the new keys is still owed. */
+    withheldLine: String = t(me.lakko.app.devices.RotationCopy.PUBLISH_OWED),
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1451,9 +1465,9 @@ private fun RotatedPhraseScreen(
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                     modifier = Modifier.padding(24.dp),
                 ) {
-                    Text(t(me.lakko.app.devices.RotationCopy.PHRASE_TITLE), style = MaterialTheme.typography.headlineSmall)
+                    Text(title, style = MaterialTheme.typography.headlineSmall)
                     Text(
-                        t(me.lakko.app.devices.RotationCopy.PUBLISH_OWED),
+                        withheldLine,
                         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     )
                     OutlinedButton(
@@ -1486,8 +1500,8 @@ private fun RotatedPhraseScreen(
                 me.lakko.app.ui.auth.RecoveryPhraseOnboarding(
                     phrase = words,
                     onDone = onClosed,
-                    title = t(me.lakko.app.devices.RotationCopy.PHRASE_TITLE),
-                    lead = t("devices.rotate.effect_phrase") + "\n\n" + t("devices.rotate.effect_devices"),
+                    title = title,
+                    lead = lead,
                 )
             } else {
                 Row(
