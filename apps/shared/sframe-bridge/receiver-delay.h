@@ -75,11 +75,23 @@
 //
 // ## What a caller must have established first
 //
-// This file cannot know which binary is loaded. The platform shim checks
-// the identity of the loaded WebRTC image (Mach-O `LC_UUID` on iOS, the ELF
-// build id on Android) against the slices the evidence above was read from,
-// and does not call in here for any other image. The bracket probe below is
-// a second, independent check, not a substitute.
+// This file cannot know which binary is loaded. The platform shim compares
+// the identity the linker stamped into the loaded WebRTC image (the Mach-O
+// `LC_UUID` on iOS, the ELF GNU build id on Android) with the identities of
+// the slices the evidence above was read from, and does not call in here for
+// any other image. That identity pin is the ONE memory-safety gate: every
+// call this file makes, the probe's own two included, goes through a slot
+// and a calling convention that are only known to be right for those images.
+//
+// The bracket probe below is not a second, independent gate. What it shows,
+// on an image that already passed the pin: that the vtable encoding
+// (absolute or relative slots) is the one this build assumes, and that slot
+// 8 and slot 16 are `media_type()` and `GetFrameDecryptor()`. It does not
+// show that slot 13 is the setter, nor that the setter takes its argument
+// the way `EngineOptionalDouble` passes it; those two rest on the reading of
+// the pinned binaries alone. It is a consistency check that catches a wrong
+// encoding or a shifted table early, and it is itself only safe to run
+// behind the pin.
 
 #ifndef LAKKO_SFRAME_BRIDGE_RECEIVER_DELAY_H_
 #define LAKKO_SFRAME_BRIDGE_RECEIVER_DELAY_H_
@@ -100,11 +112,15 @@ namespace receiver_delay {
 enum class Status : int {
   // The delay was handed to the engine.
   kOk = 0,
-  // Nothing was called: unsupported platform, a null receiver, or a
-  // receiver with no Lakko decryptor to run the probe against yet.
+  // Nothing was set on this receiver: unsupported platform, a null
+  // receiver, a receiver with no Lakko decryptor to run the probe against
+  // yet, or one whose decryptor is not the one the caller holds for it (the
+  // caller's record of this receiver is stale). Says nothing about the
+  // engine: the probe stays open and another receiver may still pass it.
   kNotAvailable = 1,
-  // The bracket probe did not answer as the evidence says it must. Nothing
-  // is set for the rest of the process.
+  // The engine answered a probe question with something that is not
+  // Lakko's: the layout cannot be trusted. Nothing is set for the rest of
+  // the process.
   kProbeFailed = 2,
 };
 
@@ -189,6 +205,12 @@ static_assert(sizeof(ReturnedRef) == sizeof(void*),
 // One diagnostic line, plain ASCII, no trailing newline. May be null.
 using LogFn = void (*)(const char* line);
 
+// Whether `candidate` is the address of a frame decryptor Lakko created and
+// that has not been destroyed (`lakko::sframe::LakkoFrameDecryptor::IsLive`
+// in the shims). Must not dereference `candidate`. May be null, which reads
+// as "no pointer is known to be Lakko's".
+using IsLiveOwnDecryptorFn = bool (*)(const void* candidate);
+
 // The function a vtable slot of `object` names under `abi`.
 inline const void* SlotTarget(const void* object, int slot, VtableAbi abi) {
   const unsigned char* vptr = nullptr;
@@ -229,9 +251,17 @@ inline bool ProbeHasPassed() {
   return ProbeState().load(std::memory_order_acquire) == 1;
 }
 
+// Whether the "this receiver's decryptor is not the one the caller holds"
+// line has been written in this process.
+inline std::atomic<bool>& StaleDecryptorLogged() {
+  static std::atomic<bool> logged{false};
+  return logged;
+}
+
 // Host tests only: forget the probe's answer.
 inline void ResetProbeForTesting() {
   ProbeState().store(0, std::memory_order_release);
+  StaleDecryptorLogged().store(false, std::memory_order_release);
 }
 
 inline void Emit(LogFn log, const char* line) {
@@ -268,8 +298,27 @@ inline void ReleaseEngineRef(const void* object,
 // `expected_media_type`, and `GetFrameDecryptor()` must return
 // `attached_decryptor`. Only if both hold is the setter's slot called, then
 // and from then on. `media_type()` is asked again on every call (it does not
-// leave the calling thread). A wrong answer at any time stops every further
-// set in the process, logged once.
+// leave the calling thread).
+//
+// A wrong answer is one of two different things, and they are kept apart:
+//
+//   * The engine answered something that is not Lakko's: `media_type()`
+//     disagrees with the track, or `GetFrameDecryptor()` returned a non-null
+//     pointer that `is_live_own_decryptor` does not know. The layout cannot
+//     be trusted. Every further set in the process stops (`kProbeFailed`),
+//     logged once. The pointer that came back is never touched, a reference
+//     on it included, so that one reference is deliberately leaked.
+//   * `GetFrameDecryptor()` returned nothing, or a live decryptor of Lakko's
+//     that is not `attached_decryptor`. The slot did what its name says; it
+//     is the CALLER's record of this receiver that is stale (a second
+//     binding-level wrapper of the same engine receiver was given a newer
+//     decryptor, or the decryptor was detached through another wrapper).
+//     This receiver is skipped (`kNotAvailable`), the probe stays open, and
+//     the reference the engine added on Lakko's own object is given back.
+//     Only a pointer `is_live_own_decryptor` vouches for is ever released.
+//
+// With a null `is_live_own_decryptor` every non-null mismatch is the first
+// kind.
 //
 // The engine's object is a proxy: the setter and `GetFrameDecryptor` block
 // the calling thread until the engine's worker thread has run them. Call
@@ -280,6 +329,7 @@ inline Status SetMinimumPlayoutDelay(
     uint32_t delay_ms,
     int expected_media_type,
     webrtc::FrameDecryptorInterface* attached_decryptor,
+    IsLiveOwnDecryptorFn is_live_own_decryptor,
     LogFn log,
     VtableAbi abi = PlatformVtableAbi()) {
   if (!PlatformSupported() || receiver == nullptr) {
@@ -311,13 +361,33 @@ inline Status SetMinimumPlayoutDelay(
         const_cast<void*>(SlotTarget(receiver, kSlotGetFrameDecryptor, abi)));
     const ReturnedRef returned = get_decryptor(receiver);
     if (returned.ptr != static_cast<void*>(attached_decryptor)) {
+      const bool own = returned.ptr != nullptr &&
+                       is_live_own_decryptor != nullptr &&
+                       is_live_own_decryptor(returned.ptr);
+      if (returned.ptr == nullptr || own) {
+        // The caller's record of this receiver is stale; the engine is not
+        // in question. A live decryptor of Lakko's came back with the
+        // reference the engine added for the value it returned.
+        if (own) {
+          static_cast<webrtc::FrameDecryptorInterface*>(returned.ptr)
+              ->Release();
+        }
+        if (!StaleDecryptorLogged().exchange(true,
+                                             std::memory_order_acq_rel)) {
+          Emit(log,
+               "[lakko.receiver-delay] a receiver's decryptor is not the "
+               "one held for it (none, or a newer one of Lakko's); that "
+               "receiver is skipped, the probe stays open");
+        }
+        return Status::kNotAvailable;
+      }
       // Whatever came back is not touched again, a reference on it
       // included: it is not known to be what the slot's name says.
       if (state.exchange(2, std::memory_order_acq_rel) != 2) {
         Emit(log,
-             "[lakko.receiver-delay] probe FAILED: GetFrameDecryptor() did "
-             "not return the attached decryptor; playout delay stays "
-             "observe-only");
+             "[lakko.receiver-delay] probe FAILED: GetFrameDecryptor() "
+             "returned something that is not a decryptor of Lakko's; "
+             "playout delay stays observe-only");
       }
       return Status::kProbeFailed;
     }

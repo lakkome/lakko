@@ -300,6 +300,17 @@ class LakkoFrameDecryptor : public webrtc::FrameDecryptorInterface {
   void AddRef() const override;
   rtc::RefCountReleaseStatus Release() const override;
 
+  // Whether `candidate` is the address (as a
+  // `webrtc::FrameDecryptorInterface*`) of a decryptor this class created
+  // and has not yet destroyed. Never dereferences `candidate`. Thread-safe.
+  //
+  // For the receiver playout-delay probe (`receiver-delay.h`): the engine
+  // hands back the decryptor a receiver holds, with a reference added, and
+  // the probe may give that reference back only when the pointer is known
+  // to be one of ours. A `true` answer stays true for as long as the caller
+  // holds a reference on the object.
+  static bool IsLive(const void* candidate);
+
  private:
   LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring, const char* label);
 

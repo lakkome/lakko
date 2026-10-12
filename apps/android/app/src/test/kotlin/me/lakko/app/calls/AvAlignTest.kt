@@ -92,6 +92,27 @@ class AvAlignTest {
         }
     }
 
+    /** Writes that wait until the test carries them out, as a thread of
+     *  their own would make them wait. */
+    private class HeldWrites : ReceiverDelayWrites {
+        val waiting = ArrayDeque<() -> Unit>()
+        var closed = false
+
+        override fun submit(write: () -> Unit) {
+            if (!closed) waiting += write
+        }
+
+        override fun close() {
+            closed = true
+            waiting.clear()
+        }
+
+        /** Carry out everything waiting, in the order it was submitted. */
+        fun runAll() {
+            while (true) (waiting.removeFirstOrNull() ?: return)()
+        }
+    }
+
     private companion object {
         fun quietPlan(
             audio: AvAudioPlan = AvAudioPlan(setMs = null, askedMs = 0u, reason = AvAudioReason.FREE),
@@ -731,5 +752,195 @@ class AvAlignTest {
         val align = CallAvAlign(rules = rules, setter = NoReceiverDelaySetter)
         align.read(-5L, setOf("a"), tracksOf("a"), emptyMap()) { _, _ -> false }
         assertEquals(0uL, rules.built.single().readings.single().first)
+    }
+
+    // ---- writes carried out off the reading thread -------------------------
+
+    private val settingPlan = quietPlan(
+        audio = AvAudioPlan(setMs = 300u, askedMs = 300u, reason = AvAudioReason.WAITING_FOR_PICTURE),
+        middle = video(AvVideoReason.RAISING, set = 240u, asked = 240u, skew = -180),
+        light = video(AvVideoReason.NO_SOUND, set = 0u),
+    )
+
+    @Test
+    fun `a reading does not wait for its writes, and they are carried out in the rule's order`() {
+        val rules = FakeRules()
+        val setter = FakeSetter()
+        val held = HeldWrites()
+        val align = CallAvAlign(rules = rules, setter = setter, writes = held)
+        rules.nextPlan = settingPlan
+        align.read(0L, setOf("a"), tracksOf("a"), emptyMap()) { _, _ -> false }
+        // The reading returned; nothing reached the setter yet.
+        assertEquals(emptyList<String>(), setter.writes)
+        assertEquals(3, held.waiting.size)
+        // A second reading queues behind the first.
+        rules.built.single().plan = quietPlan(
+            audio = AvAudioPlan(setMs = 0u, askedMs = 0u, reason = AvAudioReason.FREE),
+        )
+        align.read(1_000L, setOf("a"), tracksOf("a"), emptyMap()) { _, _ -> false }
+        held.runAll()
+        assertEquals(
+            listOf("a/audio/a-a=300", "a/middle/a-m=240", "a/light/a-l=0", "a/audio/a-a=0"),
+            setter.writes,
+        )
+        // Writes that took change nothing about the person's rule.
+        align.read(2_000L, setOf("a"), tracksOf("a"), emptyMap()) { _, _ -> false }
+        assertEquals(1, rules.built.size)
+    }
+
+    @Test
+    fun `a write that fails later reduces that person's capability once, at the next reading`() {
+        val rules = FakeRules()
+        val setter = FakeSetter().apply { failing += AvRole.AUDIO }
+        val held = HeldWrites()
+        val warnings = ArrayList<String>()
+        val align = CallAvAlign(rules = rules, setter = setter, warn = { warnings += it }, writes = held)
+        rules.nextPlan = settingPlan
+        val tracks = tracksOf("a") + tracksOf("b")
+        // Two readings ask before any write has run: two audio writes of
+        // each person are waiting when the first one fails.
+        align.read(0L, setOf("a", "b"), tracks, emptyMap()) { _, _ -> false }
+        align.read(1_000L, setOf("a", "b"), tracks, emptyMap()) { _, _ -> false }
+        assertEquals(emptyList<String>(), warnings)
+        assertEquals(2, rules.built.size)
+        held.runAll()
+        // Carried out, failed, and still nothing has changed: the failure
+        // waits for the reading thread.
+        assertEquals(emptyList<String>(), warnings)
+        assertTrue(rules.built.none { it.closed })
+
+        align.read(2_000L, setOf("a", "b"), tracks, emptyMap()) { _, _ -> false }
+        // Once per person, though two writes of each failed.
+        assertEquals(
+            listOf(
+                "call media sync peer=a could not set the audio playout delay" +
+                    " (IllegalStateException); continuing as cap(false,true)",
+                "call media sync peer=b could not set the audio playout delay" +
+                    " (IllegalStateException); continuing as cap(false,true)",
+            ),
+            warnings,
+        )
+        // Each person's rule was freed and built again, as one that cannot
+        // set the sound and still can set the picture.
+        assertEquals(4, rules.built.size)
+        assertTrue(rules.built[0].closed && rules.built[1].closed)
+        for (rebuilt in rules.built.drop(2)) {
+            assertFalse(rebuilt.audioSettable)
+            assertTrue(rebuilt.videoSettable)
+        }
+        // The picture's writes took, and no audio write is asked for again.
+        assertEquals(
+            listOf("a/middle/a-m=240", "a/light/a-l=0", "b/middle/b-m=240", "b/light/b-l=0").sorted(),
+            setter.writes.distinct().sorted(),
+        )
+        held.runAll()
+        setter.writes.clear()
+        align.read(3_000L, setOf("a", "b"), tracks, emptyMap()) { _, _ -> false }
+        held.runAll()
+        assertTrue(setter.writes.none { "/audio/" in it })
+        assertEquals(2, warnings.size)
+    }
+
+    @Test
+    fun `a late failure for a receiver that was replaced, or a person who left, changes nothing`() {
+        val rules = FakeRules()
+        val setter = FakeSetter().apply { failing += AvRole.LIGHT }
+        val held = HeldWrites()
+        val warnings = ArrayList<String>()
+        val align = CallAvAlign(rules = rules, setter = setter, warn = { warnings += it }, writes = held)
+        rules.nextPlan = quietPlan(light = video(AvVideoReason.RAISING, set = 240u))
+        align.read(0L, setOf("a", "b"), tracksOf("a") + tracksOf("b"), emptyMap()) { _, _ -> false }
+        held.runAll()
+        // Before the failures are applied: a's light receiver is replaced
+        // and b leaves and comes back.
+        setter.failing.clear()
+        val replaced = tracksOf("a", light = false) + RemoteTrackRef("a-l2", "a~light", audio = false)
+        align.removePeer("b")
+        align.read(1_000L, setOf("a", "b"), replaced + tracksOf("b"), emptyMap()) { _, _ -> false }
+        assertEquals(emptyList<String>(), warnings)
+        // Both can still set the picture: the next write goes out.
+        held.runAll()
+        assertTrue("a/light/a-l2=240" in setter.writes)
+        assertTrue("b/light/b-l=240" in setter.writes)
+        assertTrue(rules.built.last().videoSettable)
+    }
+
+    @Test
+    fun `the end of the call closes the writes, and nothing waiting is carried out`() {
+        val rules = FakeRules()
+        val setter = FakeSetter()
+        val held = HeldWrites()
+        val align = CallAvAlign(rules = rules, setter = setter, writes = held)
+        rules.nextPlan = settingPlan
+        align.read(0L, setOf("a"), tracksOf("a"), emptyMap()) { _, _ -> false }
+        align.dispose()
+        assertTrue(held.closed)
+        held.runAll()
+        align.read(1_000L, setOf("a"), tracksOf("a"), emptyMap()) { _, _ -> false }
+        held.runAll()
+        assertEquals(emptyList<String>(), setter.writes)
+    }
+
+    @Test
+    fun `the writes' own thread carries them out in order and is not the caller's`() {
+        val writes = SerialReceiverDelayWrites("test-receiver-delay")
+        val seen = java.util.Collections.synchronizedList(ArrayList<Int>())
+        val threads = java.util.Collections.synchronizedSet(HashSet<Thread>())
+        val done = java.util.concurrent.CountDownLatch(1)
+        repeat(200) { n ->
+            writes.submit {
+                threads += Thread.currentThread()
+                seen += n
+            }
+        }
+        writes.submit { done.countDown() }
+        assertTrue(done.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals((0 until 200).toList(), seen.toList())
+        assertEquals(1, threads.size)
+        assertFalse(Thread.currentThread() in threads)
+        assertTrue(threads.single().isDaemon)
+        assertEquals("test-receiver-delay", threads.single().name)
+        writes.close()
+        assertTrue(writes.awaitEnded(10_000L))
+    }
+
+    @Test
+    fun `after close the writes' thread finishes the write in flight, drops the rest and ends`() {
+        val writes = SerialReceiverDelayWrites("test-receiver-delay")
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val ran = java.util.Collections.synchronizedList(ArrayList<String>())
+        writes.submit {
+            started.countDown()
+            release.await(10, java.util.concurrent.TimeUnit.SECONDS)
+            ran += "in flight"
+        }
+        writes.submit { ran += "waiting" }
+        assertTrue(started.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        // Closing does not wait for the write in flight and does not stop it.
+        writes.close()
+        writes.close()
+        writes.submit { ran += "late" }
+        assertFalse(writes.awaitEnded(50L))
+        release.countDown()
+        assertTrue(writes.awaitEnded(10_000L))
+        assertEquals(listOf("in flight"), ran.toList())
+    }
+
+    @Test
+    fun `a call that can set gets a thread for its writes, one that cannot gets none`() {
+        val none = receiverDelayWritesFor(NoReceiverDelaySetter)
+        assertTrue(none is InlineReceiverDelayWrites)
+        var ran = 0
+        none.submit { ran += 1 }
+        assertEquals(1, ran)
+        none.close()
+        none.submit { ran += 1 }
+        assertEquals(1, ran)
+
+        val engine = receiverDelayWritesFor(EngineReceiverDelaySetter { _, _, _ -> RECEIVER_DELAY_OK })
+        assertTrue(engine is SerialReceiverDelayWrites)
+        engine.close()
+        assertTrue((engine as SerialReceiverDelayWrites).awaitEnded(10_000L))
     }
 }

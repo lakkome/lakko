@@ -41,6 +41,18 @@ std::vector<std::string> g_log;
 
 void Log(const char* line) { g_log.emplace_back(line); }
 
+// The decryptors the test says are Lakko's own and alive.
+std::vector<const void*> g_own;
+
+bool IsOwn(const void* candidate) {
+  for (const void* own : g_own) {
+    if (own == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
 #define CHECK_THAT(cond)                                             \
   do {                                                               \
     if (!(cond)) {                                                   \
@@ -158,7 +170,7 @@ void test_sets_through_a_real_vtable() {
   r.decryptor = &dec;
 
   rd::Status s = rd::SetMinimumPlayoutDelay(
-      &r, 250, rd::kMediaTypeVideo, &dec, &Log, rd::VtableAbi::kAbsolute);
+      &r, 250, rd::kMediaTypeVideo, &dec, &IsOwn, &Log, rd::VtableAbi::kAbsolute);
   CHECK_THAT(s == rd::Status::kOk);
   CHECK_THAT(r.set_calls == 1);
   CHECK_THAT(r.last.has_value() && *r.last == 0.25);
@@ -171,7 +183,7 @@ void test_sets_through_a_real_vtable() {
 
   // Zero gives the delay back: the engine's nullopt.
   s = rd::SetMinimumPlayoutDelay(
-      &r, 0, rd::kMediaTypeVideo, &dec, &Log, rd::VtableAbi::kAbsolute);
+      &r, 0, rd::kMediaTypeVideo, &dec, &IsOwn, &Log, rd::VtableAbi::kAbsolute);
   CHECK_THAT(s == rd::Status::kOk);
   CHECK_THAT(r.set_calls == 2);
   CHECK_THAT(!r.last.has_value());
@@ -181,7 +193,7 @@ void test_sets_through_a_real_vtable() {
 
   // Above the engine's own ceiling nothing larger is sent.
   s = rd::SetMinimumPlayoutDelay(
-      &r, 60000, rd::kMediaTypeVideo, nullptr, &Log, rd::VtableAbi::kAbsolute);
+      &r, 60000, rd::kMediaTypeVideo, nullptr, &IsOwn, &Log, rd::VtableAbi::kAbsolute);
   CHECK_THAT(s == rd::Status::kOk);
   CHECK_THAT(r.last.has_value() && *r.last == 10.0);
   CHECK_THAT(r.wrong_calls == 0);
@@ -190,7 +202,7 @@ void test_sets_through_a_real_vtable() {
   FakeReceiver audio;
   audio.kind = cricket::MEDIA_TYPE_AUDIO;
   s = rd::SetMinimumPlayoutDelay(
-      &audio, 120, rd::kMediaTypeAudio, nullptr, &Log,
+      &audio, 120, rd::kMediaTypeAudio, nullptr, &IsOwn, &Log,
       rd::VtableAbi::kAbsolute);
   CHECK_THAT(s == rd::Status::kOk);
   CHECK_THAT(audio.last.has_value() && *audio.last == 0.12);
@@ -203,12 +215,12 @@ void test_no_decryptor_is_not_a_failure() {
   rd::ResetProbeForTesting();
   FakeReceiver r;
   rd::Status s = rd::SetMinimumPlayoutDelay(
-      &r, 250, rd::kMediaTypeVideo, nullptr, &Log, rd::VtableAbi::kAbsolute);
+      &r, 250, rd::kMediaTypeVideo, nullptr, &IsOwn, &Log, rd::VtableAbi::kAbsolute);
   CHECK_THAT(s == rd::Status::kNotAvailable);
   CHECK_THAT(r.set_calls == 0);
   CHECK_THAT(r.get_decryptor_calls == 0);
   CHECK_THAT(!rd::ProbeHasFailed() && !rd::ProbeHasPassed());
-  CHECK_THAT(rd::SetMinimumPlayoutDelay(nullptr, 1, 0, nullptr, &Log) ==
+  CHECK_THAT(rd::SetMinimumPlayoutDelay(nullptr, 1, 0, nullptr, &IsOwn, &Log) ==
              rd::Status::kNotAvailable);
 }
 
@@ -219,14 +231,14 @@ void test_wrong_kind_stops_everything() {
   FakeReceiver r;
   r.decryptor = &dec;
   rd::Status s = rd::SetMinimumPlayoutDelay(
-      &r, 250, rd::kMediaTypeAudio, &dec, &Log, rd::VtableAbi::kAbsolute);
+      &r, 250, rd::kMediaTypeAudio, &dec, &IsOwn, &Log, rd::VtableAbi::kAbsolute);
   CHECK_THAT(s == rd::Status::kProbeFailed);
   CHECK_THAT(r.set_calls == 0);
   CHECK_THAT(r.get_decryptor_calls == 0);
   CHECK_THAT(rd::ProbeHasFailed());
   // Sticky, and said once.
   s = rd::SetMinimumPlayoutDelay(
-      &r, 250, rd::kMediaTypeVideo, &dec, &Log, rd::VtableAbi::kAbsolute);
+      &r, 250, rd::kMediaTypeVideo, &dec, &IsOwn, &Log, rd::VtableAbi::kAbsolute);
   CHECK_THAT(s == rd::Status::kProbeFailed);
   CHECK_THAT(r.set_calls == 0);
   CHECK_THAT(g_log.size() == 1);
@@ -240,7 +252,7 @@ void test_wrong_decryptor_stops_everything() {
   FakeReceiver r;
   r.decryptor = &other;
   rd::Status s = rd::SetMinimumPlayoutDelay(
-      &r, 250, rd::kMediaTypeVideo, &attached, &Log, rd::VtableAbi::kAbsolute);
+      &r, 250, rd::kMediaTypeVideo, &attached, &IsOwn, &Log, rd::VtableAbi::kAbsolute);
   CHECK_THAT(s == rd::Status::kProbeFailed);
   CHECK_THAT(r.set_calls == 0);
   // Neither decryptor was released by the probe: the one that came back is
@@ -249,14 +261,69 @@ void test_wrong_decryptor_stops_everything() {
   CHECK_THAT(other.refs == 2);
   CHECK_THAT(g_log.size() == 1);
 
-  // A receiver that returns nothing at all fails the same way.
+  CHECK_THAT(rd::ProbeHasFailed());
+}
+
+void test_a_stale_record_skips_the_receiver_only() {
+  // The engine holds a newer decryptor of Lakko's than the caller's record
+  // of this receiver names: the receiver is skipped, the process is not
+  // condemned, and the reference the engine added is given back.
   rd::ResetProbeForTesting();
+  g_log.clear();
+  FakeDecryptor held;
+  FakeDecryptor newer;
+  g_own = {static_cast<webrtc::FrameDecryptorInterface*>(&held),
+           static_cast<webrtc::FrameDecryptorInterface*>(&newer)};
+  FakeReceiver stale;
+  stale.decryptor = &newer;
+  rd::Status s = rd::SetMinimumPlayoutDelay(
+      &stale, 250, rd::kMediaTypeVideo, &held, &IsOwn, &Log,
+      rd::VtableAbi::kAbsolute);
+  CHECK_THAT(s == rd::Status::kNotAvailable);
+  CHECK_THAT(stale.set_calls == 0);
+  CHECK_THAT(!rd::ProbeHasFailed() && !rd::ProbeHasPassed());
+  CHECK_THAT(held.refs == 1);
+  CHECK_THAT(newer.refs == 1);
+
+  // The engine holds none at all (detached through another wrapper).
   FakeReceiver empty;
   s = rd::SetMinimumPlayoutDelay(
-      &empty, 250, rd::kMediaTypeVideo, &attached, &Log,
+      &empty, 250, rd::kMediaTypeVideo, &held, &IsOwn, &Log,
+      rd::VtableAbi::kAbsolute);
+  CHECK_THAT(s == rd::Status::kNotAvailable);
+  CHECK_THAT(empty.set_calls == 0);
+  CHECK_THAT(!rd::ProbeHasFailed() && !rd::ProbeHasPassed());
+  // Said once for the process.
+  CHECK_THAT(g_log.size() == 1);
+
+  // A receiver whose record is right still passes the probe afterwards,
+  // and the skipped one can then be set too.
+  FakeReceiver good;
+  good.decryptor = &held;
+  s = rd::SetMinimumPlayoutDelay(
+      &good, 250, rd::kMediaTypeVideo, &held, &IsOwn, &Log,
+      rd::VtableAbi::kAbsolute);
+  CHECK_THAT(s == rd::Status::kOk);
+  CHECK_THAT(rd::ProbeHasPassed());
+  s = rd::SetMinimumPlayoutDelay(
+      &stale, 250, rd::kMediaTypeVideo, &held, &IsOwn, &Log,
+      rd::VtableAbi::kAbsolute);
+  CHECK_THAT(s == rd::Status::kOk);
+  CHECK_THAT(stale.set_calls == 1);
+  CHECK_THAT(newer.refs == 1);
+
+  // With nothing vouching for the pointer, the same mismatch is the engine
+  // answering something unknown: everything stops and nothing is released.
+  rd::ResetProbeForTesting();
+  FakeReceiver unknown;
+  unknown.decryptor = &newer;
+  s = rd::SetMinimumPlayoutDelay(
+      &unknown, 250, rd::kMediaTypeVideo, &held, nullptr, &Log,
       rd::VtableAbi::kAbsolute);
   CHECK_THAT(s == rd::Status::kProbeFailed);
-  CHECK_THAT(empty.set_calls == 0);
+  CHECK_THAT(newer.refs == 2);
+  newer.refs = 1;
+  g_own.clear();
 }
 
 void test_a_pass_after_a_kind_mismatch_is_not_possible() {
@@ -264,18 +331,18 @@ void test_a_pass_after_a_kind_mismatch_is_not_possible() {
   FakeDecryptor dec;
   FakeReceiver r;
   r.decryptor = &dec;
-  CHECK_THAT(rd::SetMinimumPlayoutDelay(&r, 10, rd::kMediaTypeVideo, &dec,
+  CHECK_THAT(rd::SetMinimumPlayoutDelay(&r, 10, rd::kMediaTypeVideo, &dec, &IsOwn,
                                         &Log, rd::VtableAbi::kAbsolute) ==
              rd::Status::kOk);
   // The probe passed; a later receiver whose kind is wrong still stops it.
   FakeReceiver audio;
   audio.kind = cricket::MEDIA_TYPE_AUDIO;
   CHECK_THAT(rd::SetMinimumPlayoutDelay(&audio, 10, rd::kMediaTypeVideo,
-                                        nullptr, &Log,
+                                        nullptr, &IsOwn, &Log,
                                         rd::VtableAbi::kAbsolute) ==
              rd::Status::kProbeFailed);
   CHECK_THAT(audio.set_calls == 0);
-  CHECK_THAT(rd::SetMinimumPlayoutDelay(&r, 10, rd::kMediaTypeVideo, &dec,
+  CHECK_THAT(rd::SetMinimumPlayoutDelay(&r, 10, rd::kMediaTypeVideo, &dec, &IsOwn,
                                         &Log, rd::VtableAbi::kAbsolute) ==
              rd::Status::kProbeFailed);
   CHECK_THAT(r.set_calls == 1);
@@ -352,7 +419,7 @@ void test_sets_through_a_relative_vtable() {
   o.decryptor = static_cast<webrtc::FrameDecryptorInterface*>(&dec);
 
   rd::Status s = rd::SetMinimumPlayoutDelay(
-      &o, 400, rd::kMediaTypeAudio, &dec, &Log, rd::VtableAbi::kRelative);
+      &o, 400, rd::kMediaTypeAudio, &dec, &IsOwn, &Log, rd::VtableAbi::kRelative);
   CHECK_THAT(s == rd::Status::kOk);
   CHECK_THAT(o.set_calls == 1);
   CHECK_THAT(o.last.engaged && o.last.value == 0.4);
@@ -360,7 +427,7 @@ void test_sets_through_a_relative_vtable() {
   CHECK_THAT(dec.refs == 1);
 
   s = rd::SetMinimumPlayoutDelay(
-      &o, 0, rd::kMediaTypeAudio, &dec, &Log, rd::VtableAbi::kRelative);
+      &o, 0, rd::kMediaTypeAudio, &dec, &IsOwn, &Log, rd::VtableAbi::kRelative);
   CHECK_THAT(s == rd::Status::kOk);
   CHECK_THAT(o.set_calls == 2 && !o.last.engaged);
 
@@ -377,6 +444,7 @@ int main() {
   test_no_decryptor_is_not_a_failure();
   test_wrong_kind_stops_everything();
   test_wrong_decryptor_stops_everything();
+  test_a_stale_record_skips_the_receiver_only();
   test_a_pass_after_a_kind_mismatch_is_not_possible();
   test_sets_through_a_relative_vtable();
   if (g_failures != 0) {
@@ -384,6 +452,6 @@ int main() {
                  g_failures);
     return 1;
   }
-  std::printf("test_receiver_delay: all 7 tests passed\n");
+  std::printf("test_receiver_delay: all 8 tests passed\n");
   return 0;
 }

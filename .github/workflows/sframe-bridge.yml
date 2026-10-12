@@ -23,6 +23,10 @@
 #      cross-decrypt).
 #   8. Payload-size extremes (1 B / 80 B / 1500 B / 64 KiB).
 #
+# It also runs the host test of the receiver playout-delay setter
+# (`apps/shared/sframe-bridge/test_receiver_delay.cc`, ADR-0070 note of
+# 2026-10-12) through `just test-receiver-delay`.
+#
 # What this does NOT cover (lives in G3-4-mobile):
 #   - Live RTP between two iOS simulators or two Android
 #     emulators inside CI. The Obj-C++ shim (N-4
@@ -109,8 +113,24 @@ jobs:
             brew install just
           fi
 
+      # The vendored libwebrtc headers are not committed
+      # (`apps/shared/webrtc-cpp-headers/.gitignore`): they are fetched
+      # from the pinned upstream commit and checked against the committed
+      # SHA256SUMS. Both tests below refuse to build without them.
+      - name: fetch the pinned libwebrtc headers
+        run: bash apps/shared/webrtc-cpp-headers/M125/fetch.sh
+
       - name: just test-sframe-bridge
         run: just test-sframe-bridge
+
+      # The receiver playout-delay setter (`receiver-delay.h`, ADR-0070
+      # note of 2026-10-12): the vtable-slot calls and the probe, on the
+      # host compiler's own vtable and on a hand-built relative one. No
+      # Rust archive involved. `if: always()` so a bridge failure above
+      # does not hide a setter failure, and the reverse.
+      - name: just test-receiver-delay
+        if: always()
+        run: just test-receiver-delay
 
       # On failure, surface the freshly built test binary +
       # build log so a reviewer can diff what an assertion

@@ -5,6 +5,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <vector>
 
 namespace lakko {
 namespace sframe {
@@ -275,6 +277,37 @@ void SetLogSink(LogSink sink) {
 // ---------------------------------------------------------------
 
 // static
+namespace {
+
+// The decryptors alive in this process, as `FrameDecryptorInterface`
+// addresses, for `LakkoFrameDecryptor::IsLive`. A handful per call, so a
+// vector under a mutex. Both are leaked on purpose: a decryptor the engine
+// still holds may be destroyed after this file's statics would have been.
+std::mutex& LiveDecryptorsMutex() {
+  static std::mutex* mutex = new std::mutex();
+  return *mutex;
+}
+
+std::vector<const void*>& LiveDecryptors() {
+  static std::vector<const void*>* live = new std::vector<const void*>();
+  return *live;
+}
+
+}  // namespace
+
+bool LakkoFrameDecryptor::IsLive(const void* candidate) {
+  if (candidate == nullptr) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(LiveDecryptorsMutex());
+  for (const void* live : LiveDecryptors()) {
+    if (live == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
 LakkoFrameDecryptor* LakkoFrameDecryptor::Create(const uint8_t* seed,
                                                  std::size_t seed_len,
                                                  const char* label) {
@@ -298,9 +331,25 @@ LakkoFrameDecryptor::LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring,
   // the attach call that supplied it.
   const char* source = (label != nullptr && label[0] != '\0') ? label : "unknown";
   std::snprintf(label_, sizeof(label_), "%s", source);
+  const void* self = static_cast<const webrtc::FrameDecryptorInterface*>(this);
+  std::lock_guard<std::mutex> lock(LiveDecryptorsMutex());
+  LiveDecryptors().push_back(self);
 }
 
 LakkoFrameDecryptor::~LakkoFrameDecryptor() {
+  {
+    const void* self =
+        static_cast<const webrtc::FrameDecryptorInterface*>(this);
+    std::lock_guard<std::mutex> lock(LiveDecryptorsMutex());
+    std::vector<const void*>& live = LiveDecryptors();
+    for (std::size_t i = 0; i < live.size(); ++i) {
+      if (live[i] == self) {
+        live[i] = live.back();
+        live.pop_back();
+        break;
+      }
+    }
+  }
   // Callers must have released their refcount before letting us
   // destruct, so no Decrypt / Rekey is in flight against `ring_`.
   lakko_sframe_call_key_ring_free(ring_);

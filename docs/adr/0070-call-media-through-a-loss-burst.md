@@ -977,15 +977,32 @@ from one class placed in package `org.webrtc`
 ones `onAddTrack` hands out, which live until the peer connection is
 disposed; a write is excluded from `close()` by a lock.
 
-**Guards.** (1) Identity: the setter is offered only when the loaded
-WebRTC image is one the table was read from, by Mach-O `LC_UUID` (three
-slices) or ELF build id (two); any other image is observe-only, logged
-once. (2) A bracket probe before the first set of a process: the receiver
-is asked `media_type()` (a slot before the setter; must be the track's
-kind) and `GetFrameDecryptor()` (a slot after it; must be the decryptor
-Lakko attached); only then is the setter's slot called. A wrong answer
-stops every set for the process. `media_type()` is asked again on every
-set. (3) Drift: the iOS package is pinned to exactly 125.0.0
+**Guards.** (1) Identity, the one memory-safety gate: the setter is
+offered only when the identity the linker stamped into the loaded WebRTC
+image, its Mach-O `LC_UUID` (three slices) or its ELF GNU build id (two),
+equals that of an image the table was read from; any other image is
+observe-only, logged once. Every call below, the probe's included, is only
+known to be safe behind this pin. On Android the verdict is kept once an
+engine library is loaded to give it about; asked earlier, the answer is
+"no" for that call and the question stays open (corrected after the
+review of 2026-10-12, which found that an early question would have
+turned the setter off for the process). (2) A bracket probe before the
+first set of a process, a consistency check and not a second gate: the
+receiver is asked `media_type()` (slot 8, before the setter; must be the
+track's kind) and `GetFrameDecryptor()` (slot 16, after it; must be the
+decryptor Lakko attached); only then is the setter's slot called.
+`media_type()` is asked again on every set. What the probe shows is that
+the vtable encoding is the one the build assumes and that slots 8 and 16
+are what the table says. It does not show that slot 13 is the setter, nor
+how the setter takes its argument; those rest on the reading of the pinned
+binaries. Its answers are told apart (same review): an answer that is not
+Lakko's (the wrong kind, or a non-null pointer that is not a live Lakko
+decryptor, `LakkoFrameDecryptor::IsLive`) stops every set for the process
+and that pointer is never touched; no decryptor, or a live Lakko decryptor
+other than the one held for this receiver, means the caller's record of
+the receiver is stale (see below), so that receiver is skipped, the probe
+stays open and the reference the engine added on Lakko's own object is
+given back. (3) Drift: the iOS package is pinned to exactly 125.0.0
 (`project.yml`), an iOS test compares the loaded image's identity with the
 pinned ones, and an Android host test compares the version catalog with the
 version the evidence was gathered for.
@@ -993,21 +1010,48 @@ version the evidence was gathered for.
 **Threading.** The object the app holds is a proxy: the setter and
 `GetFrameDecryptor` block the caller until the engine's worker thread has
 run them; `media_type` does not leave the calling thread. iOS runs the set
-on the serial queue every other blocking libwebrtc call uses. Android runs
-it on the call's scope, as it already does `RtpSender.setParameters`.
+on the serial queue every other blocking libwebrtc call uses. Android, as
+first built, ran it inline on the call's scope, which is the main thread
+(`AppCallHost` builds that scope on `Dispatchers.Main.immediate` and both
+group-call paths pass it down): one or two blocking round trips per write,
+several writes per reading. Corrected after the review of 2026-10-12: the
+writes of a call run on one thread of their own, in the order the rule
+gave them (`SerialReceiverDelayWrites` in `AvAlign.kt`). The reading does
+not wait for them. A write that did not take is handed back through a
+queue and applied by the reading loop at its next reading, once per person
+and kind, and only if that person still has the receiver the write was
+for. The peer connection's lock still excludes `close()` from a write in
+flight; when the call ends the thread starts nothing more, drops what was
+waiting and ends.
+
+**A stale record of a receiver.** Both bindings can hand out a second
+wrapper object for one engine receiver (a second `didAdd` / `onAddTrack`
+for it). Lakko arms a decryptor on every wrapper it is handed, but records
+the receiver for the setter only when the track arrives in a stream with a
+role; a second wrapper that arrives without one leaves the record on the
+first wrapper, whose decryptor the engine no longer holds. Before the
+probe has passed, a set on that receiver gets a newer Lakko decryptor
+back. As first built that stopped the setter for the process and leaked
+one reference; now it skips that receiver. The same case exists on iOS
+(the association on the `RTCRtpReceiver` object) and on Android
+(`decryptorByReceiver`), and the one rule in `receiver-delay.h` covers
+both. Once the probe has passed the decryptor is not asked for again.
 
 **Evidence of the code itself.** A host test with a fake receiver whose
 vtable the host compiler lays out from the engine's declaration order
-(`test_receiver_delay.cc`, run for arm64 and x86_64) and a hand-built
-relative table; the compiled Android library reads `+0x34` relative on
+(`test_receiver_delay.cc`, run for arm64 and x86_64; `just
+test-receiver-delay`, and a step of the dispatch-only `sframe-bridge`
+workflow) and a hand-built relative table; the compiled Android library reads `+0x34` relative on
 arm64 and `+0x68` absolute on x86_64. The host test cannot show how the
 shipped binaries are laid out; the table above is what shows that.
 
 **Residual risk.** The identity pin makes "another binary" impossible, so
-what remains is an error in reading these binaries, which the bracket
-probe and the function-shape reading were made to catch. The probe's own
-two calls are through slots read the same way, so it is not independent
-of that reading. The receiver handed out is assumed to be the proxy of an
+what remains is an error in reading these binaries. The bracket probe
+catches one kind of such error (a wrong slot encoding, a shifted table)
+and not another (slot 13 itself, the argument's convention), for which the
+function-shape reading is all there is. The probe's own two calls are
+through slots read the same way and are safe only behind the pin, so it
+is not independent of that reading. The receiver handed out is assumed to be the proxy of an
 audio or video receiver; the framework's own methods make the same
 assumption. A set blocks its caller for one hop to the worker thread. On
 Android a `dispose()` of the receiver outside `close()` during a set would

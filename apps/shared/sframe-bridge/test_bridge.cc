@@ -179,6 +179,15 @@ void test_round_trip_single_sender() {
                                                  kTestSeed.size());
   assert(dec != nullptr && "Decryptor::Create returned nullptr");
   dec->AddRef();
+  // The decryptor is known as one of ours for exactly its lifetime, by the
+  // address the engine would hand back (`receiver-delay.h`); an encryptor,
+  // null and an unrelated address are not.
+  const void* dec_address =
+      static_cast<const webrtc::FrameDecryptorInterface*>(dec);
+  assert(lakko::sframe::LakkoFrameDecryptor::IsLive(dec_address));
+  assert(!lakko::sframe::LakkoFrameDecryptor::IsLive(enc));
+  assert(!lakko::sframe::LakkoFrameDecryptor::IsLive(nullptr));
+  assert(!lakko::sframe::LakkoFrameDecryptor::IsLive(&kAliceLeaf));
 
   const std::vector<uint8_t> plaintext = {
       'h', 'e', 'l', 'l', 'o', ' ', 'l', 'a', 'k', 'k', 'o',
@@ -224,6 +233,8 @@ void test_round_trip_single_sender() {
          rtc::RefCountReleaseStatus::kDroppedLastRef);
   assert(dec->Release() ==
          rtc::RefCountReleaseStatus::kDroppedLastRef);
+  assert(!lakko::sframe::LakkoFrameDecryptor::IsLive(dec_address) &&
+         "a destroyed decryptor is no longer known");
   std::printf("ok\n");
 }
 

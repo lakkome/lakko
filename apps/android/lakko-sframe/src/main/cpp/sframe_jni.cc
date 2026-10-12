@@ -331,6 +331,9 @@ const uint8_t kVerifiedBuildId[] = {0};
 constexpr std::size_t kMaxBuildIdLen = 64;
 
 struct EngineBuildId {
+    // The engine library is mapped in this process.
+    bool loaded = false;
+    // It carries a GNU build id (`len` bytes of `bytes`).
     bool found = false;
     std::size_t len = 0;
     uint8_t bytes[kMaxBuildIdLen] = {};
@@ -352,6 +355,7 @@ int FindEngineBuildId(struct dl_phdr_info* info, std::size_t /*size*/,
         return 0;
     }
     auto* out = static_cast<EngineBuildId*>(data);
+    out->loaded = true;
     for (int i = 0; i < info->dlpi_phnum; ++i) {
         const ElfW(Phdr)& segment = info->dlpi_phdr[i];
         if (segment.p_type != PT_NOTE) {
@@ -395,18 +399,49 @@ EngineBuildId LoadedEngineBuildId() {
     return id;
 }
 
-// 0: not decided. 1: the loaded engine is the verified binary. 2: it is not.
+// 0: not decided. 1: the loaded engine is the verified binary. 2: an engine
+// library is loaded and it is not the verified binary.
 std::atomic<int> g_engine_verified{0};
 
+// The "asked before the engine library was loaded" line was written.
+std::atomic<bool> g_engine_absent_logged{false};
+
+// Whether the engine library loaded in this process is the binary the
+// evidence was read from.
+//
+// A verdict is kept only once there is a loaded engine library to give it
+// about. Asked before `libjingle_peerconnection_so.so` is loaded (nothing in
+// the app does so today, but nothing forbids it either), the answer is "no"
+// for that call and the question stays open, so an early caller cannot turn
+// the setter off for the rest of the process. While it is open each call
+// walks the loaded-library list once (`dl_iterate_phdr`); callers ask once
+// per call start, and no set reaches here while the answer is "no".
 bool EngineIsVerified() {
     int decided = g_engine_verified.load(std::memory_order_acquire);
     if (decided == 0) {
         const EngineBuildId id = LoadedEngineBuildId();
+        if (!id.loaded) {
+            if (!g_engine_absent_logged.exchange(true,
+                                                 std::memory_order_acq_rel)) {
+                __android_log_print(
+                    ANDROID_LOG_INFO, kDelayLogTag,
+                    "setter not available yet: "
+                    "libjingle_peerconnection_so.so is not loaded; asked "
+                    "again at the next call");
+            }
+            return false;
+        }
         const bool ok = lakko::receiver_delay::PlatformSupported() &&
                         id.found && id.len == sizeof(kVerifiedBuildId) &&
                         std::memcmp(id.bytes, kVerifiedBuildId, id.len) == 0;
         decided = ok ? 1 : 2;
-        g_engine_verified.store(decided, std::memory_order_release);
+        // Two threads deciding at once reach the same verdict; the one that
+        // stores it second says nothing.
+        int undecided = 0;
+        if (!g_engine_verified.compare_exchange_strong(
+                undecided, decided, std::memory_order_acq_rel)) {
+            return undecided == 1;
+        }
         if (ok) {
             __android_log_print(
                 ANDROID_LOG_INFO, kDelayLogTag,
@@ -475,8 +510,10 @@ Java_me_lakko_sframe_ReceiverPlayoutDelay_nativeIsAvailable(
 // attached to this receiver, or 0. Returns
 // `lakko::receiver_delay::Status` as an int.
 //
-// Blocks until the engine's worker thread has run the call. The caller
-// keeps the Java `RtpReceiver` (and the decryptor) undisposed for the call.
+// Blocks until the engine's worker thread has run the call: never call it
+// on the main thread (the app runs it on its one playout-delay thread). The
+// caller keeps the Java `RtpReceiver` (and the decryptor) undisposed for
+// the call.
 JNIEXPORT jint JNICALL
 Java_me_lakko_sframe_ReceiverPlayoutDelay_nativeSet(
     JNIEnv* /*env*/,
@@ -502,7 +539,8 @@ Java_me_lakko_sframe_ReceiverPlayoutDelay_nativeSet(
     const Status status = lakko::receiver_delay::SetMinimumPlayoutDelay(
         reinterpret_cast<void*>(receiver_ptr),
         static_cast<uint32_t>(delay_ms), static_cast<int>(media_type),
-        decryptor, &DelayLogSink);
+        decryptor, &lakko::sframe::LakkoFrameDecryptor::IsLive,
+        &DelayLogSink);
     return static_cast<jint>(status);
 }
 

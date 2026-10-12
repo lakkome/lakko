@@ -2344,14 +2344,23 @@ by vtable slot
 carries no media and no key. Its gate is stricter than
 a selector probe, because a wrong slot is memory
 corruption and not a refusal: the call is made only
-when the loaded WebRTC image is byte-for-byte one the
-slot was read from (Mach-O `LC_UUID` on iOS, ELF build
-id on Android), and only after the receiver has
-answered `media_type()` and `GetFrameDecryptor()`
-correctly. Any other image, or a wrong answer, leaves
-the delay unset for the process (the call measures and
-does not align); it never affects whether media is
-encrypted.
+when the identity the linker stamped into the loaded
+WebRTC image (its Mach-O `LC_UUID` on iOS, its ELF GNU
+build id on Android) equals that of an image the slot
+was read from. That identity pin is the one
+memory-safety gate. Behind it, before the first set of
+a process, the receiver must answer `media_type()` and
+`GetFrameDecryptor()` correctly; this is a consistency
+check, not a second gate: it shows the vtable encoding
+and that slots 8 and 16 are what was read, it does not
+show slot 13 or the setter's argument convention, and
+it is itself only safe behind the pin. Any other
+image, or an answer that is not Lakko's, leaves the
+delay unset for the process (the call measures and
+does not align); a receiver whose recorded decryptor
+is not the one the engine holds for it (none, or a
+newer live one of Lakko's) is skipped alone. None of
+it affects whether media is encrypted.
 
 ### C-48: SFrame attach happens between addLocalAudioTrack and SDP build
 
@@ -2462,13 +2471,21 @@ two more references and returns both: the iOS
 `nativeRtpReceiver` accessor adds one on the engine's
 receiver, released through the receiver's own
 `Release` slot after the call; the probe's
-`GetFrameDecryptor()` adds one on Lakko's decryptor,
-released only when the pointer that came back IS that
-decryptor (anything else is never touched). On Android
-a write holds a lock that `WebRtcPeerConnection.close`
-takes before it releases the decryptors and disposes
-the peer, so a write never meets a freed receiver or
-decryptor.
+`GetFrameDecryptor()` adds one on the decryptor it
+returns, released only when the pointer that came back
+is a decryptor of Lakko's that is alive: the one held
+for that receiver, or another one
+`LakkoFrameDecryptor::IsLive` knows (the bridge keeps
+the addresses of its decryptors from construction to
+destruction; a `true` answer cannot go stale while the
+returned reference is held). Any other pointer is
+never touched, so its one reference is leaked on
+purpose. On Android a write runs on the call's one
+playout-delay thread and holds a lock that
+`WebRtcPeerConnection.close` takes before it releases
+the decryptors and disposes the peer, so a write never
+meets a freed receiver or decryptor, and one that
+arrives after `close` touches nothing.
 
 Memory-ordering: `AddRef` uses
 `std::memory_order_relaxed`; `Release` uses

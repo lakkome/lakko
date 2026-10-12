@@ -265,10 +265,16 @@ typedef NS_ENUM(NSInteger, LakkoReceiverDelayStatus) {
     LakkoReceiverDelayStatusOK = 0,
     /// Nothing was called: the setter is not available in this process
     /// (see [+isAvailable]), the receiver is nil or carries no track of a
-    /// known kind, or it has no Lakko decryptor to run the probe against.
+    /// known kind, it has no Lakko decryptor to run the probe against, or
+    /// the decryptor associated with this `RTCRtpReceiver` object is not
+    /// the one the engine holds for it (a newer one was armed, or it was
+    /// detached, through another object for the same engine receiver).
+    /// Says nothing about the engine; other receivers are unaffected.
     LakkoReceiverDelayStatusNotAvailable = 1,
-    /// The engine's object did not answer the two probe questions as the
-    /// evidence says it must. Nothing is set for the rest of the process.
+    /// The engine answered a probe question with something that is not
+    /// Lakko's (the wrong media kind, or a decryptor Lakko did not
+    /// create), so its layout cannot be trusted. Nothing is set for the
+    /// rest of the process.
     LakkoReceiverDelayStatusProbeFailed = 2,
 };
 

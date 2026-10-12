@@ -265,6 +265,22 @@ spec-check range='':
 test-sframe-bridge:
     apps/shared/sframe-bridge/build.sh
 
+# Build + run the host test of the receiver playout-delay setter
+# (`apps/shared/sframe-bridge/receiver-delay.h`, ADR-0070 note of
+# 2026-10-12): the vtable-slot calls land on the slots the engine's header
+# declares, with the argument and return conventions a C++ compiler gives
+# them, on an absolute and on a relative vtable, and the probe tells an
+# answer that is not Lakko's (everything stops) from a stale record of one
+# receiver (that receiver is skipped). Built at -O2 and -O0, and for x86_64
+# as well on an arm64 Mac with Rosetta. Needs no Rust archive. What it
+# cannot show is the layout of the shipped binaries; that is the image
+# identity pin in each platform shim.
+test-receiver-delay:
+    bash apps/shared/sframe-bridge/test-receiver-delay.sh
+
+# Both host tests of apps/shared/sframe-bridge.
+test-sframe-bridge-all: test-sframe-bridge test-receiver-delay
+
 # Everything CI does — run locally before pushing.
 ci: fmt-check lint test audit reuse fuzz-check audit-index-check spec-check
 

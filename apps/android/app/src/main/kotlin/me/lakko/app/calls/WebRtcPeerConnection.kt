@@ -1557,9 +1557,13 @@ public class WebRtcPeerConnection(
      * for a track this connection has no receiver of, and after [close].
      *
      * The engine's receiver is a proxy: the call blocks until libwebrtc's
-     * worker thread has run it, like `RtpSender.setParameters` does on the
-     * signaling thread. It is made under [receiverDelayLock], so the
-     * receiver cannot be disposed under it.
+     * worker thread has run it (one or two round trips). Never call it on
+     * the main thread nor on a libwebrtc thread: the group call makes it on
+     * its one playout-delay thread (`SerialReceiverDelayWrites`), in the
+     * order the writes were asked for. It is made under
+     * [receiverDelayLock], so the receiver cannot be disposed under it:
+     * [close] waits for a call in flight, and a call that arrives after
+     * [close] touches nothing and answers "not available".
      */
     internal fun setRemotePlayoutDelay(trackId: String, audio: Boolean, ms: Int): Int =
         synchronized(receiverDelayLock) {

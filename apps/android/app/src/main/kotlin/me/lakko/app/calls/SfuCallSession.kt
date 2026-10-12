@@ -1190,6 +1190,10 @@ class SfuCallSession(
      * native module says when the connection's book is built
      * ([receiverDelaySetterFor]); where they cannot, the rule observes: the
      * skew is measured and logged and nothing is written to a receiver.
+     *
+     * The rule is read on [scope]; its answers are written off it
+     * ([receiverDelayWritesFor]), since a write blocks on libwebrtc's worker
+     * thread and [scope] is the main thread.
      */
     private var avAlign: CallAvAlign? = null
 
@@ -1212,14 +1216,20 @@ class SfuCallSession(
         shownLayerLedger.reset()
         avAlign?.dispose()
         // What this device can do about the skew, decided here and said once.
+        val setter = receiverDelaySetterFor(
+            available = me.lakko.sframe.ReceiverPlayoutDelay.isAvailable,
+            setOn = connection::setRemotePlayoutDelay,
+        )
         val align = CallAvAlign(
             rules = SharedAvAlignRules,
-            setter = receiverDelaySetterFor(
-                available = me.lakko.sframe.ReceiverPlayoutDelay.isAvailable,
-                setOn = connection::setRemotePlayoutDelay,
-            ),
+            setter = setter,
             warn = { message -> android.util.Log.w(MEDIA_LOG_TAG, message) },
             info = { line -> android.util.Log.i(MEDIA_LOG_TAG, line) },
+            // [scope] is the main thread and the engine's setter blocks
+            // until libwebrtc's worker thread has run it, so the writes run
+            // on a thread of their own, in order. The book owns it and ends
+            // it when it is disposed.
+            writes = receiverDelayWritesFor(setter),
         )
         avAlign = align
         val readingMs = align.readingMs()

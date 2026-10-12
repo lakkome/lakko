@@ -36,13 +36,18 @@ public object ReceiverPlayoutDelay {
     /** The delay was handed to the engine. */
     public const val STATUS_OK: Int = 0
 
-    /** Nothing was called: the setter is not available in this process, the
-     *  receiver is disposed, or it has no Lakko decryptor to run the probe
-     *  against yet. */
+    /** Nothing was set on this receiver: the setter is not available in this
+     *  process, the receiver is disposed, it has no Lakko decryptor to run
+     *  the probe against yet, or the decryptor passed for it is not the one
+     *  the engine holds for it (the caller's record of the receiver is
+     *  stale). Says nothing about the engine; other receivers are
+     *  unaffected. */
     public const val STATUS_NOT_AVAILABLE: Int = 1
 
-    /** The engine's object did not answer the two probe questions as the
-     *  evidence says it must. Nothing is set for the rest of the process. */
+    /** The engine answered a probe question with something that is not
+     *  Lakko's (the wrong media kind, or a decryptor Lakko did not create),
+     *  so its layout cannot be trusted. Nothing is set for the rest of the
+     *  process. */
     public const val STATUS_PROBE_FAILED: Int = 2
 
     private val loaded: Boolean by lazy {
@@ -57,9 +62,11 @@ public object ReceiverPlayoutDelay {
 
     /**
      * `true` when a set can be attempted in this process: the native library
-     * loaded, the engine library is the verified binary, and the probe has
-     * not failed. A failed probe turns the answer to `false` for the rest of
-     * the process.
+     * loaded, the engine library is loaded and is the verified binary, and
+     * the probe has not failed. A failed probe, or a loaded engine library
+     * that is another binary, turns the answer to `false` for the rest of
+     * the process; asked before the engine library is loaded it is `false`
+     * for that call only.
      */
     @JvmStatic
     public val isAvailable: Boolean
@@ -85,9 +92,11 @@ public object ReceiverPlayoutDelay {
      * receiver, needed at least for the first set of the process (the probe
      * asks the engine for it and compares).
      *
-     * Blocks until the engine's worker thread has run the call. The caller
-     * must keep [receiver] undisposed for the call: call it on the thread
-     * that disposes the peer connection, or under a lock that excludes it.
+     * Blocks until the engine's worker thread has run the call (one or two
+     * round trips to it), so it must never run on the main thread nor on a
+     * libwebrtc thread: the app runs it on its one playout-delay thread
+     * (`SerialReceiverDelayWrites`). The caller must keep [receiver]
+     * undisposed for the call, under a lock that excludes the disposal.
      *
      * Returns one of [STATUS_OK], [STATUS_NOT_AVAILABLE],
      * [STATUS_PROBE_FAILED].

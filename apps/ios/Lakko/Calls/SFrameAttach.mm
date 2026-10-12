@@ -698,9 +698,20 @@ NSString *ImageUuidOf(const void *address) {
         return LakkoReceiverDelayStatusNotAvailable;
     }
 
-    // The decryptor Lakko attached to this receiver: the answer
-    // `GetFrameDecryptor()` must give. The wrapper is held for the call, so
-    // its reference on the C++ object is too.
+    // The decryptor Lakko attached through THIS `RTCRtpReceiver` object:
+    // the answer `GetFrameDecryptor()` must give. The wrapper is held for
+    // the call, so its reference on the C++ object is too.
+    //
+    // The framework can hand out more than one `RTCRtpReceiver` for one
+    // engine receiver (a second `didAdd` for it, or a receiver read off a
+    // transceiver). A decryptor armed through another of them leaves this
+    // object's association stale: the engine then answers with that newer
+    // decryptor, or with none after a detach. The bridge tells that apart
+    // from an answer that is not Lakko's at all
+    // (`LakkoFrameDecryptor::IsLive`): a stale association skips this
+    // receiver ("not available") and leaves the probe open; only an answer
+    // that is not a live decryptor of Lakko's stops the setter for the
+    // process.
     id associated = objc_getAssociatedObject(
         receiver, (__bridge const void *)kDecryptorAssociationKey);
     LakkoSFrameDecryptorWrapper *wrapper =
@@ -718,6 +729,7 @@ NSString *ImageUuidOf(const void *address) {
     const lakko::receiver_delay::Status status =
         lakko::receiver_delay::SetMinimumPlayoutDelay(
             native.ptr, delayMs, expectedMediaType, decryptor,
+            &lakko::sframe::LakkoFrameDecryptor::IsLive,
             &LakkoBridgeLogSink);
     // The accessor's reference.
     lakko::receiver_delay::ReleaseEngineRef(native.ptr);

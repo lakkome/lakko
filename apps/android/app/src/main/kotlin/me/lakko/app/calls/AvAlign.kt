@@ -16,6 +16,12 @@ import uniffi.lakko_ffi_uniffi.avAlignReadingMs
 import uniffi.lakko_ffi_uniffi.avAudioReasonName
 import uniffi.lakko_ffi_uniffi.avCapabilityName
 import uniffi.lakko_ffi_uniffi.avVideoReasonName
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToLong
 
 /**
@@ -58,6 +64,12 @@ import kotlin.math.roundToLong
  * available and [NoReceiverDelaySetter] where it does not
  * ([receiverDelaySetterFor]); with the second the rule is fed, the skew is
  * measured and logged, and nothing is written.
+ *
+ * The engine's setter blocks its caller until libwebrtc's worker thread has
+ * run it, and the call's reading loop runs on the main thread. So the writes
+ * of a call are carried out on one thread of their own, in the order the
+ * rule gave them ([SerialReceiverDelayWrites]); a write that did not take is
+ * handed back to the reading loop, which applies it at its next reading.
  *
  * No Android or libwebrtc type: the host JVM tests drive all of it with a
  * fake [AvAlignRules], since they cannot load the native library.
@@ -410,6 +422,87 @@ internal class EngineReceiverDelaySetter(
 internal const val RECEIVER_DELAY_MAX_MS: UInt = 10_000u
 
 /**
+ * Where the playout-delay writes of one call are carried out.
+ *
+ * A write submitted after another runs after it. After [close] nothing more
+ * is started: a write submitted later, and one still waiting, is dropped.
+ * A write that has already started is not interrupted; excluding it from the
+ * disposal of what it touches is the peer connection's own lock.
+ */
+internal interface ReceiverDelayWrites {
+    /** Carry [write] out after every write submitted before it. [write]
+     *  must not throw. Any thread. */
+    fun submit(write: () -> Unit)
+
+    /** Start nothing more. Idempotent, any thread, does not wait. */
+    fun close()
+}
+
+/**
+ * Writes carried out in place, on the caller's thread: for a process that
+ * has no setter (nothing blocks, because nothing is called) and for the host
+ * tests of the rule's bookkeeping.
+ */
+internal class InlineReceiverDelayWrites : ReceiverDelayWrites {
+    private val closed = AtomicBoolean(false)
+
+    override fun submit(write: () -> Unit) {
+        if (!closed.get()) write()
+    }
+
+    override fun close() {
+        closed.set(true)
+    }
+}
+
+/**
+ * Writes carried out one after the other on one thread that belongs to
+ * nothing else: not the main thread, which must not block, and not a
+ * libwebrtc thread, which the engine's setter would deadlock on. What
+ * `receiver-delay.h` asks of its caller, and what the iOS client does with
+ * its libwebrtc queue.
+ *
+ * The thread is started by the first write and ends once [close] has been
+ * called and the write in flight, if any, has returned; it is a daemon
+ * thread, so a call that never ends cleanly cannot keep the process alive.
+ */
+internal class SerialReceiverDelayWrites(
+    threadName: String = "lakko-receiver-delay",
+) : ReceiverDelayWrites {
+    private val closed = AtomicBoolean(false)
+    private val executor: ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread(task, threadName).apply { isDaemon = true }
+    }
+
+    override fun submit(write: () -> Unit) {
+        if (closed.get()) return
+        try {
+            // Asked again when its turn comes: a write that was waiting when
+            // the call ended is dropped, not carried out late.
+            executor.execute { if (!closed.get()) write() }
+        } catch (cause: RejectedExecutionException) {
+            // Closed between the check and the hand-over: dropped.
+        }
+    }
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) executor.shutdown()
+    }
+
+    /** Whether the thread has ended, waiting up to [timeoutMs] for it. For
+     *  the tests. */
+    fun awaitEnded(timeoutMs: Long): Boolean =
+        executor.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)
+}
+
+/**
+ * Where the writes of a call with [setter] run: on a thread of their own
+ * when the setter reaches the engine, in place when there is none.
+ */
+internal fun receiverDelayWritesFor(setter: ReceiverDelaySetter): ReceiverDelayWrites =
+    if (setter.audioSettable || setter.videoSettable) SerialReceiverDelayWrites() else InlineReceiverDelayWrites()
+
+/**
  * The setter of this process: the engine's when the native module says the
  * setter is [available], none otherwise.
  */
@@ -490,16 +583,26 @@ internal fun describeCapability(
  *
  * Once per reading interval the caller hands over the people of the call, the
  * remote tracks the connection knows, the receivers' samples and a way to ask
- * what is shown ([read]); the rule's answers are written through the
- * [ReceiverDelaySetter] before it returns. A person's rule is built at their
- * first reading and freed when they leave ([removePeer], or their absence
- * from the people of a later reading) or the call ends ([dispose]).
+ * what is shown ([read]); the rule's answers are handed, in the rule's
+ * order, to [writes], which carries them out through the
+ * [ReceiverDelaySetter]. A person's rule is built at their first reading and
+ * freed when they leave ([removePeer], or their absence from the people of a
+ * later reading) or the call ends ([dispose]).
  *
- * A write that throws is warned of once per person and kind, and that
- * person's rule is built again as one that cannot set that kind, so it goes
- * on measuring and stops asking.
+ * The setter may be called on another thread than the caller's and after
+ * [read] has returned ([SerialReceiverDelayWrites]). What the rule asked for
+ * is the rule's own book and is not waited for. A write that did not take
+ * comes back through a queue and is applied by the caller's thread, at the
+ * end of the reading that asked for it when the write ran in place, else at
+ * the start of the next one: it is warned of once per person and kind, and
+ * that person's rule is built again as one that cannot set that kind, so it
+ * goes on measuring and stops asking. A failure of a write to a receiver the
+ * person no longer has, or of a person who has left, changes nothing.
  *
- * Not thread-safe: one caller, one thread (the call's scope).
+ * [dispose] closes [writes], which this object owns.
+ *
+ * Apart from that queue, not thread-safe: one caller, one thread (the
+ * call's scope).
  */
 internal class CallAvAlign(
     private val rules: AvAlignRules = SharedAvAlignRules,
@@ -507,6 +610,7 @@ internal class CallAvAlign(
     private val warn: (String) -> Unit = {},
     info: (String) -> Unit = {},
     label: String = "call media",
+    private val writes: ReceiverDelayWrites = InlineReceiverDelayWrites(),
 ) {
     private class Slot(val trackId: String) {
         var prev: InboundSample? = null
@@ -520,8 +624,22 @@ internal class CallAvAlign(
         var last: PeerSyncState? = null
     }
 
+    /** A write that did not take, as the thread that made it reports it. */
+    private class WriteFailure(
+        val person: Person,
+        val peerId: String,
+        val role: AvRole,
+        val trackId: String,
+        /** The simple class name of what the setter threw. */
+        val why: String,
+    )
+
     private val people = LinkedHashMap<String, Person>()
     private var disposed = false
+
+    /** Filled by whichever thread carries the writes out, emptied by the
+     *  caller's ([applyWriteFailures]). */
+    private val failures = ConcurrentLinkedQueue<WriteFailure>()
 
     init {
         val capability = try {
@@ -601,6 +719,10 @@ internal class CallAvAlign(
     ) {
         if (disposed) return
         sync(peerIds, tracks)
+        // What the writes of earlier readings ran into, before any rule is
+        // asked again and after the people and receivers are known as they
+        // are now.
+        applyWriteFailures()
         for ((peerId, person) in people) {
             if (person.slots.isEmpty()) {
                 person.last = null
@@ -665,6 +787,8 @@ internal class CallAvAlign(
             for (role in AV_VIDEO_ROLES) planOf(role).setMs?.let { sets += role to it }
             for ((role, ms) in sets) write(peerId, person, role, ms)
         }
+        // Writes carried out in place have failed by now.
+        applyWriteFailures()
     }
 
     /** One line per person the last reading covered, in the order they
@@ -675,9 +799,13 @@ internal class CallAvAlign(
     /** The call is over: every rule is freed. Nothing is read or written
      *  afterwards. */
     fun dispose() {
+        disposed = true
+        // Nothing more is started; a write in flight is the connection's to
+        // wait for.
+        writes.close()
+        failures.clear()
         for (person in people.values) freeRule(person)
         people.clear()
-        disposed = true
     }
 
     private fun audioReason(reason: AvAudioReason): String =
@@ -726,15 +854,47 @@ internal class CallAvAlign(
         }
     }
 
-    /** Write one answer. A write that throws is reported once for that
-     *  person and kind, and their rule is built again without that setter. */
+    /**
+     * Hand one answer to [writes]. Nothing is waited for: a write that
+     * throws is reported back through [failures].
+     */
     private fun write(peerId: String, person: Person, role: AvRole, ms: UInt) {
         val audio = role == AvRole.AUDIO
         if (if (audio) person.audioWriteFailed else person.videoWriteFailed) return
-        val slot = person.slots[role] ?: return
-        try {
-            setter.set(peerId, role, slot.trackId, ms)
-        } catch (cause: RuntimeException) {
+        val trackId = person.slots[role]?.trackId ?: return
+        writes.submit {
+            // On the writes' thread: nothing of this object is touched but
+            // the setter and the queue.
+            val why = try {
+                setter.set(peerId, role, trackId, ms)
+                null
+            } catch (cause: RuntimeException) {
+                cause.javaClass.simpleName
+            } catch (cause: LinkageError) {
+                cause.javaClass.simpleName
+            }
+            if (why != null) failures += WriteFailure(person, peerId, role, trackId, why)
+        }
+    }
+
+    /**
+     * Apply what the writes reported, on the caller's thread. A failed write
+     * is reported once for that person and kind, and their rule is built
+     * again without that setter; later failures of the same kind, which were
+     * already on their way, change nothing more.
+     */
+    private fun applyWriteFailures() {
+        while (true) {
+            val failure = failures.poll() ?: return
+            if (disposed) continue
+            val person = failure.person
+            // The person left (and perhaps came back as someone new), or
+            // the receiver the write was for has been replaced since: the
+            // failure says nothing about what can be set now.
+            if (people[failure.peerId] !== person) continue
+            if (person.slots[failure.role]?.trackId != failure.trackId) continue
+            val audio = failure.role == AvRole.AUDIO
+            if (if (audio) person.audioWriteFailed else person.videoWriteFailed) continue
             if (audio) person.audioWriteFailed = true else person.videoWriteFailed = true
             val kind = if (audio) "audio" else "video"
             val capability = try {
@@ -748,8 +908,8 @@ internal class CallAvAlign(
                 "unknown"
             }
             warn(
-                "call media sync peer=$peerId could not set the $kind playout delay" +
-                    " (${cause.javaClass.simpleName}); continuing as $capability",
+                "call media sync peer=${failure.peerId} could not set the $kind playout delay" +
+                    " (${failure.why}); continuing as $capability",
             )
             // The rule takes what it can set when it is built, so it is built
             // again; it starts as for a person who has just joined.
