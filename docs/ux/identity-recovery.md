@@ -2092,38 +2092,73 @@ Kept by the client:
   existing key reused as is), 37 marked security-critical, none added to
   the catalog. Nothing here was built, rendered or walked.
 
-## 19. A recovery email: a new password by a mailed code
+## 19. An account without a saved phrase, a recovery email, and taking the account back with the phrase
 
 Added 2026-10-12 (maintainer's decisions of that day). **Status: designed,
 not built.** Nothing in this section exists in `services/auth` or in any
-client. Architecture: ADR-0067.
+client. Architecture: ADR-0067. Where this section and sections 1 to 10
+disagree about sign-up or the phrase, this section is the newer decision;
+the older sections are reconciled when it is built.
 
 What was decided:
 
-- A person may add one email address to the account. A code mailed to it
-  lets them **choose a new password**, and nothing else. Resetting the
-  account keys stays its own action (15.1, 17.2).
-- The server keeps only a one-way value made from the **username and the
-  address together**. It never stores the address. It sees the address for
-  the moment it sends a letter.
+- The 12 words are **not shown at sign-up**. A person may save them later.
+- A person may add one email address. The server keeps only a one-way value
+  made from the **username and the address together**, never the address.
+- **While no phrase is saved**, a code mailed to that address brings the
+  person all the way back: a new password and, on any device, their keys,
+  contacts and chats. The app says plainly that this is only as safe as the
+  mailbox.
+- **Once a phrase is saved**, the mailed code gives a new password only.
+- A person who holds the phrase can **take the account back** for about a
+  month after someone reset its keys.
+- Adding an email can be skipped, with a warning.
 - When the account has an authenticator, its code is asked for as well.
-- The recovery phrase and every other route stay as they are.
 
-### 19.1 What the route gives, and what it does not
+### 19.1 The two kinds of account, in the app's words
 
-| Device | After the new password |
-|---|---|
-| Still holds the account's keys | Signed in, chats as before. |
-| New, reinstalled or cleared | Signed in without keys: **Restore your keys** (section 8), as after any password sign-in on such a device. |
+| | No phrase saved | Phrase saved |
+|---|---|---|
+| Settings > Account shows | "Protected by your email" (or "Not protected" when no email) | "Protected by your recovery phrase" |
+| A mailed code gives | New password and everything back | New password only |
+| On a new device after the code | The app, with contacts and chats | **Restore your keys** (section 8) |
+| Three-word row (section 2) | Absent | Present on a device that holds the account |
 
-The mailed code never brings keys. On a new device the person still needs
-another device, a passkey that carries keys or the phrase; failing all three,
-**Reset account keys**, which asks for the password they just chose.
+Past messages come back only from another device, in both kinds, as today.
+No screen promises otherwise.
+
+### 19.1a Sign-up
+
+Username and password, then one step:
+
+```
+Protect your account
+If you forget your password or lose this phone, this is how
+you get back in.
+
+  [mail]  Add an email                 Recommended     >
+          We send a code to it. Anyone who can read that
+          mailbox can get into your account.
+  [key]   Save a recovery phrase                       >
+          12 words only you keep. Stronger, and nothing
+          to do with email.
+
+Not now
+```
+
+- `Add an email` goes to 19.2. `Save a recovery phrase` goes to 19.5.
+  Either lands in the app afterwards; the other stays available in Settings.
+- `Not now` opens the app's own confirmation: "Continue without protection?
+  If you forget your password, or lose this phone, you will not be able to
+  get back into this account." with `Add an email` (primary) and `Continue
+  without` (plain).
+- An unprotected account shows one dismissible banner in Settings > Account,
+  "This account has no way back in.", with `Protect it`. It returns after 30
+  days if nothing changed. Nowhere else.
 
 ### 19.2 Adding the address
 
-Entry points: Settings > Account > **Recovery email**; and one optional step
-at sign-up, after the recovery phrase is confirmed, with `Not now`.
+Entry points: Settings > Account > **Recovery email**, and 19.1a.
 
 ```
 Recovery email
@@ -2134,6 +2169,9 @@ Email   [ name@example.com ]
 
 Lakko does not keep your address. You will type it again,
 together with your username, when you need a code.
+
+Anyone who can read this mailbox can get into your account.
+Save a recovery phrase to change that.
 
 [ Send code ]
 ```
@@ -2186,33 +2224,25 @@ once: "A recovery email was added to your account." / "...was replaced" /
 "...was removed", with `OK` and `This was not me` (which opens Settings >
 Account > Recovery email on that device).
 
-### 19.3 Getting a new password
 
-Entry point: **Get back in** (section 2) gains one row, last in the group
-"Signs you in on this device":
+The last two lines of the form are shown only while no phrase is saved.
+When the account has an authenticator the form adds: "You will also need a
+code from your authenticator app. If it is on the phone you lose, the email
+will not be enough."
+
+### 19.3 Getting back in with the code
+
+Entry point: **Get back in** (section 2) gains one row, first in the list
+above both groups, since what it brings depends on the account:
 
 ```
   [mail]     Email code                     >
-             A code sent to your recovery email. You choose
-             a new password.
+             A code sent to your recovery email.
 ```
 
-The row is always shown (no row depends on server state). The note under the
-list is unchanged.
+The row is always shown (no row depends on server state).
 
-Step 1:
-
-```
-Email code
-Type your username and your recovery email.
-
-Username   [ @name ]
-Email      [ name@example.com ]
-
-[ Send code ]
-```
-
-Step 2, always, whatever was typed:
+Step 1: username and address. Step 2, always, whatever was typed:
 
 ```
 Check your email
@@ -2224,54 +2254,32 @@ its way. It works for 10 minutes.
 Send again (in 0:45)        Back
 ```
 
-Step 3, only when the account has an authenticator:
+Step 3, only when the account has an authenticator: its 6-digit code, with
+"Lost your authenticator? Use another way to get back in."
 
-```
-Authenticator code
-Type the 6-digit code from your authenticator app.
+Step 4, "Choose a new password", then:
 
-[ _ _ _ _ _ _ ]
-```
-
-Step 4:
-
-```
-Choose a new password
-
-New password           [ ............ ]
-Confirm new password   [ ............ ]
-
-[ Save and log in ]
-```
+- **No phrase saved:** a progress line "Bringing back your account" and the
+  app, as after typing the phrase today. If the keys cannot be opened (the
+  address typed differs in a way the check let through, or the stored copy
+  is damaged) the person is signed in and sees **Restore your keys**.
+- **Phrase saved:** signed in; on a device without keys, **Restore your
+  keys**.
 
 Rules:
 
-- Step 2 looks and behaves the same for a pair that matches, a pair that
-  does not, an unknown username and an account with no recovery email. No
-  wording, delay or control tells them apart. A letter leaves only for a
+- Step 2 looks and behaves the same for a matching pair, a wrong pair, an
+  unknown username and an account with no email. A letter leaves only for a
   match.
-- A wrong mailed code and a code that was never sent get the same line:
-  "That code is not right."
-- Step 3 appears only after the mailed code was accepted, so it tells
-  nothing to someone who cannot read the mailbox.
-- There is no way past step 3 without the authenticator. Its text ends with
-  "Lost your authenticator? Use another way to get back in." linking to the
-  list.
-- The old password stops working when step 4 succeeds.
-- After step 4 the person is signed in and lands per 19.1.
+- A wrong code and a code that was never sent get the same line: "That code
+  is not right." Five tries per code.
+- Step 3 appears only after the mailed code was accepted. There is no way
+  past it without the authenticator.
+- Nothing before step 4 tells which kind of account this is.
 - The username is pre-filled per section 2; the address never is.
 
-States:
-
-| State | What the person sees |
-|---|---|
-| Wrong mailed code | "That code is not right." Five tries per code. |
-| Tries used up, or expired | "Send a new code." Back to step 1 with both fields kept. |
-| Wrong authenticator code | "That code is not right." |
-| Too many attempts or letters | `recovery.error.rate_limited` with the countdown. |
-| Passwords differ / too weak | The sign-up screen's own lines. |
-| Mail is not set up on this server | Step 1 shows "Email codes are not available right now." and no button. |
-| Offline | `common.error.offline`. Fields keep their contents. |
+States: as the table of 19.2 for codes, letters, limits and offline, plus
+"Email codes are not available right now." when mail is not set up.
 
 ### 19.4 The letter
 
@@ -2280,61 +2288,116 @@ Subject: "Your Lakko code". Body: the code, "It works for 10 minutes.", and
 changed." No username, no link, no device or location, no image. Sent in the
 language of the requesting device.
 
-### 19.5 What the account's devices see afterwards
+### 19.5 Saving a recovery phrase
 
-Every device of the account that is signed in shows once, the next time it
-is opened:
+Settings > Account > **Recovery phrase**, and 19.1a.
+
+```
+Save a recovery phrase
+12 words that only you keep. After this, a code by email can
+change your password but cannot open your account.
+
+This gives your account new keys. Your contacts and chats
+stay as they are. Your other devices stay signed in.
+
+[ Show my 12 words ]
+```
+
+- Needs the proof of 17.1. Then the existing phrase screens: the words in
+  the grid, the confirmation of three of them, "I wrote them down".
+- The words are shown only when the change has gone through; until then a
+  progress line, and on failure "We could not finish. Nothing changed." with
+  `Try again`.
+- Afterwards Settings shows "Protected by your recovery phrase" and `Show
+  phrase` (behind 17.1). There is no way back to an account without one.
+- Other devices of the account show once: "A recovery phrase was saved for
+  your account." with `OK` / `This was not me`.
+
+### 19.6 What the account's devices see afterwards
+
+Every signed-in device of the account shows once, the next time it is
+opened, one of:
 
 ```
 Your password was changed
 Someone used your recovery email to choose a new password
 on <date>.
-
 [ It was me ]     [ It was not me ]
 ```
 
-`It was not me` opens a short screen: choose a new password (this device
-holds the keys, so it asks nothing else, 7.1) and, under it, `Remove recovery
-email`. When the keys were also reset after the change, the device shows
-"Was it you?" of 18.4 instead; that screen already covers this case.
+```
+Your account was opened with your recovery email
+On <date>, on another device.
+[ It was me ]     [ It was not me ]
+```
+
+`It was not me` opens one screen with, in order: choose a new password (this
+device holds the keys, so it asks nothing else), `Remove recovery email`,
+and, when no phrase is saved, `Save a recovery phrase` with the line "This
+gives your account new keys, so whoever opened it loses it." When the keys
+were reset after the change, the device shows "Was it you?" of 18.4 instead.
 
 Contacts see nothing.
 
-### 19.6 Data the UI needs
+### 19.7 Taking the account back with the phrase
 
-- Whether the server can send mail (to hide or show the rows).
-- Whether the account has a recovery email: a yes/no for the signed-in
-  account only. Never the address.
-- Enrol: start (address) and finish (code), each under a 17.1 proof; replace
-  and remove likewise.
-- Recover: start (username, address) with one uniform answer; code check
-  answering "accepted" plus "authenticator needed: yes/no"; authenticator
-  check; set the new password and land a session.
-- Remaining seconds before another letter may be asked for.
-- A per-device event "password changed by email on <date>" and the three
-  recovery-email events of 19.2, delivered to the account's own devices.
-- The moment of the last password change, to pick between 19.5 and 18.4.
+For a person whose account has a saved phrase and whose keys were reset by
+someone else. On an old device this is 18.4, unchanged, with one more
+choice under the password field: `Use my recovery phrase instead`. Without
+an old device, **Get back in** > Recovery phrase: when the words belong to
+the account as it was before a reset in the last month, the form continues
+with
 
-### 19.7 Cross-platform shape
+```
+This account's keys were changed on <date>.
+Was that you?
 
-The same four steps and the same Settings row on web, iOS and Android. Code
-fields use each platform's one-time-code hint so the system can offer the
-code from the mail app. Nothing here uses a system dialog. No deep link is
-involved: the letter has no link.
+[ It was me ]          [ Take the account back ]
+```
 
-### 19.8 Deliberately not built, and open
+`Take the account back` asks for a new password and does what 18.4 does:
+the account returns to this person with new keys, every other device is
+signed out, the authenticator and passkeys are cleared. The same costs as
+18.9 apply and the form says them. After the month the words are simply
+"not this account's phrase".
 
-- **Whoever reads the mailbox and knows the username can take the
-  password**, and with it, on a new device, reset the keys (17.2 accepts the
-  new password as proof). The owner's old device answers with 18.4 for about
-  a month. Open: the maintainer may prefer that a password chosen by email
-  is not accepted as proof for a reset for some time.
-- The mail provider and the server's mail log see that an address received
-  a Lakko code. The server sees the address and the username together while
-  it handles the request.
-- No reminder letters, no "your account was accessed" letters, no
-  newsletter. The address is used for the code and nothing else.
-- One address per account. No phone number.
-- Whether sign-up should show the email step before or instead of the
-  phrase was left for later (the phrase stays as it is).
+Not offered for an account without a saved phrase: there the person who came
+in by email holds the same words.
+
+### 19.8 Data the UI needs
+
+- Whether the server can send mail.
+- For the signed-in account: has an email (yes/no, never the address), has a
+  saved phrase, has an authenticator.
+- Enrol start / finish, replace, remove, each under a 17.1 proof.
+- Recover: start with one uniform answer; code check answering "accepted"
+  and "authenticator needed"; authenticator check; then either the sealed
+  keys or the password-only path; seconds until another letter.
+- Save a phrase: progress and outcome of the key change, the new words only
+  on success.
+- Notices for the account's own devices: password changed by email, account
+  opened by email, email added / replaced / removed, phrase saved.
+- For 19.7: whether the typed phrase is the account's phrase from before a
+  reset within the window, and the reset's date.
+
+### 19.9 Cross-platform shape
+
+The same steps and rows on web, iOS and Android. Code fields use each
+platform's one-time-code hint. No system dialog, no deep link (the letter
+has no link).
+
+### 19.10 Deliberately not built, and open
+
+- **An account without a saved phrase is as safe as its mailbox, and the
+  operator of the server could open it.** The sign-up and email screens say
+  the first in the person's terms; the second is in the security documents.
+- When someone else opens such an account by email, both hold the same
+  keys. `It was not me` is a race the owner can lose.
+- With a saved phrase, the mailbox still reaches the password and, on a new
+  device, a key reset. 19.7 and 18.4 are the answer.
+- No email and no phrase: no way back. The app says so twice (19.1a).
+- An authenticator on the lost phone blocks the email route.
+- Changing the username turns the recovery email off. A forgotten address or
+  username cannot be looked up.
+- No reminder or security letters. One address per account. No phone number.
 - Strings: none added to the catalog. Nothing here was built or walked.

@@ -1,249 +1,297 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
 
-# ADR-0067: A recovery email: a new password by a mailed code
+# ADR-0067: A recovery email, an account without a saved phrase, and taking an account back with the phrase
 
-- **Status:** Proposed (2026-10-12). The maintainer decided the direction
-  the same day (D1 to D4 below); the rest is this document's proposal.
-  Nothing is built.
+- **Status:** Proposed (2026-10-12). The maintainer decided D1 to D8 below
+  the same day, including the exception to security invariant #2; the
+  mechanisms are this document's proposal. Nothing is built.
 - **Date:** 2026-10-12
 - **Context:** account recovery, Part 6 (after
   [ADR-0064](0064-recovery-model-simplification.md),
   [ADR-0065](0065-account-key-reset.md) and
   [ADR-0066](0066-account-takeover-resistance.md))
 - **Amends (when built):** [ADR-0064](0064-recovery-model-simplification.md)
-  (it removed the email factor; this brings a narrower one back),
-  [ADR-0018](0018-recovery-factor-cascade.md) (the list of server factors).
+  (the phrase is no longer shown at sign-up; an email route returns),
+  [ADR-0018](0018-recovery-factor-cascade.md) (the list of server factors),
+  [ADR-0066](0066-account-takeover-resistance.md) (recall gains a phrase
+  arm), and **security invariant #2** (one stated exception, section 2).
 - **UX spec:** [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md)
   section 19.
 
 ## Context
 
-A person who forgets the password on a device that still holds the account
-has three ways back today: a passkey, three words of the phrase (checked by
-the device), an authenticator code. A person who never wrote the phrase
-down, has no passkey and no authenticator has none. The phrase is hard for
-ordinary people, and the maintainer wants a route they already understand.
+The recovery phrase is hard for ordinary people. Today a person who did not
+write it down, has no passkey and no authenticator cannot get back in after
+forgetting the password, and loses the account with its username after
+losing the only phone. ADR-0064 removed the email one-time code because the
+server sees the address when it sends a letter and a mailed code cannot
+bring keys.
 
-ADR-0064 removed the email one-time code for two reasons: sending a code
-makes the server see the address next to the account, and a mailed code can
-only return access, never keys. Both still hold. The maintainer's decision
-is that the first is acceptable when the server **stores** nothing that
-names the address, and that the second is acceptable because the route is
-for the password only.
+What a restore brings today, verified in `lakko-backup::BackupPayload`: the
+identity seed, the contacts, the MLS group state and the synced state
+(folders, pins, read positions). It does not hold message text; past
+messages come only from another device.
 
-A third option, mail as a notification channel ("your password was
-changed"), was rejected by the maintainer: it requires the server to hold
-the address at all times.
+## Maintainer decisions (2026-10-12)
+
+- **D1.** The server keeps a value derived from the **username and the
+  address together**, never the address.
+- **D2.** The phrase is **not shown at sign-up**. An account starts without
+  a saved phrase and the person may save one later in Settings.
+- **D3.** While **no phrase is saved**, a mailed code restores **full
+  access**: the same keys, contacts and chats. The person is told plainly
+  that this protection is only as strong as the mailbox.
+- **D4.** The exception to invariant #2 that D3 requires is accepted
+  (section 2).
+- **D5.** Once **a phrase is saved**, a mailed code changes the password
+  only; a key reset remains possible afterwards as its own action.
+- **D6.** A person who holds the phrase can **take the account back for a
+  limited time** after such a reset.
+- **D7.** Adding an email may be skipped, with a warning.
+- **D8.** When the account has an authenticator, its code is required in
+  addition to the mailed code, in both modes.
 
 ## Decision
 
-### Maintainer decisions (2026-10-12)
+### 1. Two modes of an account
 
-- **D1.** The stored value is derived from the **username and the address
-  together**, so one address on two accounts gives two unrelated values and
-  the server cannot group accounts by address or answer "is this address
-  registered".
-- **D2.** A mailed code changes the **password only**. Resetting the account
-  keys stays the separate action of ADR-0065.
-- **D3.** When the account has TOTP, its code is required as well.
-- **D4.** The recovery phrase stays as it is.
+| | **Mail-protected** (no phrase saved) | **Phrase-protected** (phrase saved) |
+|---|---|---|
+| Mailed code gives | new password and the keys | new password only |
+| Keys on a new device | another device, passkey with keys, the mailed code | another device, passkey with keys, the phrase |
+| Server holds | `email_key` and an **email vault** | `email_key` only (if an email was added) |
+| After a hostile reset | ADR-0066 recall from an old device | that, or recall with the phrase from any device |
 
-### 1. What the server stores
+A third state exists: no phrase saved and no email added. Such an account
+rests on the password and the devices that hold it; the person was warned
+(D7).
 
-One row per account, in `recovery_emails` (a new migration):
+The device still generates the 12-word phrase at sign-up and derives the
+identity from it (ADR-0017 is unchanged); it just does not show it.
+
+### 2. The email vault, and the exception to invariant #2
+
+In mail-protected mode the client seals the 16-byte phrase entropy and the
+server stores it:
 
 ```
-account_id   BINARY(16) PRIMARY KEY  (FK accounts, cascade)
-email_key    BINARY(32)
-created_at   TIMESTAMP
+vault_key = Argon2id(login_handle(32) ‖ len ‖ normalised address,
+                     salt = "lakko/email-vault/v1" ‖ vault_salt(16))
+sealed    = lakko_mnemonic::vault seal (44 bytes, as the passkey vault)
 ```
+
+`email_vaults(account_id PK, vault_salt, sealed_entropy)`, wrapped again at
+rest under `LAKKO_VAULT_ENC_KEY`. The server releases `(vault_salt,
+sealed_entropy)` only in the answer to a verified mailed code (and TOTP
+code, D8). The client re-derives the key from the username and address the
+person typed, opens the vault, rebuilds the phrase and runs the **existing**
+phrase restore: the fail-closed bundle check, the recovery login, the backup
+restore and "Choose a new password". Nothing downstream is new.
+
+**The exception, stated as it is.** The server handles the address in the
+clear when it sends a letter, at enrolment and at every recovery, and it
+holds the salt and the blob. An operator who records the address can open
+the vault and derive the account's keys. So for a mail-protected account
+invariant #2 ("the server only sees ciphertext and public artefacts; no
+root keys") does not hold against the operator, nor against anyone who
+controls the mailbox and knows the username. It still holds against a copy
+of the database taken without the addresses (the attacker must guess the
+address per account through Argon2id and, for a live database, unwrap the
+at-rest key).
+
+Proposed wording for invariant #2, for the maintainer to apply to
+`CLAUDE.md`: "Exception (ADR-0067): for an account whose owner has not saved
+a recovery phrase, the server holds the phrase entropy sealed under a key
+derived from the username and the recovery email address; the operator, who
+sees that address when sending mail, can open it. Saving a phrase ends the
+exception for that account."
+
+### 3. Saving a phrase ends the exception by changing the keys
+
+Deleting the vault is not enough: a copy taken earlier still opens the same
+phrase. So "Save a recovery phrase" in Settings is the ADR-0066 key
+**rotation** (a new phrase and identity, the other devices kept, contacts
+see nothing), followed by deleting the vault. The words shown are the new
+ones. From then on the account is phrase-protected. Needs the fresh-auth
+grant, as rotation does.
+
+Going back (discarding the phrase to return to mail-protected mode) is not
+offered.
+
+### 4. What the server stores for the address
+
+`recovery_emails(account_id PK, email_key BINARY(32), created_at)` with
 
 `email_key = keyed-BLAKE3(LAKKO_AUTH_EMAIL_PEPPER,
 "lakko/auth/recovery-email/v1" ‖ login_handle(32) ‖ len(2 BE) ‖ address)`
 
-- `login_handle` is the ADR-0054 S5 value the client derives from the
-  canonical username. The server never sees the username itself, as today.
-- `address` is the normalised address: trimmed, lower-cased as a whole,
-  exactly one `@`, 3 to 254 bytes, no control characters. No provider rules
-  (dots, plus tags) are applied.
-- The pepper is an environment secret, separate from the handle pepper.
-  Unset: every route of this ADR answers `503 recovery-email-disabled`, and
-  an anonymous `GET /recovery-email/available` answers `{available: false}`,
-  so the clients hide the rows.
+The address is normalised (trimmed, lower-cased as a whole, one `@`, 3 to
+254 bytes, no control characters; no provider rules). It is never stored or
+logged. With the database and the pepper, a suspected (username, address)
+pair can be confirmed; without the pepper it cannot. Pepper unset: every
+route here answers `503 recovery-email-disabled` and an anonymous
+`GET /recovery-email/available` answers `{available: false}`.
 
-Invariant #1 allows "a hash for recovery" and forbids storing the address,
-encrypted or not. The row satisfies it. An address has little entropy, so
-with the database **and** the pepper an attacker who already suspects a
-(username, address) pair can confirm it; without the pepper they cannot.
-That is the same class as the login-handle table.
+### 5. Codes
 
-The address is in server memory from the request until the letter is handed
-to the mail relay. It is never logged; the mail relay's own log is outside
-Lakko's control and is stated as a cost.
+`email_challenges(id, account_id, purpose, code_key, pending_key NULL,
+attempts, expires_at)`: six digits by rejection sampling, stored as a keyed
+hash, 10 minutes, five tries, one live challenge per (account, purpose).
 
-### 2. Codes
+### 6. Enrol, replace, remove (bearer, fresh-auth grant)
 
-`email_challenges`:
+- `POST /recovery-email/enrol/start {fresh_grant, handle, address}` ->
+  `{challenge_id, vault_salt, resend_after_secs}` (the handle must be the
+  account's bound handle).
+- `POST /recovery-email/enrol/finish {challenge_id, code,
+  sealed_entropy?}` upserts `email_key` and, in mail-protected mode, the
+  vault. The client seals after start, so the vault is bound to the address
+  being confirmed.
+- `DELETE /recovery-email {fresh_grant}` removes both rows.
+- `GET /recovery-email` -> `{enabled, vault}` for the session's account.
+- Re-binding the login handle deletes both rows in the same transaction.
 
-```
-id           BINARY(16) PRIMARY KEY (random)
-account_id   BINARY(16)            (a real account, or a stand-in)
-purpose      TINYINT               (1 enrol, 2 recover)
-code_key     BINARY(32)            keyed-BLAKE3(pepper, purpose ‖ id ‖ code)
-pending_key  BINARY(32) NULL       (enrol: the email_key being confirmed)
-attempts     TINYINT
-expires_at   TIMESTAMP             (10 minutes)
-```
+Sign-up counts as fresh auth, so the email step right after it asks for
+nothing more.
 
-Six decimal digits from the CSPRNG by rejection sampling. Five tries per
-challenge, then the row is deleted. One live challenge per (account,
-purpose); a new one replaces the old. A pruner sweeps expired rows.
-
-### 3. Enrol, replace, remove (bearer)
-
-Each needs the fresh-auth grant of ADR-0065 (`403 fresh-auth-required`
-otherwise), like adding a passkey: a session alone must not be able to add
-a way to change the password.
-
-- `POST /recovery-email/enrol/start {fresh_grant, handle, address}` checks
-  that `handle` is the account's bound login handle, mints a challenge
-  holding the prospective `email_key`, sends the letter, answers
-  `{challenge_id, resend_after_secs}`.
-- `POST /recovery-email/enrol/finish {challenge_id, code}` upserts the row.
-  A replace is the same pair; the old key is overwritten here.
-- `DELETE /recovery-email {fresh_grant}`.
-- `GET /recovery-email` answers `{enabled: bool}` for the session's account.
-- Unbinding or re-binding the login handle deletes the row in the same
-  transaction (the key was made from the old handle).
-
-### 4. Recover (anonymous)
+### 7. Recover (anonymous)
 
 - `POST /recovery-email/recover/start {handle, address}` always answers
-  `{challenge_id, resend_after_secs}`. The handle resolves as in ADR-0054
-  S5 (an unknown handle resolves to a stand-in account). The server computes
-  the key, compares it in constant time with the stored one (or with a
-  pepper-derived dummy) and writes a challenge either way; the letter is
-  queued only on a match. Sending is asynchronous so a match and a miss
-  answer in the same time.
-- `POST /recovery-email/recover/verify {challenge_id, code}` answers
-  `{ticket, totp_required}` or the one uniform `401 code-refused` (wrong,
-  expired, used up, never sent). A challenge of a stand-in can never verify.
-- `POST /recovery-email/recover/totp {ticket, code}` when required; the
-  existing TOTP verify with its replay and window rules.
-- `POST /recovery-email/recover/password/{start,finish}` run the OPAQUE
-  registration for `KIND_PASSWORD` under the ticket. `finish`, in one
-  transaction under the account row lock: ADR-0066's `capture_anchor`
-  (before the envelope changes), replace the password envelope, delete
-  in-flight login states, write the account notice of section 5, consume
-  the ticket, answer the session pair.
+  `{challenge_id, resend_after_secs}`; an unknown handle resolves to a
+  stand-in (ADR-0054 S5); the letter is queued only on a match and sent
+  asynchronously, so a match and a miss answer alike.
+- `POST /recovery-email/recover/verify {challenge_id, code}` -> `{ticket,
+  totp_required}` or one uniform `401 code-refused`.
+- `POST /recovery-email/recover/totp {ticket, code}` when required.
+- `POST /recovery-email/recover/open {ticket}` -> either
+  `{mode: "vault", vault_salt, sealed_entropy}` (the client continues with
+  the phrase restore; the ticket is spent) or `{mode: "password"}`.
+- `POST /recovery-email/recover/password/{start,finish}` (password mode
+  only): OPAQUE registration for `KIND_PASSWORD` under the ticket; `finish`
+  in one transaction under the account row lock captures the ADR-0066 recall
+  anchor, replaces the password envelope, writes the account notice and
+  answers the session pair. It mints no fresh-auth grant.
 
-The ticket is a random 32-byte value stored hashed in `email_challenges`
-(the verified challenge row is rewritten into it), valid 10 minutes, bound
-to the account, single use, with a flag for "TOTP passed".
+In vault mode the password is changed by the existing `/password/reset/*`
+on the recovered recovery credential, which already captures the anchor.
 
-`finish` mints **no** fresh-auth grant. The person holds the new password
-and a password login mints one as it always does; see "Stated costs".
+### 8. Taking the account back with the phrase (D6)
 
-Sessions of the account's other devices are not touched: the keys did not
-change, and a signed-in device of the owner is what shows the notice of
-section 5.
+ADR-0066's recall needs an old device (for the old seed) and the old
+password (checked against the anchored envelope). A person who holds the
+phrase has the old seed without a device and may not know the old password.
+So:
 
-### 5. Telling the account's own devices
+- The recall anchor also keeps the **recovery envelope** in force at
+  capture (it is derived from the phrase).
+- `POST /account/recall/{status,start,finish}` accept a second proof: the
+  statement signed by the anchor key, as today, plus an OPAQUE login
+  against the anchored **recovery** envelope instead of the password one.
+- A device with no cached account names it by login handle on these
+  routes; the answer stays the one uniform `recall-refused`.
+- The window is the anchor's, 30 days. The outcome is the existing recall:
+  the reset transaction with a new password, TOTP and passkeys cleared.
 
-The acting device may hold no keys, so the notice cannot ride the account's
-DeviceGroup like the "device was added" notice does. A small server table:
+This arm exists only for a phrase-protected account. In mail-protected mode
+whoever recovers by mail holds the same phrase as the owner, so the phrase
+proves nothing; there the owner has ADR-0066's device recall only.
 
-```
-account_notices(id, account_id, kind TINYINT, at TIMESTAMP)
-kinds: 1 password changed by email, 2 recovery email added,
-       3 replaced, 4 removed
-```
+### 9. Telling the account's own devices
 
-`GET /account/notices?after=<id>` (bearer) returns the rows; clients fetch
-at session landing and keep a per-device "seen" cursor locally. Rows are
-pruned after 60 days. A row carries no address and no device detail.
+`account_notices(id, account_id, kind, at)`, kinds: password changed by
+email, account restored by email, recovery email added / replaced /
+removed. `GET /account/notices?after=<id>` (bearer), fetched at session
+landing, a local seen cursor, pruned after 60 days. No address, no device
+detail. A server table because the acting device may hold no keys.
 
-### 6. Limits
+### 10. Limits, sending
 
-New `Scope` numbers (6 to 8 stay retired): letters per login handle
-(recover start), letters per account (enrol start), verify attempts per
-handle, plus the per-address `Category::Attempt` bucket. Defaults are to be
-chosen and marked as chosen, not measured. A limit answers the existing
-`429` shape. Counters are charged before any lookup, as elsewhere.
+New `Scope` numbers (6 to 8 stay retired): letters per login handle,
+letters per account, verify attempts per handle, vault opens per account,
+plus the per-address bucket. Defaults chosen, not measured. A `MailSender`
+trait with a log-only default and an SMTP sender (`lettre` returns as a
+dependency of `services/auth` only); letter text from the l10n catalog in
+the requesting device's language.
 
-### 7. Sending
+### 11. Clients
 
-A `MailSender` trait with a log-only default and an SMTP implementation
-(`lettre`, which ADR-0064 removed from the tree; it returns as a dependency
-of `services/auth` only). Configuration by environment; unset means the
-feature is off (section 1). The letter is fixed text plus the code, in the
-language tag the client sends (`Accept-Language`, matched against the
-supported set, English otherwise); the templates live in the l10n catalog
-and are compiled into the service.
-
-### 8. Clients
-
-Section 19 of the UX spec: a Settings row, an optional sign-up step, one
-more row in **Get back in**, four steps, and the notices. No core crate
-changes: the login handle and the OPAQUE client already exist on both FFI
-surfaces.
+UX section 19: sign-up without the phrase, the "Protect your account" step,
+the Settings rows, "Save a recovery phrase", the email row in **Get back
+in**, the notices, and the phrase arm of "take the account back". The
+three-word row is shown only on a device of a phrase-protected account.
+Core: a seal / open pair for the email vault in `lakko-mnemonic` (the
+Argon2id derivation, parameters to be measured), on both FFI surfaces.
 
 ## Stated costs
 
-- **The mailbox becomes a way to the password.** Whoever reads it and knows
-  the username chooses a new password. On a device without keys they then
-  hold a session and a password, which ADR-0065 accepts as proof for a key
-  reset. So the mailbox reaches a reset in two steps. What stands against
-  it: TOTP when enabled (D3), the notice on the owner's devices, and
-  ADR-0066's recall, whose anchor is captured before the password changes
-  so the owner's old device takes the account back with the **old**
-  password for 30 days.
-- **Open, for the maintainer:** refuse a password that was set by this
-  route as proof for a key reset for some period. It is one rule in
-  `require_fresh_grant` (a timestamp on the account). The maintainer has
-  rejected delays elsewhere; this document does not include one.
-- The server sees (handle, address) for the length of a request, and the
-  mail relay sees the address and that Lakko wrote to it.
-- A person who changes their username must add the address again.
-- No way to learn the address back from the account: a person who forgets
-  which address they used has to try them.
+- **A mail-protected account is as safe as its mailbox and as its
+  operator.** Whoever reads the mailbox and knows the username becomes the
+  owner, with the keys, and reads what is sent to the account from then on.
+  The owner's signed-in devices show a notice; from there the owner can
+  choose a new password, remove the email and save a phrase (which changes
+  the keys). It is a race between two parties holding the same keys, and
+  the document does not claim otherwise.
+- **A phrase-protected account loses the password to the mailbox**, and
+  through it a key reset in two steps. TOTP, the notice, device recall and
+  now phrase recall stand against it.
+- Saving a phrase depends on key rotation (ADR-0066 T5/T6), which is built
+  and unit-tested but has never been walked.
+- No phrase and no email: a forgotten password with no passkey or
+  authenticator cannot be recovered, and a lost only phone loses the
+  account.
+- An authenticator on the lost phone blocks the mail route (D8). The
+  enrolment screens say so.
+- Changing the username drops the email and the vault. A forgotten address
+  or username cannot be looked up.
+- The server sees (handle, address) for the length of a request; the mail
+  relay sees the address.
 
 ## Invariants
 
-- **#1** holds as worded: a hash for recovery, the address never stored.
-- **#2** untouched: the route touches the password envelope only, never key
-  material.
-- **#3** untouched: no `lakko-mls` change.
-- **#4, #5, #6, #7** untouched. Recovery by this route changes no identity
-  key, so contacts see nothing.
+- **#1** holds: a hash for recovery, the address never stored.
+- **#2** gains the exception of section 2, limited to accounts without a
+  saved phrase.
+- **#3** untouched (no `lakko-mls` change). **#6** holds: saving a phrase
+  is a proven rotation.
+- **#4, #5, #7** untouched.
+
+A gap entry is to be minted in `docs/security/known-gaps.md` when this is
+built, naming the exception and its two adversaries.
 
 ## Alternatives considered
 
-- **A recovery file sealed by the password and mailed by the person to
-  themselves.** Keeps the server out entirely; the maintainer rejected it as
-  unusable for ordinary people.
-- **Mail as a notification channel.** Rejected by the maintainer: the server
-  would hold the address at all times.
-- **A hash of the address alone.** Lets the server (or a leak plus the
-  pepper) test an address against every account at once and link accounts
-  that share one. D1 binds it to the username instead.
-- **The code also resets the keys.** One step instead of two for a person
-  who lost everything, and for an attacker. D2 keeps them apart.
-- **Hashing on the client.** The server must see the address to send the
-  letter, so it would hide nothing.
+- **A recovery file the person mails to themselves.** No server trust; the
+  maintainer rejected it as unusable.
+- **Mail as a notification channel.** Rejected: the server would hold the
+  address.
+- **A mailed code that only resets the keys for everyone.** No exception to
+  #2, but a person without a phrase loses contacts, folders and group state
+  on every lost phone; the maintainer rejected that.
+- **Sealing the vault under the password as well.** The route exists for a
+  forgotten password.
+- **An OPRF-derived vault key.** Rate-limits guessing, but the operator
+  evaluates its own OPRF and sees the address, so it does not remove the
+  exception.
+- **Keeping the same keys when a phrase is saved.** Leaves every earlier
+  copy of the vault valid.
 
 ## Sprint plan
 
-1. `services/auth`: migrations, the two tables and the notices table, the
-   routes, limits, the sender trait with the log-only sender, DB-gated
-   tests (enumeration: a match and a miss are indistinguishable in body and
-   status; the anchor is captured; TOTP cannot be skipped).
-2. SMTP sender and letter templates; infra configuration.
-3. Web, iOS and Android per UX section 19, in one pass.
-4. `lakko-security` on request (it touches auth and a new anonymous route).
+1. Core: the email-vault seal / open in `lakko-mnemonic`, FFI, fuzz of the
+   open path; Argon2id parameters measured on the three platforms.
+2. `services/auth`: migrations, enrol / recover / open / password routes,
+   notices, limits, log-only sender; the recall anchor's recovery envelope
+   and the phrase arm; DB-gated tests (a match and a miss are
+   indistinguishable; the vault leaves only after the code and TOTP; the
+   anchor is captured).
+3. SMTP sender, letter templates, infra configuration.
+4. Web, iOS and Android per UX section 19, in one pass, including sign-up
+   without the phrase and "Save a recovery phrase" over rotation.
+5. `lakko-security` on request; the invariant wording and the gap entry.
 
 ## References
 
-- ADR-0054 (login handle, stand-in accounts, limits), ADR-0064, ADR-0065
-  (fresh-auth grant), ADR-0066 (recall anchor).
+ADR-0017, ADR-0049 (the passkey vault's blob shape), ADR-0054 (login handle,
+stand-ins, limits), ADR-0064, ADR-0065 (fresh-auth grant, key reset),
+ADR-0066 (recall anchor, rotation).
