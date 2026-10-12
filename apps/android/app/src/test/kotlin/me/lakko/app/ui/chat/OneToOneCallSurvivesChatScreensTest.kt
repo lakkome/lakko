@@ -4,7 +4,6 @@
 package me.lakko.app.ui.chat
 
 import me.lakko.app.l10n.en
-import androidx.lifecycle.ViewModelStore
 import java.time.Instant
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -57,6 +56,7 @@ class OneToOneCallSurvivesChatScreensTest {
     fun `a call rings for chat A while chat B is open, and survives both chats being torn down`() = runTest {
         Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
         val repo = ChatRepository(applicationContext = InMemoryContext())
+        val chats = OpenChats()
         try {
             val now = System.currentTimeMillis()
             val port = OneToOneCallHostTest.FakePort()
@@ -70,12 +70,9 @@ class OneToOneCallSurvivesChatScreensTest {
             host.setForeground(true)
             repo.oneToOneCallInbound = host::deliver
 
-            val store = ViewModelStore()
-            val vmA = ChatViewModel(repo = repo, groupIdHex = groupA, callHost = host)
-            store.put("chat-$groupA", vmA)
+            val vmA = chats.open(ChatViewModel(repo = repo, groupIdHex = groupA, callHost = host))
             // Chat B opened after A — under the old slot, B now owned signaling.
-            val vmB = ChatViewModel(repo = repo, groupIdHex = groupB, callHost = host)
-            store.put("chat-$groupB", vmB)
+            val vmB = chats.open(ChatViewModel(repo = repo, groupIdHex = groupB, callHost = host))
 
             repo.routeParsedCallSignaling(
                 groupA,
@@ -94,7 +91,7 @@ class OneToOneCallSurvivesChatScreensTest {
             assertSame(ringing, vmB.oneToOneCall.value)
 
             // Leaving both chats destroys their view models: the call is untouched.
-            store.clear()
+            chats.leaveAll()
             runCurrent()
             assertSame(ringing, host.active.value)
             assertEquals(CallSession.WebCallState.Ringing, ringing.session.state.value)
@@ -102,13 +99,16 @@ class OneToOneCallSurvivesChatScreensTest {
             assertTrue(host.hasCall)
 
             // A chat opened afterwards cannot start a second call over it.
-            val vmC = ChatViewModel(repo = repo, groupIdHex = groupB, callHost = host)
+            val vmC = chats.open(ChatViewModel(repo = repo, groupIdHex = groupB, callHost = host))
             vmC.startCall()
             runCurrent()
             assertEquals(1, port.created.size)
             assertEquals("Another call is in progress.", vmC.callNotice.value?.en)
             assertFalse(host.startOutgoing(groupB))
         } finally {
+            // Before `resetMain` (see [OpenChats]): all three view models have
+            // collectors on a real thread that resume through Main.
+            chats.leaveAllAndSettle()
             repo.close()
             Dispatchers.resetMain()
         }

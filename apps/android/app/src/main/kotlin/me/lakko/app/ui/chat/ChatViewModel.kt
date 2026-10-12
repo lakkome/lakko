@@ -1067,6 +1067,12 @@ public class ChatViewModel(
      * reason, not about hiding every error.
      */
     private fun reportMembershipFailure(e: Throwable, op: String, fallbackKey: String) {
+        // The screen going away cancels whatever a handler had in flight. That
+        // is not a failure of the request and not something to report (the
+        // retry path above says the same): every handler funnels its
+        // `catch (e: Throwable)` through here, so the cancellation is passed
+        // on from here, once, and the handler's `finally` still runs.
+        if (e is kotlinx.coroutines.CancellationException) throw e
         // ADR-0061 section 6: the reason, the token pool or the device clock
         // pick the sentence; anything else is the action's own key. The raw
         // message stays in the log, for the people it was written for.

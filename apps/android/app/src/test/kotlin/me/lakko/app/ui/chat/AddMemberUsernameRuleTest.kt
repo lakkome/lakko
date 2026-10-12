@@ -14,6 +14,8 @@ import kotlinx.coroutines.test.setMain
 import me.lakko.app.chat.ChatRepository
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import uniffi.lakko_ffi_uniffi.FfiException
@@ -55,15 +57,18 @@ class AddMemberUsernameRuleTest {
     fun `an invalid username shows the reason and is never looked up`() {
         val lookups = mutableListOf<String>()
         val repo = ChatRepository(applicationContext = RuleTestContext())
+        val chats = OpenChats()
         try {
-            val vm = ChatViewModel(
-                repo = repo,
-                groupIdHex = "00".repeat(16),
-                resolveRecipient = { name ->
-                    lookups += name
-                    awaitCancellation()
-                },
-                validateUsername = ::fakeValidate,
+            val vm = chats.open(
+                ChatViewModel(
+                    repo = repo,
+                    groupIdHex = "00".repeat(16),
+                    resolveRecipient = { name ->
+                        lookups += name
+                        awaitCancellation()
+                    },
+                    validateUsername = ::fakeValidate,
+                ),
             )
             vm.setAddMemberInput("pa-vel")
             vm.onAddMember()
@@ -86,7 +91,17 @@ class AddMemberUsernameRuleTest {
             vm.setAddMemberInput(" @Alice ")
             vm.onAddMember()
             assertEquals(listOf("alice"), lookups)
+
+            // That lookup never answers. Leaving the screen cancels it, and a
+            // cancelled lookup is not a failed one: no error is reported for
+            // it, and the handler still lets go of its busy flag.
+            chats.leaveAllAndSettle()
+            assertNull(vm.membershipError.value)
+            assertFalse(vm.membershipBusy.value)
         } finally {
+            // Before `resetMain` (see [OpenChats]): the constructor's
+            // collectors are on a real thread and resume through Main.
+            chats.leaveAllAndSettle()
             repo.close()
         }
     }

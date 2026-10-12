@@ -71,8 +71,9 @@ class ChatViewModelConstructionTest {
         val previousHandler = thread.uncaughtExceptionHandler
         thread.uncaughtExceptionHandler = Thread.UncaughtExceptionHandler { _, e -> uncaught += e }
         val repo = ChatRepository(applicationContext = InMemoryContext())
+        val chats = OpenChats()
         try {
-            val vm = ChatViewModel(repo = repo, groupIdHex = "00".repeat(16))
+            val vm = chats.open(ChatViewModel(repo = repo, groupIdHex = "00".repeat(16)))
 
             assertEquals(
                 "a collector started in the constructor threw: " +
@@ -85,6 +86,9 @@ class ChatViewModelConstructionTest {
             assertNull(vm.callOccupant.value)
             assertNull(vm.joinableGroupCall.value)
         } finally {
+            // Before `resetMain` (see [OpenChats]): the collectors this test
+            // is about hop to a real thread and resume through Main.
+            chats.leaveAllAndSettle()
             thread.uncaughtExceptionHandler = previousHandler
             repo.close()
         }
