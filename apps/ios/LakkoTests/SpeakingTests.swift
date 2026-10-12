@@ -4,8 +4,8 @@
 import XCTest
 @testable import Lakko
 
-/// `docs/ux/group-call-grid.md` sections 5.2 and 7.3 — who is speaking. The
-/// same list as the web `speaking.test.ts`, with the same four numbers.
+/// `docs/ux/group-call-grid.md` sections 5.2 and 7.3: who is speaking. The
+/// same list as the web `speaking.test.ts`, with the same numbers.
 final class SpeakingTrackerTests: XCTestCase {
 
     private let loud = Speaking.level * 5
@@ -22,8 +22,14 @@ final class SpeakingTrackerTests: XCTestCase {
         }
     }
 
-    func testTheFourNumbersAreTheWebClients() {
+    func testTheNumbersAreTheWebClients() {
         XCTAssertEqual(Speaking.level, 0.02)
+        XCTAssertEqual(Speaking.speechOverNoise, 3)
+        XCTAssertEqual(Speaking.levelMin, 0.005)
+        XCTAssertEqual(Speaking.levelMax, 0.05)
+        XCTAssertEqual(Speaking.noiseRisePerSecond, 1.1)
+        XCTAssertEqual(Speaking.noiseFallPerSample, 0.5)
+        XCTAssertEqual(Speaking.noiseEvidenceMin, 1e-4)
         XCTAssertEqual(Speaking.ringOnMs, 200)
         XCTAssertEqual(Speaking.ringOffMs, 800)
         XCTAssertEqual(Speaking.floorOnsetMs, 1_500)
@@ -170,6 +176,226 @@ final class SpeakingTrackerTests: XCTestCase {
         XCTAssertNil(snap.activeSpeakerId)
         XCTAssertNil(snap.lastSpokeAtMs["a"])
         XCTAssertTrue(snap.speakingIds.isEmpty)
+    }
+}
+
+/// What counts as sound: a level well above the person's own noise floor
+/// (``NoiseGate``). The same list as the web `speaking.test.ts`.
+final class NoiseGateTests: XCTestCase {
+
+    /// Feed one level every `step` ms for `ms`, starting at `from`.
+    @discardableResult
+    private func hold(
+        _ gate: inout NoiseGate, _ level: Double, from: UInt64, ms: UInt64, step: UInt64 = 100
+    ) -> UInt64 {
+        var now = from
+        while now < from + ms {
+            gate.update(level, nowMs: now)
+            now += step
+        }
+        return now
+    }
+
+    func testItStartsAtTheFixedLevelBeforeAnythingIsKnown() {
+        XCTAssertEqual(NoiseGate().threshold, Speaking.level, accuracy: 1e-9)
+        XCTAssertEqual(SpeakingTracker().threshold(of: "nobody"), Speaking.level)
+    }
+
+    func testItFollowsAQuietRoomDownToABound() {
+        var gate = NoiseGate()
+        hold(&gate, 0.002, from: 0, ms: 1_000)
+        XCTAssertEqual(gate.threshold, 0.002 * Speaking.speechOverNoise, accuracy: 1e-9)
+        hold(&gate, 0.0002, from: 1_000, ms: 2_000)
+        XCTAssertEqual(gate.threshold, Speaking.levelMin)
+    }
+
+    func testOneTornReadingDoesNotEmptyTheFloor() {
+        var gate = NoiseGate()
+        hold(&gate, 0.006, from: 0, ms: 1_000)
+        let before = gate.threshold
+        gate.update(0.0002, nowMs: 1_000)
+        XCTAssertEqual(gate.threshold, before / 2, accuracy: 1e-9)
+    }
+
+    func testItLearnsNothingFromDigitalSilenceOrFromAReadingThatIsNotANumber() {
+        var gate = NoiseGate()
+        hold(&gate, 0.01, from: 0, ms: 20_000)
+        let before = gate.threshold
+        hold(&gate, 0, from: 20_000, ms: 5_000)
+        hold(&gate, Speaking.noiseEvidenceMin / 2, from: 25_000, ms: 5_000)
+        gate.update(.nan, nowMs: 30_000)
+        gate.update(.infinity, nowMs: 30_100)
+        XCTAssertEqual(gate.threshold, before)
+    }
+
+    func testItClimbsSlowlyTowardsSteadySoundAndNeverPastTheBoundOrTheSoundItself() {
+        var gate = NoiseGate()
+        // Three seconds of speech barely move it.
+        hold(&gate, 0.2, from: 0, ms: 3_000)
+        XCTAssertLessThan(gate.threshold, Speaking.level * 1.4)
+        // A minute of the same steady sound stops at the bound.
+        hold(&gate, 0.2, from: 3_000, ms: 60_000)
+        XCTAssertEqual(gate.threshold, Speaking.levelMax)
+        // A steady hum settles the floor at the hum, not above it.
+        var hum = NoiseGate()
+        hold(&hum, 0.01, from: 0, ms: 60_000)
+        XCTAssertEqual(hum.threshold, 0.01 * Speaking.speechOverNoise, accuracy: 1e-9)
+    }
+
+    func testALongGapBetweenReadingsIsNotALongRise() {
+        var gate = NoiseGate()
+        gate.update(0.2, nowMs: 0)
+        gate.update(0.2, nowMs: 3_600_000)
+        XCTAssertLessThan(gate.threshold, Speaking.level * 1.2)
+    }
+
+    /// A clock that steps back counts as no time passed, never as a fall.
+    func testAClockThatGoesBackChangesNothing() {
+        var gate = NoiseGate()
+        gate.update(0.2, nowMs: 5_000)
+        let before = gate.threshold
+        gate.update(0.2, nowMs: 1_000)
+        XCTAssertEqual(gate.threshold, before)
+    }
+
+    /// The rise is a rule per second, so it is the same whether readings
+    /// come every 100 ms (the web client) or every 150 ms (this one).
+    func testTheRiseDoesNotDependOnHowOftenALevelIsRead() {
+        var web = NoiseGate()
+        var ios = NoiseGate()
+        hold(&web, 0.2, from: 0, ms: 3_001, step: 100)
+        hold(&ios, 0.2, from: 0, ms: 3_001, step: GroupSpeakingMonitor.sampleIntervalMs)
+        XCTAssertEqual(web.threshold, ios.threshold, accuracy: 1e-9)
+    }
+
+    /// The fall is a rule per reading: a floor well above the room halves at
+    /// every reading, whatever the time between two of them.
+    /// The fall is per unit of time, so this client's 150 ms readings and
+    /// the web client's 100 ms readings let the floor fall alike.
+    func testTheFallIsPerUnitOfTime() {
+        var gate = NoiseGate()
+        // Long enough for the floor to reach the level itself.
+        hold(&gate, 0.016, from: 0, ms: 20_000)
+        let learned = gate.threshold
+        XCTAssertEqual(learned, 0.048, accuracy: 1e-9)
+        // 100 ms after the last reading: one web reading, a half.
+        gate.update(0.001, nowMs: 20_000)
+        XCTAssertEqual(gate.threshold, learned / 2, accuracy: 1e-9)
+        // 150 ms later: one and a half web readings.
+        gate.update(0.001, nowMs: 20_000 + GroupSpeakingMonitor.sampleIntervalMs)
+        XCTAssertEqual(gate.threshold, learned / 2 * pow(0.5, 1.5), accuracy: 1e-9)
+    }
+
+    /// Two readings at one instant: no time passed, nothing falls.
+    func testNoTimeNoFall() {
+        var gate = NoiseGate()
+        hold(&gate, 0.016, from: 0, ms: 20_000)
+        gate.update(0.001, nowMs: 20_000)
+        let after = gate.threshold
+        gate.update(0.001, nowMs: 20_000)
+        XCTAssertEqual(gate.threshold, after, accuracy: 1e-9)
+    }
+}
+
+/// One scale for a loud room and a quiet microphone: the tracker over the
+/// noise gate. The same list as the web `speaking.test.ts`.
+final class SpeakingOverNoiseTests: XCTestCase {
+
+    private let order = ["a", "b"]
+
+    /// Speech as a call delivers it: syllables around `level`, never steady.
+    private func talk(
+        _ t: inout SpeakingTracker, _ id: String, _ level: Double, from: UInt64, ms: UInt64
+    ) -> UInt64 {
+        var now = from
+        var i = 0
+        while now < from + ms {
+            t.sample(id, level: level * (i % 3 == 0 ? 0.6 : 1), nowMs: now)
+            now += 100
+            i += 1
+        }
+        return now
+    }
+
+    private func speaking(_ t: inout SpeakingTracker, _ now: UInt64) -> Bool {
+        t.snapshot(candidates: order, nowMs: now).speakingIds.contains("a")
+    }
+
+    /// The 2026-10-11 call: a phone whose speech peaked at 0.03 to 0.05.
+    func testSpeechAtThreeHundredthsOverAQuietRoomDrawsTheRing() {
+        var t = SpeakingTracker()
+        var now: UInt64 = 0
+        while now < 3_000 {
+            t.sample("a", level: 0.002, nowMs: now)
+            now += 100
+        }
+        XCTAssertFalse(speaking(&t, now))
+        // 0.6 * 0.03 = 0.018 is under the old fixed 0.02 every third reading.
+        now = talk(&t, "a", 0.03, from: now, ms: Speaking.floorOnsetMs + 500)
+        let snap = t.snapshot(candidates: order, nowMs: now)
+        XCTAssertTrue(snap.speakingIds.contains("a"))
+        XCTAssertEqual(snap.activeSpeakerId, "a")
+    }
+
+    func testARoomThatIdlesBelowTheStartLevelDrawsNoRingAndSpeechOverItDoes() {
+        var t = SpeakingTracker()
+        var now: UInt64 = 0
+        while now < 10_000 {
+            t.sample("a", level: 0.015, nowMs: now)
+            XCTAssertFalse(speaking(&t, now))
+            now += 100
+        }
+        now = talk(&t, "a", 0.15, from: now, ms: 1_000)
+        XCTAssertTrue(speaking(&t, now))
+    }
+
+    func testASteadyNoiseThatCameOnStopsCountingWithinSeconds() {
+        var t = SpeakingTracker()
+        var now: UInt64 = 0
+        while now < 1_000 {
+            t.sample("a", level: 0.03, nowMs: now)
+            now += 100
+        }
+        XCTAssertTrue(speaking(&t, now))
+        while now < 7_000 {
+            t.sample("a", level: 0.03, nowMs: now)
+            now += 100
+        }
+        XCTAssertFalse(speaking(&t, now))
+    }
+
+    func testWhatWasLearnedAboutTheRoomIsKeptAcrossAMute() {
+        var t = SpeakingTracker()
+        var now: UInt64 = 0
+        while now < 3_000 {
+            t.sample("a", level: 0.002, nowMs: now)
+            now += 100
+        }
+        let learned = t.threshold(of: "a")
+        XCTAssertLessThan(learned, Speaking.level)
+        t.silence("a")
+        XCTAssertEqual(t.threshold(of: "a"), learned)
+    }
+
+    /// A level that could not be read is silence for the ring and teaches
+    /// the noise floor nothing.
+    func testAMissingReadingIsSilenceAndTeachesNothing() {
+        var t = SpeakingTracker()
+        let loud = Speaking.level * 5
+        var now: UInt64 = 0
+        while now <= 500 {
+            t.sample("a", level: loud, nowMs: now)
+            now += 100
+        }
+        XCTAssertTrue(speaking(&t, 500))
+        let before = t.threshold(of: "a")
+        now = 600
+        while now <= 600 + Speaking.ringOffMs {
+            t.sample("a", level: nil, nowMs: now)
+            now += 100
+        }
+        XCTAssertFalse(speaking(&t, 600 + Speaking.ringOffMs))
+        XCTAssertEqual(t.threshold(of: "a"), before)
     }
 }
 
@@ -387,6 +613,27 @@ final class GroupSpeakingMonitorTests: XCTestCase {
         monitor.ingest(gone, nowMs: Speaking.ringOnMs + 150)
         monitor.ingest(gone, nowMs: Speaking.ringOnMs + 150 + Speaking.ringOffMs)
         XCTAssertEqual(speaking(state), [])
+    }
+
+    /// A person the report carries no level for teaches their noise floor
+    /// nothing, and a muted one keeps what was learned.
+    func testAMissingLevelIsNotAQuietRoom() {
+        let state = CallUiState()
+        state.setParticipants([tile("local", isLocal: true), tile("peer-a")])
+        let monitor = GroupSpeakingMonitor(ui: state)
+        for now in stride(from: UInt64(0), through: 3_000, by: 150) {
+            monitor.ingest(.none, nowMs: now)
+        }
+        XCTAssertEqual(monitor.threshold(ofParticipant: "peer-a"), Speaking.level)
+        XCTAssertEqual(monitor.threshold(ofParticipant: "local"), Speaking.level)
+        // A quiet room, read: the threshold follows it down.
+        let quiet = CallAudioLevels(local: 0.002, remoteByPeerId: ["a": 0.002])
+        for now in stride(from: UInt64(3_150), through: 6_000, by: 150) {
+            monitor.ingest(quiet, nowMs: now)
+        }
+        XCTAssertEqual(
+            monitor.threshold(ofParticipant: "peer-a"), 0.002 * Speaking.speechOverNoise,
+            accuracy: 1e-9)
     }
 
     func testStoppingClearsEveryRing() {

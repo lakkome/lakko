@@ -234,7 +234,10 @@ enum CallMediaCounters {
     /// the size and frame rate it sends, the bitrate over the interval since
     /// `before` (`-` without an earlier reading or an elapsed time), and,
     /// where `activityOf` answers, the SFU's last word for it and whether its
-    /// encoding is asked to be active: `needed=yes|no|- active=yes|no`.
+    /// encoding is asked to be active: `needed=yes|no|- active=yes|no`. When
+    /// `ceilingOf` is given (``PublishBudgetRule``: the bitrate ceiling the
+    /// sender's encoding holds, bits a second, `nil` for none) every line
+    /// ends with `ceiling=N` in kbit/s, or `ceiling=-`.
     ///
     /// A sender named in `existing` that the report carries no stream for
     /// (an inactive encoding may report none) still has its line, all
@@ -246,7 +249,8 @@ enum CallMediaCounters {
         now: CallMediaReading,
         elapsedMs: UInt64 = 0,
         activityOf: (CameraSenderKind) -> OutboundActivity? = { _ in nil },
-        existing: [CameraSenderKind] = []
+        existing: [CameraSenderKind] = [],
+        ceilingOf: ((CameraSenderKind) -> Int?)? = nil
     ) -> [String] {
         var senders = now.outbound
         for kind in CameraSenderKind.allCases
@@ -274,6 +278,9 @@ enum CallMediaCounters {
                 + " kbps=\(kbps) sender=\(out.sender?.rawValue ?? "-")"
                 + (activity.map {
                     SenderActivityRule.describe(needed: $0.needed, active: $0.active)
+                } ?? "")
+                + (ceilingOf.map { ceilingOf in
+                    PublishBudgetRule.describeSenderCeiling(out.sender.flatMap(ceilingOf))
                 } ?? "")
         }
     }

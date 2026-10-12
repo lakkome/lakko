@@ -79,14 +79,28 @@ enum CallAudioLevelStats {
 /// The levels come from the peer connection's statistics, read about seven
 /// times a second: each other person's from the `audioLevel` of the
 /// `inbound-rtp` stream of the receiver that decodes their audio, this
-/// device's own from its audio `media-source`. This binding offers a receiver
-/// no synchronization sources and the app no decoded samples, so the
-/// statistics are the one source there is; the web client's other two are
-/// absent here.
+/// device's own from its audio `media-source`. The web client measures with
+/// an analyser on the played (or captured) stream first and with the energy
+/// counters of the receiver's statistics second; the app gets no decoded
+/// samples from this binding, so the statistics are the one source here.
+/// Like the web client, it never lets a level the sender wrote into the
+/// packet header (a receiver's synchronization sources) decide anything.
 ///
-/// A person the report carries no level for is sampled as silence: no ring is
-/// drawn and the large tile falls back to the roster order, which is the call
-/// as it was before this existed. A muted person's level is not read at all.
+/// A person the report carries no level for is sampled as "could not be
+/// read": it counts as silence for the ring (none is drawn, and the large
+/// tile falls back to the roster order) and teaches that person's noise
+/// floor nothing. A muted person's level is not read at all.
+///
+/// What counts as sound follows each person's own noise floor
+/// (``NoiseGate``), with the web client's constants. The level itself is not
+/// the web client's: the statistics' `audioLevel` is whatever window the
+/// engine keeps (the web client notes libwebrtc reports a decaying peak, not
+/// a root mean square, and does not let it decide there). Here it is the
+/// only source, so the threshold follows the floor of that same instrument.
+/// The floor's fall is bounded per reading, and a reading here is every
+/// 150 ms against the web client's 100 ms, so the floor follows a room that
+/// went quiet in half as many more milliseconds; the rise is per second and
+/// is the same.
 ///
 /// Group calls only: a one-to-one has one voice.
 @MainActor
@@ -154,8 +168,9 @@ final class GroupSpeakingMonitor {
     /// A muted person is never speaking: their level is not read at all
     /// while their microphone is off, this device's own included (a muted
     /// microphone still measures the room). A person the report carried no
-    /// level for is sampled as silence, as on the web client, so a ring whose
-    /// source went away goes off instead of standing.
+    /// level for is sampled with no level, as on the web client: silence for
+    /// the ring, so one whose source went away goes off instead of standing,
+    /// and nothing for the noise floor.
     ///
     /// This device's own person is sampled for its ring and is never a
     /// candidate for the floor (``SpeakingTracker/snapshot(candidates:nowMs:)``).
@@ -179,7 +194,7 @@ final class GroupSpeakingMonitor {
             note.measured = level != nil
             if let level { note.peak = max(note.peak ?? 0, level) }
             report[person.id] = note
-            tracker.sample(person.id, level: level ?? 0, nowMs: nowMs)
+            tracker.sample(person.id, level: level, nowMs: nowMs)
         }
         let candidates = people.filter { !$0.isLocal }.map(\.id)
         let snapshot = tracker.snapshot(candidates: candidates, nowMs: nowMs)
@@ -204,7 +219,8 @@ final class GroupSpeakingMonitor {
             return VoiceReport(
                 id: person.id, isLocal: person.isLocal,
                 path: note?.measured == true ? .statsLevel : .none,
-                peak: note?.peak, speaking: note?.speaking ?? false)
+                peak: note?.peak, speaking: note?.speaking ?? false,
+                threshold: tracker.threshold(of: person.id))
         }
         report = [:]
         let layout = GroupCallLayout.kind(
@@ -223,6 +239,11 @@ final class GroupSpeakingMonitor {
             VoiceDiagnostics.describe(
                 "call media interval", voices: voices, floorId: floorId, stage: stage,
                 layout: layout))
+    }
+
+    /// The level that counts as sound for a person of the roster now.
+    func threshold(ofParticipant id: String) -> Double {
+        tracker.threshold(of: id)
     }
 
     /// The SFU peer id behind a roster id (`"peer-<peerId>"`).

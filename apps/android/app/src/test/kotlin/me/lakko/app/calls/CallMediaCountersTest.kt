@@ -4,6 +4,7 @@
 package me.lakko.app.calls
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -384,5 +385,49 @@ class CallMediaCountersTest {
         assertEquals("video/VP8", readSender(stats, senderByTrackId = trackIds)!!.videoCodec)
         // By the mid alone the first entry would have been taken for main.
         assertEquals("video/H264", readSender(stats)!!.videoCodec)
+    }
+
+    @Test
+    fun `a send video line ends with the ceiling its encoding holds, when given one`() {
+        val out = OutboundVideo(
+            sender = CameraSenderKind.MAIN,
+            scalabilityMode = "L1T3",
+            qualityLimitationReason = "none",
+            frameWidth = 1280.0,
+            frameHeight = 720.0,
+            framesPerSecond = 30.0,
+            bytesSent = 0.0,
+        )
+        val label = MEDIA_COUNTERS_INTERVAL_LABEL
+        assertFalse(describeOutbound(label, out).contains("ceiling="))
+        assertTrue(
+            describeOutbound(label, out, ceiling = SenderCeilingNote(1_200_000)).endsWith(" sender=main ceiling=1200"),
+        )
+        assertTrue(describeOutbound(label, out, ceiling = SenderCeilingNote(null)).endsWith(" sender=main ceiling=-"))
+        assertTrue(
+            describeOutbound(
+                label,
+                out,
+                SenderActivityNote(needed = true, active = true),
+                ceiling = SenderCeilingNote(483_999),
+            ).endsWith(" sender=main needed=yes active=yes ceiling=483"),
+        )
+        // A sender the report has no stream for still says its ceiling.
+        assertEquals(
+            listOf(
+                "$label send video mode=- size=- fps=- kbps=- limited_by=- sender=main needed=- active=yes ceiling=-",
+                "$label send video mode=- size=- fps=- kbps=- limited_by=- sender=light needed=- active=yes" +
+                    " ceiling=150",
+            ),
+            describeOutboundSenders(
+                label,
+                emptyList(),
+                activityOf = { SenderActivityNote(needed = null, active = true) },
+                existing = listOf(CameraSenderKind.MAIN, CameraSenderKind.LIGHT),
+                ceilingOf = { kind ->
+                    SenderCeilingNote(if (kind == CameraSenderKind.LIGHT) CAMERA_LIGHT_MAX_BITRATE_BPS else null)
+                },
+            ),
+        )
     }
 }

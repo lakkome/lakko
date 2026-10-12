@@ -22,6 +22,9 @@ struct VoiceReport: Equatable {
     let peak: Double?
     /// Whether the person counted as speaking at any reading of the interval.
     let speaking: Bool
+    /// The level that counts as sound for this person at the end of the
+    /// interval (``NoiseGate``).
+    let threshold: Double
 }
 
 /// Why a person is on the large tile; the order of the shared rule.
@@ -42,8 +45,20 @@ enum StageReason: String, Equatable {
 /// measured (`none`), measured below the threshold (a small peak, `no`), or
 /// measured and outranked (a pin, or a floor someone else holds).
 ///
+/// One person reads, for example, `a=stats-level:0.031:yes[thr=0.012]`: the
+/// path the ring was decided from, the loudest level on it over the
+/// interval, whether the ring was on, then the threshold in force. The web
+/// line's bracket also carries the raw value of every path it tried; this
+/// client has the one path, so the bracket holds the threshold alone.
+///
 /// Diagnostics only, on this device only; it decides nothing. Pure.
 enum VoiceDiagnostics {
+
+    /// A level in the line: three decimals, since speech on a quiet
+    /// microphone sits at a few hundredths; nothing read is a dash.
+    static func amount(_ level: Double?) -> String {
+        level.map { String(format: "%.3f", $0) } ?? "-"
+    }
 
     /// The short name of a person in the line: the SFU peer id, `me` for
     /// this device. Never a display name.
@@ -77,9 +92,9 @@ enum VoiceDiagnostics {
             label(id, isLocal: voices.first(where: { $0.id == id })?.isLocal == true)
         }
         let people = voices.map { voice -> String in
-            let peak = voice.peak.map { String(format: "%.2f", $0) } ?? "-"
             return "\(label(voice.id, isLocal: voice.isLocal))=\(voice.path.rawValue)"
-                + ":\(peak):\(voice.speaking ? "yes" : "no")"
+                + ":\(amount(voice.peak)):\(voice.speaking ? "yes" : "no")"
+                + "[thr=\(amount(voice.threshold))]"
         }
         let parts = ["\(prefix) voices"] + people + [
             "floor=\(floorId.map(labelOf) ?? "-")",

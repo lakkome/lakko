@@ -249,6 +249,13 @@ class SpeakingMonitorTest {
         h.feed(levels, 1_200, 1_200)
         val (voices, floorId) = h.reports.single()
         assertNull(floorId)
+        // The threshold in force for each person: the muted one was never
+        // read and keeps the start value; the two others' floors climbed for
+        // 1.2 s from the start value, neither as far as its own level.
+        val climbed = SPEAKING_LEVEL * Math.pow(NOISE_RISE_PER_SECOND, 1.2)
+        assertEquals(SPEAKING_LEVEL, voices[0].threshold, 0.0)
+        assertEquals(climbed, voices[1].threshold, 1e-9)
+        assertEquals(climbed, voices[2].threshold, 1e-9)
         assertEquals(
             listOf(
                 // Muted: not read at all.
@@ -256,7 +263,7 @@ class SpeakingMonitorTest {
                 VoiceReport("peer-a", isLocal = false, path = LevelPath.STATS_ENERGY, peak = loud, speaking = true),
                 VoiceReport("peer-b", isLocal = false, path = LevelPath.STATS_LEVEL, peak = 0.01, speaking = false),
             ),
-            voices,
+            voices.map { it.copy(threshold = SPEAKING_LEVEL) },
         )
         // The next report starts from nothing and names the floor.
         h.feed(levels, 1_300, 2_500)

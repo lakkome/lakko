@@ -76,6 +76,12 @@ interface SfuSignalingCallbacks {
      *  (ADR-0070, "senders nobody watches"): the whole state each time. */
     fun onVideoNeeded(main: Boolean, middle: Boolean) {}
 
+    /** The ceiling of this device's main and middle camera sender, kbit/s
+     *  (ADR-0068, the publish budget): the whole state each time, the last
+     *  frame wins. As the shared parser read them; `PublishBudget.kt` checks
+     *  the bounds again. */
+    fun onPublishBudget(mainKbps: Long, middleKbps: Long) {}
+
     /** Server reported a protocol-level error. */
     fun onServerError(code: SfuErrorCode, detail: String) {}
 
@@ -284,6 +290,8 @@ class SfuSignalingClient(
             is SfuServerFrame.Error -> callbacks.onServerError(frame.code, frame.detail)
             is SfuServerFrame.VideoGiven -> callbacks.onVideoGiven(frame.given)
             is SfuServerFrame.VideoNeeded -> callbacks.onVideoNeeded(frame.main, frame.middle)
+            is SfuServerFrame.PublishBudget ->
+                callbacks.onPublishBudget(frame.mainKbps.toLong(), frame.middleKbps.toLong())
         }
     }
 

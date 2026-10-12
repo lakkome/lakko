@@ -642,14 +642,12 @@ public final class WebRTCPeerConnection: NSObject {
     private func configureMainCameraSender(_ sender: RTCRtpSender) {
         let asked = CameraSender.mainTemporalLayers
         let framerate = NSNumber(value: RTCDegradationPreference.maintainFramerate.rawValue)
-        Self.libwebrtcQueue.async {
-            let parameters = sender.parameters
+        SenderParameterWrites.enqueue(sender, on: Self.libwebrtcQueue) { parameters, set in
             if let first = parameters.encodings.first {
                 first.numTemporalLayers = NSNumber(value: asked)
             }
             parameters.degradationPreference = framerate
-            sender.parameters = parameters
-            let kept = sender.parameters.encodings.first?.numTemporalLayers?.intValue
+            let kept = set(parameters).encodings.first?.numTemporalLayers?.intValue
             NSLog(
                 "WebRTCPeerConnection: %@",
                 CameraSender.temporalLayersLine(asked: asked, kept: kept))
@@ -724,9 +722,14 @@ public final class WebRTCPeerConnection: NSObject {
     /// is the only answer. `false` when the sender has no encoding or does
     /// not hold what was asked.
     ///
-    /// Made on the calling thread, unlike the other parameter writes here:
-    /// the caller must know the answer before SFrame is armed and an offer is
-    /// built, and it runs only on the fallback path.
+    /// Made on the calling thread, the one parameter write that does not go
+    /// through ``SenderParameterWrites``: the caller must know the answer
+    /// before SFrame is armed and an offer is built, and waiting for the
+    /// queue from the main thread is the deadlock ``libwebrtcQueue`` exists
+    /// to avoid. It cannot overlap another write of the same sender: the
+    /// sender was created earlier in this same main-actor turn, and every
+    /// other writer (its frame-rate preference, its activity, its ceiling) is
+    /// asked from the main actor after this returns.
     private func configureCameraCopy(_ sender: RTCRtpSender, wanted: CameraEncodingSpec) -> Bool {
         let parameters = sender.parameters
         guard let first = parameters.encodings.first else { return false }
@@ -801,16 +804,55 @@ public final class WebRTCPeerConnection: NSObject {
 
     private var activitySenders: [CameraSenderKind: RtcActivitySender] = [:]
 
+    /// A camera sender as ``SenderCeiling`` drives it: its first encoding's
+    /// `maxBitrateBps`, read and set off the main thread. `nil` without that
+    /// sender. The same object for the same sender, so a re-bind of an
+    /// unchanged sender is recognised as such, and a new object for a sender
+    /// created again, which then gets the ceiling in force.
+    func cameraCeilingSender(_ kind: CameraSenderKind) -> RtcCeilingSender? {
+        guard let sender = cameraSender(kind) else {
+            ceilingSenders[kind] = nil
+            return nil
+        }
+        if let held = ceilingSenders[kind], held.sender === sender { return held }
+        let made = RtcCeilingSender(sender: sender, queue: Self.libwebrtcQueue)
+        ceilingSenders[kind] = made
+        return made
+    }
+
+    private var ceilingSenders: [CameraSenderKind: RtcCeilingSender] = [:]
+
+    /// The bitrate ceiling each existing camera sender's encoding holds now,
+    /// bits a second, for the media log; `nil` as a value when the encoding
+    /// holds none. A sender this connection does not have is absent. Read on
+    /// the queue the writes run on, so it is what the last write left.
+    func cameraSenderCeilings() async -> [CameraSenderKind: Int?] {
+        var senders: [(kind: CameraSenderKind, sender: RTCRtpSender)] = []
+        for kind in CameraSenderKind.allCases {
+            if let sender = cameraSender(kind) { senders.append((kind, sender)) }
+        }
+        if senders.isEmpty { return [:] }
+        return await withCheckedContinuation { continuation in
+            Self.libwebrtcQueue.async {
+                var out: [CameraSenderKind: Int?] = [:]
+                for entry in senders {
+                    out[entry.kind] = .some(
+                        entry.sender.parameters.encodings.first?.maxBitrateBps?.intValue)
+                }
+                continuation.resume(returning: out)
+            }
+        }
+    }
+
     /// Ask a camera sender to keep its frame rate under a bitrate shortfall:
     /// sharpness is what the camera gives up, not motion. Best effort; a
     /// binding that does not take it keeps its default.
     private func preferFramerate(_ sender: RTCRtpSender) {
         let wanted = NSNumber(value: RTCDegradationPreference.maintainFramerate.rawValue)
-        Self.libwebrtcQueue.async {
-            let parameters = sender.parameters
+        SenderParameterWrites.enqueue(sender, on: Self.libwebrtcQueue) { parameters, set in
             if parameters.degradationPreference == wanted { return }
             parameters.degradationPreference = wanted
-            sender.parameters = parameters
+            _ = set(parameters)
         }
     }
 
@@ -1346,6 +1388,55 @@ public final class WebRTCPeerConnection: NSObject {
     }
 }
 
+// MARK: - Sender parameter writes
+
+/// The one path every write to an `RTCRtpSender`'s parameters takes; the twin
+/// of `apps/web/src/calls/sender-parameters.ts`.
+///
+/// A write is a read (`sender.parameters`), a change and a set. Two of them
+/// on one sender must not overlap, or the second puts back what the first
+/// just changed (it read before the first landed). Several parts of the group
+/// call write a camera sender's parameters: its temporal layers and
+/// frame-rate preference, whether its encoding is active
+/// (``SenderActivity``) and its bitrate ceiling (``SenderCeiling``).
+///
+/// Each hands its change here. The whole read-change-set, and the read-back
+/// that follows, run as ONE synchronous block on the serial queue the peer
+/// connection's blocking calls use. A serial queue runs one block at a time
+/// in the order they were queued, and this binding's getter and setter are
+/// synchronous, so on any sender (on all of them, in fact) the writes run one
+/// after the other, each on a reading no other write can outdate. The web
+/// client needs a promise queue per sender because its `setParameters` is
+/// asynchronous; here the block is the transaction.
+///
+/// Never called on the main thread: the read and the set block on
+/// libwebrtc's signaling thread.
+enum SenderParameterWrites {
+
+    /// Queue one write of `sender`'s parameters.
+    ///
+    /// `write` runs on `queue` with the parameters as the sender holds them
+    /// at that moment, and with `set`: hand it the changed parameters and it
+    /// sets them and returns the sender's parameters read again. The
+    /// binding's setter reports nothing, so that reading is where a caller
+    /// learns whether the write took. A `write` that never calls `set`
+    /// writes nothing.
+    static func enqueue(
+        _ sender: RTCRtpSender,
+        on queue: DispatchQueue,
+        write: @escaping (
+            _ held: RTCRtpParameters, _ set: (RTCRtpParameters) -> RTCRtpParameters
+        ) -> Void
+    ) {
+        queue.async {
+            write(sender.parameters) { changed in
+                sender.parameters = changed
+                return sender.parameters
+            }
+        }
+    }
+}
+
 // MARK: - Sender activity
 
 /// An `RTCRtpSender` as ``SenderActivity`` drives it: one read-modify-set of
@@ -1353,9 +1444,10 @@ public final class WebRTCPeerConnection: NSObject {
 /// line, the SSRC and the SFrame encryptor stay.
 ///
 /// The read and the write of a sender's parameters block on libwebrtc's
-/// signaling thread, so both are made on the queue the peer connection's own
-/// blocking calls use, never on the main thread. The binding's setter reports
-/// nothing, so whether it took is read back.
+/// signaling thread, so both are made through ``SenderParameterWrites``, on
+/// the queue the peer connection's own blocking calls use, never on the main
+/// thread. The binding's setter reports nothing, so whether it took is read
+/// back.
 final class RtcActivitySender: ActivitySender {
 
     let sender: RTCRtpSender
@@ -1369,8 +1461,7 @@ final class RtcActivitySender: ActivitySender {
     func applyEncodingActive(_ active: Bool) async -> SenderActivityOutcome {
         let sender = self.sender
         return await withCheckedContinuation { continuation in
-            queue.async {
-                let parameters = sender.parameters
+            SenderParameterWrites.enqueue(sender, on: queue) { parameters, set in
                 guard let first = parameters.encodings.first else {
                     continuation.resume(returning: .noEncoding)
                     return
@@ -1380,9 +1471,47 @@ final class RtcActivitySender: ActivitySender {
                     return
                 }
                 first.isActive = active
-                sender.parameters = parameters
-                let now = sender.parameters.encodings.first?.isActive
+                let now = set(parameters).encodings.first?.isActive
                 continuation.resume(returning: now == active ? .applied : .refused)
+            }
+        }
+    }
+}
+
+// MARK: - Sender ceiling
+
+/// An `RTCRtpSender` as ``SenderCeiling`` drives it: one read-modify-set of
+/// its first encoding's `maxBitrateBps`, nothing else of the encoding and no
+/// renegotiation. Made through ``SenderParameterWrites``, as every other
+/// write of the sender's parameters; whether it took is read back
+/// (``SenderCeilingWrite``).
+final class RtcCeilingSender: CeilingSender {
+
+    let sender: RTCRtpSender
+    private let queue: DispatchQueue
+
+    init(sender: RTCRtpSender, queue: DispatchQueue) {
+        self.sender = sender
+        self.queue = queue
+    }
+
+    func applyEncodingCeiling(_ maxBitrateBps: Int) async -> SenderCeilingOutcome {
+        let sender = self.sender
+        return await withCheckedContinuation { continuation in
+            SenderParameterWrites.enqueue(sender, on: queue) { parameters, set in
+                let first = parameters.encodings.first
+                switch SenderCeilingWrite.step(
+                    hasEncoding: first != nil, current: first?.maxBitrateBps?.intValue,
+                    wanted: maxBitrateBps)
+                {
+                case let .done(outcome):
+                    continuation.resume(returning: outcome)
+                case let .set(bps):
+                    first?.maxBitrateBps = NSNumber(value: bps)
+                    let readBack = set(parameters).encodings.first?.maxBitrateBps?.intValue
+                    continuation.resume(
+                        returning: SenderCeilingWrite.outcome(readBack: readBack, wanted: bps))
+                }
             }
         }
     }

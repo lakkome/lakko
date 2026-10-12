@@ -203,4 +203,229 @@ class SpeakingTest {
         assertEquals(200L, firstReadingWhere(100) { "a" in it.speakingIds })
         assertEquals(300L, firstReadingWhere(SPEAKING_SAMPLE_INTERVAL_MS) { "a" in it.speakingIds })
     }
+
+    // ---- What counts as sound (the web client's `NoiseGate` cases) -----------
+
+    /** Feed one level every [everyMs] for [ms], starting at [from]. */
+    private fun hold(gate: NoiseGate, level: Double, from: Long, ms: Long, everyMs: Long = 100): Long {
+        var now = from
+        while (now < from + ms) {
+            gate.update(level, now)
+            now += everyMs
+        }
+        return now
+    }
+
+    @Test
+    fun `the gate's numbers are the web client's`() {
+        assertEquals(3.0, SPEECH_OVER_NOISE, 0.0)
+        assertEquals(0.005, SPEAKING_LEVEL_MIN, 0.0)
+        assertEquals(0.05, SPEAKING_LEVEL_MAX, 0.0)
+        assertEquals(1.1, NOISE_RISE_PER_SECOND, 0.0)
+        assertEquals(0.5, NOISE_FALL_PER_SAMPLE, 0.0)
+        assertEquals(100L, NOISE_FALL_SAMPLE_MS)
+        assertEquals(1e-4, NOISE_EVIDENCE_MIN, 0.0)
+    }
+
+    @Test
+    fun `the threshold starts at the fixed level before anything is known`() {
+        assertEquals(SPEAKING_LEVEL, NoiseGate().threshold, 1e-9)
+        assertEquals(SPEAKING_LEVEL, SpeakingTracker().thresholdOf("nobody"), 0.0)
+    }
+
+    @Test
+    fun `it follows a quiet room down, to a bound`() {
+        for (every in listOf(100L, SPEAKING_SAMPLE_INTERVAL_MS)) {
+            val gate = NoiseGate()
+            hold(gate, 0.002, 0, 1_000, every)
+            assertEquals(0.002 * SPEECH_OVER_NOISE, gate.threshold, 1e-9)
+            hold(gate, 0.0002, 1_050, 2_000, every)
+            assertEquals(SPEAKING_LEVEL_MIN, gate.threshold, 0.0)
+        }
+    }
+
+    @Test
+    fun `one torn reading does not empty the floor`() {
+        val gate = NoiseGate()
+        hold(gate, 0.006, 0, 1_000)
+        val before = gate.threshold
+        // At the web client's interval: half, the web client's rule.
+        gate.update(0.0002, 1_000)
+        assertEquals(before / 2, gate.threshold, 1e-9)
+    }
+
+    @Test
+    fun `the first reading may fall as far as one reading of the web client`() {
+        val gate = NoiseGate()
+        gate.update(0.0002, 0)
+        assertEquals(SPEAKING_LEVEL / 2, gate.threshold, 1e-9)
+    }
+
+    @Test
+    fun `the floor falls by the same factor per unit of time at 150 ms as the web client's does at 100`() {
+        fun fallen(everyMs: Long, forMs: Long): Double {
+            val gate = NoiseGate()
+            // Learn a floor of 0.016 (threshold 0.048, inside the bounds).
+            hold(gate, 0.016, 0, 30_000, everyMs)
+            assertEquals(0.048, gate.threshold, 1e-9)
+            // The first reading of the falling stretch comes [everyMs] after
+            // the last one of the learning stretch.
+            val from = 30_000L
+            var now = from
+            while (now - from < forMs) {
+                gate.update(NOISE_EVIDENCE_MIN, now)
+                now += everyMs
+            }
+            return gate.threshold
+        }
+        // One reading each: 0.5 at 100 ms, 0.5^1.5 (about 0.354) at 150 ms.
+        assertEquals(0.048 * 0.5, fallen(100, 100), 1e-9)
+        assertEquals(0.048 * Math.pow(0.5, 1.5), fallen(150, 150), 1e-9)
+        // After 300 ms (three readings there, two here) both have fallen by
+        // 0.5^3, and the result is still above the lower bound.
+        assertEquals(0.048 * 0.125, fallen(100, 300), 1e-9)
+        assertEquals(fallen(100, 300), fallen(150, 300), 1e-9)
+        assertTrue(fallen(150, 300) > SPEAKING_LEVEL_MIN)
+    }
+
+    @Test
+    fun `it learns nothing from digital silence or from a reading that is not a number`() {
+        val gate = NoiseGate()
+        hold(gate, 0.01, 0, 20_000)
+        val before = gate.threshold
+        hold(gate, 0.0, 20_000, 5_000)
+        hold(gate, NOISE_EVIDENCE_MIN / 2, 25_000, 5_000)
+        gate.update(Double.NaN, 30_000)
+        gate.update(Double.POSITIVE_INFINITY, 30_100)
+        assertEquals(before, gate.threshold, 0.0)
+    }
+
+    @Test
+    fun `it climbs slowly towards steady sound and never past the bound or the sound itself`() {
+        for (every in listOf(100L, SPEAKING_SAMPLE_INTERVAL_MS)) {
+            val gate = NoiseGate()
+            // Three seconds of speech barely move it.
+            hold(gate, 0.2, 0, 3_000, every)
+            assertTrue(gate.threshold < SPEAKING_LEVEL * 1.4)
+            // A minute of the same steady sound stops at the bound.
+            hold(gate, 0.2, 3_000, 60_000, every)
+            assertEquals(SPEAKING_LEVEL_MAX, gate.threshold, 0.0)
+            // A steady hum settles the floor at the hum, not above it.
+            val hum = NoiseGate()
+            hold(hum, 0.01, 0, 60_000, every)
+            assertEquals(0.01 * SPEECH_OVER_NOISE, hum.threshold, 1e-9)
+        }
+    }
+
+    @Test
+    fun `the rise over a stretch of time does not depend on how often it is read`() {
+        val web = NoiseGate()
+        val here = NoiseGate()
+        hold(web, 0.2, 0, 3_001, 100)
+        hold(here, 0.2, 0, 3_001, SPEAKING_SAMPLE_INTERVAL_MS)
+        // Both were last read at 3 000 ms.
+        assertEquals(web.threshold, here.threshold, 1e-9)
+    }
+
+    @Test
+    fun `a long gap between readings is not a long rise`() {
+        val gate = NoiseGate()
+        gate.update(0.2, 0)
+        gate.update(0.2, 3_600_000)
+        assertTrue(gate.threshold < SPEAKING_LEVEL * 1.2)
+    }
+
+    // ---- One scale for a loud room and a quiet microphone --------------------
+
+    /** Speech as a call delivers it: syllables around [level], never steady. */
+    private fun talk(t: SpeakingTracker, id: String, level: Double, from: Long, ms: Long, everyMs: Long): Long {
+        var now = from
+        var i = 0
+        while (now < from + ms) {
+            t.sample(id, level * (if (i % 3 == 0) 0.6 else 1.0), now)
+            now += everyMs
+            i += 1
+        }
+        return now
+    }
+
+    @Test
+    fun `the ring is drawn for speech at 0_03 over a room at 0_002, which the fixed level missed`() {
+        for (every in listOf(100L, SPEAKING_SAMPLE_INTERVAL_MS)) {
+            val t = SpeakingTracker()
+            var now = 0L
+            while (now < 3_000) {
+                t.sample("a", 0.002, now)
+                now += every
+            }
+            assertFalse("a" in t.snapshot(order, now).speakingIds)
+            // 0.6 * 0.03 = 0.018 is under the old fixed 0.02 every third reading.
+            now = talk(t, "a", 0.03, now, FLOOR_ONSET_MS + 500, every)
+            val snap = t.snapshot(order, now)
+            assertTrue("a" in snap.speakingIds)
+            assertEquals("a", snap.activeSpeakerId)
+        }
+    }
+
+    @Test
+    fun `it is not drawn for a room that idles at 0_015, and is for speech over that room`() {
+        for (every in listOf(100L, SPEAKING_SAMPLE_INTERVAL_MS)) {
+            val t = SpeakingTracker()
+            var now = 0L
+            while (now < 10_000) {
+                t.sample("a", 0.015, now)
+                assertFalse("a" in t.snapshot(order, now).speakingIds)
+                now += every
+            }
+            now = talk(t, "a", 0.15, now, 1_000, every)
+            assertTrue("a" in t.snapshot(order, now).speakingIds)
+        }
+    }
+
+    @Test
+    fun `a steady noise that came on stops counting within seconds`() {
+        for (every in listOf(100L, SPEAKING_SAMPLE_INTERVAL_MS)) {
+            val t = SpeakingTracker()
+            var now = 0L
+            while (now < 1_000) {
+                t.sample("a", 0.03, now)
+                now += every
+            }
+            assertTrue("a" in t.snapshot(order, now).speakingIds)
+            while (now < 7_000) {
+                t.sample("a", 0.03, now)
+                now += every
+            }
+            assertFalse("a" in t.snapshot(order, now).speakingIds)
+        }
+    }
+
+    @Test
+    fun `what was learned about the room is kept across a mute`() {
+        val t = SpeakingTracker()
+        var now = 0L
+        while (now < 3_000) {
+            t.sample("a", 0.002, now)
+            now += 100
+        }
+        val learned = t.thresholdOf("a")
+        assertEquals(0.006, learned, 1e-9)
+        t.silence("a")
+        assertEquals(learned, t.thresholdOf("a"), 0.0)
+    }
+
+    @Test
+    fun `a level that could not be read is silence for the ring and teaches the floor nothing`() {
+        val t = SpeakingTracker()
+        feed(t, "a", loud, 0, 500)
+        assertTrue("a" in t.snapshot(order, 500).speakingIds)
+        val before = t.thresholdOf("a")
+        var now = 600L
+        while (now <= 600 + RING_OFF_MS) {
+            t.sample("a", null, now)
+            now += 100
+        }
+        assertFalse("a" in t.snapshot(order, 600 + RING_OFF_MS).speakingIds)
+        assertEquals(before, t.thresholdOf("a"), 0.0)
+    }
 }

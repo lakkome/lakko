@@ -25,9 +25,12 @@ import kotlin.math.sqrt
  *  2. where an entry reports no energy, or on a stream's first reading, its
  *     `audioLevel`.
  *
- * The web client tries a receiver's synchronization sources before either;
- * libwebrtc's Java API has no such call, so the statistics are the only
- * source here.
+ * The web client decides from an analyser on the stream it plays and, where
+ * that cannot be read, from the same growth of the receiver's audio energy;
+ * the level on a receiver's synchronization sources is only printed in its
+ * diagnostics and decides nothing. libwebrtc's Java API has neither an
+ * analyser on a played stream nor the synchronization sources, so the
+ * statistics are the only source here.
  *
  * This file is the pure half: picking the levels out of a statistics report.
  * Reading the report is [WebRtcPeerConnection.sampleAudioLevels], and what

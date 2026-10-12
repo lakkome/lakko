@@ -302,6 +302,21 @@ class SfuCallSession(
             SenderActivity(kind.wireName) { message -> android.util.Log.w(MEDIA_LOG_TAG, message) }
         }
 
+    /**
+     * The SFU's last `publish-budget` frame (`PublishBudget.kt`): the ceiling
+     * of this device's main and middle camera sender. `null` before the first
+     * frame, which means each sender keeps the ceiling it was created with.
+     */
+    private var publishBudget: PublishBudget? = null
+
+    /** Keeps the main and the middle camera sender's encoding under the
+     *  ceiling the SFU last gave. Its writes go through each sender's one
+     *  serial write path (`SenderParameters.kt`), as the `active` flag's do. */
+    private val senderCeilings: Map<CameraSenderKind, SenderCeiling> =
+        BUDGETED_SENDER_KINDS.associateWith { kind ->
+            SenderCeiling(kind.wireName) { message -> android.util.Log.w(MEDIA_LOG_TAG, message) }
+        }
+
     /** Timers on [scope], for the coalesced `video-wants` frames. */
     private val timers = object : CallTimers {
         override fun nowMs(): Long = this@SfuCallSession.nowMs()
@@ -437,7 +452,49 @@ class SfuCallSession(
             activity.bind(connection?.activitySender(kind))
             if (activity.bound) activity.want(active[kind] == true)
         }
+        // Every moment that can reset what a sender's encoding holds is also
+        // a moment its bitrate ceiling may have been lost.
+        syncSenderCeilings()
     }
+
+    /**
+     * Put the main and the middle camera sender's encoding under the ceiling
+     * the SFU last gave (`PublishBudget.kt`). `setParameters` only. A no-op
+     * before the first `publish-budget` frame and for a sender whose encoding
+     * already holds the ceiling; a write libwebrtc refused is asked again
+     * here, at the latest at the next counters tick. A sender that was added
+     * again gets the ceiling in force, not the one it was created with.
+     */
+    private fun syncSenderCeilings() {
+        val connection = pc
+        for (kind in BUDGETED_SENDER_KINDS) {
+            val ceiling = senderCeilings.getValue(kind)
+            ceiling.bind(connection?.ceilingSender(kind))
+            if (ceiling.bound) ceiling.want(senderCeiling(kind, publishBudget))
+        }
+    }
+
+    /**
+     * A `publish-budget` frame: the SFU's whole word replaces the last one,
+     * the senders follow at once, and one line says so when it changed. A
+     * frame with a ceiling outside the protocol's bounds is ignored, with one
+     * warning.
+     */
+    private fun onPublishBudgetFrame(mainKbps: Long, middleKbps: Long) {
+        val budget = readPublishBudget(mainKbps, middleKbps)
+        if (budget == null) {
+            android.util.Log.w(MEDIA_LOG_TAG, PUBLISH_BUDGET_MALFORMED_WARNING)
+            return
+        }
+        describePublishBudgetChange(publishBudget, budget)?.let { android.util.Log.i(MEDIA_LOG_TAG, it) }
+        publishBudget = budget
+        syncSenderCeilings()
+    }
+
+    /** What the `send video` line says of one sender's ceiling: what its
+     *  encoding holds now. */
+    private fun senderCeilingNote(kind: CameraSenderKind): SenderCeilingNote =
+        SenderCeilingNote(pc?.senderCeilingBps(kind))
 
     /**
      * A `video-needed` frame: the SFU's whole word replaces the last one, the
@@ -692,6 +749,8 @@ class SfuCallSession(
         }
         videoNeeded = null
         senderActivity.values.forEach { it.reset() }
+        publishBudget = null
+        senderCeilings.values.forEach { it.reset() }
         publishOfferSent = false
         signaling?.close()
         signaling = null
@@ -1161,11 +1220,13 @@ class SfuCallSession(
         val kbps = senderKbps(mediaCountersLast, reading, at - mediaCountersLastAtMs)
         val lines = describeDeltas(label, deltaOf(mediaCountersLast, reading)) +
             // One line for each camera sender: its size, what it sent, the
-            // SFU's last word for it and whether its encoding is active.
+            // SFU's last word for it, whether its encoding is active and the
+            // bitrate ceiling the encoding holds.
             describeOutboundSenders(
                 label,
                 reading.outboundVideoSenders,
                 activityOf = ::senderActivityNote,
+                ceilingOf = ::senderCeilingNote,
                 existing = CAMERA_SENDER_KINDS.filter { senderActivity.getValue(it).bound },
                 kbpsOf = { kbps[it] },
             ) +
@@ -1228,6 +1289,18 @@ class SfuCallSession(
 
             override fun onVideoNeeded(main: Boolean, middle: Boolean) {
                 scope.launch { onVideoNeededFrame(VideoNeeded(main = main, middle = middle)) }
+            }
+
+            override fun onPublishBudget(mainKbps: Long, middleKbps: Long) {
+                scope.launch { onPublishBudgetFrame(mainKbps, middleKbps) }
+            }
+
+            override fun onParseError(raw: String, error: Throwable) {
+                // A `publish-budget` frame the shared parser refused (a
+                // ceiling missing or out of bounds): ignored, with one
+                // warning. The senders keep the ceilings of the last good
+                // frame.
+                if (claimsPublishBudget(raw)) android.util.Log.w(MEDIA_LOG_TAG, PUBLISH_BUDGET_MALFORMED_WARNING)
             }
 
             override fun onPong(nonce: ULong) {

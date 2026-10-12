@@ -169,7 +169,10 @@ internal fun applyEncodingActive(sender: ActivitySender, active: Boolean): Activ
  *     sender.
  *
  * libwebrtc's Java `setParameters` answers before it returns, so unlike the
- * web twin there is nothing to serialise: one caller, one thread.
+ * web twin there is no pending write to wait for. The set itself is one
+ * read-change-set on the sender's serial write path (`SenderParameters.kt`),
+ * shared with the bitrate ceiling (`PublishBudget.kt`) and the sender's
+ * set-up, so none of them puts back what another just changed.
  *
  * @param name names the sender in the one warning: `main`, `middle` or `light`.
  */

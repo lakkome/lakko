@@ -17,14 +17,22 @@ class VoiceDiagnosticsTest {
 
     private val voices = listOf(
         VoiceReport("local", isLocal = true, path = LevelPath.STATS_LEVEL, peak = 0.314, speaking = true),
-        VoiceReport("peer-p1", isLocal = false, path = LevelPath.STATS_ENERGY, peak = 0.006, speaking = false),
+        VoiceReport(
+            "peer-p1",
+            isLocal = false,
+            path = LevelPath.STATS_ENERGY,
+            peak = 0.006,
+            speaking = false,
+            threshold = 0.0123,
+        ),
         VoiceReport("peer-p2", isLocal = false, path = LevelPath.NONE, peak = null, speaking = false),
     )
 
     @Test
     fun `the line names each person by peer id, never by name, with source, peak and ring`() {
         assertEquals(
-            "[call] voices me=stats-level:0.31:yes p1=stats-energy:0.01:no p2=none:-:no" +
+            "[call] voices me=stats-level:0.314:yes[thr=0.020] p1=stats-energy:0.006:no[thr=0.012]" +
+                " p2=none:-:no[thr=0.020]" +
                 " floor=p1 stage=p1(speaking) layout=focus",
             describeVoices("[call]", voices, "peer-p1", "peer-p1" to StageReason.SPEAKING, GroupLayoutKind.FOCUS),
         )

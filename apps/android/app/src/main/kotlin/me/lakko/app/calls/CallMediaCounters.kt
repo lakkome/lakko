@@ -306,13 +306,16 @@ internal fun senderKbps(
  * (`sender=main`, `sender=middle` or `sender=light`), what it sent over the
  * interval (`kbps=`, `-` when unknown; a field the web client's line does not
  * have) and, when [activity] is given, ends with the SFU's last word for it
- * and whether its encoding is active: `needed=yes|no|- active=yes|no`.
+ * and whether its encoding is active: `needed=yes|no|- active=yes|no`. When
+ * [ceiling] is given (`PublishBudget.kt`: the bitrate ceiling the sender's
+ * encoding holds) the line ends with `ceiling=N` in kbit/s, or `ceiling=-`.
  */
 internal fun describeOutbound(
     label: String,
     out: OutboundVideo,
     activity: SenderActivityNote? = null,
     kbps: Double? = null,
+    ceiling: SenderCeilingNote? = null,
 ): String {
     val size = if (out.frameWidth != null && out.frameHeight != null) {
         "${count(out.frameWidth)}x${count(out.frameHeight)}"
@@ -323,13 +326,15 @@ internal fun describeOutbound(
         " fps=${fixed(out.framesPerSecond, 0)} kbps=${fixed(kbps, 0)}" +
         " limited_by=${out.qualityLimitationReason ?: "-"}" +
         " sender=${out.sender.wireName}" +
-        (activity?.let(::describeSenderActivity) ?: "")
+        (activity?.let(::describeSenderActivity) ?: "") +
+        describeSenderCeiling(ceiling)
 }
 
 /**
  * The camera, one line for each of its senders (main, middle, light). A
  * sender libwebrtc is sending nothing on reports no size and no frame rate
- * (`-`). [activityOf] adds each line's `needed=` and `active=`. A sender
+ * (`-`). [activityOf] adds each line's `needed=` and `active=`, [ceilingOf]
+ * its `ceiling=`. A sender
  * named in [existing] that the report has no outbound stream for still has
  * its line, all dashes, so a sender that was switched off does not vanish
  * from the log.
@@ -340,12 +345,19 @@ internal fun describeOutboundSenders(
     activityOf: (CameraSenderKind) -> SenderActivityNote? = { null },
     existing: List<CameraSenderKind> = emptyList(),
     kbpsOf: (CameraSenderKind) -> Double? = { null },
+    ceilingOf: (CameraSenderKind) -> SenderCeilingNote? = { null },
 ): List<String> {
     val lines = ArrayList<String>()
     val reported = HashSet<CameraSenderKind>()
     for (sender in senders) {
         reported += sender.sender
-        lines += describeOutbound(label, sender, activityOf(sender.sender), kbpsOf(sender.sender))
+        lines += describeOutbound(
+            label,
+            sender,
+            activityOf(sender.sender),
+            kbpsOf(sender.sender),
+            ceilingOf(sender.sender),
+        )
     }
     for (kind in existing) {
         if (kind in reported) continue
@@ -362,6 +374,7 @@ internal fun describeOutboundSenders(
             ),
             activityOf(kind),
             null,
+            ceilingOf(kind),
         )
     }
     return lines

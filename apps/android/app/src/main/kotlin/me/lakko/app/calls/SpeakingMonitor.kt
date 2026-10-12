@@ -123,9 +123,10 @@ internal class SpeakingMonitor(
                 if (person.isLocal) levels.local?.let { it to levels.localPath } else remoteLevels[person.id]
             report.path = read?.second ?: LevelPath.NONE
             if (read != null) report.peak = maxOf(report.peak ?: 0.0, read.first)
-            // No level for someone in the call is silence: a ring must not
-            // stay on for a stream that stopped reporting.
-            tracker.sample(person.id, read?.first ?: 0.0, now)
+            // No level for someone in the call is "could not be read": silence
+            // for the ring, so it does not stay on for a stream that stopped
+            // reporting, and nothing for the person's noise floor.
+            tracker.sample(person.id, read?.first, now)
         }
         // The floor is for everyone but this device's own person.
         val candidates = people.filter { !it.isLocal }.map { it.id }
@@ -155,6 +156,7 @@ internal class SpeakingMonitor(
                 path = if (person.micOn) r.path else LevelPath.NONE,
                 peak = r.peak,
                 speaking = r.speaking,
+                threshold = tracker.thresholdOf(person.id),
             ).also {
                 r.peak = null
                 r.speaking = false
@@ -178,6 +180,10 @@ internal class SpeakingMonitor(
  * after the first one with sound here and 200 ms on the web, and goes off at
  * 900 ms of silence against 800 ms. Each reading here is the connection's
  * whole statistics report, which is why it is not taken more often.
+ *
+ * The one rule of the web client that is stated per reading, how fast a
+ * person's noise floor may fall, is applied per unit of time here
+ * ([NOISE_FALL_PER_SAMPLE]), so it does not depend on this interval either.
  */
 internal const val SPEAKING_SAMPLE_INTERVAL_MS: Long = 150L
 

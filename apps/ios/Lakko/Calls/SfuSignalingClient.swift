@@ -31,6 +31,10 @@ struct SfuSignalingCallbacks {
     /// (ADR-0070, "senders nobody watches"): the whole state, the last
     /// frame wins. The light sender is always needed and is not named.
     var onVideoNeeded: ((_ main: Bool, _ middle: Bool) -> Void)?
+    /// How much this device's main and middle camera sender may send, in
+    /// kbit/s (ADR-0068, amendment of 2026-10-11): the whole state, the last
+    /// frame wins. The light sender is not named.
+    var onPublishBudget: ((_ mainKbps: UInt32, _ middleKbps: UInt32) -> Void)?
     var onServerError: ((_ code: SfuErrorCode, _ detail: String) -> Void)?
     /// A frame the shared parser rejected. The connection is NOT closed
     /// automatically — the caller decides.
@@ -274,6 +278,8 @@ final class SfuSignalingClient {
             callbacks.onVideoGiven?(given)
         case let .videoNeeded(main, middle):
             callbacks.onVideoNeeded?(main, middle)
+        case let .publishBudget(mainKbps, middleKbps):
+            callbacks.onPublishBudget?(mainKbps, middleKbps)
         }
     }
 

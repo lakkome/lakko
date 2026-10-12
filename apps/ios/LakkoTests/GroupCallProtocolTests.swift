@@ -1104,16 +1104,23 @@ final class VoiceDiagnosticsTests: XCTestCase {
 
     func testTheLineNamesEveryPersonTheFloorTheStageAndTheLayout() {
         let voices = [
-            VoiceReport(id: "local", isLocal: true, path: .statsLevel, peak: 0.4, speaking: true),
-            VoiceReport(id: "peer-a", isLocal: false, path: .statsLevel, peak: 0.012, speaking: false),
-            VoiceReport(id: "peer-b", isLocal: false, path: .none, peak: nil, speaking: false),
+            VoiceReport(
+                id: "local", isLocal: true, path: .statsLevel, peak: 0.4, speaking: true,
+                threshold: 0.05),
+            VoiceReport(
+                id: "peer-a", isLocal: false, path: .statsLevel, peak: 0.012, speaking: false,
+                threshold: 0.0125),
+            VoiceReport(
+                id: "peer-b", isLocal: false, path: .none, peak: nil, speaking: false,
+                threshold: Speaking.level),
         ]
         XCTAssertEqual(
             VoiceDiagnostics.describe(
                 "call media interval", voices: voices, floorId: "peer-a",
                 stage: (id: "peer-a", reason: .speaking), layout: .focus),
-            "call media interval voices me=stats-level:0.40:yes a=stats-level:0.01:no"
-                + " b=none:-:no floor=a stage=a(speaking) layout=focus")
+            "call media interval voices me=stats-level:0.400:yes[thr=0.050]"
+                + " a=stats-level:0.012:no[thr=0.013] b=none:-:no[thr=0.020]"
+                + " floor=a stage=a(speaking) layout=focus")
         XCTAssertEqual(
             VoiceDiagnostics.describe(
                 "call media interval", voices: [], floorId: nil, stage: nil, layout: .grid),

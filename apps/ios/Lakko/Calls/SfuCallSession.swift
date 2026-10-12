@@ -230,12 +230,25 @@ final class SfuCallSession {
     /// means every sender is needed.
     private var videoNeeded: VideoNeeded?
     /// Keeps each camera sender's one encoding active or not, as
-    /// ``sendersActiveNow()`` says. One per sender, so the parameter writes
-    /// on a sender never overlap and the last decision wins.
+    /// ``sendersActiveNow()`` says. One per sender, so the last decision
+    /// wins; its writes go the one way every write of a sender's parameters
+    /// goes (``SenderParameterWrites``), so none overlaps another.
     private let senderActivity: [CameraSenderKind: SenderActivity] = [
         .main: SenderActivity(name: "main"),
         .middle: SenderActivity(name: "middle"),
         .light: SenderActivity(name: "light"),
+    ]
+    /// The SFU's last `publish-budget` frame (``PublishBudgetRule``): how
+    /// much the main and the middle camera sender may send. `nil` before the
+    /// first frame, which means each sender keeps the ceiling it was created
+    /// with.
+    private var publishBudget: PublishBudget?
+    /// Keeps the main and the middle camera sender's one encoding under the
+    /// ceiling the SFU last gave. Its writes go the one way every write of a
+    /// sender's parameters goes (``SenderParameterWrites``).
+    private let senderCeilings: [CameraSenderKind: SenderCeiling] = [
+        .main: SenderCeiling(name: "main"),
+        .middle: SenderCeiling(name: "middle"),
     ]
     private let rules: TileQualityRules
 
@@ -441,6 +454,37 @@ final class SfuCallSession {
             activity.bind(pc?.cameraActivitySender(kind))
             if activity.bound { activity.want(active[kind] ?? false) }
         }
+        // Every look at the senders is also when a refused ceiling is asked
+        // again, and a sender added or negotiated again is exactly the moment
+        // its bitrate ceiling may have been lost.
+        syncSenderCeilings()
+    }
+
+    /// Put the main and the middle camera sender's encoding under the
+    /// ceiling the SFU last gave (``PublishBudgetRule``). A parameter write
+    /// only. A no-op before the first `publish-budget` frame and for a
+    /// sender whose encoding already holds the ceiling; a write that did not
+    /// take is asked again here, at every media-log tick at the latest. A
+    /// sender created again gets the ceiling in force, not the one it was
+    /// created with.
+    private func syncSenderCeilings() {
+        for kind in PublishBudgetRule.budgetedKinds {
+            guard let ceiling = senderCeilings[kind] else { continue }
+            ceiling.bind(pc?.cameraCeilingSender(kind))
+            if ceiling.bound {
+                ceiling.want(PublishBudgetRule.senderCeiling(kind, publishBudget))
+            }
+        }
+    }
+
+    /// A `publish-budget` frame: the SFU's whole word replaces the last one,
+    /// the senders follow at once, and one line says so when it changed.
+    private func onPublishBudgetFrame(_ budget: PublishBudget) {
+        if let line = PublishBudgetRule.describeChange(before: publishBudget, budget) {
+            NSLog("%@", line)
+        }
+        publishBudget = budget
+        syncSenderCeilings()
     }
 
     /// A `video-needed` frame: the SFU's whole word replaces the last one,
@@ -622,6 +666,8 @@ final class SfuCallSession {
         localCameraSource = nil
         videoNeeded = nil
         for activity in senderActivity.values { activity.reset() }
+        publishBudget = nil
+        for ceiling in senderCeilings.values { ceiling.reset() }
         publishOfferSent = false
         wantsSender.reset()
         wantsBook.clear()
@@ -942,6 +988,12 @@ final class SfuCallSession {
             NSLog(
                 "SfuCallSession: signaling frame PARSE FAILED err=%@ text=%@",
                 "\(error)", String(raw.prefix(300)))
+            // A `publish-budget` frame without both ceilings, or with one
+            // out of the protocol's bounds, changes nothing: the senders
+            // keep the ceilings the last good frame gave them.
+            if PublishBudgetRule.claimsPublishBudget(raw) {
+                NSLog("%@", PublishBudgetRule.malformedWarning)
+            }
         }
         cb.onPong = { [weak self] _ in
             Task { @MainActor in self?.noteSignalingInbound() }
@@ -971,6 +1023,14 @@ final class SfuCallSession {
             Task { @MainActor in
                 self?.onVideoNeededFrame(VideoNeeded(main: main, middle: middle))
             }
+        }
+        cb.onPublishBudget = { [weak self] mainKbps, middleKbps in
+            guard let budget = PublishBudgetRule.read(mainKbps: mainKbps, middleKbps: middleKbps)
+            else {
+                NSLog("%@", PublishBudgetRule.malformedWarning)
+                return
+            }
+            Task { @MainActor in self?.onPublishBudgetFrame(budget) }
         }
         cb.onPeerJoined = { [weak self] peerId, pseudonym, peerTag in
             NSLog("SfuCallSession: peer joined peer=%@", peerId)
@@ -1161,6 +1221,9 @@ final class SfuCallSession {
         guard let connection = pc, let entries = await connection.sampleVideoStatEntries() else {
             return
         }
+        // What each sender's encoding holds, read behind every write queued
+        // so far.
+        let ceilings = await connection.cameraSenderCeilings()
         // The call may have ended while the report was read.
         guard pc === connection, mediaLogTask != nil else { return }
         // A sender the binding refused to start is asked again, and a flag a
@@ -1182,7 +1245,8 @@ final class SfuCallSession {
                     needed: SenderActivityRule.neededWord(kind, needed),
                     active: active[kind] ?? false)
             },
-            existing: CameraSenderKind.allCases.filter { connection.cameraSender($0) != nil })
+            existing: CameraSenderKind.allCases.filter { connection.cameraSender($0) != nil },
+            ceilingOf: { kind in ceilings[kind] ?? nil })
         // What each remote tile showed over the interval, with what this
         // device asks for of that person and what the SFU gives.
         lines += CallMediaCounters.describeShownPeers(

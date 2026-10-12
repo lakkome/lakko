@@ -761,12 +761,16 @@ public class WebRtcPeerConnection(
      */
     private fun preferCameraFramerate(sender: org.webrtc.RtpSender) {
         try {
-            val params = sender.parameters ?: return
-            if (params.degradationPreference == org.webrtc.RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE) {
-                return
+            serialParameterWrite(sender) {
+                val params = sender.parameters ?: return@serialParameterWrite
+                if (params.degradationPreference ==
+                    org.webrtc.RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+                ) {
+                    return@serialParameterWrite
+                }
+                params.degradationPreference = org.webrtc.RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+                if (!sender.setParameters(params)) Log.w(TAG, "camera sender: frame-rate preference refused")
             }
-            params.degradationPreference = org.webrtc.RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
-            if (!sender.setParameters(params)) Log.w(TAG, "camera sender: frame-rate preference refused")
         } catch (cause: RuntimeException) {
             Log.w(TAG, "camera sender: frame-rate preference refused", cause)
         }
@@ -857,8 +861,11 @@ public class WebRtcPeerConnection(
             // ask again on the sender. Without them this would be another
             // full-size camera, so a refusal here removes the sender.
             val ok = try {
-                val params = sender.parameters
-                params != null && configureCopyEncoding(params.encodings, kind, active) { sender.setParameters(params) }
+                serialParameterWrite(sender) {
+                    val params = sender.parameters
+                    params != null &&
+                        configureCopyEncoding(params.encodings, kind, active) { sender.setParameters(params) }
+                }
             } catch (cause: RuntimeException) {
                 false
             }
@@ -944,6 +951,7 @@ public class WebRtcPeerConnection(
     internal fun removeCameraCopySender(kind: CameraCopyKind) {
         val copy = cameraCopies.remove(kind) ?: return
         activitySenders.remove(kind.sender)
+        ceilingSenders.remove(kind.sender)
         runCatching { peer?.removeTrack(copy.sender) }
         runCatching { if (!copy.transceiver.isStopped) copy.transceiver.stop() }
         runCatching { copy.track.dispose() }
@@ -969,11 +977,49 @@ public class WebRtcPeerConnection(
     private class RtpActivitySender(val sender: org.webrtc.RtpSender) : ActivitySender {
         override fun encodingActive(): Boolean? = sender.parameters?.encodings?.firstOrNull()?.active
 
-        override fun setEncodingActive(active: Boolean): Boolean {
-            val params = sender.parameters ?: return false
-            val first = params.encodings.firstOrNull() ?: return false
+        override fun setEncodingActive(active: Boolean): Boolean = serialParameterWrite(sender) {
+            val params = sender.parameters ?: return@serialParameterWrite false
+            val first = params.encodings.firstOrNull() ?: return@serialParameterWrite false
             first.active = active
-            return sender.setParameters(params)
+            sender.setParameters(params)
+        }
+    }
+
+    /**
+     * The [kind] camera sender as [SenderCeiling] drives it (ADR-0068, the
+     * publish budget): its first encoding's `maxBitrateBps`, set with
+     * `getParameters` / `setParameters` and nothing else, on the sender's one
+     * serial write path. `null` when this device has no such sender. The
+     * object is the same for as long as the sender is.
+     */
+    internal fun ceilingSender(kind: CameraSenderKind): CeilingSender? {
+        val sender = cameraSenderOf(kind) ?: return null
+        ceilingSenders[kind]?.takeIf { it.sender === sender }?.let { return it }
+        return RtpCeilingSender(sender).also { ceilingSenders[kind] = it }
+    }
+
+    private class RtpCeilingSender(val sender: org.webrtc.RtpSender) : CeilingSender {
+        override fun setEncodingCeiling(maxBitrateBps: Int): CeilingOutcome = serialParameterWrite(sender) {
+            val params = sender.parameters ?: return@serialParameterWrite CeilingOutcome.REFUSED
+            applyEncodingCeiling(params.encodings, maxBitrateBps) { sender.setParameters(params) }
+        }
+    }
+
+    private val ceilingSenders =
+        java.util.EnumMap<CameraSenderKind, RtpCeilingSender>(CameraSenderKind::class.java)
+
+    /**
+     * The bitrate ceiling the [kind] camera sender's first encoding holds
+     * now, bits a second, for the `send video` line; `null` when it holds
+     * none, there is no such sender, or it cannot be read. Reads only the
+     * `RtpSender` this class holds. Never throws.
+     */
+    internal fun senderCeilingBps(kind: CameraSenderKind): Int? {
+        val sender = cameraSenderOf(kind) ?: return null
+        return try {
+            encodingCeiling(sender.parameters?.encodings.orEmpty())
+        } catch (cause: RuntimeException) {
+            null
         }
     }
 
@@ -1029,8 +1075,10 @@ public class WebRtcPeerConnection(
     public fun requestLocalCameraLayers() {
         val sender = localVideoSender ?: return
         val outcome = try {
-            val params = sender.parameters
-            requestCameraLayers(params.encodings) { sender.setParameters(params) }
+            serialParameterWrite(sender) {
+                val params = sender.parameters
+                requestCameraLayers(params.encodings) { sender.setParameters(params) }
+            }
         } catch (cause: RuntimeException) {
             Log.w(TAG, "camera sender: could not read the sender parameters", cause)
             CameraLayersOutcome.REFUSED
@@ -1301,10 +1349,12 @@ public class WebRtcPeerConnection(
     public suspend fun forceVideoKeyframe(): Boolean {
         val sender = localVideoSender ?: return false
         val stopped = runCatching {
-            val params = sender.parameters ?: return false
-            val encoding = params.encodings.firstOrNull() ?: return false
-            encoding.active = false
-            sender.setParameters(params)
+            serialParameterWrite(sender) {
+                val params = sender.parameters ?: return@serialParameterWrite false
+                val encoding = params.encodings.firstOrNull() ?: return@serialParameterWrite false
+                encoding.active = false
+                sender.setParameters(params)
+            }
         }.getOrElse { cause ->
             Log.w(TAG, "keyframe: could not deactivate the video encoding", cause)
             false
@@ -1312,10 +1362,12 @@ public class WebRtcPeerConnection(
         if (!stopped) return false
         kotlinx.coroutines.delay(KEYFRAME_RESTART_GAP_MS)
         return runCatching {
-            val params = sender.parameters ?: return false
-            val encoding = params.encodings.firstOrNull() ?: return false
-            encoding.active = true
-            sender.setParameters(params)
+            serialParameterWrite(sender) {
+                val params = sender.parameters ?: return@serialParameterWrite false
+                val encoding = params.encodings.firstOrNull() ?: return@serialParameterWrite false
+                encoding.active = true
+                sender.setParameters(params)
+            }
         }.getOrElse { cause ->
             // Left inactive, which would be worse than the frozen picture this
             // is trying to fix, so say so loudly.
