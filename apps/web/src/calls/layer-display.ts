@@ -400,11 +400,13 @@ export class LayerDisplayLedger {
   private readonly totalByPeer = new Map<string, LayerDisplayCounters>();
   private readonly intervalByPeer = new Map<string, LayerDisplayCounters>();
   private readonly framesByPeer = new Map<string, TileFrameCounts>();
+  private readonly shownNowByPeer = new Map<string, LayerShown>();
 
   /** A tile of `peerId` reports what it counted since its last report, and,
    *  when it has them, the frames it observed in that time. */
   add(peerId: string, counters: LayerDisplayCounters, frames?: TileFrameCounts): void {
     if (frames !== undefined) {
+      this.shownNowByPeer.set(peerId, frames.shownNow);
       const before = this.framesByPeer.get(peerId);
       this.framesByPeer.set(
         peerId,
@@ -440,6 +442,17 @@ export class LayerDisplayLedger {
     return out;
   }
 
+  /**
+   * What the tile of `peerId` that reported last said it showed; `undefined`
+   * when none ever reported frames. Kept across {@link takeFrames}: it is
+   * read between the media counters' intervals (`av-align.ts`). It is only
+   * as fresh as the tile's last report, and says nothing of whether a tile
+   * is still mounted.
+   */
+  shownNowOf(peerId: string): LayerShown | undefined {
+    return this.shownNowByPeer.get(peerId);
+  }
+
   /** Every peer a tile ever reported on, counted from the start. */
   totals(): ReadonlyMap<string, LayerDisplayCounters> {
     return new Map(this.totalByPeer);
@@ -450,6 +463,7 @@ export class LayerDisplayLedger {
     this.totalByPeer.clear();
     this.intervalByPeer.clear();
     this.framesByPeer.clear();
+    this.shownNowByPeer.clear();
   }
 }
 

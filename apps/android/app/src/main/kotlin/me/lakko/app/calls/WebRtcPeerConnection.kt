@@ -176,6 +176,19 @@ public class WebRtcPeerConnection(
     private val remoteMiddleVideoTrackIds: MutableSet<String> =
         java.util.concurrent.ConcurrentHashMap.newKeySet()
 
+    /**
+     * Every incoming track of the connection in the order it arrived, with
+     * the MSID stream id it arrived in (`AvAlign.kt`: which receiver is whose
+     * audio, main, middle or light). Written on libwebrtc's signaling thread
+     * as tracks arrive and read by the group call's reading loop, hence the
+     * copy-on-write list. The receivers themselves are not asked for: on a
+     * group connection `PeerConnection.getReceivers()` disposes every
+     * `RtpReceiver` wrapper handed out before, exactly as `getTransceivers()`
+     * does with transceivers (see [localVideoTransceiver]). A track that has
+     * gone leaves a stale entry no report names any more; [close] clears them.
+     */
+    private val remoteTracks = java.util.concurrent.CopyOnWriteArrayList<RemoteTrackRef>()
+
     /** Follows each audio entry's energy counters across statistics reports
      *  ([sampleAudioLevels]). Used from the caller's one thread. */
     private val audioLevelReader = AudioLevelReader()
@@ -297,6 +310,13 @@ public class WebRtcPeerConnection(
             // can arm the SFrame decryptor on each incoming track
             // (invariant #4).
             delegate?.onRemoteReceiver(r, streamId)
+            if (streamId != null) {
+                runCatching { r.track() }.getOrNull()?.let { arrived ->
+                    runCatching { arrived.id() }.getOrNull()?.let { trackId ->
+                        remoteTracks += RemoteTrackRef(trackId, streamId, audio = arrived is org.webrtc.AudioTrack)
+                    }
+                }
+            }
             // Remember whose sound an incoming audio track is, so a level read
             // from the statistics can be put on the right tile
             // ([sampleAudioLevels]). The statistics name the track; only this
@@ -464,6 +484,7 @@ public class WebRtcPeerConnection(
         videoSenderSealed = false
         videoSenderEncryptor = null
         remoteAudioStreamByTrackId.clear()
+        remoteTracks.clear()
         remoteLightVideoTrackIds.clear()
         remoteMiddleVideoTrackIds.clear()
     }
@@ -662,6 +683,8 @@ public class WebRtcPeerConnection(
         val senderByMid: Map<String, CameraSenderKind>,
         /** This device's camera senders, by the id of the track each sends. */
         val senderByTrackId: Map<String, CameraSenderKind>,
+        /** Every incoming track, in the order it arrived, with its stream. */
+        val remoteTracks: List<RemoteTrackRef>,
     )
 
     /**
@@ -687,6 +710,7 @@ public class WebRtcPeerConnection(
             middleTrackIds = remoteMiddleVideoTrackIds.toSet(),
             senderByMid = cameraSenderByMid(),
             senderByTrackId = cameraSenderByTrackId(),
+            remoteTracks = remoteTracks.toList(),
         )
     }
 

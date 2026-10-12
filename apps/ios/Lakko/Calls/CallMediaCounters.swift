@@ -344,6 +344,14 @@ protocol LayerCounterSource: AnyObject {
 
 extension LayerDisplay: LayerCounterSource {}
 
+/// A tile's counters that can also say which picture the tile shows now.
+protocol LayerShownSource: AnyObject {
+    /// What the tile shows.
+    func shown() -> ShownLayer
+}
+
+extension LayerDisplay: LayerShownSource {}
+
 /// What every remote tile of a call counted, by peer.
 ///
 /// A peer can be drawn by several tiles over a call (the grid, the stage, a
@@ -398,6 +406,15 @@ final class LayerDisplayLedger {
             byPeer[entry.peerId] = (byPeer[entry.peerId] ?? .zero).adding(entry.source.counters())
         }
         return Self.ordered(byPeer)
+    }
+
+    /// Whether a tile of `peerId` on screen shows its light picture now
+    /// (``RemoteLayerController``). `false` with no tile of theirs, or with
+    /// one that cannot say.
+    func lightShown(peerId: String) -> Bool {
+        live.values.contains {
+            $0.peerId == peerId && ($0.source as? LayerShownSource)?.shown() == .light
+        }
     }
 
     /// Forget what gone tiles counted: a new call starts. Tiles still on

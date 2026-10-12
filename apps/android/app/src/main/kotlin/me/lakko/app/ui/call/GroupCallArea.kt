@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
+import me.lakko.app.calls.AvRole
 import me.lakko.app.calls.CallTimers
 import me.lakko.app.calls.CallUiState
 import me.lakko.app.calls.GridLayout
@@ -590,14 +591,18 @@ private fun GroupTile(
             // to what the SFU gives, and the person's light copy while that
             // one stands still or is being replaced. One renderer in the same
             // box with the same crop; never mirrored.
+            val heavyTrack = heavyTrackForGiven(
+                wanted = wanted ?: TileVideoQuality.MAIN,
+                given = remoteVideoGiven[participant.id],
+                main = mainTrack,
+                middle = middleTrack,
+                hasLight = hasLight,
+            )
             RemoteLayeredVideoView(
-                heavyTrack = heavyTrackForGiven(
-                    wanted = wanted ?: TileVideoQuality.MAIN,
-                    given = remoteVideoGiven[participant.id],
-                    main = mainTrack,
-                    middle = middleTrack,
-                    hasLight = hasLight,
-                ),
+                heavyTrack = heavyTrack,
+                // Which of the person's tracks that is: the middle picture is
+                // the main track while the person has no middle one.
+                heavyRole = if (middleTrack != null && heavyTrack === middleTrack) AvRole.MIDDLE else AvRole.MAIN,
                 lightTrack = lightTrack,
                 peerId = peerIdOfParticipant(participant.id),
                 eglContext = eglContext,

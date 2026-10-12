@@ -808,3 +808,99 @@ on one of Lakko's three senders (either only moves packets to unknown);
 how often the new line reports `within-fec-share` with a viewer's own
 request following it, which is the case this change is meant to remove.
 Firefox's 3 s timeout itself is untouched.
+
+## Note, 2026-10-12: a remote person's sound and picture are kept together by Lakko's own rule
+
+**Read in the libwebrtc M125 source.** The engine synchronises audio with
+ONE video stream per sync group, the first (`call/call.cc`,
+`Call::ConfigureSync`: "Only sync the first A/V pair within this sync
+group"). A sync group is the stream id. A subscriber gets, per remote
+person, one audio track and up to three video tracks: main (stream id
+`<peer>`), middle (`<peer>~mid`) and light (`<peer>~light`). Main shares
+the audio's stream id; the companions of steps 1 and 5 do not. So the
+engine synchronises main only, in steps of at most 80 ms
+(`video/stream_synchronization.cc`, `kMaxChangeMs`) and with a dead band of
+30 ms (`kMinDeltaMs`), and nothing ties middle or light to the sound.
+
+**Measured on a live call on 2026-10-11** (Chrome, the receiver lines of
+`apps/web/src/calls/media-counters.ts`): the audio jitter buffer's target
+was 320 to 600 ms (the publisher's uplink delivered a tenth of its audio
+packets more than 200 ms late); main, synchronised by the engine, followed
+it at 420 to 630 ms although its network alone needed 70 to 230 ms; light
+sat at 290 ms, the floor of step 4, so a tile showing it ran 100 to 300 ms
+ahead of the sound. At one moment the audio buffer was 990 ms against
+460 ms of video.
+
+**Decided.** Lakko's own code aligns the delays and the engine executes:
+the rule of this ADR, applied to lip sync. One shared rule,
+`lakko_ui_rules::av_align` (`AvAlign`, one per remote person), on both FFI
+surfaces. Once per reading interval a client gives it, for the audio
+receiver and each video track, whether packets flow, the measured average
+jitter-buffer delay, the network-only need where the platform reports it,
+whether a tile shows the track and whether the engine synchronises it; it
+returns the target playout delay to set on each receiver
+(`RTCRtpReceiver.jitterBufferTarget` on the web, the receivers' minimum
+jitter-buffer delay on the native clients) and, per video track, the skew
+(video delay minus audio delay) and the reason.
+
+- The sound is the reference. A track the engine does not synchronise is
+  made to wait for the sound: its target follows the audio's measured
+  delay, raised by at most 240 ms a second and lowered by at most 80.
+- A target is a hint, so it is corrected by what is measured: once a
+  track has settled, half of the remaining skew goes into a trim of at
+  most 90 ms, until the skew is inside 30 ms. An engine that does not
+  follow is noticed after three settled readings and left alone.
+- A shown track that stays later than the sound with its target as low as
+  the trim allows (its own network, or the floor of step 4) makes the
+  sound wait for it, by at most 300 ms above what the audio needs for
+  itself. Beyond that the picture is left late: a picture path must not
+  be able to drag the conversation delay without limit.
+- A track the engine synchronises (main) is observed and never written. A
+  track that is not flowing is left alone and starts again at the sound's
+  delay. A missing reading changes nothing.
+
+Every constant is chosen, not measured; each is defended in the module's
+documentation. This is also the client-side setter the steps above listed
+as unbuilt ("the `jitterBufferTarget` fallback for a receiver that ignores
+the playout-delay extension"), but used for another purpose: it does not
+reproduce the server's floor, it ties the picture to the sound.
+
+**What it costs.** In a grid, where tiles show middle or light, the
+picture now waits for the sound: on the measured call that is 100 to
+300 ms more picture delay on those tiles, the delay the sound and the main
+track already had. After a burst on a quiet audio path the sound waits for
+a light track held at the 300 ms floor of step 4, so that floor now costs
+the conversation up to 300 ms where it used to cost only the picture.
+When the sound's delay falls quickly, a video target is lowered more
+slowly (a receiver shortens its delay by playing fast), so the picture is
+late for some seconds: in the model, 166 ms at worst and inside 30 ms
+again after six readings, for a drop from 600 to 320 ms.
+
+**Evidence: a model only.** Unit tests, a property test over arbitrary
+readings, and a deterministic simulation (a receiver whose delay moves
+half of the way, or a quarter, towards the largest of its network need,
+the server's floor and its target per one-second reading, read with
+6 ms of noise). On that model: light at the 290 ms floor under a steady
+450 ms sound is inside the dead band after 3 readings (residual 4 ms);
+the 990 against 460 moment after 5 readings, 10 with the slower receiver,
+without overshoot; a sound wandering between 320 and 600 ms at 10 ms a
+second is followed within 32 ms; a light track at the floor under a
+120 ms sound makes the sound wait after 8 readings and is inside the band
+after 10; a picture needing 700 ms against a 120 ms sound leaves the
+sound at 420 ms and the picture 277 ms late; an engine that ignores the
+video or the audio target ends with a standing target and no further
+changes. None of the settled cases changes a target in its last 30
+readings.
+
+**Not known, and nothing seen on a call.** Which browsers have
+`jitterBufferTarget` on audio and on video receivers (it must be
+feature-detected; the rule is told which setters exist and says what it
+then cannot do) and whether the native bindings expose a setter. How an
+engine honours the hint: how fast it moves, whether it lands on the value
+or near it, and how a hint on the audio receiver interacts with the
+engine's own synchronisation of main. Whether the network-only figure a
+browser reports excludes the playout-delay extension, as the measurement
+suggests. Whether equal jitter-buffer delays mean lip sync closely enough:
+the rule compares buffer delays and does not read capture timestamps. How
+a real receiver's lag and noise compare with the model's. No client is
+wired to the rule yet.

@@ -484,6 +484,9 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.composer.recordMode": "device",
   "lakko.media.autoplayVideoNotes": "device",
   "lakko.feed.device-banner-dismissed": "device",
+  // A diagnostic switch of this device (`calls/av-align.ts`): `off` makes a
+  // call without audio/video alignment. Names no account.
+  "lakko.call.av-align": "device",
   // not storage names
   "lakko/state-bundle-row/v1": "not-storage",
   "lakko/state-bundle/v1": "not-storage",

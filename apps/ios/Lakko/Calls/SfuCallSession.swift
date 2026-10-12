@@ -221,6 +221,15 @@ final class SfuCallSession {
     /// When the last media reading was taken, on a clock that never goes
     /// back; for the senders' bitrate over the interval.
     private var mediaLogLastAtMs: UInt64?
+    /// Each remote person's sound and picture kept together (ADR-0070, note
+    /// of 2026-10-12): one shared rule per person, fed from the receivers'
+    /// statistics. This binding has no setter for a receiver's playout delay
+    /// (``AvReceiverDelay``), so on iOS the rule measures and logs the skew
+    /// and writes nothing.
+    private let avAlign = CallAvAlign()
+    /// Reads the receivers every ``AvAlignStats/readingIntervalMs(_:)`` from
+    /// the moment media connects to hang-up.
+    private var avAlignTask: Task<Void, Never>?
 
     // ---- The camera's three senders (ADR-0070) -----------------------------
     /// The camera's own source: the copies are further tracks on it.
@@ -662,6 +671,7 @@ final class SfuCallSession {
         audioTrackPeers.removeAll()
         lightTrackIds.removeAll()
         middleTrackIds.removeAll()
+        avAlign.clear()
         offerQueue.removeAll()
         localCameraSource = nil
         videoNeeded = nil
@@ -1052,6 +1062,8 @@ final class SfuCallSession {
             Task { @MainActor in
                 guard let self else { return }
                 self.wantsBook.removePeer(peerId)
+                // Their sound-and-picture rule goes with them.
+                self.avAlign.removePeer(peerId)
                 // What the SFU gave of them goes with them: someone who
                 // later joins under the same id starts with nothing said.
                 if self.givenBook.removePeer(peerId) {
@@ -1253,13 +1265,79 @@ final class SfuCallSession {
             label, LayerDisplayLedger.shared.takeInterval(),
             wantOf: { self.wantsBook.quality(of: $0) },
             givenOf: { self.givenBook.given(of: $0) })
+        // Each person's sound against their pictures, as the last reading of
+        // the shared rule had it.
+        lines += avAlign.lines(label)
         for line in lines { NSLog("%@", line) }
         mediaLogLast = reading
         mediaLogLastAtMs = nowMs
     }
 
+    // MARK: - Sound and picture together
+
+    /// Read the receivers once per reading interval of the shared rule and
+    /// hand each remote person's readings to their `AvAlign` (ADR-0070, note
+    /// of 2026-10-12). What the rule can do here is said once, at the start.
+    private func startAvAlign() {
+        guard avAlignTask == nil else { return }
+        let intervalMs = AvAlignStats.readingIntervalMs()
+        NSLog(
+            "%@",
+            AvAlignLog.describeCapability(
+                "call media", audioSettable: AvReceiverDelay.audioSettable,
+                videoSettable: AvReceiverDelay.videoSettable, intervalMs: intervalMs))
+        avAlignTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalMs * 1_000_000)
+                if Task.isCancelled { return }
+                await self?.sampleAvAlign()
+            }
+        }
+    }
+
+    private func stopAvAlign() {
+        avAlignTask?.cancel()
+        avAlignTask = nil
+    }
+
+    private func sampleAvAlign() async {
+        // One read of the whole connection's report for every receiver.
+        guard let connection = pc, let entries = await connection.sampleInboundStatEntries()
+        else { return }
+        // The call may have ended while the report was read.
+        guard pc === connection, avAlignTask != nil else { return }
+        let writes = avAlign.read(
+            nowMs: RemoteLayerController.monotonicMs(),
+            samples: AvAlignStats.inboundSamples(entries),
+            shownOf: { peerId in
+                AvAlignStats.shownSlot(
+                    AvShownFacts(
+                        hasTile: self.wantsBook.hasTile(of: peerId),
+                        wanted: self.wantsBook.quality(of: peerId),
+                        given: self.givenBook.given(of: peerId),
+                        hasMiddle: self.avAlign.has(peerId, .middle),
+                        hasLight: self.avAlign.has(peerId, .light),
+                        lightOnTop: LayerDisplayLedger.shared.lightShown(peerId: peerId)))
+            })
+        // This binding has nothing to write a receiver's playout delay with
+        // (``AvReceiverDelay``), and the rule is built knowing so, so it
+        // asks for nothing. An answer that asks anyway cannot be carried
+        // out: it is said once per person and kind, and that person's rule
+        // goes on as one that cannot set it.
+        for write in writes {
+            if let capability = avAlign.writeFailed(peerId: write.peerId, slot: write.slot) {
+                NSLog(
+                    "%@",
+                    AvAlignLog.describeWriteFailed(
+                        "call media", peerId: write.peerId, slot: write.slot,
+                        capability: capability))
+            }
+        }
+    }
+
     /// Stop the reads and log the whole call's totals from what was read.
     private func stopMediaLog() {
+        stopAvAlign()
         guard let task = mediaLogTask else { return }
         task.cancel()
         mediaLogTask = nil
@@ -1339,6 +1417,15 @@ final class SfuCallSession {
                     case .middle: self.middleTrackIds.insert(trackId)
                     case .main: break
                     }
+                    // Which of the person's receivers this is, for the rule
+                    // that keeps their sound and picture together. A track
+                    // that replaces one under the same slot is told to the
+                    // rule there.
+                    if let streamId, let slot = AvSlot.of(kind: kind, role: role) {
+                        self.avAlign.setReceiver(
+                            peerId: LightStream.split(streamId).peerId, slot: slot,
+                            trackId: trackId)
+                    }
                 }
                 guard !pc.armSFrameDecryptor(for: receiver, seed: seed) else {
                     // Logged on SUCCESS as well as failure. While only failures
@@ -1381,6 +1468,7 @@ final class SfuCallSession {
         case .connected:
             if state == .connecting { setState(.connected) }
             startMediaLog()
+            startAvAlign()
             // Say again what this device shows, now that media flows.
             wantsSender.resend()
             // Camera-off-cleanup: announce our initial camera state to the

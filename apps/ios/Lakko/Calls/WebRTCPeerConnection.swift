@@ -533,6 +533,20 @@ public final class WebRTCPeerConnection: NSObject {
             .map { CallStatEntry(type: $0.type, values: $0.values) }
     }
 
+    /// The `inbound-rtp` entries of the statistics report, audio and video,
+    /// for the sound-and-picture alignment of a group call
+    /// (``AvAlignStats``): one read of the whole connection's report per
+    /// reading interval. `nil` when there is no peer connection.
+    func sampleInboundStatEntries() async -> [CallStatEntry]? {
+        guard let peer = peer else { return nil }
+        let report: RTCStatisticsReport = await withCheckedContinuation { cont in
+            peer.statistics { cont.resume(returning: $0) }
+        }
+        return report.statistics.values
+            .filter { $0.type == "inbound-rtp" }
+            .map { CallStatEntry(type: $0.type, values: $0.values) }
+    }
+
     /// The video entries of the statistics report (`inbound-rtp`,
     /// `outbound-rtp` and the `media-source` each sender reads from), with
     /// their ids, for the group call's media log

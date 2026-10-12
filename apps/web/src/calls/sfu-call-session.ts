@@ -153,6 +153,17 @@ import {
   type SenderReading,
 } from "./media-counters";
 import { shownLayerLedger } from "./layer-display";
+import {
+  CallAvAlign,
+  avAlignEnabled,
+  browserHasJitterTarget,
+  inboundSamples,
+  receiverSample,
+  shownTrack,
+  type AvRole,
+  type AvVideoRole,
+  type InboundSample,
+} from "./av-align";
 import { splitStreamId } from "./light-stream";
 import { registerVideoFrameSource } from "./video-frame-watch";
 import { VideoGivenBook, videoGivenChanges, type VideoGivenEntry } from "./video-given";
@@ -499,6 +510,16 @@ export class SfuCallSession {
    *  base of the next interval's line and of the total at the end). */
   private mediaCountersTimer: ReturnType<typeof setInterval> | null = null;
   private mediaCountersLast: MediaReading | null = null;
+  /** The media timer runs at the alignment rule's reading interval
+   *  (`av-align.ts`); the counters are logged every this many ticks, which
+   *  is every {@link MEDIA_COUNTERS_INTERVAL_MS}. */
+  private mediaCountersEvery = 1;
+  private mediaTick = 0;
+  /** A tick is still reading: the next one is skipped, not stacked. */
+  private mediaSampling = false;
+  /** Each remote person's sound and picture kept together (ADR-0070, note
+   *  of 2026-10-12; `av-align.ts`). `null` outside a call. */
+  private avAlign: CallAvAlign<RTCRtpReceiver> | null = null;
   private senderCountersLast: SenderReading | null = null;
   /** The ids of the remote tracks that are light companions and middle
    *  tracks (`light-stream.ts`), so the media counters can say which receiver
@@ -1387,9 +1408,96 @@ export class SfuCallSession {
     // The tiles of this call start from nothing.
     shownLayerLedger.reset();
     this.localCameraSaid = false;
+    // One timer and one statistics report per tick serve both the alignment
+    // rule and the counters. The rule is read every tick (its own interval,
+    // one second: at the counters' two seconds its steps and its counts of
+    // readings would take twice as long to close a skew); the counters are
+    // logged every second tick, as before.
+    const avAlign = new CallAvAlign<RTCRtpReceiver>({
+      enabled: avAlignEnabled(),
+      prototypeSettable: browserHasJitterTarget(),
+      // eslint-disable-next-line no-console
+      info: (line) => console.info(line),
+      // eslint-disable-next-line no-console
+      warn: (message, err) => console.warn(message, err ?? ""),
+    });
+    this.avAlign = avAlign;
+    const intervalMs = Math.min(avAlign.readingMs(), MEDIA_COUNTERS_INTERVAL_MS);
+    this.mediaCountersEvery = Math.max(1, Math.round(MEDIA_COUNTERS_INTERVAL_MS / intervalMs));
+    this.mediaTick = 0;
+    this.mediaSampling = false;
     this.mediaCountersTimer = setInterval(() => {
-      void this.sampleMediaCounters(pc);
-    }, MEDIA_COUNTERS_INTERVAL_MS);
+      void this.onMediaTick(pc);
+    }, intervalMs);
+  }
+
+  /** One tick of the media timer: read the statistics once, give the
+   *  alignment rule its interval, and on every counters tick log. */
+  private async onMediaTick(pc: RTCPeerConnection): Promise<void> {
+    if (this.pc !== pc || this.mediaSampling) return;
+    this.mediaSampling = true;
+    try {
+      this.mediaTick += 1;
+      await this.sampleMediaCounters(pc, this.mediaTick % this.mediaCountersEvery === 0);
+    } finally {
+      this.mediaSampling = false;
+    }
+  }
+
+  /**
+   * Give the alignment rule one interval from a statistics report this tick
+   * already read. Only the `inbound-rtp` entries are looked at. Where the
+   * browser's entries do not name their track, each registered receiver is
+   * asked for its own report instead.
+   */
+  private async readAvAlign(
+    pc: RTCPeerConnection,
+    entries: readonly Record<string, unknown>[],
+  ): Promise<void> {
+    const avAlign = this.avAlign;
+    if (avAlign === null) return;
+    // A track that ended (the person left or stopped sending) has no
+    // receiver to align any more.
+    for (const tracked of avAlign.receivers()) {
+      if (tracked.receiver.track?.readyState === "ended") {
+        avAlign.removeReceiver(tracked.peerId, tracked.role, tracked.receiver);
+      }
+    }
+    const samples = inboundSamples(entries);
+    let byTrack: ReadonlyMap<string, InboundSample> = samples.byTrack;
+    if (samples.unidentified > 0) {
+      const filled = new Map(samples.byTrack);
+      for (const tracked of avAlign.receivers()) {
+        if (filled.has(tracked.trackId)) continue;
+        try {
+          const report = await tracked.receiver.getStats();
+          const sample = receiverSample(report.values() as Iterable<Record<string, unknown>>);
+          if (sample !== null) filled.set(tracked.trackId, sample);
+        } catch {
+          // That receiver has no reading this interval; the rule changes
+          // nothing for it.
+        }
+      }
+      byTrack = filled;
+    }
+    if (this.pc !== pc || this.avAlign !== avAlign) return;
+    avAlign.read(Math.round(performance.now()), byTrack, (peerId) => this.shownTrackOf(peerId));
+  }
+
+  /** The one track a tile draws of `peerId` now (`av-align.ts`), from what
+   *  the tiles asked for, what the SFU gives and what the tile last said it
+   *  showed. */
+  private shownTrackOf(peerId: string): AvVideoRole | null {
+    const avAlign = this.avAlign;
+    if (avAlign === null) return null;
+    return shownTrack({
+      hasTile: this.wantsBook.hasTile(peerId),
+      wanted: this.wantsBook.qualityOf(peerId),
+      given: this.givenBook.givenOf(peerId) ?? null,
+      hasMiddle: avAlign.has(peerId, "middle"),
+      hasLight: avAlign.has(peerId, "light"),
+      lightOnTop: shownLayerLedger.shownNowOf(peerId) === "light",
+    });
   }
 
   /** Whether the `call local camera` line was written for this call. */
@@ -1415,15 +1523,18 @@ export class SfuCallSession {
     );
   }
 
-  private async sampleMediaCounters(pc: RTCPeerConnection): Promise<void> {
+  private async sampleMediaCounters(pc: RTCPeerConnection, logCounters = true): Promise<void> {
     if (this.pc !== pc) return;
     let reading: MediaReading;
     let sender: SenderReading | null;
     try {
-      const lightOutbound = await this.copyOutboundIds("light");
-      const middleOutbound = await this.copyOutboundIds("middle");
+      // The senders' own reports are only needed to name them in the log.
+      const lightOutbound = logCounters ? await this.copyOutboundIds("light") : new Set<string>();
+      const middleOutbound = logCounters ? await this.copyOutboundIds("middle") : new Set<string>();
       const report = await pc.getStats();
       const entries = [...(report.values() as Iterable<Record<string, unknown>>)];
+      await this.readAvAlign(pc, entries);
+      if (!logCounters) return;
       reading = readMedia(
         entries,
         this.copyTrackIds.light,
@@ -1472,6 +1583,12 @@ export class SfuCallSession {
       // eslint-disable-next-line no-console
       console.info(line);
     }
+    // Each remote person's sound against their pictures, as the alignment
+    // rule last read them (`av-align.ts`).
+    for (const line of this.avAlign?.lines("call media interval") ?? []) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
     this.mediaCountersLast = reading;
   }
 
@@ -1481,6 +1598,9 @@ export class SfuCallSession {
       clearInterval(this.mediaCountersTimer);
       this.mediaCountersTimer = null;
     }
+    // Every person's rule is freed with the call.
+    this.avAlign?.dispose();
+    this.avAlign = null;
     const last = this.mediaCountersLast;
     this.mediaCountersLast = null;
     this.senderCountersLast = null;
@@ -1735,6 +1855,9 @@ export class SfuCallSession {
       if (role === "main" && ev.track.kind === "audio") {
         this.audioReceivers.set(remoteStream.id, ev.receiver);
       }
+      // The alignment rule is told which receiver this is: the person's
+      // sound, or one of their three pictures (`av-align.ts`).
+      this.registerAvReceiver(splitStreamId(remoteStream.id).peerId, role, ev.track, ev.receiver);
       this.callbacks.onRemoteTrack?.({
         streamId: remoteStream.id,
         track: ev.track,
@@ -1858,8 +1981,35 @@ export class SfuCallSession {
     this.announceCameraState();
   }
 
+  /**
+   * A remote track arrived: its receiver is one of `peerId`'s for the
+   * alignment rule until the track ends (found at the next reading, as
+   * `audioReceiverFor` finds it). Audio counts only on the person's
+   * own stream; a companion stream carries a picture.
+   */
+  private registerAvReceiver(
+    peerId: string,
+    streamRole: AvVideoRole,
+    track: MediaStreamTrack,
+    receiver: RTCRtpReceiver,
+  ): void {
+    const avAlign = this.avAlign;
+    if (avAlign === null) return;
+    let role: AvRole;
+    if (track.kind === "audio") {
+      if (streamRole !== "main") return;
+      role = "audio";
+    } else if (track.kind === "video") {
+      role = streamRole;
+    } else {
+      return;
+    }
+    avAlign.setReceiver(peerId, role, receiver, track.id);
+  }
+
   private onPeerLeft(frame: SfuPeerLeft): void {
     this.wantsBook.removePeer(frame.peer_id);
+    this.avAlign?.removePeer(frame.peer_id);
     // What the SFU gave of them goes with them: someone who later joins
     // under the same id starts with nothing said.
     if (this.givenBook.removePeer(frame.peer_id)) {

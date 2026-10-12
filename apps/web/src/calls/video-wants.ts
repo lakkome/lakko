@@ -201,6 +201,14 @@ export class VideoWantsBook {
     return best;
   }
 
+  /** Whether any mounted tile draws a picture of `peerId` now. */
+  hasTile(peerId: string): boolean {
+    for (const t of this.tiles.values()) {
+      if (t.peerId === peerId) return true;
+    }
+    return false;
+  }
+
   /** The whole set: every person of the call, in the order they joined. */
   wants(): Map<string, VideoQuality> {
     const out = new Map<string, VideoQuality>();

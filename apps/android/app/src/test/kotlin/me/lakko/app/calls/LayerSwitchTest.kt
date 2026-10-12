@@ -101,6 +101,41 @@ class LayerSwitchTest {
     }
 
     @Test
+    fun `the tile says its frames are the light track's exactly when it draws them`() {
+        val rule = ScriptedRule()
+        val driver = LayeredTileDriver(rule, clock = { 0L })
+        // No light track on the tile: never the light one, whatever the rule says.
+        driver.setSources(hasHeavy = true, hasLight = false, heavyReplaced = false)
+        rule.answer = ShownLayer.LIGHT
+        assertFalse(driver.drawsLight())
+        // A companion the rule shows.
+        driver.setSources(hasHeavy = true, hasLight = true, heavyReplaced = false)
+        assertTrue(driver.drawsLight())
+        rule.answer = ShownLayer.FULL
+        assertFalse(driver.drawsLight())
+        // The heavy picture was replaced and has no frame yet: the light copy covers.
+        driver.setSources(hasHeavy = true, hasLight = true, heavyReplaced = true)
+        assertTrue(driver.drawsLight())
+        driver.heavyFrame()
+        assertFalse(driver.drawsLight())
+        // The light track alone is the tile's one picture.
+        driver.setSources(hasHeavy = false, hasLight = true, heavyReplaced = true)
+        assertTrue(driver.drawsLight())
+    }
+
+    @Test
+    fun `a tile presents nothing while the app is away or after it closed`() {
+        val driver = LayeredTileDriver(ScriptedRule(), clock = { 0L })
+        assertTrue(driver.presenting())
+        driver.pause()
+        assertFalse(driver.presenting())
+        driver.resume()
+        assertTrue(driver.presenting())
+        driver.close()
+        assertFalse(driver.presenting())
+    }
+
+    @Test
     fun `every frame of both tracks is reported, drawn or not`() {
         val rule = ScriptedRule()
         val driver = LayeredTileDriver(rule, clock = { 0L })

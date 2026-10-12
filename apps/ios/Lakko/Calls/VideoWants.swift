@@ -206,6 +206,11 @@ struct VideoWantsBook {
         }
     }
 
+    /// Whether any mounted tile draws a picture of `peerId`.
+    func hasTile(of peerId: String) -> Bool {
+        tiles.values.contains { $0.peerId == peerId }
+    }
+
     /// The whole set: every person of the call, in the order they joined.
     func wants() -> [(peer: String, quality: TileVideoQuality)] {
         peers.map { (peer: $0, quality: quality(of: $0)) }

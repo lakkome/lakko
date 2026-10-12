@@ -18,6 +18,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use crate::scoped_discovery::{FfiGroupsForm, FfiScopeId, FfiVisibilityMode, FfiVisibilitySetting};
 use crate::FfiError;
 use lakko_contacts::visibility::{ScopeId as RustScopeId, VisibilitySetting as RustSetting};
+use lakko_ui_rules::av_align::{
+    av_align_capability as rust_av_align_capability, AvAlign as RustAvAlign,
+    AvAudioPlan as RustAvAudioPlan, AvAudioReading as RustAvAudioReading,
+    AvAudioReason as RustAvAudioReason, AvCapability as RustAvCapability, AvPlan as RustAvPlan,
+    AvReadings as RustAvReadings, AvVideoPlan as RustAvVideoPlan,
+    AvVideoReading as RustAvVideoReading, AvVideoReason as RustAvVideoReason, AV_DEAD_BAND_MS,
+    AV_READING_MS, AV_SOUND_WAIT_MAX_MS,
+};
 use lakko_ui_rules::call_bar::{
     call_bar_status as rust_call_bar_status, call_bar_visibility as rust_call_bar_visibility,
     CallBar as RustCallBar, CallBarPhase as RustCallBarPhase, CallBarStatus as RustCallBarStatus,
@@ -1023,9 +1031,511 @@ pub fn layer_first_frame_grace_ms() -> u64 {
     FIRST_FRAME_GRACE_MS
 }
 
+// ----- sound and picture together (ADR-0070, note of 2026-10-12) -----------
+
+/// What the audio receiver of one remote person reports for one interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AvAudioReading {
+    /// Packets arrived in the interval.
+    pub flowing: bool,
+    /// Average time a sample spent in the jitter buffer over the interval,
+    /// milliseconds; `None` when nothing left the buffer or the platform
+    /// reports none.
+    pub delay_ms: Option<u32>,
+    /// The delay the network alone would need, milliseconds, where the
+    /// platform reports it.
+    pub network_ms: Option<u32>,
+}
+
+/// What one video receiver of one remote person reports for one interval.
+/// A track the person does not have, or one the SFU has paused, is
+/// `flowing: false` with everything else empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AvVideoReading {
+    /// Packets arrived in the interval.
+    pub flowing: bool,
+    /// A tile is drawing this track now. Only a shown track can make the
+    /// sound wait.
+    pub shown: bool,
+    /// The media engine synchronises this track with the audio itself: the
+    /// main track, which shares the audio's stream id.
+    pub engine_synced: bool,
+    /// Average time a frame spent in the jitter buffer over the interval,
+    /// milliseconds; `None` when no frame left it or the platform reports
+    /// none.
+    pub delay_ms: Option<u32>,
+    /// The delay the network alone would need, milliseconds, where the
+    /// platform reports it.
+    pub network_ms: Option<u32>,
+}
+
+impl From<AvVideoReading> for RustAvVideoReading {
+    fn from(r: AvVideoReading) -> Self {
+        Self {
+            flowing: r.flowing,
+            shown: r.shown,
+            engine_synced: r.engine_synced,
+            delay_ms: r.delay_ms,
+            network_ms: r.network_ms,
+        }
+    }
+}
+
+/// One interval's readings for one remote person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AvReadings {
+    /// The audio receiver.
+    pub audio: AvAudioReading,
+    /// The main video track (stream id `<peer>`).
+    pub main: AvVideoReading,
+    /// The middle video track (`<peer>~mid`).
+    pub middle: AvVideoReading,
+    /// The light video track (`<peer>~light`).
+    pub light: AvVideoReading,
+}
+
+impl From<AvReadings> for RustAvReadings {
+    fn from(r: AvReadings) -> Self {
+        Self {
+            audio: RustAvAudioReading {
+                flowing: r.audio.flowing,
+                delay_ms: r.audio.delay_ms,
+                network_ms: r.audio.network_ms,
+            },
+            main: r.main.into(),
+            middle: r.middle.into(),
+            light: r.light.into(),
+        }
+    }
+}
+
+/// Why the audio receiver's target is what it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AvAudioReason {
+    /// No audio packets arrived; nothing is changed.
+    NotFlowing,
+    /// The audio flows but reported no delay; nothing is changed.
+    NoReading,
+    /// This device cannot set an audio receiver's delay.
+    NoSetter,
+    /// Nothing is asked of the audio.
+    Free,
+    /// The sound waits for a picture that needs more delay than it has.
+    WaitingForPicture,
+    /// The sound waits as long as it may; the picture needs more and is
+    /// left late.
+    WaitBounded,
+    /// No picture needs the sound to wait any more; the target is coming
+    /// down.
+    Releasing,
+    /// The engine does not follow the audio target; it is no longer
+    /// corrected.
+    HintIgnored,
+}
+
+impl From<RustAvAudioReason> for AvAudioReason {
+    fn from(r: RustAvAudioReason) -> Self {
+        match r {
+            RustAvAudioReason::NotFlowing => Self::NotFlowing,
+            RustAvAudioReason::NoReading => Self::NoReading,
+            RustAvAudioReason::NoSetter => Self::NoSetter,
+            RustAvAudioReason::Free => Self::Free,
+            RustAvAudioReason::WaitingForPicture => Self::WaitingForPicture,
+            RustAvAudioReason::WaitBounded => Self::WaitBounded,
+            RustAvAudioReason::Releasing => Self::Releasing,
+            RustAvAudioReason::HintIgnored => Self::HintIgnored,
+        }
+    }
+}
+
+impl From<AvAudioReason> for RustAvAudioReason {
+    fn from(r: AvAudioReason) -> Self {
+        match r {
+            AvAudioReason::NotFlowing => Self::NotFlowing,
+            AvAudioReason::NoReading => Self::NoReading,
+            AvAudioReason::NoSetter => Self::NoSetter,
+            AvAudioReason::Free => Self::Free,
+            AvAudioReason::WaitingForPicture => Self::WaitingForPicture,
+            AvAudioReason::WaitBounded => Self::WaitBounded,
+            AvAudioReason::Releasing => Self::Releasing,
+            AvAudioReason::HintIgnored => Self::HintIgnored,
+        }
+    }
+}
+
+/// Why a video receiver's target is what it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AvVideoReason {
+    /// No packets arrived; the track is left alone.
+    NotFlowing,
+    /// The track flows but reported no delay; nothing is changed.
+    NoReading,
+    /// There is no measured audio delay to follow.
+    NoSound,
+    /// This device cannot set a video receiver's delay.
+    NoSetter,
+    /// The engine synchronises this track itself; it is only observed.
+    EngineSynced,
+    /// The track began to flow: it starts at the audio's delay.
+    Started,
+    /// The skew is inside the dead band.
+    Aligned,
+    /// The target is being raised: the picture waits for the sound.
+    Raising,
+    /// The target is being lowered towards the sound.
+    Lowering,
+    /// The target stands and the receiver has not answered it yet.
+    Settling,
+    /// The engine does not follow the target; the picture stays early.
+    HintIgnored,
+    /// The track needs more delay than the sound has; the sound waits.
+    SoundWaits,
+    /// The track is later than the sound and stays so.
+    PictureLate,
+}
+
+impl From<RustAvVideoReason> for AvVideoReason {
+    fn from(r: RustAvVideoReason) -> Self {
+        match r {
+            RustAvVideoReason::NotFlowing => Self::NotFlowing,
+            RustAvVideoReason::NoReading => Self::NoReading,
+            RustAvVideoReason::NoSound => Self::NoSound,
+            RustAvVideoReason::NoSetter => Self::NoSetter,
+            RustAvVideoReason::EngineSynced => Self::EngineSynced,
+            RustAvVideoReason::Started => Self::Started,
+            RustAvVideoReason::Aligned => Self::Aligned,
+            RustAvVideoReason::Raising => Self::Raising,
+            RustAvVideoReason::Lowering => Self::Lowering,
+            RustAvVideoReason::Settling => Self::Settling,
+            RustAvVideoReason::HintIgnored => Self::HintIgnored,
+            RustAvVideoReason::SoundWaits => Self::SoundWaits,
+            RustAvVideoReason::PictureLate => Self::PictureLate,
+        }
+    }
+}
+
+impl From<AvVideoReason> for RustAvVideoReason {
+    fn from(r: AvVideoReason) -> Self {
+        match r {
+            AvVideoReason::NotFlowing => Self::NotFlowing,
+            AvVideoReason::NoReading => Self::NoReading,
+            AvVideoReason::NoSound => Self::NoSound,
+            AvVideoReason::NoSetter => Self::NoSetter,
+            AvVideoReason::EngineSynced => Self::EngineSynced,
+            AvVideoReason::Started => Self::Started,
+            AvVideoReason::Aligned => Self::Aligned,
+            AvVideoReason::Raising => Self::Raising,
+            AvVideoReason::Lowering => Self::Lowering,
+            AvVideoReason::Settling => Self::Settling,
+            AvVideoReason::HintIgnored => Self::HintIgnored,
+            AvVideoReason::SoundWaits => Self::SoundWaits,
+            AvVideoReason::PictureLate => Self::PictureLate,
+        }
+    }
+}
+
+/// What to do with the audio receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AvAudioPlan {
+    /// The target delay to set on the receiver now, milliseconds; `None`
+    /// leaves it alone. `0` gives the target back.
+    pub set_ms: Option<u32>,
+    /// What the receiver was last told, milliseconds; `0` when nothing.
+    pub asked_ms: u32,
+    /// Why.
+    pub reason: AvAudioReason,
+}
+
+impl From<RustAvAudioPlan> for AvAudioPlan {
+    fn from(p: RustAvAudioPlan) -> Self {
+        Self {
+            set_ms: p.set_ms,
+            asked_ms: p.asked_ms,
+            reason: p.reason.into(),
+        }
+    }
+}
+
+/// What to do with one video receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AvVideoPlan {
+    /// The target delay to set on the receiver now, milliseconds; `None`
+    /// leaves it alone. `0` gives the target back.
+    pub set_ms: Option<u32>,
+    /// What the receiver was last told, milliseconds; `0` when nothing.
+    pub asked_ms: u32,
+    /// The track's measured delay minus the audio's, milliseconds: positive
+    /// when the picture is later than the sound. `None` when either was not
+    /// measured in this interval.
+    pub skew_ms: Option<i32>,
+    /// Why.
+    pub reason: AvVideoReason,
+}
+
+impl From<RustAvVideoPlan> for AvVideoPlan {
+    fn from(p: RustAvVideoPlan) -> Self {
+        Self {
+            set_ms: p.set_ms,
+            asked_ms: p.asked_ms,
+            skew_ms: p.skew_ms,
+            reason: p.reason.into(),
+        }
+    }
+}
+
+/// One interval's answer for one remote person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AvPlan {
+    /// The audio receiver.
+    pub audio: AvAudioPlan,
+    /// The main video track.
+    pub main: AvVideoPlan,
+    /// The middle video track.
+    pub middle: AvVideoPlan,
+    /// The light video track.
+    pub light: AvVideoPlan,
+}
+
+impl From<RustAvPlan> for AvPlan {
+    fn from(p: RustAvPlan) -> Self {
+        Self {
+            audio: p.audio.into(),
+            main: p.main.into(),
+            middle: p.middle.into(),
+            light: p.light.into(),
+        }
+    }
+}
+
+/// What the rule can achieve on a device, from which receivers' delays the
+/// device can set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AvCapability {
+    /// Both can be set: an early picture waits for the sound, and the sound
+    /// waits (within its bound) for a picture that needs more.
+    Full,
+    /// Only video can be set: the audio cannot be delayed here, so a picture
+    /// that needs more delay than the sound has stays late.
+    PictureWaitsOnly,
+    /// Only audio can be set: a picture that runs ahead of the sound cannot
+    /// be held back here.
+    SoundWaitsOnly,
+    /// Neither can be set: the skew is measured and nothing is done.
+    ObserveOnly,
+}
+
+impl From<RustAvCapability> for AvCapability {
+    fn from(c: RustAvCapability) -> Self {
+        match c {
+            RustAvCapability::Full => Self::Full,
+            RustAvCapability::PictureWaitsOnly => Self::PictureWaitsOnly,
+            RustAvCapability::SoundWaitsOnly => Self::SoundWaitsOnly,
+            RustAvCapability::ObserveOnly => Self::ObserveOnly,
+        }
+    }
+}
+
+impl From<AvCapability> for RustAvCapability {
+    fn from(c: AvCapability) -> Self {
+        match c {
+            AvCapability::Full => Self::Full,
+            AvCapability::PictureWaitsOnly => Self::PictureWaitsOnly,
+            AvCapability::SoundWaitsOnly => Self::SoundWaitsOnly,
+            AvCapability::ObserveOnly => Self::ObserveOnly,
+        }
+    }
+}
+
+/// Keeps one remote person's sound and picture together in a group call:
+/// from what this device's receivers report each interval, the target
+/// playout delay to set on each of them.
+///
+/// One per remote person. Every [`av_align_reading_ms`] the client reads its
+/// receivers' statistics and calls [`AvAlign::read`] with one clock in whole
+/// milliseconds (any origin), then sets every `set_ms` that came back.
+/// Thread-safe.
+#[derive(uniffi::Object)]
+pub struct AvAlign {
+    inner: Mutex<RustAvAlign>,
+}
+
+impl AvAlign {
+    /// The state is plain numbers and no method can panic while holding the
+    /// lock, so a poisoned lock still guards a consistent state.
+    fn state(&self) -> MutexGuard<'_, RustAvAlign> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[uniffi::export]
+impl AvAlign {
+    /// A remote person's alignment on a device that can (or cannot) set the
+    /// target delay of an audio receiver and of a video receiver.
+    #[uniffi::constructor]
+    #[must_use]
+    pub fn new(audio_settable: bool, video_settable: bool) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(RustAvAlign::new(audio_settable, video_settable)),
+        })
+    }
+
+    /// One interval's readings, taken at `now_ms`. Returns what to set on
+    /// each receiver.
+    pub fn read(&self, now_ms: u64, readings: AvReadings) -> AvPlan {
+        self.state().read(now_ms, &readings.into()).into()
+    }
+
+    /// The receivers were replaced: nothing has been told to the new ones.
+    /// The next reading starts every track again and tells every receiver
+    /// its target.
+    pub fn receivers_replaced(&self) {
+        self.state().receivers_replaced();
+    }
+
+    /// What the rule can achieve on this device.
+    #[must_use]
+    pub fn capability(&self) -> AvCapability {
+        self.state().capability().into()
+    }
+}
+
+/// What the rule can and cannot achieve with the setters a device has.
+#[uniffi::export]
+#[must_use]
+pub fn av_align_capability(audio_settable: bool, video_settable: bool) -> AvCapability {
+    rust_av_align_capability(audio_settable, video_settable).into()
+}
+
+/// The word a diagnostic line uses for a capability, the same on every
+/// client.
+#[uniffi::export]
+#[must_use]
+pub fn av_capability_name(capability: AvCapability) -> String {
+    RustAvCapability::from(capability).name().to_string()
+}
+
+/// The word a diagnostic line uses for an audio reason, the same on every
+/// client.
+#[uniffi::export]
+#[must_use]
+pub fn av_audio_reason_name(reason: AvAudioReason) -> String {
+    RustAvAudioReason::from(reason).name().to_string()
+}
+
+/// The word a diagnostic line uses for a video reason, the same on every
+/// client.
+#[uniffi::export]
+#[must_use]
+pub fn av_video_reason_name(reason: AvVideoReason) -> String {
+    RustAvVideoReason::from(reason).name().to_string()
+}
+
+/// How often a client reads its receivers and calls [`AvAlign::read`],
+/// milliseconds. Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn av_align_reading_ms() -> u64 {
+    AV_READING_MS
+}
+
+/// The skew inside which a track is left as it is, milliseconds. Chosen,
+/// not measured.
+#[uniffi::export]
+#[must_use]
+pub fn av_align_dead_band_ms() -> u32 {
+    AV_DEAD_BAND_MS
+}
+
+/// The most the sound is asked to wait for a picture above what the audio
+/// needs for itself, milliseconds. Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn av_align_sound_wait_max_ms() -> u32 {
+    AV_SOUND_WAIT_MAX_MS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_av_alignment_crosses_the_boundary_intact() {
+        assert_eq!(
+            (
+                av_align_reading_ms(),
+                av_align_dead_band_ms(),
+                av_align_sound_wait_max_ms()
+            ),
+            (1000, 30, 300)
+        );
+        assert_eq!(
+            av_align_capability(false, true),
+            AvCapability::PictureWaitsOnly
+        );
+        assert_eq!(
+            av_capability_name(AvCapability::PictureWaitsOnly),
+            "picture-waits-only"
+        );
+        assert_eq!(
+            av_audio_reason_name(AvAudioReason::WaitBounded),
+            "wait-bounded"
+        );
+        assert_eq!(
+            av_video_reason_name(AvVideoReason::SoundWaits),
+            "sound-waits"
+        );
+        let absent = AvVideoReading {
+            flowing: false,
+            shown: false,
+            engine_synced: false,
+            delay_ms: None,
+            network_ms: None,
+        };
+        let readings = |sound: u32, light: u32| AvReadings {
+            audio: AvAudioReading {
+                flowing: true,
+                delay_ms: Some(sound),
+                network_ms: None,
+            },
+            main: AvVideoReading {
+                flowing: true,
+                shown: false,
+                engine_synced: true,
+                delay_ms: Some(sound + 40),
+                network_ms: None,
+            },
+            middle: absent,
+            light: AvVideoReading {
+                flowing: true,
+                shown: true,
+                engine_synced: false,
+                delay_ms: Some(light),
+                network_ms: None,
+            },
+        };
+        let a = AvAlign::new(true, true);
+        assert_eq!(a.capability(), AvCapability::Full);
+        // Light at the 290 ms floor, the sound at 450: light starts at the
+        // sound's delay; main is observed only.
+        let plan = a.read(0, readings(450, 290));
+        assert_eq!(plan.light.set_ms, Some(450));
+        assert_eq!(plan.light.skew_ms, Some(-160));
+        assert_eq!(plan.light.reason, AvVideoReason::Started);
+        assert_eq!(plan.main.set_ms, None);
+        assert_eq!(plan.main.skew_ms, Some(40));
+        assert_eq!(plan.main.reason, AvVideoReason::EngineSynced);
+        assert_eq!(plan.middle.reason, AvVideoReason::NotFlowing);
+        assert_eq!(plan.audio.set_ms, None);
+        assert_eq!(plan.audio.reason, AvAudioReason::Free);
+        // The sound jumps to 990: 240 ms a second upwards.
+        let plan = a.read(1000, readings(990, 450));
+        assert_eq!(plan.light.set_ms, Some(690));
+        assert_eq!(plan.light.asked_ms, 690);
+        assert_eq!(plan.light.reason, AvVideoReason::Raising);
+        // New receivers are told again.
+        a.receivers_replaced();
+        assert_eq!(a.read(2000, readings(990, 690)).light.set_ms, Some(990));
+    }
 
     #[test]
     fn the_tile_video_rule_crosses_the_boundary_intact() {

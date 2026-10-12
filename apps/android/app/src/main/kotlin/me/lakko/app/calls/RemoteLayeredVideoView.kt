@@ -66,12 +66,16 @@ import uniffi.lakko_ffi_uniffi.layerTickMs
  *
  * @param heavyTrack the person's main or middle video track, whichever this
  *   tile shows; `null` when it shows the light picture alone.
+ * @param heavyRole which of the person's tracks [heavyTrack] is
+ *   ([AvRole.MAIN] or [AvRole.MIDDLE]); what the tile tells the call it
+ *   draws (`AvAlign.kt`).
  * @param lightTrack their light companion, or `null` when they send none.
  * @param peerId the SFU peer id, for the `shown` line of the media counters.
  */
 @Composable
 internal fun RemoteLayeredVideoView(
     heavyTrack: VideoTrack?,
+    heavyRole: AvRole,
     lightTrack: VideoTrack?,
     peerId: String,
     eglContext: EglBase.Context,
@@ -81,6 +85,7 @@ internal fun RemoteLayeredVideoView(
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
     val currentHeavy by rememberUpdatedState(heavyTrack)
     val currentLight by rememberUpdatedState(lightTrack)
+    val currentHeavyRole by rememberUpdatedState(heavyRole)
     val currentScaling by rememberUpdatedState(scalingType)
 
     val tile = remember(peerId) {
@@ -130,11 +135,13 @@ internal fun RemoteLayeredVideoView(
                 // Never mirror the other person.
                 view.setMirror(false)
                 tile.renderer = view
+                tile.heavyRole = currentHeavyRole
                 tile.attach(currentHeavy, currentLight)
                 view
             },
             update = { view ->
                 view.setScalingType(currentScaling)
+                tile.heavyRole = currentHeavyRole
                 tile.attach(currentHeavy, currentLight)
             },
             onRelease = { view ->
@@ -158,10 +165,31 @@ private class LayeredTile(
     @Volatile
     var renderer: VideoSink? = null
 
+    /** Which of the person's tracks the heavy sink is on. */
+    @Volatile
+    var heavyRole: AvRole = AvRole.MAIN
+
+    @Volatile
     private var attachedHeavy: VideoTrack? = null
     private var attachedLight: VideoTrack? = null
     private var attachedOnce = false
+
+    @Volatile
     private var released = false
+
+    init {
+        // The call asks which track this tile draws (`AvAlign.kt`).
+        shownTrackBoard.register(this, peerId) { drawnRole() }
+    }
+
+    /** The one track whose frames this tile draws now, or `null` when it
+     *  draws none. */
+    private fun drawnRole(): AvRole? = when {
+        released || !driver.presenting() -> null
+        driver.drawsLight() -> AvRole.LIGHT
+        attachedHeavy != null -> heavyRole
+        else -> null
+    }
 
     private val heavySink = VideoSink { frame: VideoFrame ->
         if (driver.heavyFrame()) renderer?.onFrame(frame)
@@ -208,6 +236,7 @@ private class LayeredTile(
     fun release() {
         if (released) return
         released = true
+        shownTrackBoard.unregister(this)
         attachedHeavy?.let { detach(it, heavySink) }
         attachedLight?.let { detach(it, lightSink) }
         attachedHeavy = null

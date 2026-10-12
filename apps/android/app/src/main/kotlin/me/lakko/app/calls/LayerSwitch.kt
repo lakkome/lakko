@@ -174,6 +174,19 @@ internal class LayeredTileDriver(
         observing = true
     }
 
+    /**
+     * Whether the frames the tile draws now are the light track's
+     * (`AvAlign.kt`): it is the tile's one picture, it covers a heavy picture
+     * that was just replaced, or the rule says the light copy is shown. The
+     * condition [lightFrame] draws under.
+     */
+    fun drawsLight(): Boolean =
+        hasLight && (lightOnly || heavySwappedAt != null || shown() == ShownLayer.LIGHT)
+
+    /** Whether the tile presents frames at all now: not closed, and the app
+     *  is in the foreground. */
+    fun presenting(): Boolean = !closed && observing
+
     /** Which picture the tile shows now. */
     fun shown(): ShownLayer =
         if (closed) ShownLayer.FULL else try {

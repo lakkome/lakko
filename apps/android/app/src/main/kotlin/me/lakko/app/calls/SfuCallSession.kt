@@ -1181,9 +1181,26 @@ class SfuCallSession(
     private var senderCountersLast: SenderReading? = null
 
     /**
-     * ADR-0067 step 1: log what the receivers report, once per interval and
-     * as a total when the call ends, with what each remote tile showed
-     * (`LayerSwitch.kt`). Diagnostics only: counts and durations.
+     * Keeps each remote person's sound and picture together (`AvAlign.kt`,
+     * ADR-0070 note of 2026-10-12): one shared rule per person, fed from the
+     * same statistics report the media counters read. One per connection;
+     * `null` while there is none. Read and written on [scope] only.
+     *
+     * The pinned libwebrtc SDK has no setter for a receiver's playout delay
+     * ([NoReceiverDelaySetter]), so on Android the rule observes: the skew is
+     * measured and logged and nothing is written to a receiver.
+     */
+    private var avAlign: CallAvAlign? = null
+
+    /**
+     * Read the connection's statistics once per reading interval of the
+     * shared audio/video rule (`AvAlign.kt`), and from that one report:
+     *
+     *  * feed the rule of every remote person, every reading;
+     *  * ADR-0067 step 1: log what the receivers report, once per
+     *    [MEDIA_COUNTERS_INTERVAL_MS] and as a total when the call ends, with
+     *    what each remote tile showed (`LayerSwitch.kt`) and one `sync` line
+     *    per remote person. Diagnostics only: counts and durations.
      */
     private fun startMediaCounters(connection: WebRtcPeerConnection) {
         mediaCountersJob?.cancel()
@@ -1192,18 +1209,47 @@ class SfuCallSession(
         senderCountersLast = null
         // The tiles of this call start from nothing.
         shownLayerLedger.reset()
+        avAlign?.dispose()
+        // What this device can do about the skew, decided here and said once.
+        val align = CallAvAlign(
+            rules = SharedAvAlignRules,
+            setter = NoReceiverDelaySetter,
+            warn = { message -> android.util.Log.w(MEDIA_LOG_TAG, message) },
+            info = { line -> android.util.Log.i(MEDIA_LOG_TAG, line) },
+        )
+        avAlign = align
+        val readingMs = align.readingMs()
+        val countersEvery = readingsPerCountersInterval(readingMs, MEDIA_COUNTERS_INTERVAL_MS)
         mediaCountersJob = scope.launch {
+            var readings = 0L
             while (isActive) {
-                delay(MEDIA_COUNTERS_INTERVAL_MS)
-                sampleMediaCounters(connection)
+                delay(readingMs)
+                readings += 1
+                sampleMediaCounters(connection, align, logCounters = readings % countersEvery == 0L)
             }
         }
     }
 
-    private suspend fun sampleMediaCounters(connection: WebRtcPeerConnection) {
+    private suspend fun sampleMediaCounters(
+        connection: WebRtcPeerConnection,
+        align: CallAvAlign,
+        logCounters: Boolean,
+    ) {
         if (pc !== connection) return
         val sample = connection.sampleMediaStats() ?: return
-        if (pc !== connection) return
+        if (pc !== connection || avAlign !== align) return
+        // One reading of the audio/video rule for every remote person: who is
+        // in the call, which track is whose, what the receivers report and
+        // what the tiles draw now. A person who joined gets a rule here; one
+        // who left has theirs freed.
+        align.read(
+            nowMs = android.os.SystemClock.elapsedRealtime(),
+            peerIds = wantsBook.wants().keys,
+            tracks = sample.remoteTracks,
+            byTrack = inboundSamples(sample.stats),
+            shown = { peerId, role -> role in shownTrackBoard.shownOf(peerId) },
+        )
+        if (!logCounters) return
         val at = nowMs()
         val reading = readMedia(
             sample.stats,
@@ -1238,7 +1284,10 @@ class SfuCallSession(
                 shownLayerLedger.takeInterval(),
                 wantOf = { wantsBook.qualityOf(it) },
                 givenOf = { givenBook.givenOf(it) },
-            )
+            ) +
+            // Each remote person's sound against their pictures, as the last
+            // reading of the shared rule had it.
+            align.lines(label)
         for (line in lines) android.util.Log.i(MEDIA_LOG_TAG, line)
         mediaCountersLast = reading
         mediaCountersLastAtMs = at
@@ -1250,6 +1299,9 @@ class SfuCallSession(
         mediaCountersJob?.cancel()
         mediaCountersJob = null
         senderCountersLast = null
+        // The call is over: every person's rule is freed.
+        avAlign?.dispose()
+        avAlign = null
         val last = mediaCountersLast ?: return
         mediaCountersLast = null
         val label = MEDIA_COUNTERS_TOTAL_LABEL
@@ -1328,6 +1380,8 @@ class SfuCallSession(
             override fun onPeerLeft(peerId: String) {
                 scope.launch {
                     wantsBook.removePeer(peerId)
+                    // Their audio/video rule goes with them.
+                    avAlign?.removePeer(peerId)
                     // What the SFU gave of them goes with them: someone who
                     // later joins under the same id starts with nothing said.
                     if (givenBook.removePeer(peerId)) callbacks.onVideoGiven(givenBook.snapshot())
