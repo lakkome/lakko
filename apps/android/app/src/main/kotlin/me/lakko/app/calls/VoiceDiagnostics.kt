@@ -19,7 +19,8 @@ import java.util.Locale
  * One person reads, for example, `a=stats-energy:0.031:yes[thr=0.012]`: the
  * path the ring was decided from, the loudest level on it over the interval,
  * whether the ring was on; then, in the bracket, the threshold in force for
- * that person ([NoiseGate]). The web client's bracket also lists the raw
+ * that person, as the shared speaking rule gives it ([SpeakingRule.threshold]).
+ * The web client's bracket also lists the raw
  * value of every path it tried (`an`, `en`, `lv`, `src`); this client has
  * one path per reading, already named before the colon, so its bracket holds
  * the threshold alone.
@@ -38,8 +39,8 @@ internal data class VoiceReport(
     /** Whether the person counted as speaking at any reading of the interval. */
     val speaking: Boolean,
     /** The level that counts as sound for this person at the end of the
-     *  interval. */
-    val threshold: Double = SPEAKING_LEVEL,
+     *  interval: the shared rule's answer, never a number of this client's. */
+    val threshold: Double,
 )
 
 /** Why a person is on the large tile; the order of the shared rule. */

@@ -1112,7 +1112,7 @@ final class VoiceDiagnosticsTests: XCTestCase {
                 threshold: 0.0125),
             VoiceReport(
                 id: "peer-b", isLocal: false, path: .none, peak: nil, speaking: false,
-                threshold: Speaking.level),
+                threshold: speakingLevel()),
         ]
         XCTAssertEqual(
             VoiceDiagnostics.describe(

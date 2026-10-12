@@ -34,7 +34,7 @@ import kotlin.math.sqrt
  *
  * This file is the pure half: picking the levels out of a statistics report.
  * Reading the report is [WebRtcPeerConnection.sampleAudioLevels], and what
- * the levels mean is [SpeakingTracker].
+ * the levels mean is the shared rule's ([SpeakingRule]).
  */
 
 /** Where a level came from. */

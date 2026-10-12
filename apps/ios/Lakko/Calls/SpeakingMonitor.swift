@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// The sound levels of one reading, as the peer connection's own statistics
 /// report them (`docs/ux/group-call-grid.md` section 7.3).
@@ -74,7 +75,14 @@ enum CallAudioLevelStats {
 }
 
 /// Reads the sound level of each person's audio in a group call and feeds
-/// ``SpeakingTracker``; the twin of `apps/web/src/calls/speaking-monitor.ts`.
+/// the shared speaking rule (`SpeakingTracker` of `LakkoCore`, written once
+/// in `crates/lakko-ui-rules/src/speaking.rs`); the twin of
+/// `apps/web/src/calls/speaking-monitor.ts`.
+///
+/// Nothing of the rule lives here: what counts as sound, when a ring comes on
+/// and goes off, and who holds the floor are all the tracker's. This class
+/// reads the levels, tells the tracker who is muted and who this device's own
+/// person is, and writes the answers onto the call's state.
 ///
 /// The levels come from the peer connection's statistics, read about seven
 /// times a second: each other person's from the `audioLevel` of the
@@ -91,16 +99,14 @@ enum CallAudioLevelStats {
 /// tile falls back to the roster order) and teaches that person's noise
 /// floor nothing. A muted person's level is not read at all.
 ///
-/// What counts as sound follows each person's own noise floor
-/// (``NoiseGate``), with the web client's constants. The level itself is not
-/// the web client's: the statistics' `audioLevel` is whatever window the
-/// engine keeps (the web client notes libwebrtc reports a decaying peak, not
-/// a root mean square, and does not let it decide there). Here it is the
-/// only source, so the threshold follows the floor of that same instrument.
-/// The floor's fall is bounded per reading, and a reading here is every
-/// 150 ms against the web client's 100 ms, so the floor follows a room that
-/// went quiet in half as many more milliseconds; the rise is per second and
-/// is the same.
+/// What counts as sound follows each person's own noise floor, inside the
+/// shared tracker. The level itself is not the web client's: the statistics'
+/// `audioLevel` is whatever window the engine keeps (the web client notes
+/// libwebrtc reports a decaying peak, not a root mean square, and does not
+/// let it decide there). Here it is the only source, so the threshold follows
+/// the floor of that same instrument. A reading here is every 150 ms; the
+/// shared rule is stated per unit of time, so the interval changes nothing
+/// about how fast a floor rises or falls.
 ///
 /// Group calls only: a one-to-one has one voice.
 @MainActor
@@ -111,7 +117,12 @@ final class GroupSpeakingMonitor {
 
     private let ui: CallUiState
     private let nowMs: () -> UInt64
-    private var tracker = SpeakingTracker()
+    /// The shared rule for this call: made at the first reading, dropped
+    /// when the monitor stops, so nothing learned in one call reaches the
+    /// next.
+    private var tracker: SpeakingTracker?
+    /// The own person the tracker was last told about.
+    private var toldLocalId: String?
     private var task: Task<Void, Never>?
     /// What each person's level was since the last `voices` line.
     private var report: [String: VoiceNote] = [:]
@@ -156,7 +167,8 @@ final class GroupSpeakingMonitor {
     func stop() {
         task?.cancel()
         task = nil
-        tracker = SpeakingTracker()
+        tracker = nil
+        toldLocalId = nil
         report = [:]
         readingsSinceReport = 0
         ui.setSpeech(speakingIds: [], speech: .none)
@@ -172,15 +184,23 @@ final class GroupSpeakingMonitor {
     /// the ring, so one whose source went away goes off instead of standing,
     /// and nothing for the noise floor.
     ///
-    /// This device's own person is sampled for its ring and is never a
-    /// candidate for the floor (``SpeakingTracker/snapshot(candidates:nowMs:)``).
+    /// This device's own person is sampled for its ring and never holds the
+    /// floor: the tracker is told who they are and skips them wherever they
+    /// stand in the roster.
     func ingest(_ levels: CallAudioLevels, nowMs: UInt64) {
         let people = ui.participants
         let order = people.map(\.id)
-        tracker.keepOnly(Set(order))
+        let tracker = self.tracker ?? SpeakingTracker()
+        self.tracker = tracker
+        let localId = people.first(where: \.isLocal)?.id
+        if localId != toldLocalId {
+            tracker.setLocal(person: localId)
+            toldLocalId = localId
+        }
+        tracker.keepOnly(people: order)
         for person in people {
             guard person.micOn else {
-                tracker.silence(person.id)
+                tracker.silence(person: person.id)
                 report[person.id] = nil
                 continue
             }
@@ -194,13 +214,12 @@ final class GroupSpeakingMonitor {
             note.measured = level != nil
             if let level { note.peak = max(note.peak ?? 0, level) }
             report[person.id] = note
-            tracker.sample(person.id, level: level, nowMs: nowMs)
+            tracker.sample(person: person.id, level: level, nowMs: nowMs)
         }
-        let candidates = people.filter { !$0.isLocal }.map(\.id)
-        let snapshot = tracker.snapshot(candidates: candidates, nowMs: nowMs)
+        let snapshot = tracker.decideFloor(order: order, nowMs: nowMs)
         for id in snapshot.speakingIds { report[id]?.speaking = true }
         ui.setSpeech(
-            speakingIds: snapshot.speakingIds,
+            speakingIds: Set(snapshot.speakingIds),
             speech: StageSpeech(
                 activeSpeakerId: snapshot.activeSpeakerId,
                 lastSpokeAtMs: snapshot.lastSpokeAtMs))
@@ -220,7 +239,7 @@ final class GroupSpeakingMonitor {
                 id: person.id, isLocal: person.isLocal,
                 path: note?.measured == true ? .statsLevel : .none,
                 peak: note?.peak, speaking: note?.speaking ?? false,
-                threshold: tracker.threshold(of: person.id))
+                threshold: threshold(ofParticipant: person.id))
         }
         report = [:]
         let layout = GroupCallLayout.kind(
@@ -241,9 +260,10 @@ final class GroupSpeakingMonitor {
                 layout: layout))
     }
 
-    /// The level that counts as sound for a person of the roster now.
+    /// The level that counts as sound for a person of the roster now, as the
+    /// shared rule reports it; the starting level before any reading.
     func threshold(ofParticipant id: String) -> Double {
-        tracker.threshold(of: id)
+        tracker?.threshold(person: id) ?? speakingLevel()
     }
 
     /// The SFU peer id behind a roster id (`"peer-<peerId>"`).

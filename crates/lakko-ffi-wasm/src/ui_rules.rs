@@ -60,6 +60,10 @@ use lakko_ui_rules::ring::{
     remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
     RingDecision as RustRingDecision, CALL_RING_WINDOW_MS,
 };
+use lakko_ui_rules::speaking::{
+    SpeakingTracker as RustSpeakingTracker, FLOOR_ONSET_MS, RING_OFF_MS, RING_ON_MS,
+    SPEAKING_LEVEL, SPEAKING_LEVEL_MAX, SPEAKING_LEVEL_MIN,
+};
 use lakko_ui_rules::visibility::{
     choose_mode as rust_choose_mode, exclude_scope_under_all as rust_exclude_scope_under_all,
     set_contacts_of_contacts as rust_set_contacts_of_contacts, set_groups as rust_set_groups,
@@ -1628,6 +1632,194 @@ pub fn av_align_sound_wait_max_ms() -> u32 {
     AV_SOUND_WAIT_MAX_MS
 }
 
+/// Who is speaking in a group call: the ring on each tile and the one person
+/// holding the floor, decided by one rule for the three clients
+/// (`docs/ux/group-call-grid.md` sections 5.2 and 7.3).
+///
+/// One per call. For every person of the roster, at every reading, call
+/// `sample` with the level that was read (`undefined` or `null` when it could
+/// not be read), or `silence` while they are muted; then `decideFloor` with
+/// the roster order, and read `speaking`, `floor` and the floor history back.
+/// Levels are the root mean square of decoded samples, `0..1`. Times are
+/// plain numbers on one millisecond clock; fractions are dropped and a
+/// negative or non-finite time reads as 0.
+#[wasm_bindgen(js_name = SpeakingTracker)]
+#[derive(Debug, Default)]
+pub struct SpeakingTracker {
+    inner: RustSpeakingTracker,
+}
+
+#[wasm_bindgen(js_class = SpeakingTracker)]
+impl SpeakingTracker {
+    /// A tracker of a call nobody has been heard in.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Name this device's own person (`undefined` for none). They are
+    /// sampled and have a ring like anyone, and never hold the floor,
+    /// wherever they stand in the order given to `decideFloor`.
+    #[wasm_bindgen(js_name = setLocal)]
+    pub fn set_local(&mut self, person: Option<String>) {
+        self.inner.set_local(person.as_deref());
+    }
+
+    /// One level reading for one person at `nowMs`. No level is "could not
+    /// be read": silence for the ring, and nothing for the person's noise
+    /// floor. A level that is not a number is silence too.
+    pub fn sample(&mut self, person: &str, level: Option<f64>, now_ms: f64) {
+        self.inner.sample(person, level, whole_ms(now_ms));
+    }
+
+    /// The person is muted: their ring goes off at once and they give up the
+    /// floor. What was learned about their room is kept.
+    pub fn silence(&mut self, person: &str) {
+        self.inner.silence(person);
+    }
+
+    /// The person left the call: everything about them is dropped.
+    pub fn forget(&mut self, person: &str) {
+        self.inner.forget(person);
+    }
+
+    /// Forget everyone who is not one of `people`, the roster as it is now.
+    #[wasm_bindgen(js_name = keepOnly)]
+    pub fn keep_only(&mut self, people: Vec<String>) {
+        self.inner.keep_only(&people);
+    }
+
+    /// Settle who holds the floor after the samples so far, and return them
+    /// (`undefined` for nobody). `order` is the roster in order, which
+    /// breaks a tie; this device's own person may be in it and is skipped.
+    #[wasm_bindgen(js_name = decideFloor)]
+    pub fn decide_floor(&mut self, order: Vec<String>, now_ms: f64) -> Option<String> {
+        self.inner
+            .decide_floor(&order, whole_ms(now_ms))
+            .map(str::to_owned)
+    }
+
+    /// Who holds the floor, as last decided. Never this device's own person.
+    #[must_use]
+    pub fn floor(&self) -> Option<String> {
+        self.inner.floor().map(str::to_owned)
+    }
+
+    /// Everyone whose ring is on, this device's own person included, sorted
+    /// by id.
+    #[must_use]
+    pub fn speaking(&self) -> Vec<String> {
+        self.inner
+            .speaking()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Whether the person's ring is on.
+    #[wasm_bindgen(js_name = isSpeaking)]
+    #[must_use]
+    pub fn is_speaking(&self, person: &str) -> bool {
+        self.inner.is_speaking(person)
+    }
+
+    /// Everyone who has held the floor, sorted by id. `floorHeldAtMs` is the
+    /// same list's times, in the same order.
+    #[wasm_bindgen(js_name = floorHolders)]
+    #[must_use]
+    pub fn floor_holders(&self) -> Vec<String> {
+        self.inner
+            .floor_history()
+            .into_iter()
+            .map(|(id, _)| id.to_owned())
+            .collect()
+    }
+
+    /// When each person of `floorHolders` last held the floor, on the
+    /// caller's clock, in that order.
+    #[wasm_bindgen(js_name = floorHeldAtMs)]
+    #[must_use]
+    pub fn floor_held_at_ms(&self) -> Vec<f64> {
+        self.inner
+            .floor_history()
+            .into_iter()
+            // A time handed in as a number is far below 2^53 unless it was
+            // nonsense to begin with.
+            .map(|(_, at)| {
+                #[allow(clippy::cast_precision_loss)]
+                let at = at as f64;
+                at
+            })
+            .collect()
+    }
+
+    /// When the person last held the floor, or `undefined` for someone who
+    /// never has.
+    #[wasm_bindgen(js_name = lastHeldFloorMs)]
+    #[must_use]
+    pub fn last_held_floor_ms(&self, person: &str) -> Option<f64> {
+        self.inner.last_held_floor_ms(person).map(|at| {
+            #[allow(clippy::cast_precision_loss)]
+            let at = at as f64;
+            at
+        })
+    }
+
+    /// What counts as sound for the person now, on the scale of the levels
+    /// (for the diagnostics line).
+    #[must_use]
+    pub fn threshold(&self, person: &str) -> f64 {
+        self.inner.threshold(person)
+    }
+}
+
+/// The threshold a person starts with, before anything is known about the
+/// noise around their microphone. Chosen, not measured.
+#[wasm_bindgen(js_name = speakingLevel)]
+#[must_use]
+pub fn speaking_level() -> f64 {
+    SPEAKING_LEVEL
+}
+
+/// The lowest a person's threshold goes. Chosen, not measured.
+#[wasm_bindgen(js_name = speakingLevelMin)]
+#[must_use]
+pub fn speaking_level_min() -> f64 {
+    SPEAKING_LEVEL_MIN
+}
+
+/// The highest a person's threshold goes. Chosen, not measured.
+#[wasm_bindgen(js_name = speakingLevelMax)]
+#[must_use]
+pub fn speaking_level_max() -> f64 {
+    SPEAKING_LEVEL_MAX
+}
+
+/// Sound for this long turns the ring on, milliseconds. Chosen, not
+/// measured.
+#[wasm_bindgen(js_name = speakingRingOnMs)]
+#[must_use]
+pub fn speaking_ring_on_ms() -> u32 {
+    small_ms(RING_ON_MS)
+}
+
+/// Silence for this long turns the ring off, milliseconds. Chosen, not
+/// measured.
+#[wasm_bindgen(js_name = speakingRingOffMs)]
+#[must_use]
+pub fn speaking_ring_off_ms() -> u32 {
+    small_ms(RING_OFF_MS)
+}
+
+/// Continuous speech for this long takes the floor, milliseconds. Chosen,
+/// not measured.
+#[wasm_bindgen(js_name = speakingFloorOnsetMs)]
+#[must_use]
+pub fn speaking_floor_onset_ms() -> u32 {
+    small_ms(FLOOR_ONSET_MS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1865,5 +2057,60 @@ mod tests {
         assert!(looks_like_a_name("@anna"));
         assert!(!looks_like_a_name("ab"));
         assert_eq!(bare_name("  @anna "), "anna");
+    }
+
+    #[test]
+    fn the_speaking_rule_crosses_the_boundary_intact() {
+        assert_eq!(
+            (
+                speaking_ring_on_ms(),
+                speaking_ring_off_ms(),
+                speaking_floor_onset_ms()
+            ),
+            (200, 800, 1500)
+        );
+        assert!(speaking_level().to_bits() == 0.02_f64.to_bits());
+        assert!(speaking_level_min().to_bits() == 0.005_f64.to_bits());
+        assert!(speaking_level_max().to_bits() == 0.05_f64.to_bits());
+        let mut t = SpeakingTracker::new();
+        t.set_local(Some("me".into()));
+        let order = || vec!["me".to_string(), "a".to_string(), "b".to_string()];
+        assert_eq!(t.floor(), None);
+        for step in 0..=15_u32 {
+            // Fractions of a millisecond are dropped.
+            let now = f64::from(step * 100) + 0.9;
+            t.sample("me", Some(0.4), now);
+            t.sample("b", Some(0.3), now);
+            t.sample("a", None, now);
+            let floor = t.decide_floor(order(), now);
+            assert_eq!(t.is_speaking("b"), step >= 2);
+            assert_eq!(floor.as_deref(), (step == 15).then_some("b"));
+        }
+        assert_eq!(t.speaking(), vec!["b".to_string(), "me".to_string()]);
+        assert_eq!(t.floor().as_deref(), Some("b"));
+        assert_eq!(t.floor_holders(), vec!["b".to_string()]);
+        assert_eq!(t.floor_held_at_ms(), vec![1500.0]);
+        assert_eq!(t.last_held_floor_ms("b"), Some(1500.0));
+        assert_eq!(t.last_held_floor_ms("me"), None);
+        assert!(t.threshold("a").to_bits() == speaking_level().to_bits());
+        // A quiet room pulls the threshold down; a mute keeps it.
+        for step in 16..=45_u32 {
+            t.sample("a", Some(0.002), f64::from(step * 100));
+        }
+        assert!((t.threshold("a") - 0.006).abs() < 1e-9);
+        t.silence("b");
+        assert_eq!(t.decide_floor(order(), 4500.0), None);
+        assert_eq!(t.speaking(), vec!["me".to_string()]);
+        assert_eq!(t.last_held_floor_ms("b"), Some(1500.0));
+        t.forget("b");
+        assert!(t.floor_holders().is_empty());
+        t.keep_only(vec!["a".into()]);
+        assert!(t.speaking().is_empty());
+        // Nothing a browser can hand over panics.
+        for odd in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -5.0, 1e300] {
+            t.sample("a", Some(odd), odd);
+            t.sample("", None, odd);
+            t.decide_floor(Vec::new(), odd);
+        }
     }
 }

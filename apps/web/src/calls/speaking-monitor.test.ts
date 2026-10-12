@@ -5,12 +5,26 @@
  * `speaking-monitor.ts` over fake receivers, fake streams and a fake clock:
  * where each person's level is read from, what a mute does, and what the one
  * timer costs.
+ *
+ * The speaking rule is the real one, over wasm, so a ring, a floor and a
+ * threshold asserted here are the shared rule's answers to what the monitor
+ * asked. `spy` wraps the real rule to show what was asked and whether every
+ * tracker made was freed.
  */
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 
 import type { LevelReceiver, LevelSource, LevelStat } from "./audio-level";
 import { STUCK_ZERO_MS } from "./audio-level";
-import { FLOOR_ONSET_MS, SPEAKING_LEVEL, type SpeakingSnapshot } from "./speaking";
+import {
+  sharedSpeakingRules,
+  type SpeakingRule,
+  type SpeakingRules,
+  type SpeakingSnapshot,
+} from "./speaking";
 import type { VoiceReport } from "./voice-diagnostics";
 import {
   browserTaps,
@@ -23,7 +37,80 @@ import {
   type VoiceSource,
 } from "./speaking-monitor";
 
-const LOUD = SPEAKING_LEVEL * 5;
+// The rule's own numbers, read once the module is loaded.
+let SPEAKING_LEVEL = 0;
+let LOUD = 0;
+let FLOOR_ONSET_MS = 0;
+beforeAll(async () => {
+  const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
+  await init({ module_or_path: readFileSync(path) });
+  SPEAKING_LEVEL = wasm.speakingLevel();
+  LOUD = SPEAKING_LEVEL * 5;
+  FLOOR_ONSET_MS = wasm.speakingFloorOnsetMs();
+});
+
+/** What the monitor asked the rule, and what it made and freed. */
+interface Asked {
+  made: number;
+  freed: number;
+  /** While true, making a tracker fails as it does before the wasm module
+   *  is ready. */
+  unready: boolean;
+  readonly calls: string[];
+  readonly trackers: SpeakingRule[];
+}
+
+/** The real rule, with every call that carries a decision written down. */
+function spy(): { readonly rules: SpeakingRules; readonly asked: Asked } {
+  const asked: Asked = { made: 0, freed: 0, unready: false, calls: [], trackers: [] };
+  const rules: SpeakingRules = {
+    create: () => {
+      if (asked.unready) throw new Error("wasm not ready");
+      const real = sharedSpeakingRules.create();
+      asked.made += 1;
+      const wrapped: SpeakingRule = {
+        setLocal: (person) => {
+          asked.calls.push(`local:${String(person ?? null)}`);
+          real.setLocal(person);
+        },
+        sample: (person, level, nowMs) => {
+          asked.calls.push(`sample:${person}:${level === null || level === undefined ? "-" : "level"}`);
+          real.sample(person, level, nowMs);
+        },
+        silence: (person) => {
+          asked.calls.push(`silence:${person}`);
+          real.silence(person);
+        },
+        forget: (person) => {
+          asked.calls.push(`forget:${person}`);
+          real.forget(person);
+        },
+        keepOnly: (people) => {
+          asked.calls.push(`keep:${people.join(",")}`);
+          real.keepOnly(people);
+        },
+        decideFloor: (order, nowMs) => {
+          asked.calls.push(`floor:${order.join(",")}`);
+          return real.decideFloor(order, nowMs);
+        },
+        floor: () => real.floor(),
+        speaking: () => real.speaking(),
+        isSpeaking: (person) => real.isSpeaking(person),
+        floorHolders: () => real.floorHolders(),
+        floorHeldAtMs: () => real.floorHeldAtMs(),
+        lastHeldFloorMs: (person) => real.lastHeldFloorMs(person),
+        threshold: (person) => real.threshold(person),
+        free: () => {
+          asked.freed += 1;
+          real.free();
+        },
+      };
+      asked.trackers.push(wrapped);
+      return wrapped;
+    },
+  };
+  return { rules, asked };
+}
 
 /**
  * A receiver that only has what the sender wrote: a level on its sources
@@ -84,6 +171,7 @@ interface Rig {
   readonly timers: { started: number; stopped: number; running: boolean };
   readonly reports: { voices: readonly VoiceReport[]; floor: string | null }[];
   readonly gestures: { resumed: number };
+  readonly asked: Asked;
   /** Run the timer for `ms`, letting statistics promises settle between ticks. */
   run(ms: number): Promise<SpeakingSnapshot>;
 }
@@ -97,6 +185,7 @@ function rig(): Rig {
   const timers = { started: 0, stopped: 0, running: false };
   const reports: Rig["reports"] = [];
   const gestures = { resumed: 0 };
+  const { rules, asked } = spy();
   const monitor = new SpeakingMonitor((s) => snapshots.push(s), {
     nowMs: () => now,
     every: (ms, run) => {
@@ -127,6 +216,7 @@ function rig(): Rig {
       gestures.resumed += 1;
     },
     onReport: (voices, floor) => reports.push({ voices, floor }),
+    rules,
   });
   return {
     monitor,
@@ -136,6 +226,7 @@ function rig(): Rig {
     timers,
     reports,
     gestures,
+    asked,
     run: async (ms) => {
       const until = now + ms;
       while (now < until) {
@@ -526,6 +617,137 @@ describe("the floor and the stage's inputs", () => {
     const snap = await r.run(SAMPLE_INTERVAL_MS);
     expect(snap.activeSpeakerId).toBeNull();
     expect(snap.lastSpokeAtMs).toEqual({});
+  });
+});
+
+describe("what the shared rule is asked", () => {
+  it("is told who this device is, and is given the whole roster in order to decide the floor", async () => {
+    const r = rig();
+    r.monitor.sync([peer("b", new StatsReceiver(), stream(LOUD)), me(stream(LOUD)), peer("c", undefined)]);
+    await r.run(FLOOR_ONSET_MS + 500);
+    expect(r.asked.calls).toContain("local:local");
+    // This device's own person is in the order: passing them over is the
+    // rule's work, not a filter here.
+    const floors = new Set(r.asked.calls.filter((c) => c.startsWith("floor:")));
+    expect([...floors]).toEqual(["floor:b,local,c"]);
+    const snap = r.snapshots[r.snapshots.length - 1];
+    expect(snap?.speakingIds.has("local")).toBe(true);
+    expect(snap?.activeSpeakerId).toBe("b");
+  });
+
+  it("names the own person again when the roster's own id changes, and nobody when there is none", () => {
+    const r = rig();
+    r.monitor.sync([peer("b", undefined)]);
+    expect(r.asked.calls.filter((c) => c.startsWith("local:")).pop()).toBe("local:null");
+    r.monitor.sync([peer("b", undefined), me(stream())]);
+    expect(r.asked.calls.filter((c) => c.startsWith("local:")).pop()).toBe("local:local");
+  });
+
+  it("silences a muted person instead of sampling them, and samples a level that could not be read as none", async () => {
+    const r = rig();
+    r.monitor.sync([me(stream(LOUD), false), peer("b", undefined, stream(null))]);
+    await r.run(500);
+    expect(r.asked.calls).toContain("silence:local");
+    expect(r.asked.calls.some((c) => c.startsWith("sample:local"))).toBe(false);
+    expect(r.asked.calls).toContain("sample:b:-");
+    expect(r.asked.calls).not.toContain("sample:b:level");
+  });
+
+  it("tells it the roster as it is now whenever the roster changes", () => {
+    const r = rig();
+    const mine = stream();
+    r.monitor.sync([me(mine), peer("b", undefined), peer("c", undefined)]);
+    r.monitor.sync([me(mine), peer("c", undefined)]);
+    expect(r.asked.calls.filter((c) => c.startsWith("keep:"))).toEqual(["keep:local,b,c", "keep:local,c"]);
+  });
+
+  it("hands on the rule's threshold for the diagnostics, which follows the person's room", async () => {
+    const r = rig();
+    // A quiet room: the threshold comes down from where a person starts.
+    r.monitor.sync([me(stream()), peer("b", undefined, stream(0.001)), peer("c", undefined, stream(null))]);
+    await r.run(REPORT_EVERY_TICKS * SAMPLE_INTERVAL_MS);
+    const voices = r.reports[0]?.voices ?? [];
+    const b = voices.find((v) => v.id === "b");
+    const c = voices.find((v) => v.id === "c");
+    expect(b?.threshold).toBe(r.asked.trackers[0]?.threshold("b"));
+    expect(b?.threshold).toBe(wasm.speakingLevelMin());
+    // Nothing read: nothing learned.
+    expect(c?.threshold).toBe(SPEAKING_LEVEL);
+  });
+
+  it("gives the floor up at the reading in which its holder is muted, and keeps them as the most recent speaker", async () => {
+    const r = rig();
+    const mine = stream();
+    const theirs = stream(LOUD);
+    r.monitor.sync([me(mine), peer("b", undefined, theirs)]);
+    const held = await r.run(FLOOR_ONSET_MS + 500);
+    expect(held.activeSpeakerId).toBe("b");
+    r.monitor.sync([me(mine), peer("b", undefined, theirs, false)]);
+    const snap = await r.run(SAMPLE_INTERVAL_MS);
+    expect(snap.activeSpeakerId).toBeNull();
+    expect(Object.keys(snap.lastSpokeAtMs)).toEqual(["b"]);
+  });
+});
+
+describe("the tracker's lifetime", () => {
+  it("is one tracker for a call, freed on dispose", async () => {
+    const r = rig();
+    const mine = stream();
+    r.monitor.sync([me(mine), peer("b", undefined)]);
+    r.monitor.sync([me(mine), peer("b", undefined), peer("c", undefined)]);
+    await r.run(1_000);
+    expect(r.asked.made).toBe(1);
+    expect(r.asked.freed).toBe(0);
+    r.monitor.dispose();
+    expect(r.asked.freed).toBe(1);
+    // A second dispose frees nothing twice.
+    r.monitor.dispose();
+    expect(r.asked.freed).toBe(1);
+  });
+
+  it("is freed when the roster empties, and the next call starts from one that has heard nobody", async () => {
+    const r = rig();
+    const mine = stream();
+    r.monitor.sync([me(mine), peer("b", undefined, stream(LOUD))]);
+    expect((await r.run(FLOOR_ONSET_MS + 500)).activeSpeakerId).toBe("b");
+    r.monitor.sync([]);
+    expect(r.asked.made).toBe(1);
+    expect(r.asked.freed).toBe(1);
+    // The same person again, silent: nothing is remembered of the last call.
+    r.monitor.sync([me(mine), peer("b", undefined, stream(0))]);
+    const snap = await r.run(SAMPLE_INTERVAL_MS);
+    expect(r.asked.made).toBe(2);
+    expect(snap.speakingIds.size).toBe(0);
+    expect(snap.lastSpokeAtMs).toEqual({});
+    r.monitor.dispose();
+    expect(r.asked.freed).toBe(2);
+  });
+
+  it("makes none for a monitor nobody was ever handed to", () => {
+    const r = rig();
+    r.monitor.sync([]);
+    r.monitor.dispose();
+    expect(r.asked.made).toBe(0);
+    expect(r.asked.freed).toBe(0);
+  });
+
+  it("reads and reports nothing while the rule cannot be made, and starts once it can", async () => {
+    const r = rig();
+    r.asked.unready = true;
+    r.monitor.sync([me(stream(LOUD), false), peer("b", undefined, stream(LOUD))]);
+    await r.run(1_000);
+    expect(r.snapshots).toHaveLength(0);
+    expect(r.taps.opened).toBe(0);
+    expect(r.asked.made).toBe(0);
+    r.asked.unready = false;
+    const snap = await r.run(FLOOR_ONSET_MS + 500);
+    expect(r.asked.made).toBe(1);
+    // Made late, it is still told who this device is and who is muted.
+    expect(r.asked.calls).toContain("local:local");
+    expect(snap.speakingIds.has("local")).toBe(false);
+    expect(snap.activeSpeakerId).toBe("b");
+    r.monitor.dispose();
+    expect(r.asked.freed).toBe(1);
   });
 });
 

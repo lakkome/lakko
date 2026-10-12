@@ -23,7 +23,8 @@ struct VoiceReport: Equatable {
     /// Whether the person counted as speaking at any reading of the interval.
     let speaking: Bool
     /// The level that counts as sound for this person at the end of the
-    /// interval (``NoiseGate``).
+    /// interval, as the shared speaking rule reports it
+    /// (`SpeakingTracker.threshold(person:)` of `LakkoCore`).
     let threshold: Double
 }
 

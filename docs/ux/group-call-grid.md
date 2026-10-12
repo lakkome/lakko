@@ -416,7 +416,20 @@ the only thing it can measure. So its spoken and tooltip text is
   quiet microphone in a quiet room and a loud one in a noisy room both light the
   ring for a voice and neither lights it for the room. Every level is on one
   scale whatever it was read from: the root mean square of the decoded samples
-  over about a tenth of a second (web: `apps/web/src/calls/speaking.ts`).
+  over about a tenth of a second. The floor falls towards a quieter reading by
+  at most half per 100 ms and climbs towards steady sound by a tenth a second,
+  both per unit of time, so how often a client reads a level changes nothing.
+- **One rule for the three clients.** The ring, the floor of 5.2 and the noise
+  floor above are `lakko-ui-rules::speaking` (`SpeakingTracker`), on both FFI
+  surfaces, with every number in this section and the 1.5-second onset as its
+  constants. It replaced three hand-written copies (TypeScript, Swift, Kotlin)
+  that had drifted: the fall of the noise floor was per reading on web and
+  per unit of time on iOS and Android. Its decisions are integer arithmetic on
+  whole milliseconds and on levels converted once to whole units, so no
+  platform's floating point can make two clients disagree. What stays on each
+  client is reading the level, the loop that reads it and the call log. This
+  device's own person has a ring and never holds the floor; a muted person has
+  neither.
 - **Latency is expected**: the level is computed from audio that has already been
   received, decrypted and decoded, so the ring trails the voice by a few hundred
   milliseconds. That is acceptable and must not be "fixed" by using a level the
@@ -631,6 +644,7 @@ camera off with a bad signal, which is the confusion 7.4 exists to prevent.
 | A way for the receiver to tell **"not sent to me"** from **"camera off"** | 7.4. Camera off is already signalled by the person themself (the call media-state signal); "not sent" has to come from the server or from this device's own pause request |
 | **Join order** as a stable roster property | 4.4, 5.1 |
 | **Which track is a screen** and whose it is | 6.3. The per-stream index already separates a screen from a camera in the media key (ADR-0035); the roster must expose it |
+| **One shared speaking rule**, `lakko-ui-rules::speaking` (built 2026-10-12, core and both FFI surfaces) | Section 7.3 and the floor of 5.2. Input: one level per person per reading (or none), the mute state, the roster order, this device's own person, the clock; output: whose ring is on, who holds the floor, when each person last held it, and the threshold in force per person for the call log |
 | **One shared layout-and-slot rule**, in `lakko-ui-rules` beside the existing call rules | Section 5 is exactly the kind of rule that drifts when written three times. Input: the roster with speaking, camera, share, pin and join order, the call-area size, the clock; output: layout, page cap, cells and the slot assignment with the hysteresis state |
 
 ## 11. Changes to `calls.md`

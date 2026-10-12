@@ -3,7 +3,14 @@
 
 /**
  * Reads the sound level of each person's audio in a group call and feeds
- * `SpeakingTracker` (`docs/ux/group-call-grid.md` sections 5.2, 7.3 and 10).
+ * the shared speaking rule (`docs/ux/group-call-grid.md` sections 5.2, 7.3
+ * and 10).
+ *
+ * What counts as sound, when a ring is on and who holds the floor is decided
+ * by one rule for the three clients (`crates/lakko-ui-rules`, `speaking`,
+ * over wasm; `speaking.ts` is how this client reaches it). This module reads
+ * levels, tells the rule who this device's own person is, who is muted and
+ * who is in the call, and hands its answers on. It decides nothing.
  *
  * Every level is measured on this device from audio it has already received,
  * decrypted and decoded. Nothing here reaches the network, and the call
@@ -12,7 +19,8 @@
  * ## One scale, and where a level comes from
  *
  * Every level handed to the tracker is the root mean square of samples in
- * `-1..1` over about a tenth of a second (`speaking.ts`), for everyone:
+ * `-1..1` over about a tenth of a second (`rmsLevel` in `audio-level.ts`), for
+ * everyone:
  *
  *  - **This device's own microphone**: an `AnalyserNode` on the captured
  *    stream. The root mean square of its time-domain samples is the scale by
@@ -41,16 +49,32 @@
  * statistics reading is a promise: at most one is under way per person, and
  * at most `MAX_STATS_READS_PER_TICK` are started per reading, in turn, so a
  * call of fifty people costs what a call of eight does.
+ *
+ * ## The tracker's lifetime
+ *
+ * The shared tracker lives in wasm memory, which the garbage collector does
+ * not reclaim, so the monitor owns exactly one at a time and frees it: when
+ * the roster empties (the call is over; the next call starts from a tracker
+ * that has heard nobody) and on `dispose`. It is made on the first reading
+ * that needs it; while the wasm module is not ready there is none, nothing
+ * is read and nothing is reported, and the next reading tries again.
  */
 
 import {
   PathChooser,
   ReceiverLevelReader,
+  rmsLevel,
   type LevelPath,
   type LevelReceiver,
   type PathReading,
 } from "./audio-level";
-import { rmsLevel, SpeakingTracker, type SpeakingSnapshot } from "./speaking";
+import {
+  readSpeech,
+  sharedSpeakingRules,
+  type SpeakingRule,
+  type SpeakingRules,
+  type SpeakingSnapshot,
+} from "./speaking";
 import type { VoiceReport } from "./voice-diagnostics";
 
 /** How often the levels are read. */
@@ -106,6 +130,9 @@ export interface SpeakingMonitorDeps {
   readonly onReport?: (voices: readonly VoiceReport[], floorId: string | null) => void;
   /** Told once whenever the source of a person's level changes. */
   readonly onPath?: (id: string, path: LevelPath) => void;
+  /** Where the call's tracker comes from; the shared rule unless a test
+   *  wants to see what it was asked. */
+  readonly rules?: SpeakingRules;
 }
 
 interface Voice {
@@ -225,7 +252,12 @@ export function browserTaps(
 
 /** Watches the people it is given until `dispose`. */
 export class SpeakingMonitor {
-  private readonly tracker = new SpeakingTracker();
+  private readonly rules: SpeakingRules;
+  /** The call's tracker; `null` before the first reading, after the roster
+   *  emptied and after `dispose`. Freed wherever it is set back to `null`. */
+  private tracker: SpeakingRule | null = null;
+  /** This device's own person, as the roster names them. */
+  private localId: string | null = null;
   private readonly voices = new Map<string, Voice>();
   private readonly nowMs: () => number;
   private readonly every: (ms: number, run: () => void) => () => void;
@@ -257,6 +289,7 @@ export class SpeakingMonitor {
     this.closeTaps = deps.closeTaps ?? taps?.closeTaps ?? ((): void => undefined);
     this.resumeTaps = deps.resumeTaps ?? taps?.resumeTaps ?? ((): void => undefined);
     this.onReport = deps.onReport ?? null;
+    this.rules = deps.rules ?? sharedSpeakingRules;
     this.onPath =
       deps.onPath ??
       ((id, path): void => {
@@ -279,7 +312,16 @@ export class SpeakingMonitor {
         this.voices.delete(id);
       }
     }
-    this.tracker.keepOnly(present);
+    this.localId = people.find((p) => p.isLocal)?.id ?? null;
+    if (people.length === 0) {
+      // The call is over: the next one starts from a tracker that has heard
+      // nobody, and nothing is held in wasm memory between calls.
+      this.freeTracker();
+    } else {
+      const tracker = this.ensureTracker();
+      tracker?.setLocal(this.localId);
+      tracker?.keepOnly([...this.order]);
+    }
     for (const p of people) {
       let voice = this.voices.get(p.id);
       if (voice === undefined) {
@@ -313,7 +355,7 @@ export class SpeakingMonitor {
         voice.tap = null;
         voice.tapOf = null;
       }
-      if (!p.micOn) this.tracker.silence(p.id);
+      if (!p.micOn) this.tracker?.silence(p.id);
     }
     if (this.voices.size > 0 && this.stopTimer === null) {
       this.stopTimer = this.every(SAMPLE_INTERVAL_MS, () => this.tick());
@@ -338,7 +380,34 @@ export class SpeakingMonitor {
     this.stopTimer = null;
     for (const voice of this.voices.values()) voice.tap?.close();
     this.voices.clear();
+    this.order = [];
+    this.localId = null;
+    this.freeTracker();
     this.closeTaps();
+  }
+
+  /** The call's tracker, made on first use and told who this device is;
+   *  `null` while the wasm module is not ready. */
+  private ensureTracker(): SpeakingRule | null {
+    if (this.tracker !== null) return this.tracker;
+    try {
+      const tracker = this.rules.create();
+      tracker.setLocal(this.localId);
+      this.tracker = tracker;
+    } catch {
+      this.tracker = null;
+    }
+    return this.tracker;
+  }
+
+  private freeTracker(): void {
+    const tracker = this.tracker;
+    this.tracker = null;
+    try {
+      tracker?.free();
+    } catch {
+      // Already freed with the module; nothing is held either way.
+    }
   }
 
   /** The level of the stream the person is played from; `null` when there
@@ -359,8 +428,12 @@ export class SpeakingMonitor {
 
   /** One reading of everyone. Public for a test to drive; the timer calls it. */
   public tick(): void {
-    const now = this.nowMs();
     const ids = this.order;
+    if (ids.length === 0) return;
+    const tracker = this.ensureTracker();
+    // No rule to ask: nothing is read, and the next reading tries again.
+    if (tracker === null) return;
+    const now = this.nowMs();
     let budget = MAX_STATS_READS_PER_TICK;
     let nextCursor = this.statsCursor;
     for (let step = 0; step < ids.length; step += 1) {
@@ -369,7 +442,7 @@ export class SpeakingMonitor {
       const voice = this.voices.get(id);
       if (voice === undefined) continue;
       if (!voice.source.micOn) {
-        this.tracker.silence(id);
+        tracker.silence(id);
         voice.reportPath = "none";
         continue;
       }
@@ -415,11 +488,13 @@ export class SpeakingMonitor {
       }
       voice.reportPath = path;
       if (level !== null) voice.reportPeak = Math.max(voice.reportPeak ?? 0, level);
-      this.tracker.sample(id, level, now);
+      tracker.sample(id, level, now);
     }
     this.statsCursor = budget === 0 ? nextCursor : 0;
-    const candidates = ids.filter((id) => this.voices.get(id)?.source.isLocal !== true);
-    const snapshot = this.tracker.snapshot(candidates, now);
+    // The whole roster, in order: the rule knows who this device is and
+    // passes them over itself.
+    tracker.decideFloor([...ids], now);
+    const snapshot = readSpeech(tracker);
     for (const id of snapshot.speakingIds) {
       const voice = this.voices.get(id);
       if (voice !== undefined) voice.reportSpeaking = true;
@@ -428,12 +503,12 @@ export class SpeakingMonitor {
     this.ticksSinceReport += 1;
     if (this.ticksSinceReport >= REPORT_EVERY_TICKS) {
       this.ticksSinceReport = 0;
-      this.report(snapshot.activeSpeakerId);
+      this.report(tracker, snapshot.activeSpeakerId);
     }
   }
 
   /** Hand the diagnostics of the readings since the last report over. */
-  private report(floorId: string | null): void {
+  private report(tracker: SpeakingRule, floorId: string | null): void {
     const voices: VoiceReport[] = [];
     for (const id of this.order) {
       const voice = this.voices.get(id);
@@ -445,7 +520,7 @@ export class SpeakingMonitor {
         path: micOn ? voice.reportPath : "none",
         peak: voice.reportPeak,
         speaking: voice.reportSpeaking,
-        threshold: this.tracker.thresholdOf(id),
+        threshold: tracker.threshold(id),
         analyser: voice.reportAnalyser,
         analyserStuck: voice.reportAnalyserStuck,
         receiver: voice.reader?.takeDiagnostics() ?? null,

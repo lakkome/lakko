@@ -4,27 +4,42 @@
 /**
  * The large tile of the Focus layout over time
  * (`docs/ux/group-call-grid.md` sections 5.2, 6.1 and 6.2): the sound levels
- * go through `SpeakingTracker`, its answer through the real shared rule
- * (`lakko_ui_rules::call_stage` over wasm), exactly as the call screen does.
+ * go through the real shared speaking rule (`lakko_ui_rules::speaking` over
+ * wasm), its answer through the real shared stage rule
+ * (`lakko_ui_rules::call_stage` over wasm), exactly as the call screen does:
+ * the tracker is told who this device is and is given the whole roster.
  *
  * Written against a live five-person call in which one person sat on the
  * stage and stayed there while others spoke.
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 
 import { stagePerson, type LayoutPerson } from "./group-call-layout";
-import { FLOOR_ONSET_MS, RING_OFF_MS, SPEAKING_LEVEL, SpeakingTracker } from "./speaking";
+import { readSpeech, sharedSpeakingRules, type SpeakingRule } from "./speaking";
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await init({ module_or_path: readFileSync(path) });
 });
 
-const LOUD = SPEAKING_LEVEL * 5;
+// The rule's own numbers, read once the module is loaded.
+let LOUD = 0;
+let FLOOR_ONSET_MS = 0;
+let RING_OFF_MS = 0;
+beforeAll(() => {
+  LOUD = wasm.speakingLevel() * 5;
+  FLOOR_ONSET_MS = wasm.speakingFloorOnsetMs();
+  RING_OFF_MS = wasm.speakingRingOffMs();
+});
+
+const trackers: SpeakingRule[] = [];
+afterEach(() => {
+  for (const t of trackers.splice(0)) t.free();
+});
 
 /** A call of this device and four others, the first of them with a camera. */
 class Call {
@@ -36,8 +51,14 @@ class Call {
     { id: "d", isLocal: false, camOn: false },
   ];
   public pinned: string | null = null;
-  private readonly tracker = new SpeakingTracker();
+  private readonly tracker: SpeakingRule;
   private now = 0;
+
+  public constructor() {
+    this.tracker = sharedSpeakingRules.create();
+    trackers.push(this.tracker);
+    this.tracker.setLocal("me");
+  }
 
   /** Let `ms` pass with these people making sound; who is on the stage after. */
   public run(speaking: readonly string[], ms: number): string | null {
@@ -47,18 +68,19 @@ class Call {
       for (const p of this.people) {
         this.tracker.sample(p.id, speaking.includes(p.id) ? LOUD : 0, this.now);
       }
-      const snap = this.tracker.snapshot(
-        this.people.filter((p) => !p.isLocal).map((p) => p.id),
+      // The whole roster, this device included: the rule passes it over.
+      this.tracker.decideFloor(
+        this.people.map((p) => p.id),
         this.now,
       );
-      stage = stagePerson(wasm, this.people, this.pinned, snap)?.id ?? null;
+      stage = stagePerson(wasm, this.people, this.pinned, readSpeech(this.tracker))?.id ?? null;
     }
     return stage;
   }
 
   public leave(id: string): void {
     this.people = this.people.filter((p) => p.id !== id);
-    this.tracker.keepOnly(new Set(this.people.map((p) => p.id)));
+    this.tracker.keepOnly(this.people.map((p) => p.id));
     // What the call store does (`callActions.participantLeft`).
     if (this.pinned === id) this.pinned = null;
   }

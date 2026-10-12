@@ -13,6 +13,7 @@
 //! Nothing here touches a screen, a store or the network. A client maps what
 //! it already holds into these types, asks, and renders the answer.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::scoped_discovery::{FfiGroupsForm, FfiScopeId, FfiVisibilityMode, FfiVisibilitySetting};
@@ -67,6 +68,10 @@ use lakko_ui_rules::lookup::{
 use lakko_ui_rules::ring::{
     remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
     RingDecision as RustRingDecision, CALL_RING_WINDOW_MS,
+};
+use lakko_ui_rules::speaking::{
+    SpeakingTracker as RustSpeakingTracker, FLOOR_ONSET_MS, RING_OFF_MS, RING_ON_MS,
+    SPEAKING_LEVEL, SPEAKING_LEVEL_MAX, SPEAKING_LEVEL_MIN,
 };
 use lakko_ui_rules::visibility::{
     choose_mode as rust_choose_mode, exclude_scope_under_all as rust_exclude_scope_under_all,
@@ -1454,6 +1459,171 @@ pub fn av_align_sound_wait_max_ms() -> u32 {
     AV_SOUND_WAIT_MAX_MS
 }
 
+/// What a [`SpeakingTracker`] says after a decision: whose ring is on and who
+/// holds the floor (`docs/ux/group-call-grid.md` sections 5.2 and 7.3).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SpeakingSnapshot {
+    /// Everyone whose ring is on, this device's own person included, sorted
+    /// by id.
+    pub speaking_ids: Vec<String>,
+    /// The one person holding the floor, or none. Never this device's own
+    /// person.
+    pub active_speaker_id: Option<String>,
+    /// When each person who has held the floor last held it, on the caller's
+    /// clock.
+    pub last_spoke_at_ms: HashMap<String, u64>,
+}
+
+fn speaking_snapshot(tracker: &RustSpeakingTracker) -> SpeakingSnapshot {
+    SpeakingSnapshot {
+        speaking_ids: tracker.speaking().into_iter().map(str::to_owned).collect(),
+        active_speaker_id: tracker.floor().map(str::to_owned),
+        last_spoke_at_ms: tracker
+            .floor_history()
+            .into_iter()
+            .map(|(id, at)| (id.to_owned(), at))
+            .collect(),
+    }
+}
+
+/// Who is speaking in a group call: the ring on each tile and the one person
+/// holding the floor, decided by one rule for the three clients.
+///
+/// One per call. For every person of the roster, at every reading, call
+/// [`SpeakingTracker::sample`] with the level that was read (or none when it
+/// could not be read), or [`SpeakingTracker::silence`] while they are muted;
+/// then [`SpeakingTracker::decide_floor`] with the roster order. Levels are
+/// the root mean square of decoded samples, `0..1`; times are one clock in
+/// whole milliseconds, any origin. Thread-safe.
+#[derive(uniffi::Object)]
+pub struct SpeakingTracker {
+    inner: Mutex<RustSpeakingTracker>,
+}
+
+impl SpeakingTracker {
+    /// No method can panic while holding the lock, so a poisoned lock still
+    /// guards a consistent state.
+    fn state(&self) -> MutexGuard<'_, RustSpeakingTracker> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[uniffi::export]
+impl SpeakingTracker {
+    /// A tracker of a call nobody has been heard in.
+    #[uniffi::constructor]
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(RustSpeakingTracker::new()),
+        })
+    }
+
+    /// Name this device's own person (or none). They are sampled and have a
+    /// ring like anyone, and never hold the floor, wherever they stand in
+    /// the order given to [`SpeakingTracker::decide_floor`].
+    pub fn set_local(&self, person: Option<String>) {
+        self.state().set_local(person.as_deref());
+    }
+
+    /// One level reading for one person at `now_ms`. No level is "could not
+    /// be read": silence for the ring, and nothing for the person's noise
+    /// floor. A level that is not a number is silence too.
+    pub fn sample(&self, person: String, level: Option<f64>, now_ms: u64) {
+        self.state().sample(&person, level, now_ms);
+    }
+
+    /// The person is muted: their ring goes off at once and they give up the
+    /// floor. What was learned about their room is kept.
+    pub fn silence(&self, person: String) {
+        self.state().silence(&person);
+    }
+
+    /// The person left the call: everything about them is dropped.
+    pub fn forget(&self, person: String) {
+        self.state().forget(&person);
+    }
+
+    /// Forget everyone who is not one of `people`, the roster as it is now.
+    pub fn keep_only(&self, people: Vec<String>) {
+        self.state().keep_only(&people);
+    }
+
+    /// Settle who holds the floor after the samples so far. `order` is the
+    /// roster in order, which breaks a tie; this device's own person may be
+    /// in it and is skipped.
+    pub fn decide_floor(&self, order: Vec<String>, now_ms: u64) -> SpeakingSnapshot {
+        let mut state = self.state();
+        state.decide_floor(&order, now_ms);
+        speaking_snapshot(&state)
+    }
+
+    /// The rings and the floor as last decided, without deciding again.
+    #[must_use]
+    pub fn snapshot(&self) -> SpeakingSnapshot {
+        speaking_snapshot(&self.state())
+    }
+
+    /// Whether the person's ring is on.
+    #[must_use]
+    pub fn is_speaking(&self, person: String) -> bool {
+        self.state().is_speaking(&person)
+    }
+
+    /// What counts as sound for the person now, on the scale of the levels
+    /// (for the diagnostics line).
+    #[must_use]
+    pub fn threshold(&self, person: String) -> f64 {
+        self.state().threshold(&person)
+    }
+}
+
+/// The threshold a person starts with, before anything is known about the
+/// noise around their microphone. Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn speaking_level() -> f64 {
+    SPEAKING_LEVEL
+}
+
+/// The lowest a person's threshold goes. Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn speaking_level_min() -> f64 {
+    SPEAKING_LEVEL_MIN
+}
+
+/// The highest a person's threshold goes. Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn speaking_level_max() -> f64 {
+    SPEAKING_LEVEL_MAX
+}
+
+/// Sound for this long turns the ring on, milliseconds. Chosen, not
+/// measured.
+#[uniffi::export]
+#[must_use]
+pub fn speaking_ring_on_ms() -> u64 {
+    RING_ON_MS
+}
+
+/// Silence for this long turns the ring off, milliseconds. Chosen, not
+/// measured.
+#[uniffi::export]
+#[must_use]
+pub fn speaking_ring_off_ms() -> u64 {
+    RING_OFF_MS
+}
+
+/// Continuous speech for this long takes the floor, milliseconds. Chosen,
+/// not measured.
+#[uniffi::export]
+#[must_use]
+pub fn speaking_floor_onset_ms() -> u64 {
+    FLOOR_ONSET_MS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1736,5 +1906,56 @@ mod tests {
         assert!(looks_like_a_name("@anna".to_string()));
         assert!(!looks_like_a_name("ab".to_string()));
         assert_eq!(bare_name("  @anna ".to_string()), "anna");
+    }
+
+    #[test]
+    fn the_speaking_rule_crosses_the_boundary_intact() {
+        assert_eq!(
+            (
+                speaking_ring_on_ms(),
+                speaking_ring_off_ms(),
+                speaking_floor_onset_ms()
+            ),
+            (200, 800, 1500)
+        );
+        assert!(speaking_level().to_bits() == 0.02_f64.to_bits());
+        assert!(speaking_level_min().to_bits() == 0.005_f64.to_bits());
+        assert!(speaking_level_max().to_bits() == 0.05_f64.to_bits());
+        let t = SpeakingTracker::new();
+        t.set_local(Some("me".into()));
+        let order = vec!["me".to_string(), "a".to_string(), "b".to_string()];
+        let mut last = t.snapshot();
+        assert_eq!(last.active_speaker_id, None);
+        for now in (0..=1500).step_by(150) {
+            t.sample("me".into(), Some(0.4), now);
+            t.sample("b".into(), Some(0.3), now);
+            t.sample("a".into(), None, now);
+            last = t.decide_floor(order.clone(), now);
+            // The first reading at or past 200 ms is the one at 300.
+            assert_eq!(t.is_speaking("b".into()), now >= 300);
+        }
+        assert_eq!(last.speaking_ids, vec!["b".to_string(), "me".to_string()]);
+        assert_eq!(last.active_speaker_id.as_deref(), Some("b"));
+        assert_eq!(last.last_spoke_at_ms, HashMap::from([("b".into(), 1500)]));
+        assert_eq!(t.snapshot(), last);
+        assert!(t.threshold("a".into()).to_bits() == speaking_level().to_bits());
+        // A quiet room pulls the threshold down; a mute keeps it.
+        for now in (1650..=4500).step_by(150) {
+            t.sample("a".into(), Some(0.002), now);
+        }
+        assert!((t.threshold("a".into()) - 0.006).abs() < 1e-9);
+        t.silence("b".into());
+        let muted = t.decide_floor(order.clone(), 4500);
+        assert_eq!(muted.speaking_ids, vec!["me".to_string()]);
+        assert_eq!(muted.active_speaker_id, None);
+        assert_eq!(muted.last_spoke_at_ms.get("b"), Some(&1500));
+        t.forget("b".into());
+        assert!(t.snapshot().last_spoke_at_ms.is_empty());
+        t.keep_only(vec!["a".into()]);
+        assert!(t.snapshot().speaking_ids.is_empty());
+        // Nothing a caller can hand over panics.
+        t.sample(String::new(), Some(f64::NAN), u64::MAX);
+        t.sample("a".into(), Some(f64::INFINITY), 0);
+        t.decide_floor(Vec::new(), 0);
     }
 }

@@ -19,8 +19,8 @@ import {
   type LevelSource,
   type LevelStat,
   type PathReading,
+  rmsLevel,
 } from "./audio-level";
-import { rmsLevel } from "./speaking";
 
 function report(stats: readonly LevelStat[]): { forEach(cb: (s: LevelStat) => void): void } {
   return { forEach: (cb) => stats.forEach(cb) };
@@ -56,6 +56,8 @@ const inbound = (over: Partial<LevelStat>): LevelStat => ({ type: "inbound-rtp",
 describe("the common scale", () => {
   it("is the root mean square of samples in -1..1, which is what the analyser path computes", () => {
     // A full-scale square wave is 1, a half-scale one 0.5, a full-scale sine 1/sqrt(2).
+    expect(rmsLevel(new Float32Array(0))).toBe(0);
+    expect(rmsLevel(new Float32Array(64))).toBe(0);
     expect(rmsLevel(new Float32Array([1, -1, 1, -1]))).toBe(1);
     expect(rmsLevel(new Float32Array([0.5, -0.5, 0.5, -0.5]))).toBe(0.5);
     const sine = Float32Array.from({ length: 4800 }, (_, i) => Math.sin((2 * Math.PI * i) / 48));

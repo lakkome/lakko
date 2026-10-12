@@ -407,7 +407,7 @@ public class CallUiState(
     }
 
     /**
-     * What the sound levels say ([SpeakingTracker]): whose ring is on, who
+     * What the sound levels say ([SpeakingRule]): whose ring is on, who
      * holds the floor and who held it last. Several people can be speaking at
      * once; only one holds the floor.
      *

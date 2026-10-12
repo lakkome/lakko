@@ -16,7 +16,14 @@ import org.junit.Test
 class VoiceDiagnosticsTest {
 
     private val voices = listOf(
-        VoiceReport("local", isLocal = true, path = LevelPath.STATS_LEVEL, peak = 0.314, speaking = true),
+        VoiceReport(
+            "local",
+            isLocal = true,
+            path = LevelPath.STATS_LEVEL,
+            peak = 0.314,
+            speaking = true,
+            threshold = 0.02,
+        ),
         VoiceReport(
             "peer-p1",
             isLocal = false,
@@ -25,7 +32,14 @@ class VoiceDiagnosticsTest {
             speaking = false,
             threshold = 0.0123,
         ),
-        VoiceReport("peer-p2", isLocal = false, path = LevelPath.NONE, peak = null, speaking = false),
+        VoiceReport(
+            "peer-p2",
+            isLocal = false,
+            path = LevelPath.NONE,
+            peak = null,
+            speaking = false,
+            threshold = 0.02,
+        ),
     )
 
     @Test

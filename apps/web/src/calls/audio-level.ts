@@ -9,8 +9,9 @@
  * ## One scale
  *
  * Every level that reaches the ring is the root mean square of samples in
- * `-1..1` over about a tenth of a second (`speaking.ts`). Two measurements
- * are on that scale and are of the audio THIS device decoded and plays:
+ * `-1..1` over about a tenth of a second (`rmsLevel` below is that number
+ * for a block of samples; the shared speaking rule takes it as it is). Two
+ * measurements are on that scale and are of the audio THIS device decoded and plays:
  *
  *  1. **`analyser`**: an `AnalyserNode` on the stream the browser plays
  *     (`speaking-monitor.ts`). The root mean square of its time-domain
@@ -56,6 +57,17 @@
  * Pure: no DOM and no clock. The receiver is a structural type so the whole
  * thing runs over fakes in a test.
  */
+
+/**
+ * Root mean square of a block of samples in `-1..1`: the scale every level is
+ * on, whatever it was read from.
+ */
+export function rmsLevel(samples: Float32Array): number {
+  if (samples.length === 0) return 0;
+  let sum = 0;
+  for (const s of samples) sum += s * s;
+  return Math.sqrt(sum / samples.length);
+}
 
 /** A measurement that may decide the ring, or none. */
 export type LevelPath = "analyser" | "stats-energy" | "none";
