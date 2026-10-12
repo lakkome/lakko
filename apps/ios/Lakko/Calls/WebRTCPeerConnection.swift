@@ -547,6 +547,27 @@ public final class WebRTCPeerConnection: NSObject {
             .map { CallStatEntry(type: $0.type, values: $0.values) }
     }
 
+    /// Set the minimum playout delay of a remote `receiver` to `ms`
+    /// milliseconds (`0` gives it back to the engine), for the
+    /// sound-and-picture alignment of a group call (``AvReceiverDelay``).
+    ///
+    /// The engine's receiver is a proxy that blocks the caller until the
+    /// worker thread has run the call, so the set runs on the queue every
+    /// other blocking libwebrtc call uses and never on the main thread
+    /// (``libwebrtcQueue``). Serial, so sets keep the order they were asked
+    /// in. The receiver is retained for the call.
+    func setReceiverPlayoutDelay(
+        _ receiver: RTCRtpReceiver, ms: UInt32
+    ) async -> LakkoReceiverDelayStatus {
+        await withCheckedContinuation { cont in
+            Self.libwebrtcQueue.async {
+                cont.resume(
+                    returning: LakkoReceiverDelay.setMinimumPlayoutDelayMs(
+                        ms, forReceiver: receiver))
+            }
+        }
+    }
+
     /// The video entries of the statistics report (`inbound-rtp`,
     /// `outbound-rtp` and the `media-source` each sender reads from), with
     /// their ids, for the group call's media log

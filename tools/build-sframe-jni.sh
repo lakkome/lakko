@@ -163,6 +163,16 @@ for entry in "${ABIS[@]}"; do
     # `-Wl,--exclude-libs,ALL` hides the Rust archive symbols
     # from the .so's dynamic symbol table so we don't pollute
     # the AAR consumer's namespace with internal Rust symbols.
+    # Relative vtables are the arm64 Android ABI of that prebuilt only
+    # (Chromium's `use_relative_vtables_abi`); its x86_64 build calls
+    # through absolute 8-byte slots (read from the binary, 2026-10-12:
+    # `callq *(%rax)` on a decryptor's `AddRef`). Passing the flag for
+    # x86_64 would hand it objects whose vtables it misreads.
+    vtable_flags=()
+    if [ "$abi" = "arm64-v8a" ]; then
+        vtable_flags=(-fexperimental-relative-c++-abi-vtables)
+    fi
+
     "$CXX" \
         --target="${triple}${API_LEVEL}" \
         --sysroot="$SYSROOT" \
@@ -172,7 +182,7 @@ for entry in "${ABIS[@]}"; do
         -Wall -Wextra -Wno-unused-parameter \
         -shared \
         -static-libstdc++ \
-        -fexperimental-relative-c++-abi-vtables \
+        ${vtable_flags[@]+"${vtable_flags[@]}"} \
         "${COMMON_INCLUDES[@]}" \
         "${SRC[@]}" \
         "$archive" \

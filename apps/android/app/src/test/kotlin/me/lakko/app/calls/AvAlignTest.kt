@@ -313,7 +313,7 @@ class AvAlignTest {
     }
 
     @Test
-    fun `this SDK has no setter, and says so when asked to set`() {
+    fun `a process without the setter says so when asked to set`() {
         assertFalse(NoReceiverDelaySetter.audioSettable)
         assertFalse(NoReceiverDelaySetter.videoSettable)
         var refused = false
@@ -323,6 +323,118 @@ class AvAlignTest {
             refused = true
         }
         assertTrue(refused)
+    }
+
+    // ---- the engine's setter -------------------------------------------------------------
+
+    @Test
+    fun `the engine's setter hands on the track, its kind and the delay, and sets both kinds`() {
+        val asked = ArrayList<String>()
+        val setter = EngineReceiverDelaySetter { trackId, audio, ms ->
+            asked += "$trackId/$audio/$ms"
+            RECEIVER_DELAY_OK
+        }
+        assertTrue(setter.audioSettable)
+        assertTrue(setter.videoSettable)
+        setter.set("a", AvRole.AUDIO, "a-a", 200u)
+        setter.set("a", AvRole.LIGHT, "a-l", 0u)
+        setter.set("a", AvRole.MIDDLE, "a-m", UInt.MAX_VALUE)
+        assertEquals(listOf("a-a/true/200", "a-l/false/0", "a-m/false/10000"), asked)
+    }
+
+    @Test
+    fun `a set the native module did not carry out is thrown, by what it said`() {
+        var status = 1
+        val setter = EngineReceiverDelaySetter { _, _, _ -> status }
+        var thrown: RuntimeException? = null
+        try {
+            setter.set("a", AvRole.LIGHT, "a-l", 100u)
+        } catch (cause: RuntimeException) {
+            thrown = cause
+        }
+        assertTrue(thrown is ReceiverDelayNotAvailable)
+        status = RECEIVER_DELAY_PROBE_FAILED
+        thrown = null
+        try {
+            setter.set("a", AvRole.LIGHT, "a-l", 100u)
+        } catch (cause: RuntimeException) {
+            thrown = cause
+        }
+        assertTrue(thrown is ReceiverDelayProbeFailed)
+        // A status this client does not know is not a set that took.
+        status = 7
+        thrown = null
+        try {
+            setter.set("a", AvRole.AUDIO, "a-a", 100u)
+        } catch (cause: RuntimeException) {
+            thrown = cause
+        }
+        assertTrue(thrown is ReceiverDelayNotAvailable)
+    }
+
+    @Test
+    fun `the setter of a process is the engine's only where the native module offers it`() {
+        val none = receiverDelaySetterFor(available = false) { _, _, _ -> RECEIVER_DELAY_OK }
+        assertTrue(none === NoReceiverDelaySetter)
+        val engine = receiverDelaySetterFor(available = true) { _, _, _ -> RECEIVER_DELAY_OK }
+        assertTrue(engine is EngineReceiverDelaySetter)
+    }
+
+    @Test
+    fun `the statuses are the native module's`() {
+        assertEquals(me.lakko.sframe.ReceiverPlayoutDelay.STATUS_OK, RECEIVER_DELAY_OK)
+        assertEquals(me.lakko.sframe.ReceiverPlayoutDelay.STATUS_PROBE_FAILED, RECEIVER_DELAY_PROBE_FAILED)
+        assertEquals(1, me.lakko.sframe.ReceiverPlayoutDelay.STATUS_NOT_AVAILABLE)
+    }
+
+    @Test
+    fun `a failed probe is said once and the person goes on observing`() {
+        val rules = FakeRules()
+        val warnings = ArrayList<String>()
+        val setter = EngineReceiverDelaySetter { _, _, _ -> RECEIVER_DELAY_PROBE_FAILED }
+        val align = CallAvAlign(rules = rules, setter = setter, warn = { warnings += it })
+        rules.nextPlan = quietPlan(
+            audio = AvAudioPlan(setMs = 200u, askedMs = 200u, reason = AvAudioReason.WAITING_FOR_PICTURE),
+            light = video(AvVideoReason.RAISING, set = 240u),
+        )
+        val tracks = tracksOf("a")
+        align.read(0L, setOf("a"), tracks, emptyMap()) { _, _ -> false }
+        align.read(1_000L, setOf("a"), tracks, emptyMap()) { _, _ -> false }
+        assertEquals(
+            listOf(
+                "call media sync peer=a could not set the audio playout delay" +
+                    " (ReceiverDelayProbeFailed); continuing as cap(false,true)",
+                "call media sync peer=a could not set the video playout delay" +
+                    " (ReceiverDelayProbeFailed); continuing as cap(false,false)",
+            ),
+            warnings,
+        )
+        // The rule built after the two failures can set neither.
+        val last = rules.built.last()
+        assertFalse(last.audioSettable)
+        assertFalse(last.videoSettable)
+    }
+
+    @Test
+    fun `the pinned libwebrtc SDK is the one the setter was verified for`() {
+        // The drift guard (ADR-0070, note of 2026-10-12). The setter calls
+        // the engine by vtable slot; the slot, each ABI's slot encoding and
+        // the calling convention were read from the machine code of this SDK
+        // version. A bump ships other binaries: the native module then
+        // refuses to set (their build ids are not the pinned ones) and this
+        // test fails until the evidence in
+        // `apps/shared/sframe-bridge/receiver-delay.h` is redone and the new
+        // build ids are pinned in `lakko-sframe/src/main/cpp/sframe_jni.cc`.
+        val catalog = listOf(
+            java.io.File("../gradle/libs.versions.toml"),
+            java.io.File("gradle/libs.versions.toml"),
+        ).first { it.isFile }
+        val pinned = catalog.readLines()
+            .map { it.trim() }
+            .single { it.startsWith("webrtc-sdk-android") && !it.contains("{") }
+            .substringAfter("=").trim().trim('"')
+        assertEquals(me.lakko.sframe.ReceiverPlayoutDelay.VERIFIED_SDK_VERSION, pinned)
+        assertEquals("125.6422.07", pinned)
     }
 
     // ---- one call ----------------------------------------------------------------------

@@ -1186,9 +1186,10 @@ class SfuCallSession(
      * same statistics report the media counters read. One per connection;
      * `null` while there is none. Read and written on [scope] only.
      *
-     * The pinned libwebrtc SDK has no setter for a receiver's playout delay
-     * ([NoReceiverDelaySetter]), so on Android the rule observes: the skew is
-     * measured and logged and nothing is written to a receiver.
+     * Whether the rule's answers can be written to a receiver is what the
+     * native module says when the connection's book is built
+     * ([receiverDelaySetterFor]); where they cannot, the rule observes: the
+     * skew is measured and logged and nothing is written to a receiver.
      */
     private var avAlign: CallAvAlign? = null
 
@@ -1213,7 +1214,10 @@ class SfuCallSession(
         // What this device can do about the skew, decided here and said once.
         val align = CallAvAlign(
             rules = SharedAvAlignRules,
-            setter = NoReceiverDelaySetter,
+            setter = receiverDelaySetterFor(
+                available = me.lakko.sframe.ReceiverPlayoutDelay.isAvailable,
+                setOn = connection::setRemotePlayoutDelay,
+            ),
             warn = { message -> android.util.Log.w(MEDIA_LOG_TAG, message) },
             info = { line -> android.util.Log.i(MEDIA_LOG_TAG, line) },
         )

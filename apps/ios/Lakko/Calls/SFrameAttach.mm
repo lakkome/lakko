@@ -6,9 +6,12 @@
 #import <WebRTC/RTCRtpReceiver.h>
 #import <WebRTC/RTCRtpSender.h>
 
+#include <dlfcn.h>
+#include <mach-o/loader.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <atomic>
+#include <cstring>
 
 // The N-3 C++ bridge layer. Its symbols come in via the static
 // archive `liblakko_sframe_native.a` (built by cargo with target
@@ -17,6 +20,7 @@
 // N-4-build follow-up sub-sprint (cross-compile + Xcode "Link
 // Binary With Libraries" entry).
 #include "../../../shared/sframe-bridge/sframe-bridge.h"
+#include "../../../shared/sframe-bridge/receiver-delay.h"
 #include "api/scoped_refptr.h"
 
 // The Swift-facing codec enum carries the C ABI's values verbatim, so the
@@ -501,6 +505,223 @@ void LakkoBridgeLogSink(const char *line) {
                              (__bridge const void *)kDecryptorAssociationKey,
                              nil,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+@end
+
+// MARK: - A receiver's minimum playout delay (ADR-0070, note of 2026-10-12)
+
+static_assert(LakkoReceiverDelayStatusOK ==
+                  static_cast<NSInteger>(lakko::receiver_delay::Status::kOk),
+              "LakkoReceiverDelayStatusOK must equal the bridge's kOk");
+static_assert(LakkoReceiverDelayStatusNotAvailable ==
+                  static_cast<NSInteger>(
+                      lakko::receiver_delay::Status::kNotAvailable),
+              "LakkoReceiverDelayStatusNotAvailable must equal kNotAvailable");
+static_assert(LakkoReceiverDelayStatusProbeFailed ==
+                  static_cast<NSInteger>(
+                      lakko::receiver_delay::Status::kProbeFailed),
+              "LakkoReceiverDelayStatusProbeFailed must equal kProbeFailed");
+
+namespace {
+
+// The framework's non-public accessor of the engine object
+// (sdk/objc/api/peerconnection/RTCRtpReceiver+Private.h):
+//
+//   @property(nonatomic, readonly)
+//       rtc::scoped_refptr<webrtc::RtpReceiverInterface> nativeRtpReceiver;
+NSString * const kNativeRtpReceiverSelectorName = @"nativeRtpReceiver";
+
+// Its Objective-C type encoding in the binary the evidence was read from. A
+// framework whose accessor has any other type is not called.
+const char * const kNativeRtpReceiverTypeEncoding =
+    "{scoped_refptr<webrtc::RtpReceiverInterface>=^{RtpReceiverInterface}}16@0:8";
+
+// The accessor returns the scoped_refptr by value. It is a class that is not
+// trivial for the purpose of calls, so it comes back in memory: through `x8`
+// on arm64 and through a hidden first argument on x86_64, with the receiver
+// and the selector after it (read from the method's code in all three
+// slices: `ldr x0, [x0, #0x10]; str x0, [x8]` and `movq 0x10(%rsi), %rdi;
+// movq %rdi, (%rbx)`). `ReturnedRef` is returned the same way, so the
+// compiler builds the right call from this type on both. The callee has
+// added a reference for the value it returns; it is given back with
+// `ReleaseEngineRef`.
+using NativeRtpReceiverIMP = lakko::receiver_delay::ReturnedRef (*)(id, SEL);
+
+// The package version and the LC_UUID of each slice whose machine code the
+// slot and the calling convention were read from (stasel/WebRTC 125.0.0,
+// WebRTC-M125.xcframework.zip, sha256
+// 4da2f9c7b7481a82249ea61dfcceae7caac6890e0a0412389684765435113ae8).
+NSString * const kVerifiedPackageVersion = @"125.0.0";
+NSString * const kVerifiedUuidDeviceArm64 = @"4C4C4485-5555-3144-A186-7570B405EE6A";
+NSString * const kVerifiedUuidSimulatorArm64 = @"4C4C44CF-5555-3144-A1B7-95616B307988";
+NSString * const kVerifiedUuidSimulatorX8664 = @"4C4C44D7-5555-3144-A1AF-2ABA8DEDBD33";
+
+// 0: not decided. 1: the static conditions hold. 2: they do not.
+std::atomic<int> g_receiver_delay_static{0};
+
+Class ReceiverClass() {
+    return NSClassFromString(@"RTCRtpReceiver");
+}
+
+// The accessor's implementation when the class has it with the expected
+// type, else null.
+IMP NativeRtpReceiverImp(Class receiverClass) {
+    if (receiverClass == nil) {
+        return nullptr;
+    }
+    SEL selector = NSSelectorFromString(kNativeRtpReceiverSelectorName);
+    Method method = class_getInstanceMethod(receiverClass, selector);
+    if (method == nullptr) {
+        return nullptr;
+    }
+    const char *encoding = method_getTypeEncoding(method);
+    if (encoding == nullptr ||
+        std::strcmp(encoding, kNativeRtpReceiverTypeEncoding) != 0) {
+        return nullptr;
+    }
+    return method_getImplementation(method);
+}
+
+// The LC_UUID of the image that holds `address`, or nil.
+NSString *ImageUuidOf(const void *address) {
+    Dl_info info;
+    if (address == nullptr || dladdr(address, &info) == 0 ||
+        info.dli_fbase == nullptr) {
+        return nil;
+    }
+    const auto *header =
+        static_cast<const struct mach_header_64 *>(info.dli_fbase);
+    if (header->magic != MH_MAGIC_64) {
+        return nil;
+    }
+    const auto *cursor = reinterpret_cast<const uint8_t *>(header + 1);
+    const uint8_t *end = cursor + header->sizeofcmds;
+    for (uint32_t i = 0; i < header->ncmds; ++i) {
+        if (cursor + sizeof(struct load_command) > end) {
+            return nil;
+        }
+        struct load_command command;
+        std::memcpy(&command, cursor, sizeof(command));
+        if (command.cmdsize < sizeof(struct load_command) ||
+            cursor + command.cmdsize > end) {
+            return nil;
+        }
+        if (command.cmd == LC_UUID &&
+            command.cmdsize >= sizeof(struct uuid_command)) {
+            struct uuid_command uuid;
+            std::memcpy(&uuid, cursor, sizeof(uuid));
+            return [[[NSUUID alloc] initWithUUIDBytes:uuid.uuid] UUIDString];
+        }
+        cursor += command.cmdsize;
+    }
+    return nil;
+}
+
+}  // namespace
+
+@implementation LakkoReceiverDelay
+
++ (NSString *)verifiedPackageVersion {
+    return kVerifiedPackageVersion;
+}
+
++ (NSArray<NSString *> *)verifiedEngineIdentities {
+    return @[
+        kVerifiedUuidDeviceArm64, kVerifiedUuidSimulatorArm64,
+        kVerifiedUuidSimulatorX8664
+    ];
+}
+
++ (NSString *)loadedEngineIdentity {
+    IMP imp = NativeRtpReceiverImp(ReceiverClass());
+    if (imp == nullptr) {
+        return nil;
+    }
+    return ImageUuidOf(reinterpret_cast<const void *>(imp));
+}
+
++ (BOOL)isAvailable {
+    int decided = g_receiver_delay_static.load(std::memory_order_acquire);
+    if (decided == 0) {
+        NSString *loaded = nil;
+        bool ok = lakko::receiver_delay::PlatformSupported();
+        if (ok) {
+            loaded = [LakkoReceiverDelay loadedEngineIdentity];
+            ok = loaded != nil &&
+                 [[LakkoReceiverDelay verifiedEngineIdentities]
+                     containsObject:loaded];
+        }
+        decided = ok ? 1 : 2;
+        g_receiver_delay_static.store(decided, std::memory_order_release);
+        if (ok) {
+            NSLog(@"[lakko.receiver-delay] setter available: WebRTC image %@ "
+                  @"is a verified slice of %@",
+                  loaded, kVerifiedPackageVersion);
+        } else {
+            NSLog(@"[lakko.receiver-delay] setter NOT available: WebRTC image "
+                  @"%@ is not a verified slice of %@; the playout delay stays "
+                  @"observe-only until the evidence is redone for this binary",
+                  loaded ?: @"(unreadable)", kVerifiedPackageVersion);
+        }
+    }
+    return decided == 1 && !lakko::receiver_delay::ProbeHasFailed();
+}
+
++ (LakkoReceiverDelayStatus)setMinimumPlayoutDelayMs:(uint32_t)delayMs
+                                         forReceiver:(RTCRtpReceiver * _Nullable)receiver {
+    if (receiver == nil) {
+        return LakkoReceiverDelayStatusNotAvailable;
+    }
+    if (lakko::receiver_delay::ProbeHasFailed()) {
+        return LakkoReceiverDelayStatusProbeFailed;
+    }
+    Class receiverClass = ReceiverClass();
+    if (![LakkoReceiverDelay isAvailable] ||
+        ![receiver isKindOfClass:receiverClass]) {
+        return LakkoReceiverDelayStatusNotAvailable;
+    }
+    IMP imp = NativeRtpReceiverImp(receiverClass);
+    if (imp == nullptr) {
+        return LakkoReceiverDelayStatusNotAvailable;
+    }
+
+    // What the track says this receiver is: the answer `media_type()` must
+    // give.
+    NSString *kind = receiver.track.kind;
+    int expectedMediaType = -1;
+    if ([kind isEqualToString:@"audio"]) {
+        expectedMediaType = lakko::receiver_delay::kMediaTypeAudio;
+    } else if ([kind isEqualToString:@"video"]) {
+        expectedMediaType = lakko::receiver_delay::kMediaTypeVideo;
+    } else {
+        return LakkoReceiverDelayStatusNotAvailable;
+    }
+
+    // The decryptor Lakko attached to this receiver: the answer
+    // `GetFrameDecryptor()` must give. The wrapper is held for the call, so
+    // its reference on the C++ object is too.
+    id associated = objc_getAssociatedObject(
+        receiver, (__bridge const void *)kDecryptorAssociationKey);
+    LakkoSFrameDecryptorWrapper *wrapper =
+        (LakkoSFrameDecryptorWrapper *)associated;
+    webrtc::FrameDecryptorInterface *decryptor =
+        wrapper != nil ? wrapper->_cppDecryptor : nullptr;
+
+    SEL selector = NSSelectorFromString(kNativeRtpReceiverSelectorName);
+    auto nativeRtpReceiver = reinterpret_cast<NativeRtpReceiverIMP>(imp);
+    const lakko::receiver_delay::ReturnedRef native =
+        nativeRtpReceiver(receiver, selector);
+    if (native.ptr == nullptr) {
+        return LakkoReceiverDelayStatusNotAvailable;
+    }
+    const lakko::receiver_delay::Status status =
+        lakko::receiver_delay::SetMinimumPlayoutDelay(
+            native.ptr, delayMs, expectedMediaType, decryptor,
+            &LakkoBridgeLogSink);
+    // The accessor's reference.
+    lakko::receiver_delay::ReleaseEngineRef(native.ptr);
+    return static_cast<LakkoReceiverDelayStatus>(status);
 }
 
 @end

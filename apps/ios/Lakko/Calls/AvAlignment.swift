@@ -22,7 +22,7 @@ import LakkoCore
 ///   * the receivers' statistics as the rule's inputs
 ///     (``AvAlignStats/trackInput(prev:cur:)``);
 ///   * which track a tile draws (``AvAlignStats/shownSlot(_:)``);
-///   * what this libwebrtc binding lets Lakko set (``AvReceiverDelay``);
+///   * what Lakko can set on a receiver in this process (``AvReceiverDelay``);
 ///   * the log lines.
 ///
 /// ``CallAvAlign`` holds one rule per remote person for one call. It has no
@@ -31,26 +31,41 @@ import LakkoCore
 
 // MARK: - What this binding can set
 
-/// What the libwebrtc binding of this app (stasel/WebRTC 125.0.0) lets Lakko
-/// set on a receiver's playout delay.
+/// What Lakko can set on a receiver's playout delay in this process.
 ///
-/// Nothing. `RTCRtpReceiver.h` of that framework declares `receiverId`,
-/// `parameters`, `track` and `delegate` and no delay of any kind; the binary
-/// carries no Objective-C selector for one either (the engine's C++
-/// `RtpReceiverInterface::SetJitterBufferMinimumDelay` is not wrapped). So
-/// the rule runs here in its observe-only capability: it is fed, the skew is
-/// measured and logged, and nothing is written. A picture on the middle or
-/// the light track can therefore run ahead of the sound on iOS exactly as it
-/// did before; this file does not change that, it measures it.
+/// `RTCRtpReceiver.h` of the app's libwebrtc binding (stasel/WebRTC 125.0.0)
+/// declares `receiverId`, `parameters`, `track` and `delegate` and no delay
+/// of any kind. The engine behind it has one,
+/// `RtpReceiverInterface::SetJitterBufferMinimumDelay`, and Lakko's native
+/// shim reaches it (``LakkoReceiverDelay``, `Calls/SFrameAttach.mm`; the
+/// evidence is in `apps/shared/sframe-bridge/receiver-delay.h` and ADR-0070,
+/// note of 2026-10-12). The shim offers it only when the WebRTC image loaded
+/// in this process is the binary that evidence was read from, and stops for
+/// the whole process if the engine's object fails its probe. For any other
+/// image the rule runs observe-only: it is fed, the skew is measured and
+/// logged, and nothing is written.
 ///
-/// Decided here, in Lakko's code, and never assumed from the engine: when a
-/// binding that has a setter is adopted, these two are what changes, and
-/// ``CallAvAlign`` already carries the answers out as ``CallAvAlign/Write``.
+/// Decided here, in Lakko's code, and never assumed from the engine. Both
+/// kinds go through the same engine method, so they have one answer; it is
+/// asked each time a call's book is built, since a failed probe changes it.
 enum AvReceiverDelay {
     /// An audio receiver's playout delay can be set.
-    static let audioSettable = false
+    static var audioSettable: Bool { LakkoReceiverDelay.isAvailable() }
     /// A video receiver's playout delay can be set.
-    static let videoSettable = false
+    static var videoSettable: Bool { LakkoReceiverDelay.isAvailable() }
+
+    /// Whether a set that came back as `status` took.
+    static func took(_ status: LakkoReceiverDelayStatus) -> Bool { status == .OK }
+
+    /// The shim's word for `status`, for the log.
+    static func name(_ status: LakkoReceiverDelayStatus) -> String {
+        switch status {
+        case .OK: return "ok"
+        case .notAvailable: return "not-available"
+        case .probeFailed: return "probe-failed"
+        @unknown default: return "unknown"
+        }
+    }
 }
 
 // MARK: - Receivers
@@ -272,12 +287,15 @@ enum AvAlignLog {
     }
 
     /// One line for a write that did not take on a person's receiver, with
-    /// the capability their rule goes on in.
+    /// why (the shim's word, when it said) and the capability their rule
+    /// goes on in.
     static func describeWriteFailed(
-        _ label: String, peerId: String, slot: AvSlot, capability: String
+        _ label: String, peerId: String, slot: AvSlot, capability: String,
+        why: String? = nil
     ) -> String {
-        "\(label) sync peer=\(peerId) \(slot.rawValue) target not taken;"
-            + " continuing capability=\(capability)"
+        "\(label) sync peer=\(peerId) \(slot.rawValue) target not taken"
+            + (why.map { " (\($0))" } ?? "")
+            + "; continuing capability=\(capability)"
     }
 }
 

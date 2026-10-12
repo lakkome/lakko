@@ -723,17 +723,20 @@ targets:
 packages:
   LakkoCore:
     path: "."
-  # G3-1 — remote SPM: stasel/WebRTC. `from: 125.0.0` allows
-  # SemVer-minor bumps inside the 125.x line (stasel uses one
-  # major per upstream WebRTC milestone, so this stays inside
-  # M125 specifically). Bumping the major (e.g. to M137) is
-  # a deliberate decision that should land in its own PR with
-  # the matching upstream-WebRTC changelog reviewed for
-  # API-shape drift (the public C++ API breaks across
-  # milestones surprisingly often).
+  # G3-1 — remote SPM: stasel/WebRTC, pinned to ONE version. stasel
+  # uses one major per upstream WebRTC milestone and every release is a
+  # different binary. Lakko's native shim calls into that binary's C++
+  # objects by vtable slot (`Calls/SFrameAttach.mm`: the frame
+  # encryptor / decryptor attach and, since ADR-0070's note of
+  # 2026-10-12, a receiver's playout delay), and the evidence for those
+  # slots was read from the machine code of 125.0.0 exactly. A bump is a
+  # deliberate change that lands with that evidence redone
+  # (`apps/shared/sframe-bridge/receiver-delay.h`) and the new binary's
+  # identities pinned; until then the shim refuses the playout-delay
+  # setter at run time and `AvAlignmentTests` fails.
   WebRTC:
     url: https://github.com/stasel/WebRTC.git
-    from: 125.0.0
+    exactVersion: 125.0.0
 
 # Schemes — xcodegen auto-generates one per target, but we
 # pin the explicit form so the build / archive / test actions

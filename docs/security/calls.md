@@ -2334,6 +2334,25 @@ makes the probe go negative; the call UI surfaces
 "calling unavailable on this build" rather than
 silently shipping unencrypted media.
 
+A second ABI dependence of the shim, added 2026-10-12
+(ADR-0070, the note of that date), is gated the same
+way but is not an E2EE gate: setting a remote
+receiver's minimum playout delay calls the engine's
+`RtpReceiverInterface::SetJitterBufferMinimumDelay`
+by vtable slot
+(`apps/shared/sframe-bridge/receiver-delay.h`). It
+carries no media and no key. Its gate is stricter than
+a selector probe, because a wrong slot is memory
+corruption and not a refusal: the call is made only
+when the loaded WebRTC image is byte-for-byte one the
+slot was read from (Mach-O `LC_UUID` on iOS, ELF build
+id on Android), and only after the receiver has
+answered `media_type()` and `GetFrameDecryptor()`
+correctly. Any other image, or a wrong answer, leaves
+the delay unset for the process (the call measures and
+does not align); it never affects whether media is
+encrypted.
+
 ### C-48: SFrame attach happens between addLocalAudioTrack and SDP build
 
 The `armSFrameEncryptors(seed, localLeaf)` call
@@ -2437,6 +2456,19 @@ on both platforms releases attached encryptors /
 decryptors BEFORE peer-disposal so libwebrtc's
 internal Release runs while our wrapper is still
 holding its retain — no use-after-free window.
+
+The playout-delay path of 2026-10-12 (ADR-0070) takes
+two more references and returns both: the iOS
+`nativeRtpReceiver` accessor adds one on the engine's
+receiver, released through the receiver's own
+`Release` slot after the call; the probe's
+`GetFrameDecryptor()` adds one on Lakko's decryptor,
+released only when the pointer that came back IS that
+decryptor (anything else is never touched). On Android
+a write holds a lock that `WebRtcPeerConnection.close`
+takes before it releases the decryptors and disposes
+the peer, so a write never meets a freed receiver or
+decryptor.
 
 Memory-ordering: `AddRef` uses
 `std::memory_order_relaxed`; `Release` uses

@@ -110,6 +110,46 @@ which is the only one the bridge seals or opens.
 | `test_mid_call_rekey_overlap` | Rekey keeps the overlap window and the codec |
 | `test_empty_frame_is_not_a_decrypt_failure` | An empty frame is zero bytes out with an OK status |
 
+## A receiver's minimum playout delay (`receiver-delay.h`)
+
+Not SFrame, but the same layer and the same kind of dependence on the
+binary: `receiver-delay.h` sets a remote receiver's minimum playout delay
+by calling the engine's
+`webrtc::RtpReceiverInterface::SetJitterBufferMinimumDelay` through its
+vtable slot, because neither public binding wraps it (ADR-0070, note of
+2026-10-12). It lives here because the probe it runs needs the decryptor
+this directory attaches, and because both platform shims already compile
+this directory.
+
+The header is self-contained and header-only: the iOS shim
+(`SFrameAttach.mm`) and the Android JNI file (`sframe_jni.cc`) include it,
+so no build recipe lists a new source. The evidence for the slot, for each
+binary's slot encoding (Android arm64 uses relative vtables, the others
+absolute ones) and for the argument's calling convention is in the
+header's opening comment. Each shim additionally refuses to call it
+unless the loaded WebRTC image is one that evidence was read from.
+
+```bash
+apps/shared/sframe-bridge/test-receiver-delay.sh
+```
+
+builds and runs `test_receiver_delay.cc` (optimised and not, and for
+x86_64 too on an Apple Silicon Mac that can run it):
+
+| Test | What it proves |
+|---|---|
+| `test_layout_of_the_argument` | `EngineOptionalDouble` is `std::optional<double>` byte for byte |
+| `test_sets_through_a_real_vtable` | The calls land on slots 8, 13 and 16 of a class declared in the engine's order; 0 is `nullopt`; the ceiling; the probe's reference is returned |
+| `test_no_decryptor_is_not_a_failure` | Without a decryptor nothing is called and the probe stays open |
+| `test_wrong_kind_stops_everything` | A wrong `media_type()` stops every set, said once |
+| `test_wrong_decryptor_stops_everything` | A wrong or missing `GetFrameDecryptor()` answer stops every set; nothing unknown is released |
+| `test_a_pass_after_a_kind_mismatch_is_not_possible` | The kind is checked on every set, after the probe passed too |
+| `test_sets_through_a_relative_vtable` | The relative encoding, on a table built by hand |
+
+The test shows that this code calls the slots the engine's header
+declares. It cannot show how the shipped binaries are laid out: that was
+read from the binaries.
+
 ## Platform integration
 
 This crate ships nothing platform-specific. The iOS shim (N-4)

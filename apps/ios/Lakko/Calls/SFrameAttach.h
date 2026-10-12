@@ -256,6 +256,72 @@ typedef NS_ENUM(uint8_t, LakkoSFrameMediaCodec) {
 
 @end
 
+// MARK: - A receiver's minimum playout delay (ADR-0070, note of 2026-10-12)
+
+/// What a set of a receiver's minimum playout delay says. The values are
+/// `lakko::receiver_delay::Status` verbatim.
+typedef NS_ENUM(NSInteger, LakkoReceiverDelayStatus) {
+    /// The delay was handed to the engine.
+    LakkoReceiverDelayStatusOK = 0,
+    /// Nothing was called: the setter is not available in this process
+    /// (see [+isAvailable]), the receiver is nil or carries no track of a
+    /// known kind, or it has no Lakko decryptor to run the probe against.
+    LakkoReceiverDelayStatusNotAvailable = 1,
+    /// The engine's object did not answer the two probe questions as the
+    /// evidence says it must. Nothing is set for the rest of the process.
+    LakkoReceiverDelayStatusProbeFailed = 2,
+};
+
+/// Sets a remote receiver's minimum playout delay through the engine's
+/// C++ `webrtc::RtpReceiverInterface::SetJitterBufferMinimumDelay`, which
+/// the framework's Objective-C surface does not wrap.
+///
+/// The engine object is reached through the framework's non-public
+/// `nativeRtpReceiver` accessor and called by vtable slot
+/// (`apps/shared/sframe-bridge/receiver-delay.h`, where the evidence for
+/// the slot and the calling convention is written down). That evidence
+/// was read from the binary of stasel/WebRTC 125.0.0, so the setter is
+/// offered only when the loaded WebRTC image IS that binary, by its
+/// Mach-O `LC_UUID`; for any other image the answer is "not available"
+/// and Lakko measures without setting.
+@interface LakkoReceiverDelay : NSObject
+
+/// The WebRTC package version the evidence was gathered for.
+@property(class, nonatomic, readonly) NSString *verifiedPackageVersion;
+
+/// The `LC_UUID` of every slice of that package the evidence covers
+/// (device arm64, simulator arm64, simulator x86_64), as `NSUUID`
+/// strings.
+@property(class, nonatomic, readonly) NSArray<NSString *> *verifiedEngineIdentities;
+
+/// The `LC_UUID` of the WebRTC image loaded in this process, or nil when
+/// it cannot be read (no `RTCRtpReceiver` class, no `nativeRtpReceiver`
+/// accessor, or an image without the load command).
+@property(class, nonatomic, readonly, nullable) NSString *loadedEngineIdentity;
+
+/// `YES` when a set can be attempted in this process: a 64-bit arm or
+/// x86 build, `RTCRtpReceiver` has the `nativeRtpReceiver` accessor with
+/// the type the evidence was read for, the loaded image is one of
+/// [+verifiedEngineIdentities], and the probe has not failed. The static
+/// part is decided once; a failed probe turns the answer to `NO` for the
+/// rest of the process.
++ (BOOL)isAvailable NS_SWIFT_NAME(isAvailable());
+
+/// Set the minimum playout delay of `receiver` to `delayMs` milliseconds;
+/// 0 gives the delay back to the engine. The receiver must carry the
+/// decryptor [LakkoSFrameAttach attachDecryptorToReceiver:seed:]
+/// attached, at least for the first set of the process: the probe asks
+/// the engine for it and compares.
+///
+/// Blocks until the engine's worker thread has run the call. Never call
+/// it on the main thread; use the queue the peer connection's other
+/// blocking calls run on.
++ (LakkoReceiverDelayStatus)setMinimumPlayoutDelayMs:(uint32_t)delayMs
+                                         forReceiver:(RTCRtpReceiver * _Nullable)receiver
+    NS_SWIFT_NAME(setMinimumPlayoutDelayMs(_:forReceiver:));
+
+@end
+
 NS_ASSUME_NONNULL_END
 
 #endif  // LAKKO_SFRAME_ATTACH_H_

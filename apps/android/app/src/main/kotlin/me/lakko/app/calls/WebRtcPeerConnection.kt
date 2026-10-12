@@ -189,6 +189,35 @@ public class WebRtcPeerConnection(
      */
     private val remoteTracks = java.util.concurrent.CopyOnWriteArrayList<RemoteTrackRef>()
 
+    /**
+     * The incoming receivers by the id of their track, for writing a
+     * receiver's playout delay ([setRemotePlayoutDelay]). These are the
+     * wrappers libwebrtc hands to `onAddTrack`: each holds its own reference
+     * on the engine object and is disposed only with the peer connection,
+     * unlike the lists `PeerConnection.getReceivers()` and
+     * `getTransceivers()` return, which dispose what they returned before
+     * (see [remoteTracks], [localVideoTransceiver]). Filled on libwebrtc's
+     * signaling thread, read by the group call's reading loop.
+     */
+    private val remoteReceivers = java.util.concurrent.ConcurrentHashMap<String, RtpReceiver>()
+
+    /** The SFrame decryptor attached to each incoming receiver
+     *  ([armSFrameDecryptor]), by the receiver's identity. Guarded by
+     *  itself. */
+    private val decryptorByReceiver =
+        java.util.IdentityHashMap<RtpReceiver, me.lakko.sframe.LakkoFrameDecryptor>()
+
+    /**
+     * Excludes [close] from a playout-delay write in flight: the write hands
+     * a receiver's engine pointer to native code, and [close] disposes the
+     * receivers. Held for the whole native call and for the moment [close]
+     * forgets the receivers, never by a libwebrtc callback.
+     */
+    private val receiverDelayLock = Any()
+
+    /** [close] has forgotten the receivers; guarded by [receiverDelayLock]. */
+    private var receiversClosed = false
+
     /** Follows each audio entry's energy counters across statistics reports
      *  ([sampleAudioLevels]). Used from the caller's one thread. */
     private val audioLevelReader = AudioLevelReader()
@@ -314,6 +343,7 @@ public class WebRtcPeerConnection(
                 runCatching { r.track() }.getOrNull()?.let { arrived ->
                     runCatching { arrived.id() }.getOrNull()?.let { trackId ->
                         remoteTracks += RemoteTrackRef(trackId, streamId, audio = arrived is org.webrtc.AudioTrack)
+                        remoteReceivers[trackId] = r
                     }
                 }
             }
@@ -460,6 +490,14 @@ public class WebRtcPeerConnection(
             // peer.dispose drops to 0 + frees cleanly.
             attachedEncryptors.forEach { it.release() }
             attachedEncryptors.clear()
+            // No playout-delay write may still hold a receiver or its
+            // decryptor when they go: wait for one in flight, then forget
+            // them so none starts ([setRemotePlayoutDelay]).
+            synchronized(receiverDelayLock) {
+                receiversClosed = true
+                remoteReceivers.clear()
+                synchronized(decryptorByReceiver) { decryptorByReceiver.clear() }
+            }
             attachedDecryptors.forEach { it.release() }
             attachedDecryptors.clear()
 
@@ -485,6 +523,7 @@ public class WebRtcPeerConnection(
         videoSenderEncryptor = null
         remoteAudioStreamByTrackId.clear()
         remoteTracks.clear()
+        remoteReceivers.clear()
         remoteLightVideoTrackIds.clear()
         remoteMiddleVideoTrackIds.clear()
     }
@@ -1505,8 +1544,32 @@ public class WebRtcPeerConnection(
         val dec = me.lakko.sframe.LakkoFrameDecryptor.create(seed) ?: return false
         receiver.setFrameDecryptor(dec)
         attachedDecryptors += dec
+        synchronized(decryptorByReceiver) { decryptorByReceiver[receiver] = dec }
         return true
     }
+
+    /**
+     * Set the minimum playout delay of the incoming receiver of track
+     * [trackId] to [ms] milliseconds (`0` gives it back to the engine), for
+     * the sound-and-picture alignment of a group call (`AvAlign.kt`).
+     * [audio] is what the track is. Returns the native module's status
+     * (`me.lakko.sframe.ReceiverPlayoutDelay.STATUS_*`); "not available"
+     * for a track this connection has no receiver of, and after [close].
+     *
+     * The engine's receiver is a proxy: the call blocks until libwebrtc's
+     * worker thread has run it, like `RtpSender.setParameters` does on the
+     * signaling thread. It is made under [receiverDelayLock], so the
+     * receiver cannot be disposed under it.
+     */
+    internal fun setRemotePlayoutDelay(trackId: String, audio: Boolean, ms: Int): Int =
+        synchronized(receiverDelayLock) {
+            val receiver = remoteReceivers[trackId]
+            if (receiversClosed || peer == null || receiver == null) {
+                return@synchronized me.lakko.sframe.ReceiverPlayoutDelay.STATUS_NOT_AVAILABLE
+            }
+            val decryptor = synchronized(decryptorByReceiver) { decryptorByReceiver[receiver] }
+            me.lakko.sframe.ReceiverPlayoutDelay.set(receiver, decryptor, audio, ms)
+        }
 
     /**
      * Mid-call SFrame rekey (G-18, ADR-0029). Rotate every installed

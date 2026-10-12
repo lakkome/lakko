@@ -41,19 +41,23 @@ import kotlin.math.roundToLong
  *    ([ReceiverDelaySetter]), and the write itself;
  *  * the log lines ([describeSync], [describeCapability]).
  *
- * ## What Android can do: observe only
+ * ## What Android can do
  *
- * The pinned SDK (`io.github.webrtc-sdk:android:125.6422.07`) has no way to
- * set a receiver's playout delay. `org.webrtc.RtpReceiver` is, in full:
+ * The pinned SDK (`io.github.webrtc-sdk:android:125.6422.07`) binds no way
+ * to set a receiver's playout delay. `org.webrtc.RtpReceiver` is, in full:
  * `track()`, `getParameters()`, `id()`, `dispose()`, `SetObserver(Observer)`
- * and `setFrameDecryptor(FrameDecryptor)`; its native methods are the same
- * six (`nativeGetTrack`, `nativeGetParameters`, `nativeGetId`,
- * `nativeSetObserver`, `nativeUnsetObserver`, `nativeSetFrameDecryptor`).
- * libwebrtc's C++ `RtpReceiverInterface::SetJitterBufferMinimumDelay` has no
- * Java binding in this SDK. So the rule runs with neither setter
- * ([NoReceiverDelaySetter]): it is fed, the skew is measured and logged, and
- * nothing is written. A tile on the middle or the light picture is not held
- * back to the sound on Android until the SDK binds that method.
+ * and `setFrameDecryptor(FrameDecryptor)`. The engine behind it has one,
+ * `RtpReceiverInterface::SetJitterBufferMinimumDelay`, and Lakko's native
+ * module reaches it (`me.lakko.sframe.ReceiverPlayoutDelay`; the evidence is
+ * in `apps/shared/sframe-bridge/receiver-delay.h` and ADR-0070, note of
+ * 2026-10-12). That module offers it only when the engine library loaded in
+ * this process is the binary the evidence was read from, and stops for the
+ * whole process if the engine's object fails its probe.
+ *
+ * So the setter is [EngineReceiverDelaySetter] where the module says it is
+ * available and [NoReceiverDelaySetter] where it does not
+ * ([receiverDelaySetterFor]); with the second the rule is fed, the skew is
+ * measured and logged, and nothing is written.
  *
  * No Android or libwebrtc type: the host JVM tests drive all of it with a
  * fake [AvAlignRules], since they cannot load the native library.
@@ -344,17 +348,76 @@ internal interface ReceiverDelaySetter {
 }
 
 /**
- * The setter of the pinned libwebrtc SDK: there is none (see the file's
- * header). Asked to set, it refuses, so a caller that got the capability
- * wrong finds out.
+ * The setter of a process in which the engine's method cannot be reached
+ * (see the file's header). Asked to set, it refuses, so a caller that got
+ * the capability wrong finds out.
  */
 internal object NoReceiverDelaySetter : ReceiverDelaySetter {
     override val audioSettable: Boolean = false
     override val videoSettable: Boolean = false
 
     override fun set(peerId: String, role: AvRole, trackId: String, ms: UInt): Unit =
-        throw UnsupportedOperationException("org.webrtc.RtpReceiver has no playout-delay setter in this SDK")
+        throw UnsupportedOperationException("no playout-delay setter is available in this process")
 }
+
+/** A set the native module did not carry out: the receiver is gone, or the
+ *  setter is not available in this process. */
+internal class ReceiverDelayNotAvailable : IllegalStateException("not-available")
+
+/** A set the native module refused because the engine's object failed its
+ *  probe; nothing is set for the rest of the process. */
+internal class ReceiverDelayProbeFailed : IllegalStateException("probe-failed")
+
+/** What [EngineReceiverDelaySetter] is told when a set took. The native
+ *  module's `ReceiverPlayoutDelay.STATUS_OK`. */
+internal const val RECEIVER_DELAY_OK: Int = 0
+
+/** The native module's `ReceiverPlayoutDelay.STATUS_PROBE_FAILED`. */
+internal const val RECEIVER_DELAY_PROBE_FAILED: Int = 2
+
+/**
+ * The setter that reaches the engine's
+ * `RtpReceiverInterface::SetJitterBufferMinimumDelay` through Lakko's native
+ * module. Both kinds go through the one engine method, so both are settable.
+ *
+ * [setOn] carries one set out on the receiver of a track (`trackId`, whether
+ * it is an audio track, milliseconds; `0` gives the target back) and returns
+ * the module's status. Anything but [RECEIVER_DELAY_OK] is thrown, which is
+ * how [CallAvAlign] learns to stop asking for that kind of that person.
+ *
+ * No Android type here: the peer connection supplies [setOn].
+ */
+internal class EngineReceiverDelaySetter(
+    private val setOn: (trackId: String, audio: Boolean, ms: Int) -> Int,
+) : ReceiverDelaySetter {
+    override val audioSettable: Boolean = true
+    override val videoSettable: Boolean = true
+
+    override fun set(peerId: String, role: AvRole, trackId: String, ms: UInt) {
+        // The rule asks for at most a few seconds; the engine's own ceiling
+        // is ten. Kept inside an Int whatever is asked.
+        val bounded = ms.coerceAtMost(RECEIVER_DELAY_MAX_MS).toInt()
+        when (setOn(trackId, role == AvRole.AUDIO, bounded)) {
+            RECEIVER_DELAY_OK -> Unit
+            RECEIVER_DELAY_PROBE_FAILED -> throw ReceiverDelayProbeFailed()
+            else -> throw ReceiverDelayNotAvailable()
+        }
+    }
+}
+
+/** The engine clamps a minimum playout delay to ten seconds; nothing larger
+ *  is sent. */
+internal const val RECEIVER_DELAY_MAX_MS: UInt = 10_000u
+
+/**
+ * The setter of this process: the engine's when the native module says the
+ * setter is [available], none otherwise.
+ */
+internal fun receiverDelaySetterFor(
+    available: Boolean,
+    setOn: (trackId: String, audio: Boolean, ms: Int) -> Int,
+): ReceiverDelaySetter =
+    if (available) EngineReceiverDelaySetter(setOn) else NoReceiverDelaySetter
 
 // ---------------------------------------------------------------------------
 // The log lines

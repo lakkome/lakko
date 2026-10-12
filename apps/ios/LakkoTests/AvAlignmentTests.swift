@@ -257,10 +257,64 @@ final class AvAlignLogTests: XCTestCase {
                 + " interval_ms=1000")
     }
 
-    func testThisBindingSetsNothing() {
+    func testTheLoadedWebRTCIsTheBinaryTheSetterWasVerifiedFor() {
+        // The drift guard (ADR-0070, note of 2026-10-12). The setter calls
+        // the engine by vtable slot; the slot and the calling convention
+        // were read from the machine code of stasel/WebRTC 125.0.0. A
+        // package bump loads another binary, the shim then refuses to set
+        // (observe-only), and this test fails until the evidence in
+        // `apps/shared/sframe-bridge/receiver-delay.h` is redone for the new
+        // binary and its identities are pinned in `SFrameAttach.mm`.
+        XCTAssertEqual(LakkoReceiverDelay.verifiedPackageVersion, "125.0.0")
+        let loaded = LakkoReceiverDelay.loadedEngineIdentity
+        XCTAssertNotNil(loaded, "the WebRTC image has no readable identity")
+        XCTAssertTrue(
+            LakkoReceiverDelay.verifiedEngineIdentities.contains(loaded ?? ""),
+            "WebRTC image \(loaded ?? "-") is not a verified slice of"
+                + " \(LakkoReceiverDelay.verifiedPackageVersion)")
+        XCTAssertEqual(
+            Set(LakkoReceiverDelay.verifiedEngineIdentities),
+            [
+                "4C4C4485-5555-3144-A186-7570B405EE6A",
+                "4C4C44CF-5555-3144-A1B7-95616B307988",
+                "4C4C44D7-5555-3144-A1AF-2ABA8DEDBD33",
+            ])
+    }
+
+    func testBothKindsHaveTheShimsOneAnswer() {
         // Pinned: a change here is a change of what iOS does on a call.
-        XCTAssertFalse(AvReceiverDelay.audioSettable)
-        XCTAssertFalse(AvReceiverDelay.videoSettable)
+        let available = LakkoReceiverDelay.isAvailable()
+        XCTAssertEqual(AvReceiverDelay.audioSettable, available)
+        XCTAssertEqual(AvReceiverDelay.videoSettable, available)
+    }
+
+    func testOnlyAnOkSetTook() {
+        XCTAssertTrue(AvReceiverDelay.took(.OK))
+        XCTAssertFalse(AvReceiverDelay.took(.notAvailable))
+        XCTAssertFalse(AvReceiverDelay.took(.probeFailed))
+        XCTAssertEqual(AvReceiverDelay.name(.OK), "ok")
+        XCTAssertEqual(AvReceiverDelay.name(.notAvailable), "not-available")
+        XCTAssertEqual(AvReceiverDelay.name(.probeFailed), "probe-failed")
+    }
+
+    func testANilReceiverIsNeverCalled() {
+        XCTAssertEqual(
+            LakkoReceiverDelay.setMinimumPlayoutDelayMs(120, forReceiver: nil),
+            .notAvailable)
+    }
+
+    func testAWriteThatDidNotTakeSaysWhy() {
+        XCTAssertEqual(
+            AvAlignLog.describeWriteFailed(
+                "call media", peerId: "p7", slot: .light, capability: "observe-only",
+                why: "probe-failed"),
+            "call media sync peer=p7 light target not taken (probe-failed);"
+                + " continuing capability=observe-only")
+        XCTAssertEqual(
+            AvAlignLog.describeWriteFailed(
+                "call media", peerId: "p7", slot: .audio, capability: "video-only"),
+            "call media sync peer=p7 audio target not taken;"
+                + " continuing capability=video-only")
     }
 }
 
@@ -530,9 +584,9 @@ final class CallAvAlignSharedRuleTests: XCTestCase {
         return writes
     }
 
-    func testAsThisBindingIsTheRuleMeasuresTheSkewAndWritesNothing() {
-        // The book as the session builds it: what `AvReceiverDelay` says.
-        let book = CallAvAlign()
+    func testWithoutSettersTheRuleMeasuresTheSkewAndWritesNothing() {
+        // The book of a process where the setter is not available.
+        let book = CallAvAlign(audioSettable: false, videoSettable: false)
         let writes = drive(book, readings: 4)
         XCTAssertEqual(writes, [])
         XCTAssertEqual(

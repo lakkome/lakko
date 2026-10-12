@@ -895,7 +895,8 @@ readings.
 **Not known, and nothing seen on a call.** Which browsers have
 `jitterBufferTarget` on audio and on video receivers (it must be
 feature-detected; the rule is told which setters exist and says what it
-then cannot do) and whether the native bindings expose a setter. How an
+then cannot do) and whether the native bindings expose a setter (they do
+not; see the next note for how the native clients reach the engine's). How an
 engine honours the hint: how fast it moves, whether it lands on the value
 or near it, and how a hint on the audio receiver interacts with the
 engine's own synchronisation of main. Whether the network-only figure a
@@ -904,3 +905,116 @@ suggests. Whether equal jitter-buffer delays mean lip sync closely enough:
 the rule compares buffer delays and does not read capture timestamps. How
 a real receiver's lag and noise compare with the model's. No client is
 wired to the rule yet.
+
+## Note, 2026-10-12: the native clients set a receiver's delay through the engine's C++ object
+
+**The gap.** Neither native binding wraps a setter for a receiver's
+playout delay: `RTCRtpReceiver` of stasel/WebRTC 125.0.0 has `receiverId`,
+`parameters`, `track` and `delegate`; `org.webrtc.RtpReceiver` of
+`io.github.webrtc-sdk:android:125.6422.07` has `track()`,
+`getParameters()`, `id()`, `SetObserver`, `setFrameDecryptor` and
+`dispose()`. The engine has
+`webrtc::RtpReceiverInterface::SetJitterBufferMinimumDelay(
+absl::optional<double> delay_seconds)`. The maintainer chose to reach it
+through the native layer that already implements libwebrtc's frame
+encryptor and decryptor interfaces. A wrong virtual call is a crash or
+memory corruption, so the evidence came first.
+
+**Which source each binary is built from.** stasel/WebRTC 125.0.0: its
+release notes name `branch-heads/6422` commit
+`8505a9838ea91c66c96c173d30cd66f9dbcc7548`, its README says the source is
+unmodified, and the cached archive has the checksum `Package.swift` pins
+(`4da2f9c7...13ae8`). The Android AAR is the webrtc-sdk fork, branch
+`m125_release`; no tag of the fork names the commit of 125.6422.07, but on
+that branch `api/rtp_receiver_interface.h`, `api/ref_count.h`,
+`pc/rtp_receiver_proxy.h` and the JNI `rtp_receiver.cc` were never touched
+by the fork: they are byte-identical to upstream. The class has, in
+declaration order, `AddRef`, `Release`, the destructor (two slots),
+`track`, `dtls_transport`, `stream_ids`, `streams`, `media_type`, `id`,
+`GetParameters`, `SetParameters`, `SetObserver`,
+`SetJitterBufferMinimumDelay` (slot 13), `GetSources`,
+`SetFrameDecryptor`, `GetFrameDecryptor`,
+`SetDepacketizerToDecoderFrameTransformer`.
+
+**Read from the machine code of every slice Lakko ships**, not reasoned
+from the header:
+
+| Slice | Slot encoding | Setter | Read from |
+|---|---|---|---|
+| iOS device arm64, simulator arm64, simulator x86_64 | 8-byte address | `+0x68` | the framework's Objective-C methods call `id` at `+0x48`, `GetParameters` at `+0x50`, `SetObserver` at `+0x60`, `SetFrameDecryptor` at `+0x78`; slot 13 of the `VideoRtpReceiver` vtable is a function that stores its argument in the cached delay and forwards `GetMs()` to the media channel, slot 14 takes a struct-return pointer |
+| Android x86_64 | 8-byte address | `+0x68` | `nativeGetId` `+0x48`, `nativeGetParameters` `+0x50`, `nativeSetObserver` `+0x60`, `nativeSetFrameDecryptor` `+0x78`; slot 13 the same function |
+| Android arm64-v8a | signed 32-bit offset from the vtable (relative vtables) | `+0x34` | `nativeGetId` `+0x24`, `nativeGetParameters` `+0x28`, `nativeSetObserver` `+0x30`, `nativeSetFrameDecryptor` `+0x3c`; slot 13 the same function |
+
+The argument (`std::optional<double>` in these builds:
+`ABSL_OPTION_USE_STD_OPTIONAL 2`) arrives in every slice as two integer
+register words, the double's bits and then the engaged flag (arm64
+`x1` / `w2`, x86_64 `rsi` / `dl`), read from the callee
+`JitterBufferDelay::Set`. On x86_64 that is not where a plain
+`{double, bool}` travels (`xmm0`), which a hand-written struct would have
+got wrong. Two things in this table decide the design: the three binaries
+do not share one vtable encoding, and the argument's convention is not the
+obvious one. So the call is made by slot, with the encoding and the
+argument's shape written out per platform
+(`apps/shared/sframe-bridge/receiver-delay.h`), not through a class
+declaration compiled with whatever the build's flags give.
+
+**How the engine object is reached.** iOS: the framework's non-public
+`nativeRtpReceiver` accessor (a third-party framework's selector, not an
+Apple one), called only when its Objective-C type encoding is the one the
+binary was read with; it returns the `scoped_refptr` in memory, and the
+reference it adds is released. Android: the SDK's package-private
+`RtpReceiver.getNativeRtpReceiver()`, a raw `RtpReceiverInterface*`, called
+from one class placed in package `org.webrtc`
+(`LakkoRtpReceiverAccess`); no reflection. The receivers written to are the
+ones `onAddTrack` hands out, which live until the peer connection is
+disposed; a write is excluded from `close()` by a lock.
+
+**Guards.** (1) Identity: the setter is offered only when the loaded
+WebRTC image is one the table was read from, by Mach-O `LC_UUID` (three
+slices) or ELF build id (two); any other image is observe-only, logged
+once. (2) A bracket probe before the first set of a process: the receiver
+is asked `media_type()` (a slot before the setter; must be the track's
+kind) and `GetFrameDecryptor()` (a slot after it; must be the decryptor
+Lakko attached); only then is the setter's slot called. A wrong answer
+stops every set for the process. `media_type()` is asked again on every
+set. (3) Drift: the iOS package is pinned to exactly 125.0.0
+(`project.yml`), an iOS test compares the loaded image's identity with the
+pinned ones, and an Android host test compares the version catalog with the
+version the evidence was gathered for.
+
+**Threading.** The object the app holds is a proxy: the setter and
+`GetFrameDecryptor` block the caller until the engine's worker thread has
+run them; `media_type` does not leave the calling thread. iOS runs the set
+on the serial queue every other blocking libwebrtc call uses. Android runs
+it on the call's scope, as it already does `RtpSender.setParameters`.
+
+**Evidence of the code itself.** A host test with a fake receiver whose
+vtable the host compiler lays out from the engine's declaration order
+(`test_receiver_delay.cc`, run for arm64 and x86_64) and a hand-built
+relative table; the compiled Android library reads `+0x34` relative on
+arm64 and `+0x68` absolute on x86_64. The host test cannot show how the
+shipped binaries are laid out; the table above is what shows that.
+
+**Residual risk.** The identity pin makes "another binary" impossible, so
+what remains is an error in reading these binaries, which the bracket
+probe and the function-shape reading were made to catch. The probe's own
+two calls are through slots read the same way, so it is not independent
+of that reading. The receiver handed out is assumed to be the proxy of an
+audio or video receiver; the framework's own methods make the same
+assumption. A set blocks its caller for one hop to the worker thread. On
+Android a `dispose()` of the receiver outside `close()` during a set would
+be a use-after-free; nothing in Lakko does that.
+
+**Found on the way, not fixed here.** `tools/build-sframe-jni.sh` passes
+`-fexperimental-relative-c++-abi-vtables` for both Android ABIs, and the
+x86_64 `libsframe_jni.so` is built with relative vtables
+(`movslq 0xc(%rax), %rcx; addq %rax, %rcx; callq *%rcx`), while the x86_64
+`libjingle_peerconnection_so.so` calls a decryptor's `AddRef` as
+`callq *(%rax)`. Read from both binaries: on an x86_64 emulator the first
+`AddRef` libwebrtc makes on a Lakko frame encryptor or decryptor jumps to
+a garbage address. The flag belongs to arm64 only. Not run to confirm.
+
+**Not seen on a device.** Nothing here has run against a real call. A
+device run has to show the capability line with both setters `yes`, the
+probe's "passed" line, and `ask=` values followed by the measured delay of
+that receiver over the next readings.

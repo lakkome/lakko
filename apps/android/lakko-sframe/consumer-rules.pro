@@ -24,3 +24,13 @@
 # the interface implementations intact.
 -keep,allowoptimization class * implements org.webrtc.FrameEncryptor { *; }
 -keep,allowoptimization class * implements org.webrtc.FrameDecryptor { *; }
+
+# ReceiverPlayoutDelay (ADR-0070, note of 2026-10-12): its native methods
+# are found by name, and the accessor it calls in the SDK's package is the
+# SDK's package-private `RtpReceiver.getNativeRtpReceiver()`, which a
+# shrinker must neither rename nor remove.
+-keep class me.lakko.sframe.ReceiverPlayoutDelay { *; }
+-keep class org.webrtc.LakkoRtpReceiverAccess { *; }
+-keepclassmembers class org.webrtc.RtpReceiver {
+    long getNativeRtpReceiver();
+}

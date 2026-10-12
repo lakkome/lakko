@@ -223,10 +223,15 @@ final class SfuCallSession {
     private var mediaLogLastAtMs: UInt64?
     /// Each remote person's sound and picture kept together (ADR-0070, note
     /// of 2026-10-12): one shared rule per person, fed from the receivers'
-    /// statistics. This binding has no setter for a receiver's playout delay
-    /// (``AvReceiverDelay``), so on iOS the rule measures and logs the skew
-    /// and writes nothing.
+    /// statistics. Whether its answers can be written to a receiver is what
+    /// ``AvReceiverDelay`` says when the session is built; where they cannot,
+    /// the rule measures and logs the skew and writes nothing.
     private let avAlign = CallAvAlign()
+    /// The receivers the rule's answers are written to, by the id of their
+    /// track, with whose they are. Held from the moment a track arrives to
+    /// the person's leaving or hang-up; an `RTCRtpReceiver` keeps its engine
+    /// object alive, so a write never meets a freed one.
+    private var avReceivers: [String: (peerId: String, receiver: RTCRtpReceiver)] = [:]
     /// Reads the receivers every ``AvAlignStats/readingIntervalMs(_:)`` from
     /// the moment media connects to hang-up.
     private var avAlignTask: Task<Void, Never>?
@@ -672,6 +677,7 @@ final class SfuCallSession {
         lightTrackIds.removeAll()
         middleTrackIds.removeAll()
         avAlign.clear()
+        avReceivers.removeAll()
         offerQueue.removeAll()
         localCameraSource = nil
         videoNeeded = nil
@@ -1062,8 +1068,10 @@ final class SfuCallSession {
             Task { @MainActor in
                 guard let self else { return }
                 self.wantsBook.removePeer(peerId)
-                // Their sound-and-picture rule goes with them.
+                // Their sound-and-picture rule goes with them, and their
+                // receivers with it.
                 self.avAlign.removePeer(peerId)
+                self.avReceivers = self.avReceivers.filter { $0.value.peerId != peerId }
                 // What the SFU gave of them goes with them: someone who
                 // later joins under the same id starts with nothing said.
                 if self.givenBook.removePeer(peerId) {
@@ -1319,18 +1327,29 @@ final class SfuCallSession {
                         hasLight: self.avAlign.has(peerId, .light),
                         lightOnTop: LayerDisplayLedger.shared.lightShown(peerId: peerId)))
             })
-        // This binding has nothing to write a receiver's playout delay with
-        // (``AvReceiverDelay``), and the rule is built knowing so, so it
-        // asks for nothing. An answer that asks anyway cannot be carried
-        // out: it is said once per person and kind, and that person's rule
-        // goes on as one that cannot set it.
+        // Carry the answers out. A set blocks until the engine's worker
+        // thread has run it, so it runs off the main thread, one after the
+        // other in the order the rule gave them. One that does not take
+        // (no receiver for the track, the setter not available in this
+        // process, or the engine's object failing its probe) is said once
+        // per person and kind, and that person's rule goes on as one that
+        // cannot set it.
         for write in writes {
+            // The call may have ended, or the person left, during a set.
+            guard pc === connection, avAlignTask != nil else { return }
+            var why = "no-receiver"
+            if let held = avReceivers[write.trackId], held.peerId == write.peerId {
+                let status = await connection.setReceiverPlayoutDelay(
+                    held.receiver, ms: write.setMs)
+                if AvReceiverDelay.took(status) { continue }
+                why = AvReceiverDelay.name(status)
+            }
             if let capability = avAlign.writeFailed(peerId: write.peerId, slot: write.slot) {
                 NSLog(
                     "%@",
                     AvAlignLog.describeWriteFailed(
                         "call media", peerId: write.peerId, slot: write.slot,
-                        capability: capability))
+                        capability: capability, why: why))
             }
         }
     }
@@ -1422,9 +1441,10 @@ final class SfuCallSession {
                     // that replaces one under the same slot is told to the
                     // rule there.
                     if let streamId, let slot = AvSlot.of(kind: kind, role: role) {
+                        let peerId = LightStream.split(streamId).peerId
                         self.avAlign.setReceiver(
-                            peerId: LightStream.split(streamId).peerId, slot: slot,
-                            trackId: trackId)
+                            peerId: peerId, slot: slot, trackId: trackId)
+                        self.avReceivers[trackId] = (peerId, receiver)
                     }
                 }
                 guard !pc.armSFrameDecryptor(for: receiver, seed: seed) else {
