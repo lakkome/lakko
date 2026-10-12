@@ -308,8 +308,9 @@ The server decides, the client executes.
   sender with `setParameters`, serialised with every other write to the
   sender's parameters, the last frame winning; before the first frame a
   sender keeps the ceiling it was created with. Web is built
-  (`apps/web/src/calls/publish-budget.ts`); iOS and Android follow and
-  until then ignore the frame.
+  (`apps/web/src/calls/publish-budget.ts`); iOS and Android obey it too
+  since 2026-10-12 (`PublishBudget.swift`, `PublishBudget.kt`), host-tested
+  only.
 
 Every constant is chosen, not measured.
 

@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0071: The codec's frame header stays in the clear; the SFrame header moves to the end of the frame
 
-- **Status:** Proposed (2026-10-07; the maintainer decided to do this). Phase 1 is built: the Rust core, the wasm FFI, new entry points on the C ABI, and the web client. Host-tested only. Not run in any browser, not seen on a call. Phase 2 (the native bridges, iOS, Android) is not built, and until it is a web client and a native client do not open each other's media.
+- **Status:** Proposed (2026-10-07; the maintainer decided to do this). Phase 1 is built: the Rust core, the wasm FFI, new entry points on the C ABI, and the web client. Host-tested only. Not run in any browser, not seen on a call. Phase 2 (the native bridges, iOS, Android) is built since 2026-10-11 (see the dated note below): host-tested, never run on a device, so that a web client and a native client open each other's media is not yet observed.
 - **Date:** 2026-10-07
 - **Context:** call media, Phase 3. Amends [ADR-0013](0013-sframe-cross-platform-aad.md) (the frame layout and what the AEAD additional data covers). Leaves [ADR-0035](0035-sframe-per-stream-kid-key.md) (one key per `(leaf, stream)` through the KID), [ADR-0069](0069-sframe-random-counter-start.md) (64-bit counter with a random start) and [ADR-0029](0029-mid-call-key-rotation.md) (the overlap key ring) unchanged in keying. Security invariants #2, #3 and #4; C-5, C-6, C-55.
 

@@ -906,6 +906,14 @@ the rule compares buffer delays and does not read capture timestamps. How
 a real receiver's lag and noise compare with the model's. No client is
 wired to the rule yet.
 
+**Update, same day:** all three clients are wired. Web writes
+`jitterBufferTarget` where the browser has it (`apps/web/src/calls/av-align.ts`,
+on by default, `localStorage` `lakko.call.av-align` to switch it off); iOS
+and Android feed the rule from receiver statistics
+(`AvAlignment.swift`, `AvAlign.kt`) and set the engine's minimum playout
+delay through the native shim described in the next note. Host-tested
+only; nothing was seen on a call.
+
 ## Note, 2026-10-12: the native clients set a receiver's delay through the engine's C++ object
 
 **The gap.** Neither native binding wraps a setter for a receiver's
@@ -1005,7 +1013,9 @@ assumption. A set blocks its caller for one hop to the worker thread. On
 Android a `dispose()` of the receiver outside `close()` during a set would
 be a use-after-free; nothing in Lakko does that.
 
-**Found on the way, not fixed here.** `tools/build-sframe-jni.sh` passes
+**Found on the way; fixed the same day** (the flag is now passed for
+arm64-v8a only and both libraries were rebuilt; not run on an emulator).
+As found: `tools/build-sframe-jni.sh` passed
 `-fexperimental-relative-c++-abi-vtables` for both Android ABIs, and the
 x86_64 `libsframe_jni.so` is built with relative vtables
 (`movslq 0xc(%rax), %rcx; addq %rax, %rcx; callq *%rcx`), while the x86_64
