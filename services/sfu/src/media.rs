@@ -117,10 +117,12 @@
 //!   serialized them for that subscriber
 //!   ([`crate::fec_send`]);
 //! - the generic frame descriptor is carried verbatim
-//!   ([`crate::frame_descriptor`]), with audio level and
-//!   video orientation; `mid`, `rid`, the transport-wide
+//!   ([`crate::frame_descriptor`]), with video
+//!   orientation; `mid`, `rid`, the transport-wide
 //!   sequence number and absolute send time belong to each
-//!   leg and are set by str0m.
+//!   leg and are set by str0m. The audio level (RFC 6464) is
+//!   not negotiated with any peer and is carried nowhere
+//!   (see [`session_extension_map`]).
 //!
 //! Loss is repaired where it is seen: str0m on the receive
 //! side asks a publisher again for a missing video packet,
@@ -1045,11 +1047,13 @@ pub(crate) struct RelayPacket {
     pub(crate) recovered: bool,
     /// When the packet reached the SFU.
     pub(crate) arrival: Instant,
-    /// Audio level header extension, if the packet carried it.
-    pub(crate) audio_level: Option<i8>,
-    /// Voice-activity flag of the same extension.
-    pub(crate) voice_activity: Option<bool>,
     /// Video orientation header extension, if carried.
+    ///
+    /// There is deliberately no field for the audio level or
+    /// the voice-activity flag (RFC 6464): the SFU does not
+    /// negotiate that extension ([`session_extension_map`]),
+    /// and a packet in transit has nowhere to hold a value a
+    /// peer sent anyway.
     pub(crate) video_orientation: Option<VideoOrientation>,
     /// The generic frame descriptor exactly as this packet
     /// carried it, relayed verbatim.
@@ -1096,11 +1100,11 @@ impl RelayPacket {
     /// what is the stream's own and travels with it. `mid`,
     /// `rid`, the transport-wide sequence number and
     /// absolute send time are deliberately left unset; str0m
-    /// fills them in for the egress leg.
+    /// fills them in for the egress leg. The audio level and
+    /// the voice-activity flag are never set: who is speaking,
+    /// and how loudly, is not the server's to relay.
     fn egress_extensions(&self) -> ExtensionValues {
         let mut ext_vals = ExtensionValues {
-            audio_level: self.audio_level,
-            voice_activity: self.voice_activity,
             video_orientation: self.video_orientation,
             ..ExtensionValues::default()
         };
@@ -3296,15 +3300,32 @@ fn abs_send_time_24(sent: Instant, base: Instant) -> u32 {
     u32::try_from(units & 0x00ff_ffff).unwrap_or(0)
 }
 
-/// The session extension map of a peer under [`BitrateControl::Server`]:
-/// str0m's standard map without the transport-wide sequence number. An
-/// extension that is not in the session map is neither offered nor echoed
-/// in an answer, so no media line of this peer negotiates it;
-/// `abs-send-time` stays.
-fn extension_map_without_transport_cc() -> ExtensionMap {
+/// The session extension map every peer's `Rtc` is built from: str0m's
+/// standard map without the audio level, and, when `transport_cc` is
+/// false ([`BitrateControl::Server`] without downlink control), without the
+/// transport-wide sequence number either; `abs-send-time` stays.
+///
+/// An extension that is not in the session map is neither offered nor
+/// echoed in an answer, and its id on a received packet maps to nothing,
+/// so no media line of the peer negotiates it and no value is parsed.
+///
+/// **The audio level (`urn:ietf:params:rtp-hdrext:ssrc-audio-level`,
+/// RFC 6464) is never in it.** A header extension is outside the SFrame
+/// seal, so negotiating this one would tell the server, in the clear and
+/// on every audio packet, who is speaking and how loudly
+/// (`docs/ux/group-call-grid.md` section 10, `docs/security/calls.md`
+/// C-39). str0m's standard map carries it on id 1, which is why the map is
+/// always replaced rather than extended. No client needs it: each one
+/// measures the audio it decoded.
+fn session_extension_map(transport_cc: bool) -> ExtensionMap {
     let mut map = ExtensionMap::empty();
     for (id, ext) in ExtensionMap::standard().iter() {
-        if !matches!(ext, Extension::TransportSequenceNumber) {
+        let dropped = match ext {
+            Extension::AudioLevel => true,
+            Extension::TransportSequenceNumber => !transport_cc,
+            _ => false,
+        };
+        if !dropped {
             map.set(id, ext.clone());
         }
     }
@@ -3481,14 +3502,17 @@ impl MediaPeer {
         // estimate of a subscriber's path is the SFU's own, fed from the
         // feedback records str0m hands out, and what does not fit the path
         // is a track the allocation pauses, never a queue.
-        let mut config = Rtc::builder().set_rtp_mode(true).enable_bwe(None);
-        if server && !downlink_control {
-            // ADR-0068: no transport-wide congestion control with this
-            // peer. Without the extension in the session map str0m neither
-            // offers it nor echoes it.
-            config = config.set_extension_map(extension_map_without_transport_cc());
-        }
-        let mut config = config
+        //
+        // The session map is always replaced, never str0m's default: the
+        // default carries the audio level, which this SFU negotiates with
+        // nobody ([`session_extension_map`]). ADR-0068: under server-side
+        // bitrate control without downlink control the transport-wide
+        // sequence number is left out too.
+        let transport_cc = !server || downlink_control;
+        let mut config = Rtc::builder()
+            .set_rtp_mode(true)
+            .enable_bwe(None)
+            .set_extension_map(session_extension_map(transport_cc))
             .set_extension(
                 frame_descriptor::GENERIC_FRAME_DESCRIPTOR_ID,
                 frame_descriptor::generic_frame_descriptor_extension(),
@@ -4381,8 +4405,6 @@ impl MediaPeer {
             red,
             recovered: false,
             arrival: packet.timestamp,
-            audio_level: ext_vals.audio_level,
-            voice_activity: ext_vals.voice_activity,
             video_orientation: ext_vals.video_orientation,
             descriptor,
             starts_independent_frame,
@@ -4654,8 +4676,8 @@ impl MediaPeer {
     ///    packet with no slot downstream is `Stale`.
     ///
     /// The packet is then written with the marker bit kept, the
-    /// publisher's frame descriptor, audio level and video
-    /// orientation, `nackable` for video (so str0m keeps it for a
+    /// publisher's frame descriptor and video orientation
+    /// (never an audio level), `nackable` for video (so str0m keeps it for a
     /// subscriber's retransmission request) and not for audio,
     /// and its arrival time as the wall clock str0m builds sender
     /// reports from (a late packet gets the matching earlier
@@ -11445,21 +11467,160 @@ mod tests {
     }
 
     #[test]
-    fn server_bitrate_control_drops_only_the_transport_wide_sequence_number() {
-        let map = extension_map_without_transport_cc();
+    fn server_bitrate_control_drops_the_transport_wide_sequence_number_too() {
+        let map = session_extension_map(false);
+        let with = session_extension_map(true);
         let standard = ExtensionMap::standard();
         assert!(map.id_of(Extension::TransportSequenceNumber).is_none());
+        assert_eq!(
+            with.id_of(Extension::TransportSequenceNumber),
+            standard.id_of(Extension::TransportSequenceNumber)
+        );
         assert!(standard.id_of(Extension::TransportSequenceNumber).is_some());
-        assert_eq!(map.iter().count() + 1, standard.iter().count());
+        // The standard map less the audio level, and less transport-cc
+        // where that is asked for; nothing else goes.
+        assert_eq!(with.iter().count() + 1, standard.iter().count());
+        assert_eq!(map.iter().count() + 2, standard.iter().count());
         for ext in [
             Extension::AbsoluteSendTime,
-            Extension::AudioLevel,
             Extension::RtpMid,
             Extension::RtpStreamId,
             Extension::RepairedRtpStreamId,
             Extension::VideoOrientation,
         ] {
-            assert_eq!(map.id_of(ext.clone()), standard.id_of(ext));
+            assert_eq!(map.id_of(ext.clone()), standard.id_of(ext.clone()));
+            assert_eq!(with.id_of(ext.clone()), standard.id_of(ext));
+        }
+    }
+
+    const AUDIO_LEVEL_URI: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+
+    /// One peer per way the SFU builds an `Rtc`: client-side bitrate
+    /// control, server-side, and server-side with downlink control; with
+    /// and without the optional extensions.
+    fn peers_of_every_configuration() -> Vec<MediaPeer> {
+        let now = Instant::now();
+        let server = || BitrateControl::Server(EstimatorConfig::default());
+        let mut peers = Vec::new();
+        for video_fec in [false, true] {
+            for protection in [LossProtection::default(), LossProtection::off()] {
+                for (bitrate, downlink) in [
+                    (BitrateControl::Client, false),
+                    (server(), false),
+                    (server(), true),
+                ] {
+                    peers.push(MediaPeer::with_downlink_control(
+                        pid("p"),
+                        now,
+                        None,
+                        video_fec,
+                        bitrate,
+                        protection,
+                        downlink,
+                    ));
+                }
+            }
+        }
+        peers
+    }
+
+    /// The audio level (RFC 6464) is in no session map the SFU builds,
+    /// although str0m's own default has it.
+    #[test]
+    fn no_session_extension_map_holds_the_audio_level() {
+        assert!(
+            ExtensionMap::standard()
+                .id_of(Extension::AudioLevel)
+                .is_some(),
+            "str0m's default map has it: the reason the SFU replaces the map"
+        );
+        for transport_cc in [false, true] {
+            let map = session_extension_map(transport_cc);
+            assert!(map.id_of(Extension::AudioLevel).is_none());
+            assert!(map.iter().all(|(_, ext)| *ext != Extension::AudioLevel));
+        }
+        for peer in peers_of_every_configuration() {
+            assert!(
+                peer.rtc
+                    .codec_config()
+                    .params()
+                    .iter()
+                    .any(|p| p.spec().codec == Codec::Opus),
+                "opus is still configured"
+            );
+        }
+    }
+
+    /// A publisher that offers the audio level, as every libwebrtc client
+    /// does, is answered without it; so it does not send it.
+    #[test]
+    fn the_answer_to_a_publisher_does_not_accept_the_audio_level() {
+        for mut peer in peers_of_every_configuration() {
+            let mut client = Rtc::builder().build(Instant::now());
+            let mut change = client.sdp_api();
+            change.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+            change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+            let (offer, _pending) = change.apply().expect("an offer");
+            let offer = offer.to_sdp_string();
+            assert!(
+                offer.contains(AUDIO_LEVEL_URI),
+                "the client offers it:\n{offer}"
+            );
+            let answer = peer.accept_offer(&offer).expect("the SFU answers");
+            assert!(
+                !answer.contains("audio-level"),
+                "not echoed: {}",
+                extmap_summary(&answer)
+            );
+            assert!(
+                answer.contains("m=audio") && answer.contains("opus/48000/2"),
+                "audio itself is accepted:\n{answer}"
+            );
+            assert!(answer.contains("urn:ietf:params:rtp-hdrext:sdes:mid"));
+            // And the line negotiated no id for it: a value sent anyway
+            // would be parsed into nothing.
+            let mids: Vec<&str> = answer
+                .lines()
+                .filter_map(|l| l.strip_prefix("a=mid:"))
+                .collect();
+            assert_eq!(mids.len(), 2, "{answer}");
+            for mid in mids {
+                let media = peer.rtc.media(Mid::from(mid)).expect("the line exists");
+                assert!(media.remote_extmap().id_of(Extension::AudioLevel).is_none());
+            }
+        }
+    }
+
+    /// The SFU's own offer of an audio track to a subscriber carries no
+    /// audio-level extension, whatever the configuration.
+    #[test]
+    fn the_offer_to_a_subscriber_does_not_carry_the_audio_level() {
+        for mut peer in peers_of_every_configuration() {
+            for kind in [MediaKind::Audio, MediaKind::Video] {
+                peer.observe_remote_track_in(
+                    pid("pub"),
+                    TrackIn {
+                        mid: Mid::new(),
+                        kind,
+                        simulcast: false,
+                        light: false,
+                        middle: false,
+                    },
+                );
+            }
+            let offer = peer
+                .negotiate_if_needed()
+                .expect("negotiates")
+                .expect("an offer");
+            assert!(
+                offer.contains("m=audio") && offer.contains("opus/48000/2"),
+                "an audio line is offered:\n{offer}"
+            );
+            assert!(
+                !offer.contains("audio-level"),
+                "not offered: {}",
+                extmap_summary(&offer)
+            );
         }
     }
 
@@ -12083,8 +12244,6 @@ mod tests {
             red: None,
             recovered: false,
             arrival: Instant::now(),
-            audio_level: None,
-            voice_activity: None,
             video_orientation: None,
             descriptor: None,
             starts_independent_frame: false,
@@ -12569,7 +12728,7 @@ mod tests {
     fn extmap_summary_names_the_id_each_extension_landed_on() {
         let sdp = "v=0\r\n\
              m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
-             a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n\
+             a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\r\n\
              a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
              m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
              a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
@@ -12577,7 +12736,7 @@ mod tests {
         let summary = extmap_summary(sdp);
         assert_eq!(
             summary,
-            "[audio] 1:ssrc-audio-level 4:mid [video] 4:mid 12:generic-frame-descriptor-00"
+            "[audio] 2:abs-send-time 4:mid [video] 4:mid 12:generic-frame-descriptor-00"
         );
     }
 
@@ -13218,15 +13377,15 @@ mod tests {
         use str0m::rtp::VideoOrientation;
         let descriptor = PacketDescriptor(vec![0xb0, 0x01, 0x2a, 0x00]);
         let packet = RelayPacket {
-            audio_level: Some(-30),
-            voice_activity: Some(true),
             video_orientation: Some(VideoOrientation::Deg90),
             descriptor: Some(descriptor.clone()),
             ..synthetic_video_packet()
         };
         let ev = packet.egress_extensions();
-        assert_eq!(ev.audio_level, Some(-30));
-        assert_eq!(ev.voice_activity, Some(true));
+        assert!(
+            ev.audio_level.is_none() && ev.voice_activity.is_none(),
+            "who speaks, and how loudly, is not relayed"
+        );
         assert_eq!(ev.video_orientation, Some(VideoOrientation::Deg90));
         assert_eq!(
             ev.user_values.get::<PacketDescriptor>(),
@@ -13242,7 +13401,8 @@ mod tests {
 
         // Nothing to carry: nothing is invented.
         let bare = synthetic_packet().egress_extensions();
-        assert!(bare.audio_level.is_none() && bare.video_orientation.is_none());
+        assert!(bare.audio_level.is_none() && bare.voice_activity.is_none());
+        assert!(bare.video_orientation.is_none());
         assert!(bare.user_values.get::<PacketDescriptor>().is_none());
     }
 

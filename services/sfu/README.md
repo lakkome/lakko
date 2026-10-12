@@ -118,6 +118,69 @@ These are **architecturally absent**, not "feature gated":
   web) and speak the Lakko signaling protocol directly.
 - **No plaintext-media fallback.** A peer that fails to
   enable the SFrame transform is refused.
+- **No audio level.** The RTP header extension
+  `urn:ietf:params:rtp-hdrext:ssrc-audio-level` (RFC 6464)
+  is negotiated with nobody; see "Header extensions" below.
+
+## Header extensions
+
+A header extension is outside the SFrame seal, so each one
+the SFU negotiates is something the SFU can read. The
+session extension map of every peer is built by
+`session_extension_map` in `src/media.rs`, never taken from
+str0m's default:
+
+| Extension | Negotiated | Use |
+|---|---|---|
+| `sdes:mid`, `sdes:rtp-stream-id`, `sdes:repaired-rtp-stream-id` | always | routing a packet to its media line and layer; set per leg |
+| `abs-send-time` | always | the SFU's own path estimates |
+| `transport-wide-cc` | not under server-side bitrate control without downlink control | see "Bitrate control" |
+| `urn:3gpp:video-orientation` | always (video) | relayed |
+| `generic-frame-descriptor-00` | always (video) | relayed verbatim; where a key frame starts (`src/frame_descriptor.rs`) |
+| `playout-delay` | unless `LAKKO_SFU_PLAYOUT_DELAY=0` (video) | stamped by the SFU |
+| `ssrc-audio-level` (RFC 6464) | **never** | none |
+
+**The audio level is never negotiated (2026-10-12).** It
+would tell the server, in the clear and on every audio
+packet, who is speaking and how loudly, which
+`docs/ux/group-call-grid.md` section 10 forbids. str0m's
+default map has it on id 1; until this date the SFU kept
+that default, accepted the extension in its answer to a
+publisher, offered it to every subscriber and copied the
+value from packet to packet. It was found in the SFU's own
+log of an offered downstream track
+(`[audio] 1:ssrc-audio-level ...`). Now:
+
+- the answer to a publisher does not echo the extension, so
+  a publisher does not send it;
+- the SFU's offers to subscribers do not name it;
+- a value a client sends anyway is under an id that maps to
+  nothing on the SFU: it is not parsed, a packet in transit
+  (`RelayPacket`) has no field for it, and the outgoing
+  packet's extension values never set it;
+- nothing in the SFU ever used the level: no active-speaker
+  rule, no forwarding decision, no metric, no log line. The
+  only use was the relay itself.
+
+Each client measures the audio it decoded instead (web: an
+analyser on the played stream and the receiver's audio
+energy; iOS and Android: receiver statistics).
+
+Tests: `no_session_extension_map_holds_the_audio_level`,
+`the_answer_to_a_publisher_does_not_accept_the_audio_level`,
+`the_offer_to_a_subscriber_does_not_carry_the_audio_level`
+and
+`egress_extensions_carry_the_streams_own_values_and_nothing_of_the_leg`
+(unit, over every way a peer is configured); and in
+`tests/synthetic_client_e2e.rs`
+`the_audio_level_is_negotiated_with_neither_publisher_nor_subscriber`
+and `an_audio_level_sent_anyway_reaches_no_subscriber`, the
+second with a publisher that puts the extension on the wire
+although the answer did not accept it. Not verified: a
+browser or a native client against this SFU. That an
+offerer does not send an extension the answer left out is
+the offer/answer rule (RFC 8285 section 6, recalled); it
+was observed here for the str0m test client only.
 
 See [ADR-0011](../../docs/adr/0011-rust-sfu.md) §"What the
 SFU does NOT do" for the full statement and the

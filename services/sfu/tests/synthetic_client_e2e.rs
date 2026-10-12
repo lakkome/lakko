@@ -531,6 +531,26 @@ impl SyntheticClient {
     /// Write one audio RTP packet on `mid` with payload type `pt`. `false`
     /// until the send stream exists.
     fn write_audio_rtp(&mut self, mid: Mid, pt: u8, seq: u64, payload: &[u8]) -> bool {
+        self.write_audio_rtp_ext(
+            mid,
+            pt,
+            seq,
+            payload,
+            str0m::rtp::ExtensionValues::default(),
+        )
+    }
+
+    /// As [`Self::write_audio_rtp`], with header extension values of the
+    /// caller's choosing. str0m puts on the wire only those whose extension
+    /// this client believes the media line negotiated.
+    fn write_audio_rtp_ext(
+        &mut self,
+        mid: Mid,
+        pt: u8,
+        seq: u64,
+        payload: &[u8],
+        ext_vals: str0m::rtp::ExtensionValues,
+    ) -> bool {
         let mut api = self.rtc.direct_api();
         let Some(stream) = api.stream_tx_by_mid(mid, None) else {
             return false;
@@ -543,7 +563,7 @@ impl SyntheticClient {
                 rtp_time,
                 Instant::now(),
                 false,
-                str0m::rtp::ExtensionValues::default(),
+                ext_vals,
                 false,
                 payload.to_vec(),
             )
@@ -3744,6 +3764,244 @@ async fn red_audio_reaches_only_the_subscribers_that_negotiated_it() {
         "the SFU sends a subscriber without red no RED packet at all"
     );
     assert_eq!(b.rtp_in.len(), sent.len());
+}
+
+/// The RFC 6464 audio-level header extension.
+const AUDIO_LEVEL_URI: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+
+/// What one run of [`run_audio_level`] saw.
+struct AudioLevelRun {
+    /// The publisher's offer, the SFU's answer to it, and the SFU's own
+    /// offer of the track to the subscriber.
+    publisher_offer: String,
+    answer_to_publisher: String,
+    offer_to_subscriber: String,
+    /// One-byte header extension ids on the audio packets the publisher
+    /// put on the wire, and on those the subscriber was sent.
+    publisher_wire_ids: std::collections::BTreeSet<u8>,
+    subscriber_wire_ids: std::collections::BTreeSet<u8>,
+    /// Payloads the subscriber received, and those sent.
+    received: Vec<Vec<u8>>,
+    sent: Vec<Vec<u8>>,
+}
+
+/// An audio publisher A and a subscriber B through the live media task. A
+/// writes every packet with an audio level and the voice-activity flag set.
+///
+/// With `sends_anyway`, A applies the SFU's answer with the audio-level
+/// line put back into it, so A's own stack believes the extension was
+/// negotiated and writes it on the wire: a client that sends the value
+/// although the SFU never accepted it.
+#[allow(clippy::too_many_lines)]
+async fn run_audio_level(sends_anyway: bool) -> AudioLevelRun {
+    const OPUS_PT: u8 = 111;
+    const PACKETS: u64 = 10;
+    let payload = |i: u64| format!("sealed audio packet {i:04} of the level test").into_bytes();
+
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                call_id: "level-test".to_owned(),
+                account_id: "subscriber-b".to_owned(),
+                outbound: Some(tx),
+            })
+            .await
+    );
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    // Both clients keep str0m's default extension map, which, like a
+    // browser's, has the audio level in it.
+    let mut a = SyntheticClient::new_rtp_mode(false).await;
+    let mut b = SyntheticClient::new_rtp_mode(false).await;
+    let a_id = PeerId::fresh();
+
+    let (b_offer, b_pending) = b.create_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "level-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts the subscriber offer");
+    b.accept_answer(b_pending, &b_answer).expect("B applies");
+
+    let (a_offer, a_pending, mid) = a.create_audio_publisher_offer();
+    let a_answer = media
+        .accept_offer(a_id, "level-call".to_owned(), a_offer.clone())
+        .await
+        .expect("SFU accepts the publisher offer");
+    let applied = if sends_anyway {
+        let id_line = a_offer
+            .lines()
+            .find(|l| l.ends_with(AUDIO_LEVEL_URI))
+            .expect("the publisher offered the audio level");
+        let mid_line = a_answer
+            .lines()
+            .find(|l| l.starts_with("a=mid:"))
+            .expect("the answer has a media line");
+        a_answer.replacen(mid_line, &format!("{mid_line}\r\n{id_line}"), 1)
+    } else {
+        a_answer.clone()
+    };
+    a.accept_answer(a_pending, &applied).expect("A applies");
+
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    let mut b_reneg = false;
+    let mut offer_to_subscriber: Option<String> = None;
+    let mut written: u64 = 0;
+    let mut settle: Option<Instant> = None;
+    let mut buf = [0u8; 2048];
+    loop {
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "the audio-level test did not finish in time"
+        );
+        if settle.is_some_and(|at| now >= at) {
+            break;
+        }
+        for client in [&mut a, &mut b] {
+            let _ = client.drain().await;
+        }
+        if !b_reneg && b.is_connected() {
+            while let Ok(frame) = b_rx.try_recv() {
+                if let ServerFrame::SdpOffer { sdp } = frame {
+                    let answer = b.answer_renegotiation(&sdp).expect("B answers");
+                    offer_to_subscriber = Some(sdp);
+                    b_reneg = media
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok();
+                }
+            }
+        }
+        if a.is_connected() && b.is_connected() && b_reneg && written < PACKETS {
+            let ext = str0m::rtp::ExtensionValues {
+                audio_level: Some(-30),
+                voice_activity: Some(true),
+                ..str0m::rtp::ExtensionValues::default()
+            };
+            if a.write_audio_rtp_ext(mid, OPUS_PT, written, &payload(written), ext) {
+                written += 1;
+                if written == PACKETS {
+                    settle = Some(Instant::now() + Duration::from_secs(1));
+                }
+            }
+        }
+        for client in [&mut a, &mut b] {
+            while let Ok((n, src)) = client.socket.try_recv_from(&mut buf) {
+                client.feed_receive(&buf[..n], src, sfu_addr);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        for client in [&mut a, &mut b] {
+            client.feed_timeout();
+        }
+    }
+    drop(media);
+
+    AudioLevelRun {
+        publisher_offer: a_offer,
+        answer_to_publisher: a_answer,
+        offer_to_subscriber: offer_to_subscriber.expect("B was offered the track"),
+        publisher_wire_ids: a
+            .wire_headers
+            .iter()
+            .flat_map(|(_, _, header)| one_byte_extension_ids(header))
+            .collect(),
+        subscriber_wire_ids: b.in_ext_ids.clone(),
+        received: b.rtp_packets.iter().map(|(_, p)| p.clone()).collect(),
+        sent: (0..PACKETS).map(payload).collect(),
+    }
+}
+
+/// The id an SDP gives the audio-level extension, if it names it at all.
+fn audio_level_id(sdp: &str) -> Option<u8> {
+    sdp.lines()
+        .find(|l| l.ends_with(AUDIO_LEVEL_URI))
+        .and_then(|l| l.strip_prefix("a=extmap:"))
+        .and_then(|l| l.split_whitespace().next())
+        .and_then(|id| id.parse().ok())
+}
+
+/// The SFU negotiates no audio-level extension (RFC 6464) with anyone
+/// (`docs/ux/group-call-grid.md` section 10): it is outside the end-to-end
+/// encryption and would tell the server who is speaking and how loudly.
+///
+/// A publisher that offers it, as every libwebrtc client does, is answered
+/// without it and so does not send it; the SFU's own offer to a subscriber
+/// does not name it; audio itself crosses as before.
+#[tokio::test]
+async fn the_audio_level_is_negotiated_with_neither_publisher_nor_subscriber() {
+    let run = Box::pin(run_audio_level(false)).await;
+    let id = audio_level_id(&run.publisher_offer).expect("the publisher offers the audio level");
+    assert!(
+        !run.answer_to_publisher.contains("audio-level"),
+        "the answer does not accept it:\n{}",
+        run.answer_to_publisher
+    );
+    assert!(
+        !run.offer_to_subscriber.contains("audio-level"),
+        "the SFU's own offer does not name it:\n{}",
+        run.offer_to_subscriber
+    );
+    for sdp in [&run.answer_to_publisher, &run.offer_to_subscriber] {
+        assert!(
+            sdp.contains("opus/48000/2") && sdp.contains("urn:ietf:params:rtp-hdrext:sdes:mid")
+        );
+    }
+    assert!(
+        !run.publisher_wire_ids.contains(&id),
+        "a publisher answered without the extension does not send it: {:?}",
+        run.publisher_wire_ids
+    );
+    assert!(!run.publisher_wire_ids.is_empty(), "it still sends others");
+    assert!(!run.subscriber_wire_ids.contains(&id));
+    assert_eq!(run.received, run.sent, "audio crosses verbatim");
+}
+
+/// A client that sends the audio level although the SFU did not accept it
+/// gains nothing: the value reaches no other peer. The subscriber's packets
+/// carry no extension under the publisher's id for it, and none the SFU's
+/// offer to the subscriber did not name.
+#[tokio::test]
+async fn an_audio_level_sent_anyway_reaches_no_subscriber() {
+    let run = Box::pin(run_audio_level(true)).await;
+    let id = audio_level_id(&run.publisher_offer).expect("the publisher offers the audio level");
+    assert!(!run.answer_to_publisher.contains("audio-level"));
+    assert!(
+        run.publisher_wire_ids.contains(&id),
+        "the misbehaving publisher does put the extension on the wire: {:?}",
+        run.publisher_wire_ids
+    );
+    let offered: std::collections::BTreeSet<u8> = run
+        .offer_to_subscriber
+        .lines()
+        .filter_map(|l| l.strip_prefix("a=extmap:"))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter_map(|id| id.parse().ok())
+        .collect();
+    assert!(
+        !offered.contains(&id),
+        "id {id} is free on the subscriber's leg"
+    );
+    assert!(
+        !run.subscriber_wire_ids.contains(&id),
+        "nothing under the audio-level id reaches the subscriber: {:?}",
+        run.subscriber_wire_ids
+    );
+    assert!(
+        run.subscriber_wire_ids.is_subset(&offered),
+        "the subscriber is sent only extensions the SFU offered it: {:?} of {offered:?}",
+        run.subscriber_wire_ids
+    );
+    assert_eq!(
+        run.received, run.sent,
+        "the audio itself still crosses verbatim"
+    );
 }
 
 /// A video publisher A and a video subscriber B, connected through the live

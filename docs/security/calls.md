@@ -1663,6 +1663,48 @@ what changed is that the clear codec prefix is now something
 the statement has to be checked against, where before there
 was nothing in a payload an SFU could have read.
 
+**No audio level (2026-10-12).** The zero-payload-inspection
+statement is about payloads; an RTP header extension is
+outside the SFrame seal altogether, so every extension the
+SFU negotiates is metadata it can read. One of them was a
+leak: `urn:ietf:params:rtp-hdrext:ssrc-audio-level`
+(RFC 6464) carries, per audio packet and in the clear to the
+server, the speaker's level and a voice-activity flag, that
+is, who is speaking and how loudly. `services/sfu` kept
+str0m's default extension map, which has it on id 1, so it
+accepted the extension in its answer to a publisher, offered
+it to every subscriber and copied the value from packet to
+packet. Found in the SFU's own log of an offered downstream
+track (`[audio] 1:ssrc-audio-level ...`), against
+`docs/ux/group-call-grid.md` section 10, which says it must
+not be negotiated. Nothing in the SFU read the value for a
+decision, a metric or a log line; the relay was its only use.
+
+Now the session extension map of every peer is built by
+`session_extension_map` (`services/sfu/src/media.rs`) and
+never holds the audio level, so: the answer to a publisher
+does not echo it (the publisher then does not send it); the
+SFU's own offers do not name it; a value sent anyway sits
+under an id that maps to nothing and is not parsed; and
+`RelayPacket` has no field that could carry it to another
+peer. Pinned by
+`no_session_extension_map_holds_the_audio_level`,
+`the_answer_to_a_publisher_does_not_accept_the_audio_level`,
+`the_offer_to_a_subscriber_does_not_carry_the_audio_level`
+(unit, every peer configuration) and, over the live media
+task,
+`the_audio_level_is_negotiated_with_neither_publisher_nor_subscriber`
+and `an_audio_level_sent_anyway_reaches_no_subscriber`. The
+extensions that remain are listed in
+`services/sfu/README.md` ("Header extensions"). What a
+compromised SFU still learns without any extension is
+unchanged and is not claimed away here: packet sizes and
+timing per stream, from which speech activity can be
+inferred (Opus discontinuous transmission is the client's
+setting, not examined here). Not verified against a browser
+or a native client. One-to-one calls have no SFU and are not
+affected by this change.
+
 **Pinned invariants** the test suite (32 unit + 9
 integration) asserts:
 
