@@ -486,16 +486,32 @@ export async function composeForwardEnvelope(
  * device that already holds the original shows the message once
  * (`resend-marker.ts`). The core carries the marker only when both halves
  * are given and within bounds.
+ *
+ * `parts` keeps the message FAITHFUL: a re-sent reply carries its quote
+ * and a re-sent forward its attribution and origin, exactly as the original
+ * did. The caller decides the reply's target (`reset-repair.ts`
+ * `resendParts`: 0, "no jump", since the original lives in another journal).
  */
 export async function composeResendEnvelope(
   text: string,
   refs: readonly AttachmentRefBytes[],
   origin: ForwardOrigin,
+  parts: { readonly reply?: ReplyRef; readonly forward?: ForwardRef } = {},
 ): Promise<Uint8Array> {
   const wasm = await loadWasm();
   const builder = new wasm.EnvelopeBuilder(text);
   try {
     addRefsToBuilder(wasm, builder, refs);
+    if (parts.reply !== undefined) {
+      builder.setReply(BigInt(parts.reply.target), parts.reply.author, parts.reply.excerpt);
+    }
+    if (parts.forward !== undefined) {
+      builder.setForward(
+        parts.forward.author,
+        parts.forward.origin?.groupIdB64,
+        parts.forward.origin === undefined ? undefined : BigInt(parts.forward.origin.messageId),
+      );
+    }
     builder.setResendOrigin(origin.groupIdB64, BigInt(origin.messageId));
     return builder.build();
   } catch (err) {

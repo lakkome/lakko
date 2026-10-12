@@ -464,6 +464,11 @@ public final class AuthRepository: ObservableObject {
     /// the composition root.
     var onAccountKeysRotated: (@MainActor (_ secrets: IdentitySecrets, _ predecessorSeed: Data) async -> Void)?
 
+    /// How this repository builds the backup client of its restore, its
+    /// first backup and its re-seal after a rotation. A seam: the production
+    /// client carries default transports to storage and auth.
+    static var makeBackupClient: () -> BackupClient = { BackupClient() }
+
     /// The live `UNUserNotificationCenter` removal.
     nonisolated static func removeAllDeliveredNotifications() {
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
@@ -4456,7 +4461,7 @@ public final class AuthRepository: ObservableObject {
         context: String
     ) async -> (snapshot: Data, knownGroupIdsHex: [String]) {
         let phraseBytes = Data(phrase.utf8)
-        let client = BackupClient()
+        let client = Self.makeBackupClient()
         client.setSessionToken(sessionToken)
 
         // ADR-0037 §6: arm the rollback gate — verify the auth-signed backup
@@ -4584,7 +4589,7 @@ public final class AuthRepository: ObservableObject {
         wholeStorageSnapshot: Data = Data()
     ) async {
         let phraseBytes = Data(phrase.utf8)
-        let backupClient = BackupClient()
+        let backupClient = Self.makeBackupClient()
         backupClient.setSessionToken(sessionToken)
 
         // Cache the phrase first — even if the network leg
@@ -5316,7 +5321,7 @@ extension AuthRepository {
         var phraseBytes = Data(phrase.utf8)
         defer { phraseBytes.resetBytes(in: 0..<phraseBytes.count) }
 
-        let backupClient = BackupClient()
+        let backupClient = Self.makeBackupClient()
         backupClient.setSessionToken(token)
         // The scheduled backup seals with the cached phrase: left on the old
         // words it would overwrite this envelope with one the new words

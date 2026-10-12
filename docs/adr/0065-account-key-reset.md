@@ -1737,34 +1737,72 @@ founder's re-sent message is not drawn twice on its own other devices.
   at the chosen default behind one function each on every client
   (`restoreOwnershipToResetIdentity`, `resendOwnMessagesAfterReset`); D3 and the 30-day TTL likewise.
 
-**Client differences and gaps:**
+**Alignment pass (2026-10-12), one behaviour per rule on the three clients.** Unit tests only (web
+vitest 4741, five default-order runs and a shuffled one; iOS `LakkoTests` 3367 with 0 failures;
+Android 3553 on the host JVM, four runs, the `.so` still not rebuilt); nothing walked.
 
-- **Web**: the service worker does not know the re-send marker (a push for a re-sent message is
-  not suppressed); an interrupted re-send restarts from the first message, and a re-sent reply or
-  forward loses its quote or attribution; the feed shows the head segment only.
-- **iOS**: lineage is not in the client's backup payload; the claim store is plaintext
-  `UserDefaults` (it holds a Welcome; web seals it); a call offer from a superseded sender is not
-  filtered before the conversation moves; `/i/` from a contact shows the "already a contact" result
-  instead of opening the contact; message previews of a successor do not merge with notifications
-  delivered before the move; `Members changed` has no row on iOS, so its suppression is unwired; no
-  test drives a full claim-and-build pass.
-- **Android**: the chat screen is keyed on the head group and is rebuilt when the conversation
-  moves (unsent composer text is lost); the unread badge does not count unread rows of an older
-  segment; `Members changed` is judged per poll batch; the ADR-0050 re-request path does not pass
-  the binding filter.
-- **Android, and to be checked on the other two**: the binding filter of the add-member function
-  may refuse an unpinned person whose devices are still bound to a proven predecessor key after an
-  ADR-0066 rotation.
-- **All three**: a shared unpin of an older segment is local only; a genuine contact known only
-  from a profile gets an ordinary request row.
+- **Who is added.** Every path that adds another person's devices (a new chat, the user-facing add,
+  the successor build, the ADR-0050 re-request and re-admission) goes through one function per
+  client: the identity gate first, then a filter that accepts a KeyPackage bound to the expected key
+  or its pinned proven chain and never one bound to a key an accepted reset retired. New chats had
+  no filter on web and Android before this.
+- **Nothing from a retired key acts.** Chat rows, ops, call signals and service envelopes whose
+  sender resolves to a key an accepted reset retired are dropped in the foreground and by the three
+  background readers (no preview, no ring); commits and proposals are never dropped. iOS and the
+  web worker drop them in every conversation; Android drops call signals and service envelopes only
+  where the conversation moved or is unrepairable because of that reset.
+- **The claim store is sealed** under the device key on all three (it holds a prepared Welcome).
+- **A re-send is resumable and faithful:** a durable per-old-group cursor advanced after each
+  message lands; a re-sent reply keeps its quote (target 0), a forward its attribution and origin.
+- **The background readers know the re-send marker** and stay quiet about a message the device
+  holds. `lakko-ffi-extension`'s `ParsedBody` gained `resend_origin_group_b64` /
+  `resend_origin_message_id` for the iOS NSE. iOS cannot post nothing (the extension must call its
+  content handler), so it delivers a passive, silent notification the app removes at the next
+  continuity sweep.
+- **Lineage survives a backup restore** on all three (the iOS restore folded through a path that
+  dropped it).
+- **`/i/` from an established contact** opens the contact on all three, with no consume.
+- Per platform: the web feed includes rows of a conversation's older groups; iOS notifications are
+  threaded by the conversation root, so a successor does not start a new stack; Android keeps the
+  unsent composer text across a move and counts unread rows of older segments.
 
-**Test hygiene, to be dealt with:** two intermediate runs of the new iOS
-`ConversationContinuityTests` published MLS ciphertext rows to random unclaimed journal ids on the
-test stack's DS (the fixture used a default `ChatClient()`, which carries a real `DsClient`); the
-fixture is fixed, other iOS suites that build `ChatClient()` the same way were not checked.
-Android's `OneToOneCallSurvivesChatScreensTest` failed once and passed on re-run in three separate
-passes (a leaked exception), unexplained. iOS `JournalClaimOnOpenTests.testConcurrentCallersShareOneClaim`
-failed once, unexplained.
+**Still different, and gaps:**
+
+- **A person whose account rotated (ADR-0066) before this device ever saw them cannot be added or
+  written to** until their devices are re-bound to the new key: the directory serves the new key,
+  the devices are bound to the old one, and no pin or verified binding links them. A supersession
+  proof at first sight is not accepted (anyone can sign "X -> new key" with their own X, so a
+  malicious directory could attach its own devices). Closing it needs the predecessor anchored in
+  the KT log at first sight, or a signature by the new key over the old binding. On web and
+  Android a new chat with such a person worked before this pass (unfiltered). Decided 2026-10-12: the
+  refusal stays for now, to be revisited after use.
+- No background reader maps a rotated sender's keys when matching a re-send's author, so that
+  notification shows.
+- The re-send covers only messages this device sent itself; re-sent attachments reuse the stored
+  references.
+- Android: the chat screen is still rebuilt when the conversation moves (scroll position and an
+  armed reply are lost); `Members changed` is judged per poll batch; this account's own other
+  devices put into a group this device founds are unfiltered; a Keystore read failure of the claim
+  store reads as "no file". iOS: `Members changed` has no row.
+- All three: a shared unpin of an older segment is local only; a genuine contact known only from a
+  profile gets an ordinary request row.
+
+**Test hygiene (2026-10-12).** Each client's unit suite now fails on any request that leaves the
+process (web: `src/test/no-network.ts` over `fetch` / `WebSocket` / `XMLHttpRequest` / `EventSource`
+/ `sendBeacon`, Node `http` / `net` not covered; iOS: `LakkoTests/NetworkGuard.swift`, installed
+when the test bundle loads, so the host app's launch work runs before it; Android: one OkHttp seam
+`transport/BaseHttpEngine.kt` with a forbidding test engine, `HttpURLConnection` in
+`TurnCredentialClient` not covered). Web caught nothing. iOS caught about thirty fixtures reaching
+the test stack (default `ChatClient()` / `DiscoveryClient()` / `BackupClient()`, the shared
+anonymous-token pool refilling at auth, a mounted photo bubble), all moved to offline doubles
+through four small production seams. Android caught `ResetGateTest` (10 tests), caused by
+production code: `checkTransparencyLog` fetched the attest key with the log off; fixed. Flaky
+tests: Android `OneToOneCallSurvivesChatScreensTest` was charged for view models other tests never
+ended (their collectors resumed on Main after `resetMain`); fixed by cancelling and joining before
+the reset, with a leak log that fails the build. iOS `testConcurrentCallersShareOneClaim` was a
+racy test over correct code; rewritten with a fixed order. The three web failures seen once were
+not reproduced; a shuffled run found and fixed one order dependency
+(`reach/service-envelope.test.ts`).
 
 #### R.14 Not verified, and open on paper
 

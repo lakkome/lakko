@@ -68,6 +68,7 @@ import { loadChannelPostLog, subscribeChannelPostLogChanged } from "../feed/chan
 import { attachmentLine, FEED_PRESETS, repliesLabel, whyLine, type FeedPresetKey } from "../feed/feed-copy";
 import {
   buildFeedInput,
+  feedRefLogKey,
   feedSourceKey,
   groupFeedSources,
   reactionSummary,
@@ -78,7 +79,7 @@ import { useLineage } from "../chat/use-lineage";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
 import { rankFeedInput, type FeedCore, type RankedItem } from "../feed/feed-ranking";
 import { FEED_SEEN_DWELL_MS, isSeenInSlot } from "../feed/feed-seen";
-import { encodeReadPosition } from "../chat/lineage";
+import { encodeReadPosition, historyRowId } from "../chat/lineage";
 import {
   blankDraft,
   decodeDraft,
@@ -180,7 +181,9 @@ interface SavedView {
 const PREVIEW_ITEMS = 8;
 
 function itemKey(item: RankedItem): string {
-  return `${item.ref.source.kind}:${item.ref.source.idHex}:${item.ref.message.messageId}`;
+  // The group the row lives in, not the conversation's current one: a
+  // successor's message ids restart (ADR-0065 R.5).
+  return `${item.ref.source.kind}:${feedRefLogKey(item.ref)}:${item.ref.message.messageId}`;
 }
 
 export default function Feed(): JSX.Element {
@@ -409,6 +412,9 @@ export default function Feed(): JSX.Element {
         .map((c) => ({
           conversationHex: c.conversationHex,
           headHex: syncGroupIdHex(c.head.group.groupId),
+          // Rows still arriving in an older group's journal (members not in
+          // the successor yet) are items of the same conversation.
+          olderSegmentHexes: c.history.map((g) => syncGroupIdHex(g.group.groupId)),
           slug: base64UrlEncodeNoPad(c.head.group.groupId),
           title: titleOf(c.head),
           audience: peopleCountOf(c.head.group),
@@ -609,7 +615,12 @@ export default function Feed(): JSX.Element {
       navigate(paths.channel(ref.source.slug));
       return;
     }
-    navigate(`${paths.groupChat(ref.source.slug)}?at=${ref.message.messageId}`);
+    // A row of an older group opens the conversation at its history row
+    // (`lineage.ts` `historyRowId`, the id the chat view lists it under).
+    const messageId = Number(ref.message.messageId);
+    const at =
+      ref.segment === undefined ? messageId : historyRowId(messageId, ref.segment.distanceFromHead);
+    navigate(`${paths.groupChat(ref.source.slug)}?at=${at}`);
   };
 
   const [expanded, setExpanded] = createSignal<ReadonlySet<string>>(new Set());
@@ -644,7 +655,7 @@ export default function Feed(): JSX.Element {
       // section 5): only one above the newest read can move it.
       return Number(ref.message.messageId) > (marks().channelRead[ref.source.idHex] ?? 0);
     }
-    return !isSeenInSlot(log()?.[ref.source.idHex], ref.message);
+    return !isSeenInSlot(log()?.[feedRefLogKey(ref)], ref.message);
   };
 
   async function flushSeen(): Promise<void> {
@@ -705,9 +716,12 @@ export default function Feed(): JSX.Element {
       }
       return;
     }
-    const ids = pendingSeen.get(ref.source.idHex) ?? new Set<string>();
+    // Filed under the group the row lives in: the read receipt goes into
+    // that group and the read position carries its segment.
+    const logKey = feedRefLogKey(ref);
+    const ids = pendingSeen.get(logKey) ?? new Set<string>();
     ids.add(ref.message.messageId);
-    pendingSeen.set(ref.source.idHex, ids);
+    pendingSeen.set(logKey, ids);
     if (flushTimer === null) {
       flushTimer = setTimeout(() => {
         void flushSeen().catch((err: unknown) => {
@@ -867,9 +881,11 @@ export default function Feed(): JSX.Element {
   });
   const [forwarding, setForwarding] = createSignal<FeedCandidateRef | null>(null);
 
-  const entryOfSource = (source: FeedSource): ActiveGroup | undefined =>
-    source.kind === "group"
-      ? chats.groups().find((g) => syncGroupIdHex(g.group.groupId) === source.idHex)
+  /** The group a feed row lives in (an older group of a moved conversation
+   *  for a history row), as this device holds it. */
+  const entryOfRef = (ref: FeedCandidateRef): ActiveGroup | undefined =>
+    ref.source.kind === "group"
+      ? chats.groups().find((g) => syncGroupIdHex(g.group.groupId) === feedRefLogKey(ref))
       : undefined;
 
   /** The author as a RECIPIENT should read it: the person's own name for
@@ -894,7 +910,7 @@ export default function Feed(): JSX.Element {
     if (ref.source.kind === "channel") {
       payload = feedForwardPayload({ kind: "channel", message: ref.message, channelTitle: ref.source.title });
     } else {
-      const origin = entryOfSource(ref.source);
+      const origin = entryOfRef(ref);
       if (origin === undefined) throw new KeyedError("chat.error.message_gone");
       payload = feedForwardPayload({
         kind: "group",
@@ -1452,8 +1468,10 @@ export default function Feed(): JSX.Element {
                 <Icon name="chevron" size={16} />
                 {t("common.open")}
               </button>
-              {/* A channel is one-way: its posts have no reply. */}
-              <Show when={m().ref.source.kind === "group"}>
+              {/* A channel is one-way: its posts have no reply. A row of an
+                  older group of a moved conversation is read-only there, as
+                  it is in the conversation itself (ADR-0065 R.5). */}
+              <Show when={m().ref.source.kind === "group" && m().ref.segment === undefined}>
                 <button
                   type="button"
                   role="menuitem"

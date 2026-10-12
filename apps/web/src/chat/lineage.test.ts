@@ -12,6 +12,7 @@ import {
   headSegment,
   historyRowId,
   isHistoryRowId,
+  laterSegmentExists,
   NO_LINEAGE,
   OLD_SEGMENT_POLL_WINDOW_MS,
   oldSegmentPolled,
@@ -190,5 +191,21 @@ describe("retiresOldSegmentPush (R.5: the old group's subscription is retired)",
   });
   it("is done once", () => {
     expect(retiresOldSegmentPush({ ...base, alreadyRetired: true })).toBe(false);
+  });
+});
+
+describe("laterSegmentExists (R.5 / R.8: the conversation already moved)", () => {
+  const lineage = buildLineage([
+    { successorHex: "b", rootHex: "a", hlc: 1n },
+    { successorHex: "c", rootHex: "a", hlc: 2n },
+  ]);
+  it("every segment but the last has a later one", () => {
+    expect(laterSegmentExists(lineage, "a")).toBe(true);
+    expect(laterSegmentExists(lineage, "b")).toBe(true);
+    expect(laterSegmentExists(lineage, "c")).toBe(false);
+  });
+  it("a group no register names is its own, unmoved, conversation", () => {
+    expect(laterSegmentExists(lineage, "z")).toBe(false);
+    expect(laterSegmentExists(NO_LINEAGE, "a")).toBe(false);
   });
 });

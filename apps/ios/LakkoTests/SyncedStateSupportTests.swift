@@ -66,6 +66,42 @@ final class SyncedStateSupportTests: XCTestCase {
         XCTAssertFalse(SyncedStateMerge.merge(a, into: b), "a second merge changes nothing")
     }
 
+    // ADR-0065 R.5 / R.13b - the lineage is in the backup wherever the other
+    // synced maps are, and comes back on restore.
+
+    func testTheLineageSurvivesABackupRoundTripAndARestoreMerge() throws {
+        let successor = Data(repeating: 0xA1, count: 32)
+        let root = Data(repeating: 0xB2, count: 32)
+        let device = SyncedState()
+        _ = try device.applyPayload(payload: flagsPayload(hlc: 30, pinned: true))
+        XCTAssertTrue(try device.setLineage(hlc: 31, successorGroupId: successor, rootConversationId: root))
+        // What the backup composer takes: the persisted bytes as they are.
+        let backedUp = try device.toBytes()
+        // The restore path: `SyncedStateStore.mergeIntoStored` reads the
+        // bytes and folds them into whatever the device holds.
+        let incoming = try SyncedState.fromBytes(bytes: backedUp)
+        XCTAssertEqual(try incoming.lineageRoot(successorGroupId: successor)?.rootConversationId, root)
+        let restored = SyncedState()
+        XCTAssertTrue(SyncedStateMerge.merge(incoming, into: restored))
+        XCTAssertEqual(
+            try restored.lineageRoot(successorGroupId: successor)?.rootConversationId, root,
+            "a restore that drops the lineage draws a moved conversation as two")
+        XCTAssertEqual(try restored.allLineage().count, 1)
+        XCTAssertEqual(try restored.flags(groupId: gid)?.pinned, true)
+        XCTAssertFalse(SyncedStateMerge.merge(incoming, into: restored), "a second merge changes nothing")
+    }
+
+    func testARestoreMergeKeepsALineageThisDeviceAlreadyHolds() throws {
+        let successor = Data(repeating: 0xA1, count: 32)
+        let root = Data(repeating: 0xB2, count: 32)
+        let held = SyncedState()
+        XCTAssertTrue(try held.setLineage(hlc: 9, successorGroupId: successor, rootConversationId: root))
+        let backup = SyncedState()
+        _ = try backup.applyPayload(payload: flagsPayload(hlc: 3, pinned: true))
+        _ = SyncedStateMerge.merge(backup, into: held)
+        XCTAssertEqual(try held.lineageRoot(successorGroupId: successor)?.rootConversationId, root)
+    }
+
     // MARK: - Growth (section 5.1)
 
     private func leaf(_ index: UInt32, _ key: UInt8) -> DeviceLeaf {

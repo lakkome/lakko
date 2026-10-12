@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { planBackgroundEvents } from "./background-events";
+import { dropsFromSupersededSender, planBackgroundEvents } from "./background-events";
 import type { IncomingChatEvent } from "./client";
 
 const T = "2026-09-13T12:00:00Z";
@@ -189,5 +189,92 @@ describe("planBackgroundEvents", () => {
   it("flags a commit so the membership-shrink rotation runs (ADR-0043)", () => {
     expect(plan.sawCommit).toBe(true);
     expect(planBackgroundEvents([chat]).sawCommit).toBe(false);
+  });
+});
+
+describe("nothing from a superseded sender acts (ADR-0065 R.8)", () => {
+  const retired = (k: string): boolean => k === "k";
+  const everything = [
+    chat,
+    { ...offer, senderKey: "k" as never },
+    edit,
+    receipt,
+    profile,
+    profileRequest,
+    groupName,
+    pin,
+    beacon,
+    secret,
+  ] as IncomingChatEvent[];
+
+  it("a call offer, an op and a chat row from a retired key are dropped in ANY conversation", () => {
+    const plan = planBackgroundEvents(everything, retired);
+    expect(plan.timeline).toEqual([]);
+    expect(plan.signaling).toEqual([]);
+    expect(plan.messageOps).toEqual([]);
+    expect(plan.readReceipts).toEqual([]);
+    // In a conversation repaired in place its service envelopes still apply
+    // until the eviction lands.
+    expect(plan.profiles).toHaveLength(1);
+    expect(plan.profileRequests).toHaveLength(1);
+    expect(plan.groupNames).toHaveLength(1);
+    expect(plan.pins).toHaveLength(1);
+    expect(plan.beacons).toHaveLength(1);
+    expect(plan.pushSecrets).toHaveLength(1);
+  });
+
+  it("in a conversation that is unrepairable for that reset, or moved, its control and service envelopes are dropped too", () => {
+    const plan = planBackgroundEvents(everything, retired, undefined, {
+      sender: retired,
+      // The two leaf-only envelopes come from leaf 0, which is the retired
+      // person's.
+      senderKeyOfLeaf: (leaf) => (leaf === 0 ? "k" : undefined),
+    });
+    expect(plan.timeline).toEqual([]);
+    expect(plan.signaling).toEqual([]);
+    expect(plan.profiles).toEqual([]);
+    expect(plan.profileRequests).toEqual([]);
+    expect(plan.groupNames).toEqual([]);
+    expect(plan.pins).toEqual([]);
+    expect(plan.beacons).toEqual([]);
+    expect(plan.pushSecrets).toEqual([]);
+    expect(plan.toView).toEqual([]);
+  });
+
+  it("another member's envelopes in the same conversation are untouched", () => {
+    const other = (e: IncomingChatEvent): IncomingChatEvent =>
+      ({ ...e, senderKey: "someone-else" }) as IncomingChatEvent;
+    const plan = planBackgroundEvents([other(chat), other(profile), other(groupName), other(pin)], retired, undefined, {
+      sender: retired,
+    });
+    expect(plan.timeline).toHaveLength(1);
+    expect(plan.profiles).toHaveLength(1);
+    expect(plan.groupNames).toHaveLength(1);
+    expect(plan.pins).toHaveLength(1);
+  });
+
+  it("a commit and a proposal are MLS state and are never dropped by sender", () => {
+    const inert = { sender: () => true, senderKeyOfLeaf: () => "k" };
+    expect(dropsFromSupersededSender(commit, () => true, inert)).toBe(false);
+    expect(dropsFromSupersededSender(storedProposal, () => true, inert)).toBe(false);
+    const plan = planBackgroundEvents([commit, storedProposal], () => true, undefined, inert);
+    expect(plan.sawCommit).toBe(true);
+    expect(plan.storedProposals).toHaveLength(1);
+  });
+
+  it("a leaf-only envelope whose sender cannot be named is not dropped", () => {
+    expect(dropsFromSupersededSender(beacon, retired, { sender: retired })).toBe(false);
+    expect(
+      dropsFromSupersededSender(beacon, retired, { sender: retired, senderKeyOfLeaf: () => undefined }),
+    ).toBe(false);
+  });
+
+  it("the open chat's own poll asks the same question (one rule for both consumers)", () => {
+    const inert = { sender: retired, senderKeyOfLeaf: (leaf: number) => (leaf === 0 ? "k" : undefined) };
+    for (const e of everything) expect(dropsFromSupersededSender(e, retired, inert)).toBe(true);
+    for (const e of everything) {
+      const live = { ...e, senderKey: "live", senderLeaf: 5 } as IncomingChatEvent;
+      expect(dropsFromSupersededSender(live, retired, inert)).toBe(false);
+    }
   });
 });

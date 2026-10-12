@@ -307,7 +307,7 @@ final class SplitPollSerializationTests: XCTestCase {
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
             dsClient: ds,
-            discovery: DiscoveryClient(),
+            discovery: Offline.discovery(),
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroupsStore,
             messageLogStore: MessageLogStore(),

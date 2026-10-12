@@ -114,7 +114,7 @@ final class ReceiveDurabilityTests: XCTestCase {
     /// set after a successful return would leave exactly those rows unprotected.
     func testARefusedRowStillCountsAsTouched() throws {
         let (identity, group) = try realGroup()
-        let client = ChatClient()
+        let client = Offline.chatClient()
         let result = client.applyFetchedMessages(
             identity: identity,
             group: group,
@@ -132,7 +132,7 @@ final class ReceiveDurabilityTests: XCTestCase {
 
     func testAnEmptyBatchTouchesNothing() throws {
         let (identity, group) = try realGroup()
-        let client = ChatClient()
+        let client = Offline.chatClient()
         let result = client.applyFetchedMessages(
             identity: identity, group: group, groupIdHex: try journalHex(group),
             raw: fetchResult([]), after: 7
@@ -143,7 +143,7 @@ final class ReceiveDurabilityTests: XCTestCase {
 
     func testAnAllEchoBatchTouchesNothing() throws {
         let (identity, group) = try realGroup()
-        let client = ChatClient()
+        let client = Offline.chatClient()
         let journal = try journalHex(group)
         client.markOwnPublishedCommit(groupIdHex: journal, messageId: 10)
         let result = client.applyFetchedMessages(

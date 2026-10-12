@@ -158,7 +158,7 @@ final class SessionRestoreTests: XCTestCase {
 
     func testLaunchWithFullMaterialLandsStateAndSecretsTogether() {
         let persistence = FakePersistence()
-        let repo = AuthRepository(
+        let repo = AuthRepository.offline(
             sessionStore: makeSessionStore(with: marker),
             authClientFactory: { NameRouteStub.client(NameRouteStub.scope { _, _, _ in (503, "") }) },
             persistence: persistence,
@@ -175,7 +175,7 @@ final class SessionRestoreTests: XCTestCase {
         // The exact on-device state that used to produce the dead session.
         let persistence = FakePersistence()
         persistence.token = nil
-        let repo = AuthRepository(
+        let repo = AuthRepository.offline(
             sessionStore: makeSessionStore(with: marker),
             authClientFactory: { NameRouteStub.client(NameRouteStub.scope { _, _, _ in (503, "") }) },
             persistence: persistence,
@@ -188,7 +188,7 @@ final class SessionRestoreTests: XCTestCase {
     func testLaunchWithExpiredTokenIsLoggedOutAndDeletesIt() {
         let persistence = FakePersistence()
         persistence.token = PersistedSessionToken(sessionToken: "tok-old", sessionExpiresAtMs: now - 1)
-        let repo = AuthRepository(
+        let repo = AuthRepository.offline(
             sessionStore: makeSessionStore(with: marker),
             authClientFactory: { NameRouteStub.client(NameRouteStub.scope { _, _, _ in (503, "") }) },
             persistence: persistence,
@@ -294,7 +294,8 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
             persistence: persistence,
             nowMs: { 1_000_000 },
             accountDirectory: directory,
-            loginHandleBinds: ledger
+            loginHandleBinds: ledger,
+            restoreDirectory: OfflineRestoreDirectory()
         )
     }
 

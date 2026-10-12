@@ -161,8 +161,8 @@ final class ContactsPerAccountTests: XCTestCase {
 
     private func makeRepository(_ session: CurrentValueSubject<String?, Never>) -> ContactsRepository {
         ContactsRepository(
-            authRepository: AuthRepository(
-                authClientFactory: { AuthClient(baseURL: "http://auth.test") },
+            authRepository: AuthRepository.offline(
+                authClientFactory: { Offline.auth() },
                 persistence: EmptyPersistence(),
                 nowMs: { 1_000_000 }),
             inboxStore: ContactsInboxStore(defaults: defaults),

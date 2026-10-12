@@ -19,6 +19,7 @@ import type { IncomingChatEvent } from "./client";
 import { buildLineage } from "./lineage";
 import { MESSAGE_LOG_VERSION, type MessageLogPayload, type PersistedMessage } from "./message-log-store";
 import { heldResendPredicate, type ResendReceivePort } from "./resend-receive";
+import { resendParts } from "./reset-repair";
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -38,6 +39,29 @@ describe("the marker on the wire", () => {
     if (body.kind !== "chat") return;
     expect(body.text).toBe("again");
     expect(body.resendOrigin).toEqual({ groupIdB64: OLD_B64, messageId: 41 });
+  });
+  it("a re-sent REPLY keeps its quote, with target 0 (no jump)", async () => {
+    const parts = resendParts({ reply: { target: 17, author: "Ada", excerpt: "see you at nine" } });
+    const bytes = await composeResendEnvelope("ok", [], { groupIdB64: OLD_B64, messageId: 41 }, parts);
+    const body = await parseBodyEnvelope(bytes);
+    if (body.kind !== "chat") throw new Error("not a chat body");
+    expect(body.reply).toEqual({ target: 0, author: "Ada", excerpt: "see you at nine" });
+    expect(body.forward).toBeUndefined();
+    expect(body.resendOrigin).toEqual({ groupIdB64: OLD_B64, messageId: 41 });
+  });
+  it("a re-sent FORWARD keeps its attribution and its origin", async () => {
+    const forward = { author: "Grace", origin: { groupIdB64: base64Encode(OTHER), messageId: 9 } };
+    const bytes = await composeResendEnvelope(
+      "fwd",
+      [],
+      { groupIdB64: OLD_B64, messageId: 42 },
+      resendParts({ forward }),
+    );
+    const body = await parseBodyEnvelope(bytes);
+    if (body.kind !== "chat") throw new Error("not a chat body");
+    expect(body.forward).toEqual(forward);
+    expect(body.reply).toBeUndefined();
+    expect(body.resendOrigin).toEqual({ groupIdB64: OLD_B64, messageId: 42 });
   });
   it("an ordinary message carries none", async () => {
     const body = await parseBodyEnvelope(await composeEnvelope("plain", []));

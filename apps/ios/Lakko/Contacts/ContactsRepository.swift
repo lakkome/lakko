@@ -1566,14 +1566,16 @@ public final class ContactsRepository: ObservableObject {
 
         // ADR-0065 R.7 case 1 / UX 16.6 — a link from a person who is already
         // a contact (a reset loses their contacts; they may hand out a new
-        // link): no request is sent and no use of the link is spent. The
+        // link) OPENS that contact: no request is sent, no use of the link
+        // is spent and no result screen is shown in between. The
         // check above ran R.2 first, so an attested reset was accepted there
         // and an unproven change was refused. "Already a contact" is the pin
         // or a verified binding naming the row's key: a row whose account id
         // came only from a peer's own profile does not swallow this person's
         // link.
-        if establishedContact(ofAccountId: inviterAccountId) != nil {
-            return .alreadyAccepted
+        if let existing = establishedContact(ofAccountId: inviterAccountId) {
+            // The link opens that contact: no result screen, no use spent.
+            return .knownContact(contactMessageId: existing.request.messageId)
         }
 
         // Consume — atomic counter bump + per-joiner dedup.
@@ -1705,6 +1707,11 @@ public enum AcceptInviteResult: Equatable {
         groupIdHex: String?
     )
     case alreadyAccepted
+    /// ADR-0065 R.7 case 1 / UX 16.6 — the link is from a person who is
+    /// already an established contact: nothing was sent and no use of the
+    /// link was spent. The landing OPENS that contact (the route's key is the
+    /// contact's request id) and shows no result of its own.
+    case knownContact(contactMessageId: Int64)
     case expired
     case exhausted
     case notFound

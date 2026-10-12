@@ -4,7 +4,7 @@
 /** ADR-0065 R.2 - `add-member-key.ts`. */
 import { describe, expect, it } from "vitest";
 
-import { acceptableBoundKeys, devicesBoundTo } from "./add-member-key";
+import { acceptableBoundKeys, devicesBoundTo, trustedBoundKeys } from "./add-member-key";
 
 describe("acceptableBoundKeys", () => {
   it("with no pin only the expected key is accepted", () => {
@@ -24,6 +24,44 @@ describe("acceptableBoundKeys", () => {
   });
   it("an empty expected key accepts nothing", () => {
     expect(acceptableBoundKeys("", { currentKeyB64: "new", provenPredecessorsB64: [] }).size).toBe(0);
+  });
+});
+
+describe("acceptableBoundKeys and a reset", () => {
+  const superseded = new Set(["retired"]);
+  it("an expected key a reset retired accepts nothing", () => {
+    const keys = { currentKeyB64: "new", provenPredecessorsB64: [] };
+    expect(acceptableBoundKeys("retired", keys, superseded).size).toBe(0);
+    expect(acceptableBoundKeys("retired", undefined, superseded).size).toBe(0);
+  });
+  it("a retired key is never accepted through a chain either", () => {
+    const keys = { currentKeyB64: "new", provenPredecessorsB64: ["retired", "old"] };
+    expect([...acceptableBoundKeys("new", keys, superseded)].sort()).toEqual(["new", "old"]);
+  });
+  it("reads a retired-key map as well as a set", () => {
+    expect(acceptableBoundKeys("retired", undefined, new Map([["retired", "account"]])).size).toBe(0);
+  });
+});
+
+describe("trustedBoundKeys (a path with no caller's key)", () => {
+  it("a pinned account: the current key and every proven predecessor", () => {
+    const keys = { currentKeyB64: "new", provenPredecessorsB64: ["old"] };
+    expect([...trustedBoundKeys(keys, undefined)].sort()).toEqual(["new", "old"]);
+  });
+  it("the pin wins over a binding", () => {
+    const keys = { currentKeyB64: "new", provenPredecessorsB64: [] };
+    expect([...trustedBoundKeys(keys, "bound")]).toEqual(["new"]);
+  });
+  it("an account this device never pinned: the key of its verified binding", () => {
+    expect([...trustedBoundKeys(undefined, "bound")]).toEqual(["bound"]);
+  });
+  it("neither pinned nor bound: no key, so nobody is added under the id", () => {
+    expect(trustedBoundKeys(undefined, undefined).size).toBe(0);
+  });
+  it("a key a reset retired is never trusted", () => {
+    const keys = { currentKeyB64: "new", provenPredecessorsB64: [] };
+    expect([...trustedBoundKeys(keys, undefined, new Set(["old"]))]).toEqual(["new"]);
+    expect(trustedBoundKeys(undefined, "old", new Set(["old"])).size).toBe(0);
   });
 });
 

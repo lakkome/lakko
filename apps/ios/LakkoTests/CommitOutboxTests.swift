@@ -318,14 +318,14 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
         knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
 
         let repo = ChatRepository(
-            chatClient: ChatClient(),
+            chatClient: Offline.chatClient(),
             dsClient: makeSweepDs(),
-            discovery: DiscoveryClient(),
+            discovery: Offline.discovery(),
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroupsStore,
             messageLogStore: MessageLogStore(),
             commitOutbox: CommitOutboxStore(rootDir: outboxDir),
-            pushRouting: PushGroupRouting(),
+            pushRouting: Offline.pushRouting(),
             beaconStore: BeaconObservationStore(
                 defaults: UserDefaults(suiteName: "cob-\(UUID().uuidString)")!),
             pendingRequestStore: PendingRequestStore(

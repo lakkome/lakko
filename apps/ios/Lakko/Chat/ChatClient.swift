@@ -431,6 +431,18 @@ public final class ChatClient {
         return ResendMarker.Origin(groupIdB64: groupIdB64, messageId: messageId)
     }
 
+    /// ADR-0065 R.8 — the PERSON an application row came from: the MLS
+    /// sender leaf resolved to an account key against the roster of the epoch
+    /// the row decrypted at (C-68), for EVERY application payload: a chat
+    /// row, an op, a control or service envelope, call signaling. `nil` for
+    /// an MLS handshake row (a commit, a proposal), which has no application
+    /// sender and must be applied whoever sent it, and for a leaf that does
+    /// not resolve.
+    static func applicationSender(of processed: ProcessedMessage, group: Group) -> MemberIdentity? {
+        guard case .application(_, let senderLeaf, _) = processed else { return nil }
+        return senderLeaf.flatMap { AuthorIdentity.resolve(group: group, leafIndex: $0) }
+    }
+
     public func applyFetchedMessages(
         identity: Identity,
         group: Group,
@@ -442,6 +454,7 @@ public final class ChatClient {
         var cursor = after
         var touchedMlsState = false
         var resendOrigins: [Int64: ResendMarker.Origin] = [:]
+        var eventSenders: [MemberIdentity?] = []
         for message in raw.messages {
             cursor = message.id
 
@@ -487,6 +500,9 @@ public final class ChatClient {
             if let origin = Self.resendOrigin(of: processed) {
                 resendOrigins[message.id] = origin
             }
+            // Resolved on the line after the apply, like the event's own
+            // author: the one moment the roster is the row's epoch.
+            eventSenders.append(Self.applicationSender(of: processed, group: group))
             events.append(
                 Self.toEvent(
                     messageId: message.id,
@@ -506,7 +522,8 @@ public final class ChatClient {
             cursor: cursor,
             hasMore: raw.hasMore,
             touchedMlsState: touchedMlsState,
-            resendOrigins: resendOrigins
+            resendOrigins: resendOrigins,
+            eventSenders: eventSenders
         )
     }
 
@@ -1556,14 +1573,21 @@ public struct PollMessagesResult: Equatable {
     /// drawn; the repository uses it to show a message this device already
     /// holds in an older segment once.
     public let resendOrigins: [Int64: ResendMarker.Origin]
+    /// ADR-0065 R.8 — the application sender of each event, in the order of
+    /// ``events`` (`ChatClient.applicationSender`): the account key an
+    /// application row came from, `nil` for an MLS handshake row. Empty when
+    /// the producer resolved none (then nothing is dropped by sender).
+    public let eventSenders: [MemberIdentity?]
 
     public init(
         events: [IncomingChatEvent],
         cursor: Int64,
         hasMore: Bool,
         touchedMlsState: Bool = false,
-        resendOrigins: [Int64: ResendMarker.Origin] = [:]
+        resendOrigins: [Int64: ResendMarker.Origin] = [:],
+        eventSenders: [MemberIdentity?] = []
     ) {
+        self.eventSenders = eventSenders
         self.events = events
         self.cursor = cursor
         self.hasMore = hasMore

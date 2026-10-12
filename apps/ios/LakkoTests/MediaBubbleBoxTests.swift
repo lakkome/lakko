@@ -57,6 +57,11 @@ final class MediaBubbleBoxTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        // A mounted bubble starts its own download. These tests measure the
+        // box BEFORE any byte arrives, so the download is one that never
+        // answers within the test and never opens a connection.
+        MediaSessionCache.shared.fetchThumb = { _ in throw URLError(.notConnectedToInternet) }
+        MediaSessionCache.shared.fetchAttachment = { _ in throw URLError(.notConnectedToInternet) }
         let suite = "me.lakko.tests.media-bubble-box." + UUID().uuidString
         defaultsSuite = UserDefaults(suiteName: suite)
         controller = ChatMediaController(

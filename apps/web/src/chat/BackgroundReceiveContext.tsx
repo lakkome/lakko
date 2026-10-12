@@ -144,13 +144,17 @@ import { subscribeResetAccepted } from "../contacts/reset-events";
 import { installScopeLineage } from "../reach/mailbox-write";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { useLineage } from "./use-lineage";
-import { oldSegmentPolled, retiresOldSegmentPush } from "./lineage";
+import { laterSegmentExists, oldSegmentPolled, retiresOldSegmentPush } from "./lineage";
+import { groupIdHex } from "../devices/sync/state";
+import { writeSupersededMirror } from "../push/superseded-mirror";
 import {
   awaitedSwaps,
   conversationMovedAt,
   markPushRetired,
+  advanceResendCursor,
   markResent,
   noteConversationMoved,
+  resendCursorOf,
   setAwaitedSwaps,
   wasPushRetired,
   wasResent,
@@ -161,7 +165,7 @@ import {
   type ContinuityPort,
 } from "./continuity-runtime";
 import { NO_CLAIMS } from "./group-closed-store";
-import { messagesToResend } from "./reset-repair";
+import { messagesToResend, resendParts, resendRemaining } from "./reset-repair";
 import {
   composeEnvelope,
   composeForwardEnvelope,
@@ -177,8 +181,8 @@ import {
   resetHeldSends,
   restoreHeldSends,
 } from "./held-send-queue";
-import { persistedFromForwardRef } from "./forward";
-import { persistedFromReplyRef } from "./reply-snapshot";
+import { forwardRefFromPersisted, persistedFromForwardRef } from "./forward";
+import { persistedFromReplyRef, replyRefFromPersisted } from "./reply-snapshot";
 import { unrepairableBy } from "./successor-claim";
 import { installDeadSessionGuard } from "./client";
 import { attachmentRefFromPersisted, persistedFromAttachmentRef } from "./persisted-attachment";
@@ -188,6 +192,7 @@ import {
   mayAddResetIdentity,
   repairPlan,
   resetCase,
+  supersededSenderInert,
 } from "./reset-repair";
 import { conversationKindOf } from "./conversation-kind";
 import type { ProposalRecordView } from "./pending-requests";
@@ -978,20 +983,30 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         })),
         signedAtMs,
       );
-      for (const id of ids) {
+      // An interrupted re-send continues after the last message that LANDED
+      // (the durable cursor), never from the first.
+      for (const id of resendRemaining(ids, resendCursorOf(account, oldGroupIdB64))) {
         const m = byId.get(id);
         if (m === undefined) continue;
         // The same content, sealed again for the new session. The stored
         // attachment references are reused: it is the same conversation.
-        // The marker names the ORIGINAL group and message id: a device of
-        // this account that holds the original shows the message once
-        // (`resend-marker.ts`). Never drawn.
+        // A reply keeps its quote (target 0: no jump) and a forward its
+        // attribution and origin. The marker names the ORIGINAL group and
+        // message id: a device of this account that holds the original
+        // shows the message once (`resend-marker.ts`). Never drawn.
         const envelope = await composeResendEnvelope(
           m.text,
           m.attachments.map((a) => attachmentRefFromPersisted(a).ref),
           { groupIdB64: oldGroupIdB64, messageId: id },
+          resendParts({
+            reply: replyRefFromPersisted(m.reply),
+            forward: forwardRefFromPersisted(m.forward),
+          }),
         );
+        // A throw leaves the cursor where it is: the next pass sends this
+        // message again and nothing before it.
         await chat.sendMessage(secrets, successor.group, envelope);
+        advanceResendCursor(account, oldGroupIdB64, id);
       }
       markResent(account, oldGroupIdB64);
     },
@@ -1216,7 +1231,22 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
 
   // An accepted reset (wherever the identity gate met it) starts the work at
   // once, for every conversation shared with that account.
-  const unsubscribeResetAccepted = subscribeResetAccepted(() => continueAll(true));
+  /** ADR-0065 R.8 — the service worker's copy of the retired keys
+   *  (`push/superseded-mirror.ts`), so a push from a removed device that
+   *  still holds old keys neither rings nor posts a preview. Best effort. */
+  function mirrorSupersededKeys(): void {
+    const account = activeAccount;
+    if (account === null) return;
+    void writeSupersededMirror(account, loadSupersededKeys().keys()).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("[continuity] the retired keys were not mirrored for the service worker", err);
+    });
+  }
+
+  const unsubscribeResetAccepted = subscribeResetAccepted(() => {
+    mirrorSupersededKeys();
+    return continueAll(true);
+  });
   // A claim kept for a later verdict triggers the identity check of the
   // account that would make the group unrepairable, then is judged again.
   groupClosed.onPendingClaim((entry) => {
@@ -1715,7 +1745,24 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         return deviceKey === null ? null : loadMessageLog(account, deviceKey);
       },
     });
-    const planned = planBackgroundEvents(events, (k) => superseded.has(k), resendHeld);
+    // ADR-0065 R.8 — in a conversation that cannot be repaired in place for
+    // a reset, or that already moved, nothing from the retired key acts:
+    // its control and service envelopes are dropped with its rows.
+    const inertFacts = superseded.size === 0 ? undefined : continuityFacts(groupIdB64);
+    const moved = superseded.size > 0 && laterSegmentExists(lineageView.lineage(), groupIdHex(entry.group.groupId));
+    const planned = planBackgroundEvents(events, (k) => superseded.has(k), resendHeld, {
+      sender: (k) =>
+        // Facts that cannot be read (a torn role-table read) judge nothing
+        // repairable: the retired key stays inert.
+        supersededSenderInert({
+          senderKeyB64: k,
+          supersededKeys: superseded,
+          kind: inertFacts?.kind ?? "chat",
+          ownerKeyB64: inertFacts?.ownerKeyB64,
+          moved,
+        }),
+      senderKeyOfLeaf: (leaf) => personKeyAtLeafB64(entry, leaf),
+    });
     // ADR-0065 R.7 case 2 / UX 16.5 — a batch that only swapped the devices
     // of people who stay leaves no `Members changed` row, in the log or in
     // the view.
@@ -1990,6 +2037,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     if (activeAccount === accountIdB64 && loopAbort !== null) return;
     stop();
     activeAccount = accountIdB64;
+    mirrorSupersededKeys();
     // ADR-0065 R.7 case 1 — messages held before a reload are read back.
     void restoreHeldSends(accountIdB64);
     const controller = new AbortController();
@@ -2241,6 +2289,22 @@ function hexOf(entry: ActiveGroup): string {
 }
 
 /** The roster member at `leaf`, resolved at receipt (C-68). */
+/** Base64 of the PERSON key (ADR-0050) of the member at `leaf`, or
+ *  `undefined` on a torn read or when no member holds that leaf. */
+function personKeyAtLeafB64(entry: ActiveGroup, leaf: number): string | undefined {
+  try {
+    const roster = entry.group.members() as unknown as Array<{
+      leafIndex: number;
+      signaturePublicKey: Uint8Array;
+      accountKey?: Uint8Array;
+    }>;
+    const hit = roster.find((m) => m.leafIndex === leaf);
+    return hit === undefined ? undefined : base64Encode(personKeyOf(hit));
+  } catch {
+    return undefined;
+  }
+}
+
 function signatureKeyOfLeaf(entry: ActiveGroup, leaf: number): Uint8Array | undefined {
   try {
     const roster = entry.group.members() as Array<{

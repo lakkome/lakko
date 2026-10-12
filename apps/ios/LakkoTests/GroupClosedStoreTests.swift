@@ -124,17 +124,33 @@ final class GroupClosedStoreTests: XCTestCase {
 
     // MARK: - GroupClosedStore
 
+    /// A reversible stand-in for the Keychain wrap: every byte flipped, and
+    /// an `open` that refuses what `seal` did not produce.
+    private static let marker = Data("sealed:".utf8)
+    private let sealer = GroupClosedStore.Sealer(
+        seal: { GroupClosedStoreTests.marker + Data($0.map { $0 ^ 0xFF }) },
+        open: { sealed in
+            guard sealed.starts(with: GroupClosedStoreTests.marker) else {
+                throw NSError(domain: "test.sealer", code: 1)
+            }
+            return Data(sealed.dropFirst(GroupClosedStoreTests.marker.count).map { $0 ^ 0xFF })
+        })
+
+    private func makeStore(_ account: String) -> GroupClosedStore {
+        GroupClosedStore(defaults: defaults, ownerAccountIdB64: account, sealer: sealer)
+    }
+
     func testWritesThroughAndReloadsPerAccount() {
-        let store = GroupClosedStore(defaults: defaults, ownerAccountIdB64: "acct")
+        let store = makeStore("acct")
         XCTAssertNil(store.read(groupIdB64: "G"))
         let state = GroupClosedRules.withAcceptedClaim(.noClaims, claim(7))
         XCTAssertTrue(store.write(groupIdB64: "G", state))
 
-        let again = GroupClosedStore(defaults: defaults, ownerAccountIdB64: "acct")
+        let again = makeStore("acct")
         XCTAssertEqual(again.read(groupIdB64: "G")?.accepted?.messageId, 7)
         XCTAssertEqual(again.entries(), ["G": state])
         // Another account sees nothing of it.
-        let other = GroupClosedStore(defaults: defaults, ownerAccountIdB64: "acct2")
+        let other = makeStore("acct2")
         XCTAssertNil(other.read(groupIdB64: "G"))
         XCTAssertTrue(other.entries().isEmpty)
 
@@ -144,26 +160,75 @@ final class GroupClosedStoreTests: XCTestCase {
     }
 
     func testOneBlobPerGroup() {
-        let store = GroupClosedStore(defaults: defaults, ownerAccountIdB64: "acct")
+        let store = makeStore("acct")
         store.write(groupIdB64: "G1", GroupClosedRules.withAcceptedClaim(.noClaims, claim(1)))
         store.write(groupIdB64: "G2", GroupClosedRules.withPendingClaim(.noClaims, claim(2)))
-        XCTAssertNotNil(defaults.string(forKey: "lakko.group-closed.v2.acct.G1"))
-        XCTAssertNotNil(defaults.string(forKey: "lakko.group-closed.v2.acct.G2"))
+        XCTAssertNotNil(defaults.data(forKey: "lakko.group-closed.v3.acct.G1"))
+        XCTAssertNotNil(defaults.data(forKey: "lakko.group-closed.v3.acct.G2"))
         store.drop(groupIdB64: "G1")
         XCTAssertNil(store.read(groupIdB64: "G1"))
         XCTAssertEqual(store.read(groupIdB64: "G2")?.pending.map(\.messageId), [2])
     }
 
-    func testAnUnreadableBlobReadsAsNone() {
-        defaults.set("not json", forKey: "lakko.group-closed.v2.acct.G")
-        let store = GroupClosedStore(defaults: defaults, ownerAccountIdB64: "acct")
+    // ADR-0065 R.13b - the claim store is sealed under the device key: it
+    // can hold a prepared Welcome.
+
+    func testThePreparedWelcomeIsNeverStoredAsItIs() throws {
+        let store = makeStore("acct")
+        let welcomeB64 = Data("a prepared welcome".utf8).base64EncodedString()
+        let state = StoredGroupClosed(
+            accepted: nil, pending: [], own: OwnClaim(successorGroupIdB64: "successor", messageId: 4),
+            prepared: PreparedSuccessor(
+                successorGroupIdB64: "successor", welcomeB64: welcomeB64,
+                targetKeysB64: ["target-key"], delivered: false))
+        XCTAssertTrue(store.write(groupIdB64: "G", state))
+        let stored = try XCTUnwrap(defaults.data(forKey: "lakko.group-closed.v3.acct.G"))
+        for plain in [welcomeB64, "successor", "target-key"] {
+            XCTAssertNil(stored.range(of: Data(plain.utf8)), "\(plain) is readable in the stored row")
+        }
+        // No value of the account's rows is a string any more.
+        XCTAssertNil(defaults.string(forKey: "lakko.group-closed.v3.acct.G"))
+        XCTAssertEqual(store.read(groupIdB64: "G"), state)
+    }
+
+    func testARowThatCannotBeSealedIsNotWritten() {
+        let failing = GroupClosedStore(
+            defaults: defaults, ownerAccountIdB64: "acct",
+            sealer: GroupClosedStore.Sealer(
+                seal: { _ in throw NSError(domain: "test.sealer", code: 2) }, open: { $0 }))
+        XCTAssertFalse(failing.write(groupIdB64: "G", .noClaims))
+        XCTAssertNil(defaults.object(forKey: "lakko.group-closed.v3.acct.G"))
+    }
+
+    func testABlobThatDoesNotOpenReadsAsNone() {
+        // Sealed under another key (here: not this sealer's output at all).
+        defaults.set(Data("not sealed by this device".utf8), forKey: "lakko.group-closed.v3.acct.G")
+        let store = makeStore("acct")
         XCTAssertNil(store.read(groupIdB64: "G"))
         XCTAssertTrue(store.entries().isEmpty)
     }
 
+    func testAnUnreadableBlobReadsAsNone() throws {
+        defaults.set(try sealer.seal(Data("not json".utf8)), forKey: "lakko.group-closed.v3.acct.G")
+        let store = makeStore("acct")
+        XCTAssertNil(store.read(groupIdB64: "G"))
+        XCTAssertTrue(store.entries().isEmpty)
+    }
+
+    func testAPlaintextRowOfTheEarlierStoreIsNotReadAndIsClearedWithTheAccount() {
+        let json = GroupClosedRules.encodeRow(["G": GroupClosedRules.withAcceptedClaim(.noClaims, claim(7))])
+        defaults.set(json, forKey: "lakko.group-closed.v2.acct.G")
+        defaults.set(json, forKey: "lakko.group-closed.v3.acct.G")
+        let store = makeStore("acct")
+        XCTAssertNil(store.read(groupIdB64: "G"), "a plaintext row is never trusted")
+        GroupClosedStore.clear(ownerAccountIdB64: "acct", defaults: defaults)
+        XCTAssertNil(defaults.object(forKey: "lakko.group-closed.v2.acct.G"))
+        XCTAssertNil(defaults.object(forKey: "lakko.group-closed.v3.acct.G"))
+    }
+
     func testClearForgetsOneAccountOnly() {
-        let a = GroupClosedStore(defaults: defaults, ownerAccountIdB64: "acct")
-        let b = GroupClosedStore(defaults: defaults, ownerAccountIdB64: "acct2")
+        let a = makeStore("acct")
+        let b = makeStore("acct2")
         a.write(groupIdB64: "G1", .noClaims)
         a.write(groupIdB64: "G2", .noClaims)
         b.write(groupIdB64: "G1", .noClaims)

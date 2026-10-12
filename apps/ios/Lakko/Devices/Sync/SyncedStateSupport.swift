@@ -89,21 +89,22 @@ extension Notification.Name {
 public enum SyncedStateMerge {
 
     /// Fold every register of `source` into `target`, each with its original
-    /// stamp, through the same catch-up parts a growth re-send carries. The
+    /// stamp, through the core's own merge (`SyncedState::merge_from`). The
     /// fold is idempotent and commutative, so this is a true merge.
+    ///
+    /// EVERY register, the conversation lineage included (ADR-0065 R.5).
+    /// This used to go through the growth re-send's snapshot parts, which
+    /// deliberately leave the lineage out (it travels in its own envelope):
+    /// a backup carried the lineage and a restore dropped it, so a restored
+    /// device drew a moved conversation as two.
     @discardableResult
     public static func merge(_ source: SyncedState, into target: SyncedState) -> Bool {
-        var changed = false
         do {
-            for part in try source.snapshotParts() {
-                let payload = ParsedDeviceGroupPayload(
-                    hlc: 0, senderLeaf: 0, body: .stateSnapshot(part: part))
-                if try target.applyPayload(payload: payload) { changed = true }
-            }
+            return try target.mergeFrom(other: source)
         } catch {
             NSLog("SyncedStateMerge failed: %@", error.localizedDescription)
+            return false
         }
-        return changed
     }
 }
 

@@ -197,7 +197,8 @@ final class UsernameDirectoryTests: XCTestCase {
             authClientFactory: { self.stubbedAuthClient() },
             persistence: persistence,
             nowMs: { 1_000_000 },
-            accountDirectory: directory
+            accountDirectory: directory,
+            restoreDirectory: OfflineRestoreDirectory()
         )
     }
 

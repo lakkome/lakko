@@ -12,7 +12,7 @@
  * stores and sends exactly what it returns; a re-send carries the original
  * stamp; anything else inside a `ServiceEnvelope` is dropped.
  */
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -31,7 +31,12 @@ import {
   resetServiceEnvelopeOutbox,
   setServiceEnvelopeComposer,
 } from "./service-envelope-outbox";
-import { loadVisibility, receiveVisibility, visibilitySetting } from "./visibility-store";
+import {
+  loadVisibility,
+  receiveVisibility,
+  registerVisibilityComposer,
+  visibilitySetting,
+} from "./visibility-store";
 import { loadOwnProfile, saveOwnProfile, type OwnProfileStorage } from "../profile/own-profile";
 import {
   bindOwnProfileSync,
@@ -46,6 +51,14 @@ const W = (): Wasm => wasm as unknown as Wasm;
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
+});
+
+// Several tests below replace the Visibility composer with none to capture
+// one kind alone. The module registers it once, at import, so without this
+// every test after such a one saw no composer: the suite passed only in the
+// order it is written in.
+afterEach(() => {
+  registerVisibilityComposer();
 });
 
 /** A Visibility envelope: the default setting with contacts of contacts

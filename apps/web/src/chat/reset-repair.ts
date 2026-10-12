@@ -411,3 +411,82 @@ export function dropsSupersededSender(
 ): boolean {
   return senderKeyB64 !== undefined && supersededKeys.has(senderKeyB64);
 }
+
+/**
+ * R.8 "nothing from a superseded sender acts". In a conversation that cannot
+ * be repaired in place for that reset (a one-to-one, a group the retired key
+ * owned, a group with no role table), or that already moved to a successor,
+ * the leaves bound to the retired key are never removed: whoever still holds
+ * the old keys can keep posting there. EVERYTHING such a sender posts is
+ * dropped there: a chat row, an op and a call offer (those are dropped in
+ * every conversation, `dropsSupersededSender`) and also every control or
+ * service envelope (a profile, a group name, a pin, a push-routing secret,
+ * a committer beacon, a shared-channels list, a scoped-discovery envelope).
+ *
+ * | sender's key retired by an accepted reset | conversation moved | reset case for that key | inert |
+ * |-------------------------------------------|--------------------|-------------------------|-------|
+ * | no                                        | -                  | -                       | no    |
+ * | yes                                       | yes                | any                     | yes   |
+ * | yes                                       | no                 | `repair`                | no    |
+ * | yes                                       | no                 | anything else           | yes   |
+ *
+ * In a group that IS repaired in place the old leaves are evicted by a
+ * commit; until it lands their service envelopes are still applied (their
+ * chat rows, ops and call signals are not).
+ */
+export function supersededSenderInert(input: {
+  readonly senderKeyB64: string | undefined;
+  readonly supersededKeys: ReadonlyMap<string, string> | ReadonlySet<string>;
+  readonly kind: ConversationKind;
+  readonly ownerKeyB64: string | undefined;
+  /** A later segment of the conversation exists (the lineage names one). */
+  readonly moved: boolean;
+}): boolean {
+  const sender = input.senderKeyB64;
+  if (sender === undefined || !input.supersededKeys.has(sender)) return false;
+  if (input.moved) return true;
+  return resetCase({ kind: input.kind, ownerKeyB64: input.ownerKeyB64, supersededKeyB64: sender }) !== "repair";
+}
+
+/**
+ * R.7 case 1: what is left of a re-send. `ids` is {@link messagesToResend}
+ * (ascending); `cursor` is the ORIGINAL id of the last message that landed
+ * in the successor (the durable per-conversation cursor of
+ * `continuity-store.ts`), or `null` when none has. An interrupted re-send
+ * continues after the cursor, never from the first message: what already
+ * landed is not sent a second time.
+ */
+export function resendRemaining(ids: readonly number[], cursor: number | null): number[] {
+  return cursor === null ? [...ids] : ids.filter((id) => id > cursor);
+}
+
+/** The reply target a re-sent reply carries: "no jump" (the original it
+ *  answers lives in the OLD group's journal; its id means nothing in the
+ *  successor's). The same value a held reply is flushed with
+ *  (`held-send.ts` `REPLY_NO_JUMP_TARGET`). */
+export const RESEND_REPLY_TARGET = 0;
+
+/**
+ * R.7 case 1: the parts of a stored message a re-send carries beside its
+ * text and attachments, so the message is FAITHFUL:
+ *
+ * | the original was ... | the re-send carries                                        |
+ * |----------------------|------------------------------------------------------------|
+ * | a reply              | the same quote (author, excerpt), target 0                 |
+ * | a forward            | the same attribution and the same origin reference         |
+ * | neither              | nothing more                                               |
+ */
+export function resendParts<
+  R extends { readonly target: number },
+  F extends object,
+>(original: { readonly reply?: R | undefined; readonly forward?: F | undefined }): {
+  readonly reply?: R;
+  readonly forward?: F;
+} {
+  return {
+    ...(original.reply === undefined
+      ? {}
+      : { reply: { ...original.reply, target: RESEND_REPLY_TARGET } }),
+    ...(original.forward === undefined ? {} : { forward: original.forward }),
+  };
+}

@@ -585,6 +585,17 @@ targets:
       - path: Lakko/Chat/ConversationLineageMirror.swift
         type: file
         buildPhase: sources
+      # ADR-0065 R.8 / R.7 case 1 — what lets this extension stay silent
+      # where the app is: the keys accepted resets retired, the account's own
+      # person key and each successor's segment index, mirrored by the app
+      # and READ here; and the re-send rule itself, the same function the
+      # app's receive paths call. Foundation only; read-only here.
+      - path: Lakko/Chat/ContinuityMirror.swift
+        type: file
+        buildPhase: sources
+      - path: Lakko/Chat/ResendMarker.swift
+        type: file
+        buildPhase: sources
       # The DS row `created_at` parser, shared with the app so both processes
       # measure a call's age against the same clock the same way. Foundation
       # only.
@@ -687,6 +698,10 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         PRODUCT_BUNDLE_IDENTIFIER: me.lakko.dev.LakkoTests
         GENERATE_INFOPLIST_FILE: YES
+        # ADR-0065 R.13b - the bundle's principal class installs the
+        # suite-wide network guard (`LakkoTests/NetworkGuard.swift`) before
+        # any test runs: no unit test may reach a server.
+        INFOPLIST_KEY_NSPrincipalClass: LakkoTestsNetworkGuard
         # Host-app bundle loader so the test binary can resolve
         # symbols against the running Lakko.app on the
         # simulator (standard app-hosted XCTest pattern).

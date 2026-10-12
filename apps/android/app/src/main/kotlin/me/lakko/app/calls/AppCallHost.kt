@@ -427,7 +427,7 @@ internal class ChatRepositoryGroupCallPort(
 
     override suspend fun fetchSfuCallState(url: String): String? {
         val client = io.ktor.client.HttpClient(
-            me.lakko.app.transport.AntiCensorshipEngine(io.ktor.client.engine.okhttp.OkHttp.create {}),
+            me.lakko.app.transport.AntiCensorshipEngine(me.lakko.app.transport.BaseHttpEngine.create()),
         )
         return try {
             val response = client.get(url)

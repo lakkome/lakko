@@ -1268,14 +1268,14 @@ final class ChatRepositoryMlsIdleTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: outboxDir) }
 
         let repo = ChatRepository(
-            chatClient: ChatClient(),
-            dsClient: DsClient(baseURL: "http://127.0.0.1:9"),
-            discovery: DiscoveryClient(),
+            chatClient: Offline.chatClient(),
+            dsClient: Offline.ds(),
+            discovery: Offline.discovery(),
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroups,
             messageLogStore: MessageLogStore(),
             commitOutbox: CommitOutboxStore(rootDir: outboxDir),
-            pushRouting: PushGroupRouting(),
+            pushRouting: Offline.pushRouting(),
             beaconStore: BeaconObservationStore(
                 defaults: UserDefaults(suiteName: "mls-idle-b-\(UUID().uuidString)")!),
             pendingRequestStore: PendingRequestStore(

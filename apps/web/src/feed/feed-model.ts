@@ -37,6 +37,13 @@ export interface FeedSource {
   /** The route segment that opens it: base64url of a group id
    *  (`/groups/<slug>`), the hex id of a channel (`/channels/<id>`). */
   readonly slug: string;
+  /** ADR-0065 R.5 / R.7 case 3 — the log keys of the conversation's OLDER
+   *  groups this device holds, oldest first. Members who have not been
+   *  added to the successor yet keep writing in the old group, and its
+   *  journal is still read for a while (`lineage.ts` `oldSegmentPolled`):
+   *  those rows are items of this one source, like the head's. Absent or
+   *  empty = the conversation has no older group here. */
+  readonly olderSegmentHexes?: readonly string[];
   /** What the conversation list calls it. */
   readonly title: string;
   /** Muted in this account's conversation flags. */
@@ -62,10 +69,24 @@ export interface FeedCandidateInput {
   readonly text: string;
 }
 
+/** The older group of a moved conversation a candidate's row lives in. */
+export interface FeedOlderSegment {
+  /** Its message-log key. */
+  readonly idHex: string;
+  /** How many held groups it is behind the conversation's current one
+   *  (>= 1): what `lineage.ts` `historyRowId` numbers its rows with. */
+  readonly distanceFromHead: number;
+}
+
 /** Where a candidate came from, so the screen can draw and open it. */
 export interface FeedCandidateRef {
   readonly source: FeedSource;
   readonly message: PersistedMessage;
+  /** Set when the row lives in an OLDER group of the conversation, not in
+   *  `source.idHex` (ADR-0065 R.5). Such a row is read-only, as it is in the
+   *  conversation itself: it can be opened, seen, copied and forwarded, and
+   *  cannot be replied to. */
+  readonly segment?: FeedOlderSegment;
   /** For the item's "why" line (UX spec section 3). */
   readonly mentionsMe: boolean;
   readonly repliesToMe: boolean;
@@ -166,12 +187,41 @@ export function feedSourceKey(source: Pick<FeedSource, "idHex" | "conversationHe
   return source.conversationHex ?? source.idHex;
 }
 
+/** The message-log key a candidate's row is stored under: the older group
+ *  it lives in, else the source's own. */
+export function feedRefLogKey(ref: Pick<FeedCandidateRef, "source" | "segment">): string {
+  return ref.segment?.idHex ?? ref.source.idHex;
+}
+
+/**
+ * A successor group's DS message ids restart, so inside ONE feed
+ * conversation an older group's row cannot share the current group's id
+ * space (the ranking folds replies and breaks ties by message id). An older
+ * group's row is ranked under
+ *
+ *     id + distance * FEED_SEGMENT_ID_SPAN      (distance >= 1 from the head)
+ *
+ * which is unique per `(group, message id)` for any id below the span and
+ * leaves the current group's ids as they are. Used only as the ranking's
+ * input; never stored, sent or shown.
+ */
+export const FEED_SEGMENT_ID_SPAN = 2n ** 40n;
+
+/** The id a row is ranked under. `distanceFromHead` is 0 for the current
+ *  group. */
+export function feedRankId(messageId: bigint, distanceFromHead: number): bigint {
+  return messageId + BigInt(Math.max(0, Math.trunc(distanceFromHead))) * FEED_SEGMENT_ID_SPAN;
+}
+
 /** One group conversation as the feed's source list reads it. */
 export interface GroupConversationForFeed {
   /** Hex of the conversation id (the lineage root). */
   readonly conversationHex: string;
   /** Hex of the group it currently lives in (the lineage head). */
   readonly headHex: string;
+  /** Hex of the conversation's older groups this device holds, oldest
+   *  first. Absent = none. */
+  readonly olderSegmentHexes?: readonly string[];
   readonly slug: string;
   readonly title: string;
   readonly audience: number;
@@ -194,6 +244,9 @@ export function groupFeedSources(
       kind: "group",
       idHex: c.headHex,
       ...(c.conversationHex === c.headHex ? {} : { conversationHex: c.conversationHex }),
+      ...(c.olderSegmentHexes === undefined || c.olderSegmentHexes.length === 0
+        ? {}
+        : { olderSegmentHexes: c.olderSegmentHexes.filter((hex) => hex !== c.headHex) }),
       slug: c.slug,
       title: c.title,
       muted: mutedOf(c.conversationHex),
@@ -201,6 +254,65 @@ export function groupFeedSources(
     });
   }
   return out;
+}
+
+/**
+ * One group's stored rows as candidates of `source`: the group the
+ * conversation lives in (`segment` undefined), or one of its older groups.
+ * A reply and the "replies to me" test are judged inside the group the row
+ * lives in: a message id means nothing across groups.
+ */
+function addGroupMessages(
+  ctx: FeedContext,
+  source: FeedSource,
+  conversation: number,
+  oldest: number,
+  candidates: FeedCandidateInput[],
+  refs: FeedCandidateRef[],
+  segment: FeedOlderSegment | undefined,
+): void {
+  const slot = ctx.log[segment?.idHex ?? source.idHex];
+  if (slot === undefined) return;
+  const distance = segment?.distanceFromHead ?? 0;
+  const outgoing = new Set<string>();
+  for (const m of slot.messages) {
+    if (m.direction === "outgoing") outgoing.add(m.messageId);
+  }
+  for (const m of slot.messages) {
+    if (m.direction === "system" || m.deleted === true) continue;
+    const id = parseId(m.messageId);
+    if (id === null) continue;
+    const time = Date.parse(m.createdAt);
+    if (Number.isNaN(time) || time < oldest) continue;
+    const replyTarget = m.reply?.target ?? null;
+    const replyTo = replyTarget === null ? null : parseId(replyTarget);
+    const fromSelf = m.direction === "outgoing";
+    const author = m.authorKeyB64 ?? null;
+    const reactors = new Set((m.reactions ?? []).map((r) => r.reactorKeyB64));
+    const mentionsMe =
+      !fromSelf && ctx.ownUsername !== null && ctx.mentions(m.text, ctx.ownUsername);
+    const repliesToMe = !fromSelf && replyTarget !== null && outgoing.has(replyTarget);
+    candidates.push({
+      conversation,
+      messageId: feedRankId(id, distance),
+      replyTo: replyTo === null ? null : feedRankId(replyTo, distance),
+      timeMs: BigInt(time),
+      fromSelf,
+      fromContact: !fromSelf && author !== null && ctx.contactKeysB64.has(author),
+      mentionsMe,
+      repliesToMe,
+      reactionsDistinct: reactors.size,
+      hasMedia: m.attachments.length > 0,
+      text: m.text,
+    });
+    refs.push({
+      source,
+      message: m,
+      mentionsMe,
+      repliesToMe,
+      ...(segment === undefined ? {} : { segment }),
+    });
+  }
 }
 
 /** Turn the logs into the ranking's input. Rows that cannot be placed (a
@@ -215,41 +327,16 @@ export function buildFeedInput(ctx: FeedContext): FeedInput {
       addChannelPosts(ctx, source, conversation, oldest, candidates, refs);
       return;
     }
-    const slot = ctx.log[source.idHex];
-    if (slot === undefined) return;
-    const outgoing = new Set<string>();
-    for (const m of slot.messages) {
-      if (m.direction === "outgoing") outgoing.add(m.messageId);
-    }
-    for (const m of slot.messages) {
-      if (m.direction === "system" || m.deleted === true) continue;
-      const id = parseId(m.messageId);
-      if (id === null) continue;
-      const time = Date.parse(m.createdAt);
-      if (Number.isNaN(time) || time < oldest) continue;
-      const replyTarget = m.reply?.target ?? null;
-      const replyTo = replyTarget === null ? null : parseId(replyTarget);
-      const fromSelf = m.direction === "outgoing";
-      const author = m.authorKeyB64 ?? null;
-      const reactors = new Set((m.reactions ?? []).map((r) => r.reactorKeyB64));
-      const mentionsMe =
-        !fromSelf && ctx.ownUsername !== null && ctx.mentions(m.text, ctx.ownUsername);
-      const repliesToMe = !fromSelf && replyTarget !== null && outgoing.has(replyTarget);
-      candidates.push({
-        conversation,
-        messageId: id,
-        replyTo,
-        timeMs: BigInt(time),
-        fromSelf,
-        fromContact: !fromSelf && author !== null && ctx.contactKeysB64.has(author),
-        mentionsMe,
-        repliesToMe,
-        reactionsDistinct: reactors.size,
-        hasMedia: m.attachments.length > 0,
-        text: m.text,
+    // The conversation's older groups first (oldest first), then the group
+    // it lives in now: one source, every group of it this device holds.
+    const older = source.olderSegmentHexes ?? [];
+    older.forEach((idHex, index) => {
+      addGroupMessages(ctx, source, conversation, oldest, candidates, refs, {
+        idHex,
+        distanceFromHead: older.length - index,
       });
-      refs.push({ source, message: m, mentionsMe, repliesToMe });
-    }
+    });
+    addGroupMessages(ctx, source, conversation, oldest, candidates, refs, undefined);
   });
 
   return { sources: ctx.sources, candidates, refs };

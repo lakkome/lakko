@@ -1827,7 +1827,12 @@ private struct SessionRoot: View, Equatable {
                     repository: contactsRepository,
                     intake: inviteIntake
                 ),
-                onDone: { pop(route, from: tab) }
+                onDone: { pop(route, from: tab) },
+                // A link from an established contact opens that contact,
+                // in place of the landing (web / Android).
+                onOpenContact: { messageId in
+                    replaceTop(route, with: .contactDetail(messageId: messageId), in: tab)
+                }
             )
         case .groupJoinLanding(let slug):
             // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link.

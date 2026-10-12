@@ -55,6 +55,7 @@ class AddMemberUsernameRuleTest {
     fun `an invalid username shows the reason and is never looked up`() {
         val lookups = mutableListOf<String>()
         val repo = ChatRepository(applicationContext = RuleTestContext())
+        var built: ChatViewModel? = null
         try {
             val vm = ChatViewModel(
                 repo = repo,
@@ -64,7 +65,7 @@ class AddMemberUsernameRuleTest {
                     awaitCancellation()
                 },
                 validateUsername = ::fakeValidate,
-            )
+            ).also { built = it }
             vm.setAddMemberInput("pa-vel")
             vm.onAddMember()
             assertEquals(emptyList<String>(), lookups)
@@ -87,6 +88,8 @@ class AddMemberUsernameRuleTest {
             vm.onAddMember()
             assertEquals(listOf("alice"), lookups)
         } finally {
+            // Before `tearDown` resets Main: see [clearAndJoin].
+            built?.clearAndJoin()
             repo.close()
         }
     }

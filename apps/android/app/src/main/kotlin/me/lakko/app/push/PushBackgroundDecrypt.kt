@@ -237,6 +237,44 @@ internal fun buildBackgroundDecryptDeps(
         override fun isClosedOneToOne(accountIdB64: String, groupHex: String): Boolean =
             groupHex.lowercase() in
                 me.lakko.app.chat.SharedPrefsContinuityBackend(appContext).load(accountIdB64).movedOneToOne
+
+        // ADR-0065 R.5 / R.8 — the reset ledger is plain preferences (public
+        // account keys and generations), written by the identity gate. A
+        // READ (C-59).
+        override fun supersededKeys(accountIdB64: String): Set<String> =
+            try {
+                me.lakko.app.contacts.supersededKeysOf(
+                    me.lakko.app.contacts.SharedPrefsResetLedgerStore(appContext).loadAll(accountIdB64),
+                ).keys
+            } catch (_: Throwable) {
+                emptySet()
+            }
+
+        override fun conversationMoved(accountIdB64: String, groupHex: String): Boolean =
+            try {
+                me.lakko.app.chat.SharedPrefsContinuityBackend(appContext).load(accountIdB64)
+                    .moved.containsKey(groupHex.lowercase())
+            } catch (_: Throwable) {
+                false
+            }
+
+        override fun lineage(accountIdB64: String): List<me.lakko.app.chat.LineageEntry> =
+            me.lakko.app.chat.LineageMirror.load(appContext, accountIdB64)
+
+        // ADR-0065 R.7 case 1 — the app's own stored message log, the same
+        // file [startCursor] reads. Opened at most once per wake and only
+        // when a row carries a re-send marker; never written from here.
+        private var heldLog: Pair<String, me.lakko.app.chat.MessageLogPayload?>? = null
+
+        override fun heldRow(accountIdB64: String, groupHex: String, messageId: Long): me.lakko.app.chat.HeldRow? {
+            val log = heldLog?.takeIf { it.first == accountIdB64 }?.second
+                ?: try {
+                    MessageLogStore.getLog(appContext, accountIdB64)
+                } catch (_: Throwable) {
+                    null
+                }.also { heldLog = accountIdB64 to it }
+            return me.lakko.app.chat.heldRowIn(log, groupHex, messageId)
+        }
     }
 }
 
@@ -312,6 +350,7 @@ private class RealThrowawayGroup(
             BackgroundPayloadKind.SERVICE_ENVELOPE -> return null
             BackgroundPayloadKind.CALL_SIGNALING ->
                 return callSignalingRow(app.data, senderNameOf(app.senderLeaf))
+                    ?.copy(senderAccountB64 = senderAccountOf(app))
             BackgroundPayloadKind.MESSAGE -> Unit
         }
         val body = try {
@@ -328,8 +367,30 @@ private class RealThrowawayGroup(
             text = body.text,
             attachmentCount = body.attachments.size,
             senderName = senderNameOf(app.senderLeaf),
+            senderAccountB64 = senderAccountOf(app),
+            resendOrigin = me.lakko.app.chat.resendOriginFrom(body.resendOriginGroupB64, body.resendOriginMessageId),
         )
     }
+
+    /** The account key the core resolved the sender leaf to at receipt. */
+    private fun senderAccountOf(app: ProcessedMessage.Application): String? =
+        app.senderAccount?.let { java.util.Base64.getEncoder().encodeToString(it) }
+
+    // ADR-0065 R.5 / R.8 — reads of the throwaway group, nothing written.
+    override fun facts(): WakeGroupFacts? =
+        try {
+            val roster = group.members()
+            val own = identity.signaturePublicKey()
+            WakeGroupFacts(
+                kind = me.lakko.app.chat.conversationKindOf(group.groupKind()),
+                rosterPersonKeysB64 = me.lakko.app.chat.personKeysOf(roster),
+                ownerKeyB64 = group.groupRoles()?.owner?.let { java.util.Base64.getEncoder().encodeToString(it) },
+                ownPersonKeyB64 = roster.firstOrNull { it.signaturePublicKey.contentEquals(own) }
+                    ?.let { java.util.Base64.getEncoder().encodeToString(me.lakko.app.chat.personKeyOf(it)) },
+            )
+        } catch (_: Throwable) {
+            null
+        }
 
     /**
      * ADR-0048 — the sender's already-known name. The leaf is resolved to a

@@ -187,7 +187,7 @@ public object AccountLocalWipe {
         // successor claims, the continuity facts and the lineage mirror.
         Step("reset-ledger") { ctx, acct -> me.lakko.app.contacts.SharedPrefsResetLedgerStore(ctx).clearForOwner(acct) },
         Step("verified-bindings") { ctx, acct -> me.lakko.app.contacts.SharedPrefsVerifiedBindingStore(ctx).clearForOwner(acct) },
-        Step("successor-claims") { ctx, acct -> me.lakko.app.chat.SharedPrefsSuccessorClaimBackend.deleteAccount(ctx, acct) },
+        Step("successor-claims") { ctx, acct -> me.lakko.app.chat.SealedSuccessorClaimBackend.deleteAccount(ctx, acct) },
         Step("reset-continuity") { ctx, acct -> me.lakko.app.chat.SharedPrefsContinuityBackend.deleteAccount(ctx, acct) },
         Step("lineage-mirror") { ctx, acct -> me.lakko.app.chat.LineageMirror.deleteAccount(ctx, acct) },
         Step("held-sends") { ctx, acct -> me.lakko.app.chat.SealedHeldSendBackend.deleteAccount(ctx, acct) },

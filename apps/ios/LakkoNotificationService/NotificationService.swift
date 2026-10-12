@@ -118,6 +118,17 @@ public final class NotificationService: UNNotificationServiceExtension {
             return
         }
 
+        // ADR-0065 R.5 — the stack is the CONVERSATION, not the wake's
+        // routing id: `g` is per group and changes when the routing secret
+        // rotates, so a conversation that moved to a successor group (or
+        // rotated its secret) would otherwise start a second stack. Resolved
+        // from the route index and the lineage mirror alone (reads; C-59),
+        // before the decrypt, so it holds on a decrypt failure too. A wake
+        // that cannot be routed keeps `g`.
+        if let thread = nseConversationThread(wake, NseRealDecryptDeps()) {
+            best.threadIdentifier = thread
+        }
+
         // Budget deadline: if the decrypt has not delivered by the budget,
         // ship the generic content. Cancelled on first delivery.
         let deadline = DispatchWorkItem { [weak self] in
@@ -141,9 +152,7 @@ public final class NotificationService: UNNotificationServiceExtension {
                 // is per GROUP; a group that continues a conversation is
                 // grouped under the conversation instead (the tag differs
                 // from the wake's group only then).
-                if preview.movedConversation {
-                    best.threadIdentifier = preview.tag
-                }
+                best.threadIdentifier = preview.tag
                 self.deliver(best)
             case .callOffer(let alert):
                 self.deliverCallAlert(alert, into: best)
@@ -151,10 +160,34 @@ public final class NotificationService: UNNotificationServiceExtension {
                 self.deliverSilentCallAlert(alert, into: best)
             case .callEnded(let callIdHex):
                 await self.deliverCallEnded(callIdHex: callIdHex, into: best)
+            case .quiet(let tag):
+                self.deliverQuietly(tag: tag, into: best)
             case .none:
                 self.deliver(best)
             }
         }
+    }
+
+    /// ADR-0065 R.8 / R.7 case 1 — the wake brought only rows the app shows
+    /// nothing for (a superseded sender's, a re-send of a message already
+    /// held).
+    ///
+    /// Posting nothing is not available: the extension MUST call
+    /// `contentHandler`, and dropping a visible push needs an entitlement
+    /// this app does not hold. So it delivers the quietest thing there is:
+    /// no sound, `.passive` (it does not light the screen or break through a
+    /// Focus), in the conversation's stack, with the generic line the server
+    /// sent. It carries ``LakkoQuietNotification/userInfoKey`` so the app can
+    /// take it down the next time it runs.
+    private func deliverQuietly(tag: String, into best: UNMutableNotificationContent) {
+        best.threadIdentifier = tag
+        best.sound = nil
+        best.interruptionLevel = .passive
+        best.badge = nil
+        var info = best.userInfo
+        info[LakkoQuietNotification.userInfoKey] = true
+        best.userInfo = info
+        deliver(best)
     }
 
     // MARK: - Calls

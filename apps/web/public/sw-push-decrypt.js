@@ -325,6 +325,21 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   the lineage's first group), from the same sync row as the mute flag.
  *   `null` when unknown: the notification is then grouped under the group
  *   id, as before. Optional; a throw is treated as unknown.
+ * @property {(accountId: string, deviceKey: any, question: ResendQuestion) => Promise<boolean>} [lookupResendHeld]
+ *   ADR-0065 R.7 case 1 — READ-ONLY: is this message a RE-SEND whose
+ *   original this device already holds? Answered from two rows the app wrote
+ *   and the worker already reads (the encrypted message log and the
+ *   encrypted sync row), through {@link resendHeldFromRows}. `true` posts
+ *   nothing for the message. Optional; absent, `false` and a throw all mean
+ *   "not held", so the message is previewed as any other (the marker's
+ *   fail-safe direction: a notification too many, never one too few).
+ * @property {(accountId: string) => Promise<readonly string[] | null>} [lookupSupersededKeys]
+ *   ADR-0065 R.5 / R.8 — READ-ONLY: the account keys (standard base64) an
+ *   accepted reset retired, from the plaintext mirror the app writes
+ *   (`src/push/superseded-mirror.ts`). A frame whose MLS-authenticated
+ *   sender is bound to one of them (a removed device that still holds the
+ *   old keys) neither rings nor becomes a preview. Read once per wake.
+ *   Optional; absent, `null` and a throw mean "none retired".
  * @property {unknown} [notificationWords]
  *   ADR-0061 — the notification words the page stored in Cache Storage (raw,
  *   as read), so an attachment-only preview reads in the interface language.
@@ -623,6 +638,8 @@ export async function decryptPushPreview(wake, deps) {
     // be judged stale differently.
     const now = typeof deps.nowMs === "function" ? deps.nowMs() : Date.now();
     const words = readWords(deps.notificationWords ?? null);
+    // ADR-0065 R.8 — the retired keys, read once for the batch.
+    const retired = await supersededKeySet(deps, accountId);
     for (const message of messages) {
       let processed;
       try {
@@ -633,9 +650,22 @@ export async function decryptPushPreview(wake, deps) {
         // only; it is never persisted (read-only-throwaway discipline).
         continue;
       }
+      // Nothing from a superseded sender acts: no ring, no preview. The
+      // sender is resolved to its PERSON key against the roster of the
+      // epoch the frame decrypted at.
+      if (retired.size > 0) {
+        const senderPerson = personKeyAtLeaf(group, processed?.senderLeaf);
+        if (senderPerson !== null && retired.has(senderPerson)) continue;
+      }
       const call = callNoticeFrom(deps.wasm, processed, message, groupHex, now);
       if (call !== null) {
         latestCall = { notice: call, senderKeyB64: senderKeyOf(group, processed) };
+        continue;
+      }
+      // ADR-0065 R.7 case 1 — a re-sent message whose original this device
+      // already holds is not a new message here: it posts nothing, and an
+      // older real row of the batch stays the preview. A READ (C-59).
+      if (await resendAlreadyHeld(deps, accountId, deviceKey, group, processed, groupHex)) {
         continue;
       }
       const preview = previewFromProcessed(deps.wasm, processed, words);
@@ -1316,6 +1346,228 @@ function isProfileEnvelope(wasm, bytes) {
   }
   freeQuietly(decoded);
   return true;
+}
+
+/**
+ * What {@link DecryptPushDeps.lookupResendHeld} is asked.
+ *
+ * @typedef {object} ResendQuestion
+ * @property {string} receivedGroupHex  the group the wake is for, lowercase hex.
+ * @property {string} originGroupB64    the marker's original group, standard base64.
+ * @property {number} originMessageId   the original's DS message id there.
+ * @property {string | null} senderAccountKeyB64  the PERSON key of the MLS-authenticated sender.
+ * @property {string | null} ownAccountKeyB64     this account's PERSON key in the group.
+ */
+
+/**
+ * ADR-0050 — base64 of the PERSON key (the account key, else the legacy leaf
+ * key) of the member at `leaf` in the throwaway group's roster, or `null`.
+ *
+ * @param {any} group
+ * @param {unknown} leaf
+ * @returns {string | null}
+ */
+function personKeyAtLeaf(group, leaf) {
+  if (typeof leaf !== "number") return null;
+  let members;
+  try {
+    members = group.members();
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(members)) return null;
+  for (const m of members) {
+    if (m?.leafIndex !== leaf) continue;
+    if (m.accountKey instanceof Uint8Array && m.accountKey.length > 0) {
+      return bytesToBase64(m.accountKey);
+    }
+    return m.signaturePublicKey instanceof Uint8Array ? bytesToBase64(m.signaturePublicKey) : null;
+  }
+  return null;
+}
+
+/**
+ * The retired keys for this wake, as a set. Never throws; every miss is the
+ * empty set (nothing is dropped).
+ *
+ * @param {DecryptPushDeps} deps
+ * @param {string} accountId
+ * @returns {Promise<Set<string>>}
+ */
+async function supersededKeySet(deps, accountId) {
+  const out = new Set();
+  if (typeof deps.lookupSupersededKeys !== "function") return out;
+  try {
+    const keys = await deps.lookupSupersededKeys(accountId);
+    if (!Array.isArray(keys)) return out;
+    for (const k of keys) if (typeof k === "string" && k.length > 0) out.add(k);
+  } catch {
+    out.clear();
+  }
+  return out;
+}
+
+/**
+ * The re-send marker of a processed frame, or `null`: both halves present
+ * and well-formed, read from the same parse the preview uses.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {any} processed
+ * @returns {{ originGroupB64: string, originMessageId: number } | null}
+ */
+function resendMarkerOf(wasm, processed) {
+  if (
+    processed === null ||
+    processed === undefined ||
+    processed.kind !== "Application" ||
+    processed.applicationData === undefined ||
+    processed.applicationData === null
+  ) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = wasm.parseBodyEnvelope(processed.applicationData);
+  } catch {
+    return null;
+  }
+  try {
+    if (parsed.kind !== "chat") return null;
+    const group = parsed.resendOriginGroupB64;
+    const id = parsed.resendOriginMessageId;
+    if (typeof group !== "string" || group.length === 0) return null;
+    if (typeof id !== "bigint" && typeof id !== "number") return null;
+    const messageId = Number(id);
+    if (!Number.isSafeInteger(messageId) || messageId < 0) return null;
+    return { originGroupB64: group, originMessageId: messageId };
+  } catch {
+    return null;
+  } finally {
+    freeQuietly(parsed);
+  }
+}
+
+/**
+ * Whether this frame is a re-send whose original the device holds. Never
+ * throws; every miss is `false`.
+ *
+ * @param {DecryptPushDeps} deps
+ * @param {string} accountId
+ * @param {any} deviceKey
+ * @param {any} group
+ * @param {any} processed
+ * @param {string} groupHex
+ * @returns {Promise<boolean>}
+ */
+async function resendAlreadyHeld(deps, accountId, deviceKey, group, processed, groupHex) {
+  if (typeof deps.lookupResendHeld !== "function") return false;
+  const marker = resendMarkerOf(deps.wasm, processed);
+  if (marker === null) return false;
+  let ownLeaf;
+  try {
+    ownLeaf = typeof group.ownLeafIndex === "function" ? group.ownLeafIndex() : group.ownLeafIndex;
+  } catch {
+    ownLeaf = undefined;
+  }
+  try {
+    return (
+      (await deps.lookupResendHeld(accountId, deviceKey, {
+        receivedGroupHex: groupHex,
+        originGroupB64: marker.originGroupB64,
+        originMessageId: marker.originMessageId,
+        senderAccountKeyB64: personKeyAtLeaf(group, processed?.senderLeaf),
+        ownAccountKeyB64: personKeyAtLeaf(group, ownLeaf),
+      })) === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ADR-0065 R.7 case 1 — the service worker's copy of the re-send rule
+ * (`src/chat/resend-marker.ts` `resendVerdict`, which this file cannot
+ * import): `true` exactly when
+ *
+ *   - the marker's group is an OLDER segment of the SAME conversation as the
+ *     group the message was received in (from the decrypted sync row, the
+ *     lineage registers of the ADR-0058 fold), and
+ *   - the decrypted message log holds the named row in that group, and
+ *   - that row's author is the account of the MLS-authenticated sender: a
+ *     row this device sent itself counts as this account's.
+ *
+ * Anything unreadable, unknown or mismatched is `false`: the message is
+ * previewed. Keys are compared as stored; a key alias the app would resolve
+ * (a proven rotation) is not known here and reads as a mismatch, which errs
+ * toward a notification.
+ *
+ * Pure apart from the wasm read; exported for `sw.js` and the tests.
+ *
+ * @param {any} logPayload   the decrypted message-log row (`message-log-store.ts`).
+ * @param {any} syncPayload  the decrypted sync row (`sync-state-store.ts`).
+ * @param {ResendQuestion} question
+ * @param {any} wasm
+ * @returns {boolean}
+ */
+export function resendHeldFromRows(logPayload, syncPayload, question, wasm) {
+  if (question === null || typeof question !== "object") return false;
+  const sender = question.senderAccountKeyB64;
+  if (typeof sender !== "string" || sender.length === 0) return false;
+  const receivedHex = question.receivedGroupHex;
+  if (typeof receivedHex !== "string" || !isHex(receivedHex) || receivedHex.length === 0) return false;
+  const originBytes = base64DecodeQuietly(question.originGroupB64);
+  if (originBytes === null || originBytes.length === 0) return false;
+  const originHex = bytesToHex(originBytes);
+  if (originHex === receivedHex) return false;
+
+  // The held row and its author.
+  const slot = logPayload?.groups?.[originHex];
+  if (slot === null || typeof slot !== "object" || !Array.isArray(slot.messages)) return false;
+  const row = slot.messages.find((m) => Number(m?.messageId) === question.originMessageId);
+  if (row === undefined || row === null) return false;
+  let author = null;
+  if (row.direction === "outgoing") author = question.ownAccountKeyB64;
+  else if (row.direction === "incoming") author = row.authorKeyB64;
+  if (typeof author !== "string" || author.length === 0 || author !== sender) return false;
+
+  // The segment order, from the lineage registers.
+  if (syncPayload === null || typeof syncPayload !== "object" || syncPayload.v !== 2) return false;
+  if (typeof syncPayload.s !== "string" || syncPayload.s.length === 0) return false;
+  if (wasm === null || typeof wasm !== "object" || typeof wasm.SyncedState !== "function") {
+    return false;
+  }
+  let state = null;
+  /** @type {any[]} */
+  const registers = [];
+  try {
+    const stateBytes = base64DecodeQuietly(syncPayload.s);
+    if (stateBytes === null) return false;
+    const receivedBytes = new Uint8Array(receivedHex.length / 2);
+    for (let i = 0; i < receivedBytes.length; i += 1) {
+      receivedBytes[i] = parseInt(receivedHex.slice(i * 2, i * 2 + 2), 16);
+    }
+    state = wasm.SyncedState.fromBytes(stateBytes);
+    // The received group must be a successor: a first group has no older
+    // segment to hold an original in.
+    const received = state.lineageRoot(receivedBytes);
+    if (received === undefined || received === null) return false;
+    registers.push(received);
+    const rootHex = bytesToHex(received.rootConversationId);
+    if (originHex === rootHex) return true;
+    const origin = state.lineageRoot(originBytes);
+    if (origin === undefined || origin === null) return false;
+    registers.push(origin);
+    if (bytesToHex(origin.rootConversationId) !== rootHex) return false;
+    // Segments are ordered by stamp, ties broken on the successor id
+    // (`src/chat/lineage.ts`).
+    if (origin.hlc !== received.hlc) return origin.hlc < received.hlc;
+    return originHex < receivedHex;
+  } catch {
+    return false;
+  } finally {
+    for (const r of registers) freeQuietly(r);
+    freeQuietly(state);
+  }
 }
 
 /**

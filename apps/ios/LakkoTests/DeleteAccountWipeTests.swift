@@ -208,10 +208,11 @@ final class DeleteAccountWipeTests: XCTestCase {
         sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: "dora"))
         let auth = AuthRepository(
             sessionStore: sessionStore,
-            authClientFactory: { AuthClient(baseURL: "http://auth.test") },
+            authClientFactory: { Offline.auth() },
             persistence: RestoringPersistence(),
             nowMs: { 1_000_000 },
             accountDirectory: NoDirectory(),
+            restoreDirectory: OfflineRestoreDirectory(),
             pushBinding: PushAccountBindingStore(defaults: UserDefaults(suiteName: suiteName)!),
             removeDeliveredNotifications: {},
             proofLoginOperation: { _, _ in

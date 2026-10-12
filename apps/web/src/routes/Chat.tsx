@@ -174,10 +174,18 @@ import {
 import { heldResendPredicate } from "../chat/resend-receive";
 import { unrepairableBy } from "../chat/successor-claim";
 import { READMISSION_INTERVAL_MS } from "../chat/device-readmission";
-import { encodeReadPosition, historyRowId, historyRowOrigin, isHistoryRowId } from "../chat/lineage";
+import {
+  encodeReadPosition,
+  historyRowId,
+  historyRowOrigin,
+  isHistoryRowId,
+  laterSegmentExists,
+} from "../chat/lineage";
+import { dropsFromSupersededSender, type InertSender } from "../chat/background-events";
 import {
   deviceSwapAcrossCommits,
   dropsSupersededSender,
+  supersededSenderInert,
   repairPlan,
   resetCase,
 } from "../chat/reset-repair";
@@ -2115,6 +2123,22 @@ function ChatView(props: {
    * what gets persisted, never the leaf: OpenMLS reuses a vacated leaf for the
    * next member added, so a stored leaf silently comes to name somebody else.
    */
+  /** Base64 of the PERSON key (ADR-0050) at `leaf`; `undefined` on a torn
+   *  read or when no member holds it. */
+  function personKeyOfLeafB64(leaf: number): string | undefined {
+    try {
+      const roster = props.entry.group.members() as unknown as Array<{
+        leafIndex: number;
+        signaturePublicKey: Uint8Array;
+        accountKey?: Uint8Array;
+      }>;
+      const hit = roster.find((m) => m.leafIndex === leaf);
+      return hit === undefined ? undefined : base64Encode(personKeyOf(hit));
+    } catch {
+      return undefined;
+    }
+  }
+
   function signatureKeyOfLeaf(leaf: number): Uint8Array | undefined {
     try {
       const roster = props.entry.group.members() as Array<{
@@ -3646,16 +3670,31 @@ function ChatView(props: {
     let typing = typingMap();
     let typingChanged = false;
     const nowMs = Date.now();
+    const retired = supersededKeys();
+    const senderSuperseded = (k: string): boolean => dropsSupersededSender(k, retired);
+    const moved =
+      retired.size > 0 &&
+      laterSegmentExists(lineageView.lineage(), hexOf(props.entry.group.groupId));
+    const inertSender: InertSender = {
+      sender: (k) =>
+        supersededSenderInert({
+          senderKeyB64: k,
+          supersededKeys: retired,
+          kind: conversationKind(),
+          ownerKeyB64: ownerKeyB64(),
+          moved,
+        }),
+      senderKeyOfLeaf: (leaf) => personKeyOfLeafB64(leaf),
+    };
     for (const e of events) {
       // ADR-0065 R.5 / R.8 — a row from a leaf bound to a key an accepted
       // reset retired (a removed device still holding the old keys) is
       // dropped before it is stored or shown.
-      if (
-        (e.kind === "application" || e.kind === "op") &&
-        dropsSupersededSender(e.senderKey, supersededKeys())
-      ) {
-        continue;
-      }
+      // The same rule as the background settle (`background-events.ts`): a
+      // call signal from such a sender never rings, and in a conversation
+      // that cannot be repaired in place for that reset, or that already
+      // moved, its control and service envelopes are dropped too.
+      if (dropsFromSupersededSender(e, senderSuperseded, inertSender)) continue;
       if (e.kind === "op") {
         // ADR-0024 — typing / read-receipt are ephemeral status,
         // not message overlays: fold them into their own state.

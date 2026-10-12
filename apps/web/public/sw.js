@@ -779,6 +779,41 @@ function buildDecryptDeps(wasm, core) {
         return null;
       }
     },
+    // ADR-0065 R.5 / R.8 — the account keys an accepted reset retired, from
+    // the plaintext mirror the app writes (`src/push/superseded-mirror.ts`;
+    // the pin store itself is `localStorage`, which a worker cannot read).
+    // READ-ONLY (C-59). Every miss is "none retired": the wake is shown.
+    lookupSupersededKeys: async (accountId) => {
+      try {
+        const row = await idbGet("lakko-superseded-keys", "rows", accountId);
+        return Array.isArray(row?.keys) ? row.keys : null;
+      } catch {
+        return null;
+      }
+    },
+    // ADR-0065 R.7 case 1 — is this a re-sent message whose original this
+    // device already holds? READ-ONLY, from the two encrypted rows this
+    // worker already reads: the message log (the held row and its author)
+    // and the sync row (the lineage: which group is an older segment of
+    // which conversation). Nothing is mirrored for it and nothing is
+    // written (C-59). Every miss is "not held": the message is previewed.
+    lookupResendHeld: async (accountId, deviceKey, question) => {
+      const logRow = await idbGet("lakko-message-log", "logs", accountId);
+      const syncRow = await idbGet("lakko-device-sync", "rows", accountId);
+      if (logRow?.ciphertext === undefined || syncRow?.ciphertext === undefined) return false;
+      try {
+        const decode = async (ciphertext) =>
+          JSON.parse(new TextDecoder().decode(await aesGcmUnwrap(deviceKey, ciphertext)));
+        return core.resendHeldFromRows(
+          await decode(logRow.ciphertext),
+          await decode(syncRow.ciphertext),
+          question,
+          wasm,
+        );
+      } catch {
+        return false;
+      }
+    },
     // Non-extractable AES-GCM device root key (usable for decrypt).
     getDeviceKey: async (accountId) => {
       const row = await idbGet("lakko-auth", "device_keys", accountId);

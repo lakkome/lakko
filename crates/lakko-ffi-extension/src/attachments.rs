@@ -126,6 +126,15 @@ pub struct ParsedBody {
     pub emoji: Option<String>,
     /// ADR-0024 — the typing state (`Some` only for `Typing`).
     pub is_typing: Option<bool>,
+    /// ADR-0065 R.7: the group a re-sent message was first sent into
+    /// (standard base64), carried only together with
+    /// `resend_origin_message_id`. Never shown: the extension uses it to stay
+    /// quiet about a message this device already holds.
+    #[uniffi(default = None)]
+    pub resend_origin_group_b64: Option<String>,
+    /// ADR-0065 R.7: the DS `messageId` of that first send.
+    #[uniffi(default = None)]
+    pub resend_origin_message_id: Option<i64>,
 }
 
 /// Decode an MLS Application message body into a classified [`ParsedBody`]
@@ -137,12 +146,14 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
     match inner::parse_body(&bytes) {
         // ADR-0052: a reply's quote is not previewed by a notification, and
         // this surface stays the smallest that decrypts (C-59), so the reply
-        // is matched away rather than carried. The same goes for the forward
-        // attribution and the ADR-0065 re-send marker: a notification needs
-        // neither, and deduplicating a re-sent row is the foreground app's
-        // job.
+        // and the forward attribution are matched away rather than carried.
+        // The ADR-0065 re-send marker IS carried: without it the extension
+        // would notify a second time about a message the device holds.
         inner::MessageBody::Chat {
-            text, attachments, ..
+            text,
+            attachments,
+            resend,
+            ..
         } => ParsedBody {
             kind: MessageBodyKind::Chat,
             text,
@@ -150,6 +161,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: None,
             emoji: None,
             is_typing: None,
+            resend_origin_group_b64: resend.as_ref().map(|r| r.group_id_b64.clone()),
+            resend_origin_message_id: resend.map(|r| r.message_id),
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
             kind: MessageBodyKind::Edit,
@@ -158,6 +171,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: Some(target),
             emoji: None,
             is_typing: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::Delete { target } => ParsedBody {
             kind: MessageBodyKind::Delete,
@@ -166,6 +181,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: Some(target),
             emoji: None,
             is_typing: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::Reaction { target, emoji } => ParsedBody {
             kind: MessageBodyKind::Reaction,
@@ -174,6 +191,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: Some(target),
             emoji: Some(emoji),
             is_typing: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::Typing { is_typing } => ParsedBody {
             kind: MessageBodyKind::Typing,
@@ -182,6 +201,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: None,
             emoji: None,
             is_typing: Some(is_typing),
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
             kind: MessageBodyKind::ReadReceipt,
@@ -190,6 +211,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: Some(up_to),
             emoji: None,
             is_typing: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::Unsupported { version } => ParsedBody {
             kind: MessageBodyKind::Unsupported,
@@ -198,6 +221,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: Some(i64::from(version)),
             emoji: None,
             is_typing: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::ServiceEnvelope => ParsedBody {
             kind: MessageBodyKind::ServiceEnvelope,
@@ -206,6 +231,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: None,
             emoji: None,
             is_typing: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
     }
 }

@@ -265,6 +265,9 @@ public final class ChatRepository: ObservableObject {
     var heldSendSealer = HeldSendQueue.Sealer(
         seal: { try MessageLogStore.sealUnderWrapKey($0) },
         open: { try MessageLogStore.openUnderWrapKey($0) })
+    /// Removes the delivered notifications the extension marked quiet
+    /// (``QuietNotifications``). Injectable for tests.
+    var removeQuietNotifications: () -> Void = { QuietNotifications.removeDelivered() }
     /// Removes the ``ResetEvents`` subscription.
     var resetEventsUnsubscribe: (() -> Void)?
     /// The subscription that feeds ``applyLineage(_:)``; owned here so the
@@ -1143,18 +1146,13 @@ public final class ChatRepository: ObservableObject {
         // core verifies. ADR-0057 — remembered so the registrar appointment
         // can fetch the recipient's identity bundle.
         memberAccountIdHints[recipientSignaturePubkey] = recipientAccountId
-        guard let listedDevices = try await discovery.fetchKeyPackages(
-            accountId: recipientAccountId
-        ), !listedDevices.isEmpty else {
-            throw ChatError.argument(
-                "recipient has no KeyPackage uploaded yet"
-            )
-        }
-        // ADR-0065 R.2 — only the devices bound to the key the caller expects
-        // this person to have (`AddMemberKey.swift`); none left is the same
-        // answer as an empty directory, and nothing was created.
-        let recipientDevices = devicesOfExpectedPerson(
-            listedDevices, expectedKey: recipientSignaturePubkey)
+        // ADR-0065 R.2 / ADR-0066 3.5 — the identity gate for the account,
+        // then only the devices bound to the key the caller expects this
+        // person to have or a proven predecessor of it
+        // (``expectedPersonDevices``); none left is the same answer as an
+        // empty directory, and nothing was created.
+        let recipientDevices = try await expectedPersonDevices(
+            accountId: recipientAccountId, expectedKey: recipientSignaturePubkey)
         guard !recipientDevices.isEmpty else {
             throw ChatError.argument(
                 "recipient has no KeyPackage uploaded yet"
@@ -2696,16 +2694,15 @@ public final class ChatRepository: ObservableObject {
         // holding a group's commit chain across it would stall unrelated
         // membership work on that group for its whole duration.
         // ADR-0050 — every device of the person.
-        guard let listedDevices = try await discovery.fetchKeyPackages(
-            accountId: recipientAccountId
-        ), !listedDevices.isEmpty else {
-            throw ChatError.argument("recipient has no KeyPackage uploaded yet")
-        }
-        // ADR-0065 R.2 — the directory is not trusted to say whose devices it
-        // returned: only those bound to the expected key (or its proven
-        // chain, never a reset-retired key) are added. None left: the same
-        // answer as an empty directory, nothing merged or published.
-        let devices = devicesOfExpectedPerson(listedDevices, expectedKey: recipientSignaturePubkey)
+        // ADR-0065 R.2 / ADR-0066 3.5 — the identity gate for the account
+        // first (it is what records a proven rotation, and this is also the
+        // path the ADR-0050 re-request of an older add rides). The directory
+        // is then not trusted to say whose devices it returned: only those
+        // bound to the expected key or its proven chain, never a
+        // reset-retired key, are added. None left: the same answer as an
+        // empty directory, nothing merged or published.
+        let devices = try await expectedPersonDevices(
+            accountId: recipientAccountId, expectedKey: recipientSignaturePubkey)
         guard !devices.isEmpty else {
             throw ChatError.argument("recipient has no KeyPackage uploaded yet")
         }
@@ -2750,6 +2747,48 @@ public final class ChatRepository: ObservableObject {
     /// The proven-predecessor map the add-member key check reads. Injectable
     /// for tests.
     var provenPredecessorsProvider: () -> ProvenPredecessors = { ProvenPredecessorStore().load() }
+
+    /// ADR-0065 R.2 / ADR-0066 section 3.5 — the identity gate an account is
+    /// put through before its devices are fetched to be added. Injectable for
+    /// tests; production runs the fail-closed check of
+    /// ``ContactsClient/checkContactIdentity(accountId:heldKeyB64:)`` with no
+    /// roster key, as a contact request does: a pin decides, else a verified
+    /// binding stands in for it, else the first observation is pinned.
+    var addIdentityGate: (@MainActor (_ accountId: Data) async throws -> Void)?
+
+    /// THE way an account's devices are fetched to be added to a group: the
+    /// user-facing add, a successor build, the re-admission arm and the
+    /// ADR-0050 membership re-request all end here, so no add path can
+    /// forget either step.
+    ///
+    /// 1. The identity gate for the account runs FIRST, unless the caller
+    ///    just ran it (`gateAlreadyRan`). After an ADR-0066 rotation the
+    ///    account's kept devices are still bound to the OLD key while the
+    ///    directory serves the new one; the gate is what records the proven
+    ///    rotation (old key -> new key), and for a person who is not a
+    ///    contact it is what turns the verified binding this device held
+    ///    into a pin with its proven chain. A change that is neither proven
+    ///    nor an attested reset throws here, and nothing is fetched.
+    /// 2. The directory's list is filtered to the devices bound to the
+    ///    expected key OR any key of its proven chain
+    ///    (`AddMemberKey.acceptableBoundKeys`). A key an accepted RESET
+    ///    retired is in no proven chain and is never accepted.
+    ///
+    /// Returns the devices to add; empty when the directory lists none that
+    /// are this person's.
+    func expectedPersonDevices(
+        accountId: Data, expectedKey: Data, gateAlreadyRan: Bool = false
+    ) async throws -> [DeviceKeyPackage] {
+        if !gateAlreadyRan {
+            if let addIdentityGate {
+                try await addIdentityGate(accountId)
+            } else {
+                _ = try await identityGateClient().checkContactIdentity(accountId: accountId)
+            }
+        }
+        let listed = try await discovery.fetchKeyPackages(accountId: accountId) ?? []
+        return devicesOfExpectedPerson(listed, expectedKey: expectedKey)
+    }
 
     /// ADR-0065 R.2 — the listed devices that are the expected person's.
     func devicesOfExpectedPerson<D>(
@@ -4706,7 +4745,8 @@ public final class ChatRepository: ObservableObject {
         // message this device already holds in an older segment (rule 6: it
         // is shown once, where it was).
         let events = silentlyFiltered(
-            result.events, resendOrigins: result.resendOrigins, groupIdHex: groupIdHex)
+            result.events, resendOrigins: result.resendOrigins,
+            eventSenders: result.eventSenders, groupIdHex: groupIdHex)
         noteAppliedForUnread(events, groupIdHex: groupIdHex)
         record.consumeEvents(
             events,
@@ -5529,8 +5569,9 @@ public final class ChatRepository: ObservableObject {
         if plan.mayAdd, ResetRepair.mayAddResetIdentity(ownRole) {
             // R.8 "no KeyPackage yet": an empty list proposes nothing and the
             // next pass asks again.
-            let listed = (try? await discovery.fetchKeyPackages(accountId: accountId)) ?? []
-            let devices = devicesOfExpectedPerson(listed, expectedKey: newKey)
+            // The arm ran the gate for this account on this pass.
+            let devices = (try? await expectedPersonDevices(
+                accountId: accountId, expectedKey: newKey, gateAlreadyRan: true)) ?? []
             let present = Set((try? groups[groupIdHex]?.group.members())?.map { $0.signaturePublicKey } ?? [])
             let removed = currentAccountIdB64.map {
                 DeviceReadmissionMemory.removed(accountIdB64: $0, groupIdHex: groupIdHex)
@@ -5650,9 +5691,9 @@ public final class ChatRepository: ObservableObject {
                 // its proven chain) are theirs.
                 guard let rosterKey = base64Decode(candidate.rosterKeyB64) else { continue }
                 do {
-                    let list = devicesOfExpectedPerson(
-                        try await discovery.fetchKeyPackages(accountId: candidate.accountId) ?? [],
-                        expectedKey: rosterKey)
+                    // The gate for this account ran a few lines up.
+                    let list = try await expectedPersonDevices(
+                        accountId: candidate.accountId, expectedKey: rosterKey, gateAlreadyRan: true)
                     accounts.append(DeviceReadmission.AccountDevices(
                         personKeyB64: candidate.rosterKeyB64,
                         devices: list.map {
@@ -6200,7 +6241,9 @@ public final class ChatRepository: ObservableObject {
                     var origins: [Int64: ResendMarker.Origin] = [:]
                     if let origin = ChatClient.resendOrigin(of: processed) { origins[row.id] = origin }
                     let events = self.silentlyFiltered(
-                        [event], resendOrigins: origins, groupIdHex: groupIdHex)
+                        [event], resendOrigins: origins,
+                        eventSenders: [ChatClient.applicationSender(of: processed, group: record.group)],
+                        groupIdHex: groupIdHex)
                     self.noteAppliedForUnread(events, groupIdHex: groupIdHex)
                     record.consumeEvents(
                         events,

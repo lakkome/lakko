@@ -269,7 +269,8 @@ final class SignupCancelTests: XCTestCase {
             authClientFactory: { SignupAuthRecorder.client(host, solve: blockingSolver) },
             persistence: NullPersistence(),
             nowMs: { 1_000_000 },
-            accountDirectory: UnusedDirectory()
+            accountDirectory: UnusedDirectory(),
+            restoreDirectory: OfflineRestoreDirectory()
         )
         let viewModel = SignupViewModel(repository: repository)
         viewModel.username = "alice_1"

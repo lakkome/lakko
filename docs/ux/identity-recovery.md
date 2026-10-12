@@ -2091,3 +2091,250 @@ Kept by the client:
 - Strings: 57 keys listed in 18.6 (55 new, one existing text replaced, one
   existing key reused as is), 37 marked security-critical, none added to
   the catalog. Nothing here was built, rendered or walked.
+
+## 19. A recovery email: a new password by a mailed code
+
+Added 2026-10-12 (maintainer's decisions of that day). **Status: designed,
+not built.** Nothing in this section exists in `services/auth` or in any
+client. Architecture: ADR-0067.
+
+What was decided:
+
+- A person may add one email address to the account. A code mailed to it
+  lets them **choose a new password**, and nothing else. Resetting the
+  account keys stays its own action (15.1, 17.2).
+- The server keeps only a one-way value made from the **username and the
+  address together**. It never stores the address. It sees the address for
+  the moment it sends a letter.
+- When the account has an authenticator, its code is asked for as well.
+- The recovery phrase and every other route stay as they are.
+
+### 19.1 What the route gives, and what it does not
+
+| Device | After the new password |
+|---|---|
+| Still holds the account's keys | Signed in, chats as before. |
+| New, reinstalled or cleared | Signed in without keys: **Restore your keys** (section 8), as after any password sign-in on such a device. |
+
+The mailed code never brings keys. On a new device the person still needs
+another device, a passkey that carries keys or the phrase; failing all three,
+**Reset account keys**, which asks for the password they just chose.
+
+### 19.2 Adding the address
+
+Entry points: Settings > Account > **Recovery email**; and one optional step
+at sign-up, after the recovery phrase is confirmed, with `Not now`.
+
+```
+Recovery email
+If you forget your password, we send a code to this address
+so you can choose a new one.
+
+Email   [ name@example.com ]
+
+Lakko does not keep your address. You will type it again,
+together with your username, when you need a code.
+
+[ Send code ]
+```
+
+Then, on the same surface:
+
+```
+Enter the code
+We sent a 6-digit code to name@example.com.
+
+[ _ _ _ _ _ _ ]
+
+Send again (in 0:45)        Use a different address
+```
+
+- Adding, replacing and removing the address each need the proof of 17.1
+  (password or passkey within ten minutes); the block of 17.1 is drawn above
+  the email field when no proof is live. Sign-up counts as a proof.
+- The account must have a username. A guest account sees one line, "Choose a
+  username first.", and a button to the username screen.
+- The address is shown back only on this surface and only until it closes.
+  Afterwards Settings shows **Recovery email: On** with `Replace` and
+  `Remove`, never the address (the device does not keep it either).
+- Replacing is the same two steps for the new address; the old one stops
+  working when the new code is accepted, not before.
+- Removing is one confirmation in the app's own dialog: "Remove recovery
+  email? You will not be able to get a new password by email."
+- Changing the username turns the recovery email off (the stored value was
+  made from the old name). The username screen says so before the change and
+  offers to add it again after.
+
+States:
+
+| State | What the person sees |
+|---|---|
+| Not a valid address | One line under the field; `Send code` disabled until it parses. |
+| Sending | `Send code` shows its working word. |
+| Sent | The code step. |
+| Wrong code | "That code is not right." The fields clear and keep focus. |
+| Code expired (10 minutes) | "That code has expired." with `Send again`. |
+| Too many wrong codes | "Too many attempts. Send a new code." The code step returns to the address step. |
+| Too many letters | `recovery.error.rate_limited` with the countdown. |
+| Mail could not be sent | "We could not send the letter. Try again later." |
+| Mail is not set up on this server | The row in Settings and the sign-up step are absent. |
+| Offline | `common.error.offline`. |
+| Done | Back to Settings with **Recovery email: On**; at sign-up, on to the app. |
+
+Every other signed-in device of the account shows the notice of 17.5's kind
+once: "A recovery email was added to your account." / "...was replaced" /
+"...was removed", with `OK` and `This was not me` (which opens Settings >
+Account > Recovery email on that device).
+
+### 19.3 Getting a new password
+
+Entry point: **Get back in** (section 2) gains one row, last in the group
+"Signs you in on this device":
+
+```
+  [mail]     Email code                     >
+             A code sent to your recovery email. You choose
+             a new password.
+```
+
+The row is always shown (no row depends on server state). The note under the
+list is unchanged.
+
+Step 1:
+
+```
+Email code
+Type your username and your recovery email.
+
+Username   [ @name ]
+Email      [ name@example.com ]
+
+[ Send code ]
+```
+
+Step 2, always, whatever was typed:
+
+```
+Check your email
+If that username and address belong together, a code is on
+its way. It works for 10 minutes.
+
+[ _ _ _ _ _ _ ]
+
+Send again (in 0:45)        Back
+```
+
+Step 3, only when the account has an authenticator:
+
+```
+Authenticator code
+Type the 6-digit code from your authenticator app.
+
+[ _ _ _ _ _ _ ]
+```
+
+Step 4:
+
+```
+Choose a new password
+
+New password           [ ............ ]
+Confirm new password   [ ............ ]
+
+[ Save and log in ]
+```
+
+Rules:
+
+- Step 2 looks and behaves the same for a pair that matches, a pair that
+  does not, an unknown username and an account with no recovery email. No
+  wording, delay or control tells them apart. A letter leaves only for a
+  match.
+- A wrong mailed code and a code that was never sent get the same line:
+  "That code is not right."
+- Step 3 appears only after the mailed code was accepted, so it tells
+  nothing to someone who cannot read the mailbox.
+- There is no way past step 3 without the authenticator. Its text ends with
+  "Lost your authenticator? Use another way to get back in." linking to the
+  list.
+- The old password stops working when step 4 succeeds.
+- After step 4 the person is signed in and lands per 19.1.
+- The username is pre-filled per section 2; the address never is.
+
+States:
+
+| State | What the person sees |
+|---|---|
+| Wrong mailed code | "That code is not right." Five tries per code. |
+| Tries used up, or expired | "Send a new code." Back to step 1 with both fields kept. |
+| Wrong authenticator code | "That code is not right." |
+| Too many attempts or letters | `recovery.error.rate_limited` with the countdown. |
+| Passwords differ / too weak | The sign-up screen's own lines. |
+| Mail is not set up on this server | Step 1 shows "Email codes are not available right now." and no button. |
+| Offline | `common.error.offline`. Fields keep their contents. |
+
+### 19.4 The letter
+
+Subject: "Your Lakko code". Body: the code, "It works for 10 minutes.", and
+"If you did not ask for this, ignore this letter. Your password has not
+changed." No username, no link, no device or location, no image. Sent in the
+language of the requesting device.
+
+### 19.5 What the account's devices see afterwards
+
+Every device of the account that is signed in shows once, the next time it
+is opened:
+
+```
+Your password was changed
+Someone used your recovery email to choose a new password
+on <date>.
+
+[ It was me ]     [ It was not me ]
+```
+
+`It was not me` opens a short screen: choose a new password (this device
+holds the keys, so it asks nothing else, 7.1) and, under it, `Remove recovery
+email`. When the keys were also reset after the change, the device shows
+"Was it you?" of 18.4 instead; that screen already covers this case.
+
+Contacts see nothing.
+
+### 19.6 Data the UI needs
+
+- Whether the server can send mail (to hide or show the rows).
+- Whether the account has a recovery email: a yes/no for the signed-in
+  account only. Never the address.
+- Enrol: start (address) and finish (code), each under a 17.1 proof; replace
+  and remove likewise.
+- Recover: start (username, address) with one uniform answer; code check
+  answering "accepted" plus "authenticator needed: yes/no"; authenticator
+  check; set the new password and land a session.
+- Remaining seconds before another letter may be asked for.
+- A per-device event "password changed by email on <date>" and the three
+  recovery-email events of 19.2, delivered to the account's own devices.
+- The moment of the last password change, to pick between 19.5 and 18.4.
+
+### 19.7 Cross-platform shape
+
+The same four steps and the same Settings row on web, iOS and Android. Code
+fields use each platform's one-time-code hint so the system can offer the
+code from the mail app. Nothing here uses a system dialog. No deep link is
+involved: the letter has no link.
+
+### 19.8 Deliberately not built, and open
+
+- **Whoever reads the mailbox and knows the username can take the
+  password**, and with it, on a new device, reset the keys (17.2 accepts the
+  new password as proof). The owner's old device answers with 18.4 for about
+  a month. Open: the maintainer may prefer that a password chosen by email
+  is not accepted as proof for a reset for some time.
+- The mail provider and the server's mail log see that an address received
+  a Lakko code. The server sees the address and the username together while
+  it handles the request.
+- No reminder letters, no "your account was accessed" letters, no
+  newsletter. The address is used for the code and nothing else.
+- One address per account. No phone number.
+- Whether sign-up should show the email step before or instead of the
+  phrase was left for later (the phrase stays as it is).
+- Strings: none added to the catalog. Nothing here was built or walked.

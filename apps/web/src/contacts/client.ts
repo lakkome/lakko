@@ -73,7 +73,7 @@ import type {
 import type { IdentityFetchResponse } from "../discovery/wire";
 import type { ReceivedProfile } from "../profile/profile-envelope";
 import type { AccountPubkeyPin } from "./local-store";
-import { acceptableBoundKeys, devicesBoundTo } from "./add-member-key";
+import { acceptableBoundKeys, devicesBoundTo, trustedBoundKeys } from "./add-member-key";
 import { contactRequestGate, requestTargetAfterFetch } from "./request-target";
 import { resetVerdict, type AttestCheck, type LogCheck } from "./reset-verdict";
 import { notifyResetAccepted } from "./reset-events";
@@ -92,6 +92,7 @@ import {
   acceptReset,
   accountIdB64OfKey,
   accountKeysOf,
+  loadSupersededKeys,
   readPin,
   setPin,
   recordLogStatus,
@@ -3156,6 +3157,12 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     recipientAccountId: Uint8Array,
     kind: ConversationKind,
+    /** The account key the caller expects the person to have (a contact
+     *  row's, a contact request's, a looked-up bundle's). Without one (a
+     *  successor build names the account only) the keys this device trusts
+     *  for the account id decide. Either way only a device bound to an
+     *  accepted key founds the conversation (`add-member-key.ts`). */
+    expectedSignaturePubkey?: Uint8Array,
   ): Promise<PreparedGroup> {
     const wasm = await loadWasm();
 
@@ -3173,6 +3180,19 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     if (recipientDevices === null || recipientDevices.length === 0) {
+      throw ContactsError.noIdentityBundle(recipientAccountId);
+    }
+    // ADR-0065 R.2 - the same filter as every other add path: only a device
+    // bound to the expected key or a proven predecessor of it (with no
+    // expected key: to a key this device trusts for the account after the
+    // gate above), and never to a key a reset retired, founds the
+    // conversation.
+    recipientDevices = await this.devicesOfAccount(
+      recipientAccountId,
+      recipientDevices,
+      expectedSignaturePubkey === undefined ? null : base64Encode(expectedSignaturePubkey),
+    );
+    if (recipientDevices.length === 0) {
       throw ContactsError.noIdentityBundle(recipientAccountId);
     }
 
@@ -3316,8 +3336,12 @@ export class ContactsClient {
       readonly replyGrantB64?: string | null;
     } = {},
   ): Promise<{ group: WasmGroup; welcomeMessageId: number }> {
-    void recipientSignaturePubkey;
-    const prepared = await this.prepareGroupWith(identity, recipientAccountId, kind);
+    const prepared = await this.prepareGroupWith(
+      identity,
+      recipientAccountId,
+      kind,
+      recipientSignaturePubkey,
+    );
     const delivered = await this.deliverPreparedWelcomes(
       prepared.group.groupId,
       prepared.welcome,
@@ -3402,6 +3426,43 @@ export class ContactsClient {
   }
 
   /**
+   * ADR-0065 R.2 / ADR-0066 section 3.5 - THE filter every path that adds an
+   * account's devices to a group goes through (`add-member-key.ts`): the
+   * user-facing add, a new chat and a successor build, the ADR-0050
+   * re-admission arm and the membership re-request. Call it AFTER the
+   * identity gate ran for the account, so a proven rotation is recorded.
+   *
+   * @param expectedKeyB64 the account key the caller expects the person to
+   *   have, or `null` for a path that has none: then the keys this device
+   *   trusts for the account id decide (the pin and its proven chain, else
+   *   its verified binding).
+   * @returns the devices whose signed binding names an accepted key, in
+   *   order. A key an accepted reset retired is never accepted.
+   */
+  private async devicesOfAccount<D extends { readonly keyPackage: Uint8Array }>(
+    accountId: Uint8Array,
+    devices: readonly D[],
+    expectedKeyB64: string | null,
+  ): Promise<D[]> {
+    const wasm = await loadWasm();
+    const accountIdB64 = base64Encode(accountId);
+    const keys = accountKeysOf(accountIdB64);
+    const superseded = loadSupersededKeys();
+    const accepted =
+      expectedKeyB64 !== null
+        ? acceptableBoundKeys(expectedKeyB64, keys, superseded)
+        : trustedBoundKeys(keys, readVerifiedBinding(accountIdB64)?.keyB64, superseded);
+    return devicesBoundTo(devices, accepted, (d) => {
+      try {
+        const bound = wasm.keyPackageAccountKey(d.keyPackage);
+        return bound === undefined ? null : base64Encode(bound);
+      } catch {
+        return null;
+      }
+    });
+  }
+
+  /**
    * Receive side of `startGroupWith`. Decodes the Welcome
    * blob into a fully-initialised `Group` for the local
    * Identity.
@@ -3483,25 +3544,16 @@ export class ContactsClient {
     }
     // ADR-0065 R.2 - the directory is not trusted to say whose devices these
     // are. Only a device whose signed binding names the EXPECTED account key
-    // (or a key of its pinned proven chain) is added; anything else is
-    // refused here, for every caller (`add-member-key.ts`).
-    {
-      const wasm = await loadWasm();
-      const acceptedKeys = acceptableBoundKeys(
-        base64Encode(recipientSignaturePubkey),
-        accountKeysOf(base64Encode(recipientAccountId)),
-      );
-      devices = devicesBoundTo(devices, acceptedKeys, (d) => {
-        try {
-          const bound = wasm.keyPackageAccountKey(d.keyPackage);
-          return bound === undefined ? null : base64Encode(bound);
-        } catch {
-          return null;
-        }
-      });
-      if (devices.length === 0) {
-        throw ContactsError.noIdentityBundle(recipientAccountId);
-      }
+    // (or a key of its pinned proven chain; never a key a reset retired) is
+    // added; anything else is refused here, for every caller
+    // (`add-member-key.ts`).
+    devices = await this.devicesOfAccount(
+      recipientAccountId,
+      devices,
+      base64Encode(recipientSignaturePubkey),
+    );
+    if (devices.length === 0) {
+      throw ContactsError.noIdentityBundle(recipientAccountId);
     }
 
     // 2. Resolve the canonical Identity — same instance every
@@ -3955,6 +4007,18 @@ export class ContactsClient {
       console.warn("own device bound under another of the account's keys; not admitted to the chat");
       return null;
     }
+    // ADR-0065 R.2 - a device of ANOTHER account goes through the same
+    // filter as every add path: its binding must name a key this device
+    // trusts for that account id (never a key a reset retired). The
+    // directory listing a device under an id proves nothing by itself.
+    if (accountId !== undefined && (identity === null || !bytesEqualCc(accountId, identity.accountId))) {
+      const kept = await this.devicesOfAccount(accountId, [{ keyPackage }], null);
+      if (kept.length === 0) {
+        // eslint-disable-next-line no-console
+        console.warn("a listed device is not bound to a key trusted for its account; not admitted");
+        return null;
+      }
+    }
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
       // Re-checked under the lock: a poll may have applied the very commit
       // that admitted this device while we waited.
@@ -3988,6 +4052,19 @@ export class ContactsClient {
     accountId: Uint8Array,
     deviceKey: Uint8Array,
   ): Promise<MembershipOutcome | null> {
+    // ADR-0065 R.2 - the re-request runs the identity gate first, like every
+    // add: a proven rotation is recorded (a verified binding becomes a pin
+    // with its chain) before the device's binding is judged in
+    // `admitDeviceToGroup`. Only for an account this device already trusts a
+    // key for: a re-request never first-sights an account id.
+    const own = identity !== null && bytesEqualCc(accountId, identity.accountId);
+    if (!own) {
+      const idB64 = base64Encode(accountId);
+      if (readPin(idB64) === undefined && readVerifiedBinding(idB64) === undefined) {
+        throw new Error("no trusted key for the device's account right now");
+      }
+      await this.checkContactIdentity(accountId);
+    }
     let list;
     try {
       list = await this.discovery.fetchKeyPackages(accountId);

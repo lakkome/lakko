@@ -7,7 +7,6 @@ import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.HttpClientEngineBase
 import io.ktor.client.engine.HttpClientEngineCapability
 import io.ktor.client.engine.HttpClientEngineConfig
-import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.request.HttpRequestData
 import io.ktor.client.request.HttpResponseData
 import io.ktor.http.HttpHeaders
@@ -189,4 +188,4 @@ public class SessionBearerEngine(
  * (ADR-0026) around OkHttp.
  */
 public fun lakkoHttpEngine(): HttpClientEngine =
-    SessionBearerEngine(AntiCensorshipEngine(OkHttp.create {}))
+    SessionBearerEngine(AntiCensorshipEngine(BaseHttpEngine.create()))

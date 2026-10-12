@@ -181,5 +181,28 @@ extension ChatRepository {
             if conversation != hex { map[hex] = conversation }
         }
         ConversationLineageMirror.replaceAll(accountIdB64: accountIdB64, conversationOfSuccessor: map)
+        mirrorContinuityFacts()
+    }
+
+    /// Mirror what the notification extension needs to stay silent where
+    /// this app is (`ContinuityMirror`): the keys accepted resets retired,
+    /// this account's own person key, and the segment index of each held
+    /// group that continues a conversation. Written at bootstrap, when the
+    /// lineage changes and when a reset is accepted.
+    func mirrorContinuityFacts() {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        var indexes: [String: Int] = [:]
+        var own: String?
+        for (hex, record) in groups {
+            let index = conversationLineage.segmentIndexOf(hex)
+            if index > 0 { indexes[hex.lowercased()] = index }
+            if own == nil { own = AuthorIdentity.own(group: record.group) }
+        }
+        ContinuityMirror.replace(
+            accountIdB64: accountIdB64,
+            row: ContinuityMirror.Row(
+                supersededKeysB64: Array(supersededKeyMap().keys),
+                ownPersonKeyB64: own,
+                segmentIndexOfGroupHex: indexes))
     }
 }

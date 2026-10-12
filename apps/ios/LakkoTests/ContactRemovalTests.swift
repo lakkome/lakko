@@ -108,8 +108,8 @@ final class ContactRemovalTests: XCTestCase {
 
     private func makeRepository() -> ContactsRepository {
         ContactsRepository(
-            authRepository: AuthRepository(
-                authClientFactory: { AuthClient(baseURL: "http://auth.test") },
+            authRepository: AuthRepository.offline(
+                authClientFactory: { Offline.auth() },
                 persistence: NoSessionPersistence(),
                 nowMs: { 1_000_000 }),
             accountBinding: Just<String?>(account).eraseToAnyPublisher())

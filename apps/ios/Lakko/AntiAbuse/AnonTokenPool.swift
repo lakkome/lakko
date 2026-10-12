@@ -50,7 +50,7 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     /// How long an action waits for a refill before failing.
     public static let defaultWaitSeconds: TimeInterval = 8
 
-    private let issuer: AnonTokenIssuing
+    private var issuer: AnonTokenIssuing
     private let store: AnonTokenStore?
     private let now: @Sendable () -> Date
     private let windowSecs: UInt64
@@ -84,6 +84,17 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
         self.now = now
         self.windowSecs = windowSecs
         self.waitSeconds = waitSeconds
+    }
+
+    /// Replace the issuer refills are drawn from. A seam for the test bundle:
+    /// ``shared`` is bound to the production issuer, and every client a test
+    /// builds without naming a token source draws from it, so the bundle
+    /// installs an issuer that never leaves the process before any test
+    /// runs. A refill already in flight keeps the issuer it started with.
+    func setIssuer(_ issuer: AnonTokenIssuing) {
+        lock.lock()
+        self.issuer = issuer
+        lock.unlock()
     }
 
     // MARK: - Session

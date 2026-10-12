@@ -42,12 +42,19 @@ export function isVisibilityLoaded(): boolean {
   return boundAccount !== null && setting() !== null;
 }
 
-// The envelope the other devices get: the current setting with its own stamp.
-setServiceEnvelopeComposer("visibility", async () => {
-  const current = setting();
-  if (boundAccount === null || current === null) return null;
-  return (await loadWasm()).composeVisibilityEnvelope(current);
-});
+/**
+ * Register the envelope the other devices get: the current setting with its
+ * own stamp. Runs once when this module loads; exported so a test that
+ * replaced the composer can put this one back.
+ */
+export function registerVisibilityComposer(): void {
+  setServiceEnvelopeComposer("visibility", async () => {
+    const current = setting();
+    if (boundAccount === null || current === null) return null;
+    return (await loadWasm()).composeVisibilityEnvelope(current);
+  });
+}
+registerVisibilityComposer();
 
 /** The stamp a change gets: strictly after the previous one even when the
  *  clock stands still or went backwards. */

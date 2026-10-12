@@ -112,6 +112,7 @@ import { deleteRecallRecord } from "./recall-record";
 import { deleteFloor } from "../backup/floor-store";
 import { clearAutoBackupState } from "../backup/auto-backup";
 import { clearGroupRoutingForAccount } from "../push/group-routing-store";
+import { clearSupersededMirrorForAccount } from "../push/superseded-mirror";
 import { deleteAnonTokensForAccount } from "../tokens/anon-token-store";
 import { clearEmojiPrefsForAccount } from "../media/emoji/emoji-index";
 
@@ -212,6 +213,8 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // kept under the device key for a re-send after a key rotation.
     { name: "sent-request-intros", run: () => deleteSentIntrosForAccount(accountIdB64) },
     { name: "push-routing", run: () => clearGroupRoutingForAccount(accountIdB64) },
+    // ADR-0065 R.8: the service worker's copy of the keys a reset retired.
+    { name: "superseded-mirror", run: () => clearSupersededMirrorForAccount(accountIdB64) },
     {
       name: "anon-tokens",
       run: () => (urlKey === null ? undefined : deleteAnonTokensForAccount(urlKey)),

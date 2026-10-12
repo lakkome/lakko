@@ -308,12 +308,12 @@ final class SendEpochStraddleTests: XCTestCase {
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
             dsClient: ds,
-            discovery: DiscoveryClient(),
+            discovery: Offline.discovery(),
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroupsStore,
             messageLogStore: MessageLogStore(),
             commitOutbox: CommitOutboxStore(rootDir: outboxDir),
-            pushRouting: PushGroupRouting(),
+            pushRouting: Offline.pushRouting(),
             beaconStore: BeaconObservationStore(
                 defaults: UserDefaults(suiteName: "straddle-b-\(UUID().uuidString)")!),
             pendingRequestStore: PendingRequestStore(

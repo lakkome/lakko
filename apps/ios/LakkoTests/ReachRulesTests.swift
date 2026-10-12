@@ -208,7 +208,7 @@ final class ReachRulesTests: XCTestCase {
         let c = ReachCenter(
             persistence: InMemoryReachPersistence(),
             // Unreachable on purpose: a unit test never registers anything.
-            ds: DsClient(baseURL: "http://127.0.0.1:1"))
+            ds: Offline.ds())
         c.activate(accountIdB64: "acct", accountIdentity: try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32)))
         return c
     }

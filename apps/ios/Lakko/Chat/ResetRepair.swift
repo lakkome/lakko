@@ -279,12 +279,71 @@ public enum ResetRepair {
     /// ``resendOwnMessagesAfterReset()`` is off. A row with no readable time
     /// is NOT re-sent: the rule is "after the reset was signed", and an
     /// unknown time proves nothing.
-    public static func messagesToResend(_ messages: [OldSegmentMessage], resetSignedAtMs: Int64) -> [Int64] {
+    ///
+    /// `afterMessageId` is the durable cursor of an interrupted re-send: the
+    /// old journal's id of the last message that landed in the successor.
+    /// Only later ids are returned, so a re-send continues and never starts
+    /// again from the first message.
+    public static func messagesToResend(
+        _ messages: [OldSegmentMessage], resetSignedAtMs: Int64, afterMessageId: Int64? = nil
+    ) -> [Int64] {
         guard resendOwnMessagesAfterReset() else { return [] }
+        let after = afterMessageId ?? 0
         return messages
             .filter { $0.own && $0.resendable && ($0.sentAtMs.map { $0 > resetSignedAtMs } ?? false) }
             .map(\.messageId)
+            .filter { $0 > after }
             .sorted()
+    }
+
+    /// What a re-sent message carries besides its text and attachments.
+    public struct ResendParts: Equatable {
+        /// The reply target: `HeldSend.replyNoJumpTarget` (the original the
+        /// quote names is a row of the OLD journal), or `nil` for no reply.
+        public let replyTo: Int64?
+        public let replyAuthor: String?
+        public let replyExcerpt: String?
+        public let forwardedFrom: String?
+        /// The forward's origin, kept as a whole pair or not at all.
+        public let forwardOriginGroupB64: String?
+        public let forwardOriginMessageId: Int64?
+        /// The re-send marker: the ORIGINAL group and message id.
+        public let resendOriginGroupB64: String
+        public let resendOriginMessageId: Int64
+    }
+
+    /// R.7 case 1: a re-sent message is the SAME message. A reply keeps its
+    /// quote (the snapshot) with target 0, since the quoted row lives in the
+    /// old journal and a successor's ids restart; a forward keeps its
+    /// attribution and its origin. A forward never carries a quote
+    /// (ADR-0052 section 5.1), so a row holding both is sent as the forward.
+    ///
+    /// | the original is | reply fields                 | forward fields        |
+    /// |-----------------|------------------------------|-----------------------|
+    /// | a plain message | none                         | none                  |
+    /// | a reply         | target 0 + author + excerpt  | none                  |
+    /// | a forward       | none                         | author + whole origin |
+    public static func resendParts(
+        replyAuthor: String?, replyExcerpt: String?, isReply: Bool,
+        forwardAuthor: String?, forwardOriginGroupB64: String?, forwardOriginMessageId: Int64?,
+        isForward: Bool,
+        originGroupB64: String, originMessageId: Int64
+    ) -> ResendParts {
+        let origin: (String, Int64)? = {
+            guard isForward, let group = forwardOriginGroupB64, !group.isEmpty,
+                  let id = forwardOriginMessageId else { return nil }
+            return (group, id)
+        }()
+        let reply = isReply && !isForward
+        return ResendParts(
+            replyTo: reply ? HeldSend.replyNoJumpTarget : nil,
+            replyAuthor: reply ? replyAuthor : nil,
+            replyExcerpt: reply ? replyExcerpt : nil,
+            forwardedFrom: isForward ? forwardAuthor : nil,
+            forwardOriginGroupB64: origin?.0,
+            forwardOriginMessageId: origin?.1,
+            resendOriginGroupB64: originGroupB64,
+            resendOriginMessageId: originMessageId)
     }
 
     /// R.7 case 3: who the winner adds to an owned group's successor: every
@@ -335,6 +394,36 @@ public enum ResetRepair {
     /// of a current key is the same person and is never dropped.
     public static func dropsSupersededSender(_ senderKeyB64: String?, supersededKeys: Set<String>) -> Bool {
         senderKeyB64.map { supersededKeys.contains($0) } ?? false
+    }
+
+    /// R.8 "nothing from a superseded sender acts": the rows of a received
+    /// batch that are kept, given each row's APPLICATION sender.
+    ///
+    /// | the row is                                              | its sender                | kept |
+    /// |---------------------------------------------------------|---------------------------|------|
+    /// | an MLS handshake row (a commit, a proposal)             | none                      | yes  |
+    /// | any application row: a chat row, an op, a control or    | a key no reset retired    | yes  |
+    /// | service envelope, call signaling                        | a key a reset retired     | no   |
+    /// | an application row whose leaf did not resolve           | none                      | yes  |
+    ///
+    /// The rule is on the SENDER, not on the kind, so a kind added later is
+    /// covered without being remembered here. The last row is not a hole:
+    /// every consumer already refuses an application row it cannot attribute
+    /// (an unresolved author edits, pins, rings and names nothing).
+    ///
+    /// `senders` runs parallel to `rows`; a row past its end has no sender.
+    public static func keptAfterSupersededSenders<Row>(
+        _ rows: [Row], senders: [String?], supersededKeys: Set<String>
+    ) -> [Row] {
+        if supersededKeys.isEmpty { return rows }
+        var kept: [Row] = []
+        kept.reserveCapacity(rows.count)
+        for (index, row) in rows.enumerated() {
+            let sender = index < senders.count ? senders[index] : nil
+            if dropsSupersededSender(sender, supersededKeys: supersededKeys) { continue }
+            kept.append(row)
+        }
+        return kept
     }
 }
 

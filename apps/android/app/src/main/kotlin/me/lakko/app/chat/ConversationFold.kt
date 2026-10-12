@@ -66,11 +66,12 @@ public fun foldConversations(threads: List<ChatThread>, lineage: Lineage): List<
         val head = byHex[plan.headHex] ?: return@mapNotNull null
         val headIndex = plan.heldSegments.indexOf(plan.headHex)
         val older = if (headIndex <= 0) emptyList() else plan.heldSegments.subList(0, headIndex)
+        val headSegment = lineage.segmentIndexOf(plan.headHex)
         if (older.isEmpty()) {
-            return@mapNotNull if (head.conversationHex == plan.conversationHex) {
+            return@mapNotNull if (head.conversationHex == plan.conversationHex && head.segmentIndex == headSegment) {
                 head
             } else {
-                head.copy(conversationHex = plan.conversationHex)
+                head.copy(conversationHex = plan.conversationHex, segmentIndex = headSegment)
             }
         }
         val history = ArrayList<ChatMessage>()
@@ -86,7 +87,53 @@ public fun foldConversations(threads: List<ChatThread>, lineage: Lineage): List<
             localUnread = unread,
             conversationHex = plan.conversationHex,
             olderSegments = older,
+            segmentIndex = headSegment,
+            olderSegmentIndices = older.map { lineage.segmentIndexOf(it) },
         )
+    }
+}
+
+/**
+ * R.5 - where a row of the folded [thread] sits in the conversation's
+ * timeline: its segment (the lineage index) and its DS message id IN that
+ * segment. A history row carries both ([ChatMessage.historyOf],
+ * [ChatMessage.historyMessageId]); every other row is the head's. `null` for
+ * a row with no DS id (a row this device made and the server has not named).
+ */
+public fun timelinePositionOf(thread: ChatThread, message: ChatMessage): TimelinePosition? {
+    val segmentHex = message.historyOf
+    if (segmentHex == null) {
+        return if (message.messageId > 0) TimelinePosition(thread.segmentIndex, message.messageId) else null
+    }
+    if (message.historyMessageId <= 0) return null
+    val at = thread.olderSegments.indexOfFirst { it.equals(segmentHex, ignoreCase = true) }
+    // A folded thread built before the indices existed, or by a test: the
+    // held order, which is the lineage order when every segment is held.
+    val segment = thread.olderSegmentIndices.getOrNull(at) ?: at.takeIf { it >= 0 } ?: return null
+    return TimelinePosition(segment, message.historyMessageId)
+}
+
+/**
+ * R.5 - whether a row of the folded [thread] is PAST the read position, that
+ * is, not read yet as the cross-device cursor knows it
+ * ([readUpToInSegment]).
+ *
+ * | the position is in ...             | the row is unread |
+ * |------------------------------------|-------------------|
+ * | an earlier segment than the row's  | yes               |
+ * | the row's segment                  | id > position's   |
+ * | a later segment                    | no                |
+ *
+ * So an unread row of an OLDER segment counts until the position passes it,
+ * and a head row is never read by a position that only reached the old
+ * group. A row with no timeline position is not counted.
+ */
+public fun rowPastReadPosition(thread: ChatThread, message: ChatMessage, position: TimelinePosition): Boolean {
+    val at = timelinePositionOf(thread, message) ?: return false
+    return when (val read = readUpToInSegment(position, at.segment)) {
+        SegmentRead.Nothing -> true
+        SegmentRead.All -> false
+        is SegmentRead.UpTo -> at.messageId > read.messageId
     }
 }
 

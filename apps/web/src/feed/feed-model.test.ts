@@ -10,6 +10,9 @@ import type { PersistedMessage } from "../chat/message-log-store";
 import {
   buildFeedInput,
   FEED_MAX_WINDOW_MS,
+  FEED_SEGMENT_ID_SPAN,
+  feedRankId,
+  feedRefLogKey,
   feedSourceKey,
   groupFeedSources,
   reactionSummary,
@@ -259,5 +262,120 @@ describe("the feed's sources are conversations, not groups (ADR-0065 R.5)", () =
     expect(withoutHidden(sources, ["root"]).map((s) => s.idHex)).toEqual(["plain"]);
     // The successor's own id hides nothing: it is not what a person hid.
     expect(withoutHidden(sources, ["successor"])).toHaveLength(2);
+  });
+});
+
+describe("an older group of a moved conversation feeds the same source (ADR-0065 R.5 / R.7 case 3)", () => {
+  const ROOT = "11".repeat(32);
+  const MIDDLE = "22".repeat(32);
+  const HEAD = "33".repeat(32);
+  const MOVED: FeedSource = {
+    kind: "group",
+    idHex: HEAD,
+    conversationHex: ROOT,
+    olderSegmentHexes: [ROOT, MIDDLE],
+    slug: "head-slug",
+    title: "Book club",
+    muted: false,
+    audience: 5,
+  };
+  const moved = (log: Record<string, PersistedMessage[]>, source: FeedSource = MOVED) =>
+    ctx([], {
+      sources: [source],
+      log: Object.fromEntries(Object.entries(log).map(([hex, messages]) => [hex, { cursor: "0", messages }])),
+    });
+
+  it("a row still arriving in an old group's journal is an item of the conversation", () => {
+    const input = buildFeedInput(
+      moved({
+        [ROOT]: [msg(40, 2 * HOUR, { text: "still writing in the old group" })],
+        [HEAD]: [msg(1, HOUR, { text: "first in the successor" })],
+      }),
+    );
+    expect(input.refs.map((r) => r.message.text)).toEqual([
+      "still writing in the old group",
+      "first in the successor",
+    ]);
+    // Both are items of the ONE source.
+    expect(input.candidates.map((c) => c.conversation)).toEqual([0, 0]);
+    expect(input.refs.every((r) => r.source === MOVED)).toBe(true);
+    // The old row says which group it lives in and how far behind the head.
+    expect(input.refs[0]?.segment).toEqual({ idHex: ROOT, distanceFromHead: 2 });
+    expect(input.refs[1]?.segment).toBeUndefined();
+    expect(feedRefLogKey(input.refs[0]!)).toBe(ROOT);
+    expect(feedRefLogKey(input.refs[1]!)).toBe(HEAD);
+  });
+
+  it("the head's ids are unchanged and no two groups' rows share a rank id", () => {
+    const input = buildFeedInput(
+      moved({
+        [ROOT]: [msg(1, 4 * HOUR), msg(2, 3 * HOUR)],
+        [MIDDLE]: [msg(1, 2 * HOUR)],
+        [HEAD]: [msg(1, HOUR), msg(2, HOUR / 2)],
+      }),
+    );
+    const ids = input.candidates.map((c) => c.messageId);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.slice(-2)).toEqual([1n, 2n]);
+    expect(ids[0]).toBe(1n + 2n * FEED_SEGMENT_ID_SPAN);
+    expect(ids[2]).toBe(1n + FEED_SEGMENT_ID_SPAN);
+    expect(feedRankId(7n, 0)).toBe(7n);
+  });
+
+  it("a reply is folded under its parent inside its own group, never under a same-numbered row of another", () => {
+    const input = buildFeedInput(
+      moved({
+        [ROOT]: [msg(10, 5 * HOUR, { text: "old parent" }), msg(11, 4 * HOUR, { text: "old reply", reply: { target: "10" } })],
+        [HEAD]: [msg(10, 2 * HOUR, { text: "new parent" }), msg(12, HOUR, { text: "new reply", reply: { target: "10" } })],
+      }),
+    );
+    const items = rankFeedInput(wasm, wasm.FeedRule.preset(wasm.FeedPreset.Latest), input, NOW);
+    expect(items.map((i) => i.ref.message.text)).toEqual(["new parent", "old parent"]);
+    expect(items[0]?.replies.map((r) => r.message.text)).toEqual(["new reply"]);
+    expect(items[1]?.replies.map((r) => r.message.text)).toEqual(["old reply"]);
+  });
+
+  it("'replies to me' is judged inside the row's own group", () => {
+    const input = buildFeedInput(
+      moved({
+        // My message 5 lives in the OLD group; a reply to 5 in the head
+        // answers somebody else's row there.
+        [ROOT]: [msg(5, 5 * HOUR, { direction: "outgoing" }), msg(6, 4 * HOUR, { reply: { target: "5" } })],
+        [HEAD]: [msg(5, 2 * HOUR), msg(7, HOUR, { reply: { target: "5" } })],
+      }),
+    );
+    const byText = new Map(input.refs.map((r) => [`${feedRefLogKey(r)}:${r.message.messageId}`, r.repliesToMe]));
+    expect(byText.get(`${ROOT}:6`)).toBe(true);
+    expect(byText.get(`${HEAD}:7`)).toBe(false);
+  });
+
+  it("an old group this device holds no log for adds nothing, and the window still applies", () => {
+    const input = buildFeedInput(
+      moved({
+        [ROOT]: [msg(1, FEED_MAX_WINDOW_MS + HOUR), msg(2, HOUR)],
+        [HEAD]: [],
+      }),
+    );
+    expect(input.refs.map((r) => r.message.messageId)).toEqual(["2"]);
+  });
+
+  it("the source list names the older groups a conversation holds, oldest first", () => {
+    const sources = groupFeedSources(
+      [
+        {
+          conversationHex: ROOT,
+          headHex: HEAD,
+          olderSegmentHexes: [ROOT, MIDDLE],
+          slug: "head-slug",
+          title: "Book club",
+          audience: 5,
+        },
+        { conversationHex: "plain", headHex: "plain", olderSegmentHexes: [], slug: "s", title: "t", audience: 2 },
+      ],
+      () => false,
+    );
+    expect(sources[0]?.olderSegmentHexes).toEqual([ROOT, MIDDLE]);
+    expect(sources[0]?.idHex).toBe(HEAD);
+    expect(sources[1] !== undefined && "olderSegmentHexes" in sources[1]).toBe(false);
   });
 });

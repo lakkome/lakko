@@ -84,7 +84,8 @@ private struct BackupHeadResponse: Decodable {
 public func mintBackupHead(
     sessionToken: String?,
     envelopeHash: Data,
-    baseURL: String = AuthClient.defaultBaseURL
+    baseURL: String = AuthClient.defaultBaseURL,
+    session: URLSession = .shared
 ) async throws -> MintedBackupHead {
     guard let token = sessionToken, !token.isEmpty else {
         throw BackupHeadMintError.noSessionToken
@@ -105,7 +106,7 @@ public func mintBackupHead(
     // surface, like the DeviceAttestKey JWKS fetch); disarmed = the direct
     // URLSession path.
     let (data, response) = try await AntiCensorshipTransport.perform(
-        request, session: .shared, config: .current)
+        request, session: session, config: .current)
     guard let http = response as? HTTPURLResponse else {
         throw BackupHeadMintError.http(0)
     }

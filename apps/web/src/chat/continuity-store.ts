@@ -10,7 +10,8 @@
  *     (`lineage.ts` `oldSegmentPolled`);
  *   * that the founder's re-send of its own messages into the successor of
  *     a one-to-one RAN (`reset-repair.ts` `messagesToResend`), so a second
- *     pass never sends them twice;
+ *     pass never sends them twice, and how far an interrupted one got (the
+ *     original id of the last message that landed), so it continues there;
  *   * the first half of a member's device swap that landed in a commit of
  *     its own, so the second half leaves no `Members changed` row either.
  *
@@ -33,12 +34,16 @@ interface Row {
   /** base64 old group id -> its push subscription was retired here
    *  (`lineage.ts` `retiresOldSegmentPush`). */
   pushRetired: Record<string, true>;
+  /** base64 old group id -> the ORIGINAL message id of the last re-sent
+   *  message that landed in the successor: where an interrupted re-send
+   *  continues (`reset-repair.ts` `resendRemaining`). */
+  resendCursor: Record<string, number>;
 }
 
 function load(accountIdB64: string): Row {
   try {
     const raw = localStorage.getItem(CONTINUITY_STATE_PREFIX + accountIdB64);
-    if (raw === null) return { moved: {}, resent: {}, swapping: {}, pushRetired: {} };
+    if (raw === null) return { moved: {}, resent: {}, swapping: {}, pushRetired: {}, resendCursor: {} };
     const parsed = JSON.parse(raw) as Partial<Row>;
     return {
       moved: typeof parsed.moved === "object" && parsed.moved !== null ? parsed.moved : {},
@@ -47,9 +52,13 @@ function load(accountIdB64: string): Row {
         typeof parsed.swapping === "object" && parsed.swapping !== null ? parsed.swapping : {},
       pushRetired:
         typeof parsed.pushRetired === "object" && parsed.pushRetired !== null ? parsed.pushRetired : {},
+      resendCursor:
+        typeof parsed.resendCursor === "object" && parsed.resendCursor !== null
+          ? parsed.resendCursor
+          : {},
     };
   } catch {
-    return { moved: {}, resent: {}, swapping: {}, pushRetired: {} };
+    return { moved: {}, resent: {}, swapping: {}, pushRetired: {}, resendCursor: {} };
   }
 }
 
@@ -84,6 +93,28 @@ export function markResent(accountIdB64: string, oldGroupIdB64: string): void {
 
 export function wasResent(accountIdB64: string, oldGroupIdB64: string): boolean {
   return load(accountIdB64).resent[oldGroupIdB64] === true;
+}
+
+/**
+ * The re-send of `oldGroupIdB64` got as far as the original `messageId`:
+ * that message LANDED in the successor. Monotone: a lower id never moves
+ * the cursor back. Written after every message, so an interruption costs
+ * at most the message in flight.
+ */
+export function advanceResendCursor(accountIdB64: string, oldGroupIdB64: string, messageId: number): void {
+  if (!Number.isSafeInteger(messageId) || messageId < 0) return;
+  const row = load(accountIdB64);
+  const held = row.resendCursor[oldGroupIdB64];
+  if (typeof held === "number" && Number.isFinite(held) && held >= messageId) return;
+  row.resendCursor[oldGroupIdB64] = messageId;
+  save(accountIdB64, row);
+}
+
+/** Where the re-send of `oldGroupIdB64` continues after, or `null` when no
+ *  message of it has landed. */
+export function resendCursorOf(accountIdB64: string, oldGroupIdB64: string): number | null {
+  const at = load(accountIdB64).resendCursor[oldGroupIdB64];
+  return typeof at === "number" && Number.isSafeInteger(at) && at >= 0 ? at : null;
 }
 
 /** The old group's push subscription was retired on this device. */

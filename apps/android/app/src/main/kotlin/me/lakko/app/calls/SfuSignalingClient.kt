@@ -4,7 +4,6 @@
 package me.lakko.app.calls
 
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocketSession
@@ -107,7 +106,8 @@ class SfuSignalingClient(
     private val scope: CoroutineScope,
     private val callbacks: SfuSignalingCallbacks,
 ) {
-    private val client = HttpClient(OkHttp) { install(WebSockets) }
+    private val engine = me.lakko.app.transport.BaseHttpEngine.create()
+    private val client = HttpClient(engine) { install(WebSockets) }
     private var session: DefaultClientWebSocketSession? = null
     private var receiveJob: Job? = null
 
@@ -338,6 +338,8 @@ class SfuSignalingClient(
             }
         }
         client.close()
+        // The client was handed an engine instance, which it does not own.
+        runCatching { engine.close() }
     }
 }
 

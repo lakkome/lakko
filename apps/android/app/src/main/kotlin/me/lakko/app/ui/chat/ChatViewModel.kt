@@ -495,8 +495,15 @@ public class ChatViewModel(
                 )
             }
         }
+        // ADR-0065 R.5 — what was typed and not sent belongs to the
+        // conversation, not to the group this screen happens to be on: a
+        // screen rebuilt on the conversation's successor starts with it
+        // ([me.lakko.app.chat.ComposerCarry]). Seeded here, before the
+        // collector below reports the composer's text back.
+        composer.update { it.copy(draft = me.lakko.app.chat.composerSeed(it.draft, repo.unsentComposerText(groupIdHex))) }
         viewModelScope.launch {
             composer.collect { composerState ->
+                repo.noteComposerText(groupIdHex, composerState.draft)
                 derived.value = buildState(repo.state.value, composerState, lastTypingText)
             }
         }
@@ -1077,6 +1084,10 @@ public class ChatViewModel(
      * reason, not about hiding every error.
      */
     private fun reportMembershipFailure(e: Throwable, op: String, fallbackKey: String) {
+        // The screen went away while the action was in flight (the scope was
+        // cancelled): nothing failed, and there is nobody to tell. A timeout
+        // is a failure and is reported like any other.
+        if (e is kotlinx.coroutines.CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) return
         // ADR-0061 section 6: the reason, the token pool or the device clock
         // pick the sentence; anything else is the action's own key. The raw
         // message stays in the log, for the people it was written for.

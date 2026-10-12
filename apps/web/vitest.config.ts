@@ -52,6 +52,9 @@ export default defineConfig({
           name: "rules",
           environment: "node",
           include: ["src/**/*.test.ts"],
+          // No unit test may reach the network: every transport global
+          // refuses unless the test installs its own (`src/test/no-network.ts`).
+          setupFiles: ["src/test/no-network.ts"],
           // The wasm core is large; give the proof-roundtrip tests a
           // little headroom over the default per-test timeout.
           testTimeout: 20000,
@@ -70,6 +73,7 @@ export default defineConfig({
           name: "ui",
           environment: "jsdom",
           include: ["src/**/*.test.tsx"],
+          setupFiles: ["src/test/no-network.ts"],
           // Solid must be the BROWSER build here for the same reason the
           // project above pins the condition, and for a second one: the
           // plugin's `config` hook adds `/solid-js/` to `server.deps.external`

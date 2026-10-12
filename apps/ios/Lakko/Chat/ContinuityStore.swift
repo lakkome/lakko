@@ -48,6 +48,10 @@ public final class ContinuityStore {
         var swapping: [String: [String: Int64]] = [:]
         /// base64 old group id -> its push subscription was retired here.
         var pushRetired: Set<String> = []
+        /// base64 old group id -> the DS message id (in the OLD journal) of
+        /// the last message whose re-send into the successor landed: where an
+        /// interrupted re-send continues.
+        var resendCursor: [String: Int64] = [:]
     }
 
     private static func millis(_ raw: Any) -> Int64? {
@@ -90,7 +94,8 @@ public final class ContinuityStore {
         }
         return Row(
             moved: stamps(object["moved"]), resent: marks(object["resent"]),
-            swapping: swapping, pushRetired: marks(object["pushRetired"]))
+            swapping: swapping, pushRetired: marks(object["pushRetired"]),
+            resendCursor: stamps(object["resendCursor"]).filter { $0.value > 0 })
     }
 
     static func encode(_ row: Row) -> Data? {
@@ -105,6 +110,7 @@ public final class ContinuityStore {
             "resent": trues(row.resent),
             "swapping": row.swapping.mapValues { numbers($0) as Any },
             "pushRetired": trues(row.pushRetired),
+            "resendCursor": numbers(row.resendCursor),
         ]
         return try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
     }
@@ -142,6 +148,21 @@ public final class ContinuityStore {
 
     public func wasResent(oldGroupIdB64: String) -> Bool {
         load().resent.contains(oldGroupIdB64)
+    }
+
+    /// The old journal's message id of the last message whose re-send into
+    /// the successor of `oldGroupIdB64` landed, or `nil` before the first.
+    public func resendCursor(oldGroupIdB64: String) -> Int64? {
+        load().resendCursor[oldGroupIdB64]
+    }
+
+    /// Advance that cursor. Never moves backward: a re-send is in the old
+    /// journal's order, and a smaller id would send a landed message again.
+    public func advanceResendCursor(oldGroupIdB64: String, to messageId: Int64) {
+        var row = load()
+        guard messageId > (row.resendCursor[oldGroupIdB64] ?? 0) else { return }
+        row.resendCursor[oldGroupIdB64] = messageId
+        save(row)
     }
 
     /// The old group's push subscription was retired on this device.

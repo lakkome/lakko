@@ -44,6 +44,11 @@ public data class ContinuityRow(
      *  plain fact so the background push path, which opens no MLS state for
      *  this question, can answer it. */
     val movedOneToOne: Set<String> = emptySet(),
+    /** Old group -> the id (in the OLD journal) of the last of this
+     *  account's messages whose re-send into the successor LANDED: an
+     *  interrupted re-send continues after it. Gone once the group is in
+     *  [resent]. */
+    val resendCursor: Map<String, Long> = emptyMap(),
 )
 
 /** Record that [oldGroupHex] moved; the FIRST time wins. */
@@ -56,8 +61,18 @@ public fun ContinuityRow.withMoved(oldGroupHex: String, nowMs: Long, oneToOne: B
     }
 }
 
+/** The re-send of [oldGroupHex] ran to its end: its cursor is spent. */
 public fun ContinuityRow.withResent(oldGroupHex: String): ContinuityRow =
-    if (oldGroupHex in resent) this else copy(resent = resent + oldGroupHex)
+    if (oldGroupHex in resent && !resendCursor.containsKey(oldGroupHex)) {
+        this
+    } else {
+        copy(resent = resent + oldGroupHex, resendCursor = resendCursor - oldGroupHex)
+    }
+
+/** The re-send of the message [messageId] of [oldGroupHex] landed. The
+ *  cursor only moves forward. */
+public fun ContinuityRow.withResendCursor(oldGroupHex: String, messageId: Long): ContinuityRow =
+    if ((resendCursor[oldGroupHex] ?: 0L) >= messageId) this else copy(resendCursor = resendCursor + (oldGroupHex to messageId))
 
 public fun ContinuityRow.withPushRetired(oldGroupHex: String): ContinuityRow =
     if (oldGroupHex in pushRetired) this else copy(pushRetired = pushRetired + oldGroupHex)

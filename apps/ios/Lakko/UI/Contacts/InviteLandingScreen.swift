@@ -30,30 +30,40 @@ public struct InviteLandingScreen: View {
 
     @ObservedObject public var viewModel: InviteLandingViewModel
     public var onDone: () -> Void
+    /// ADR-0065 R.7 case 1 / UX 16.6 — a link from a person who is already a
+    /// contact opens that contact (the route's key is the contact's request
+    /// id): this screen is replaced, it shows no result of its own.
+    public var onOpenContact: (Int64) -> Void
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     public init(
         viewModel: InviteLandingViewModel,
-        onDone: @escaping () -> Void
+        onDone: @escaping () -> Void,
+        onOpenContact: @escaping (Int64) -> Void = { _ in }
     ) {
         self.viewModel = viewModel
         self.onDone = onDone
+        self.onOpenContact = onOpenContact
     }
 
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 content
-                Button(action: {
-                    viewModel.dismiss()
-                    onDone()
-                }) {
-                    Text(l10n.t("common.done"))
-                        .frame(maxWidth: .infinity)
+                // No Done while the flow runs or hands over to the contact:
+                // there is no result on this screen to be done with.
+                if InviteLandingViewModel.showsResult(viewModel.state) {
+                    Button(action: {
+                        viewModel.dismiss()
+                        onDone()
+                    }) {
+                        Text(l10n.t("common.done"))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
             }
             .padding(24)
         }
@@ -61,13 +71,23 @@ public struct InviteLandingScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await viewModel.run()
+            openContactIfKnown()
         }
+    }
+
+    /// Hand over to the contact the link's owner already is, once.
+    private func openContactIfKnown() {
+        guard let contact = InviteLandingViewModel.contactToOpen(viewModel.state) else { return }
+        viewModel.dismiss()
+        onOpenContact(contact)
     }
 
     @ViewBuilder
     private var content: some View {
         switch viewModel.state {
-        case .running:
+        case .running, .done(.knownContact):
+            // A known contact is never a result here: the progress stays
+            // until the contact's own screen replaces this one.
             VStack(alignment: .leading, spacing: 8) {
                 ProgressView()
                     .controlSize(.large)
@@ -130,7 +150,7 @@ public struct InviteLandingScreen: View {
     private func headline(for result: AcceptInviteResult) -> String {
         switch result {
         case .accepted: return l10n.t("invite.contact.result.sent_title")
-        case .alreadyAccepted: return l10n.t("invite.contact.result.already_title")
+        case .alreadyAccepted, .knownContact: return l10n.t("invite.contact.result.already_title")
         case .expired: return l10n.t("invite.contact.result.expired_title")
         case .exhausted: return l10n.t("invite.contact.result.used_up_title")
         case .notFound: return l10n.t("invite.contact.result.not_found_title")
@@ -149,7 +169,7 @@ public struct InviteLandingScreen: View {
         switch result {
         case .accepted:
             return l10n.t("invite.contact.result.sent_body")
-        case .alreadyAccepted:
+        case .alreadyAccepted, .knownContact:
             return l10n.t("invite.contact.result.already_body")
         case .expired:
             return l10n.t("invite.contact.expired")
@@ -189,6 +209,25 @@ public final class InviteLandingViewModel: ObservableObject {
     }
 
     @Published public private(set) var state: State = .running
+
+    /// The contact a finished flow opens instead of showing a result: the
+    /// link's owner is already an established contact.
+    ///
+    /// | state                         | opens a contact | shows a result |
+    /// |-------------------------------|-----------------|----------------|
+    /// | running                       | no              | no             |
+    /// | done, a known contact         | that contact    | no             |
+    /// | done, anything else           | no              | yes            |
+    public nonisolated static func contactToOpen(_ state: State) -> Int64? {
+        if case .done(.knownContact(let contactMessageId)) = state { return contactMessageId }
+        return nil
+    }
+
+    /// Whether the screen shows a result (and its Done button) for `state`.
+    public nonisolated static func showsResult(_ state: State) -> Bool {
+        guard case .done = state else { return false }
+        return contactToOpen(state) == nil
+    }
 
     private let slug: String
     private let repository: ContactsRepository

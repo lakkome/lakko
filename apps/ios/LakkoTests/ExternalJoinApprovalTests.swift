@@ -319,12 +319,12 @@ final class ExternalJoinApprovalTests: XCTestCase {
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
             dsClient: ds,
-            discovery: DiscoveryClient(),
+            discovery: Offline.discovery(),
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroupsStore,
             messageLogStore: MessageLogStore(),
             commitOutbox: CommitOutboxStore(rootDir: outboxDir),
-            pushRouting: PushGroupRouting(),
+            pushRouting: Offline.pushRouting(),
             beaconStore: beaconStore,
             pendingRequestStore: PendingRequestStore(
                 defaults: UserDefaults(suiteName: "ext-join-approve-p-\(UUID().uuidString)")!)

@@ -4,8 +4,9 @@
 package me.lakko.app.chat
 
 import android.content.Context
-import android.content.SharedPreferences
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 
 /*
@@ -27,8 +28,10 @@ import kotlinx.serialization.json.Json
  *   * `prepared` - the successor this device created locally (step 1), with
  *     the Welcome of its founding commit until that was delivered.
  *
- * Nothing here is shown: the store has no reader in any view (R.0). Mirror
- * of `apps/web/src/chat/group-closed-store.ts`.
+ * Nothing here is shown: the store has no reader in any view (R.0). The
+ * rows are SEALED under the device's Keystore key between sessions: a
+ * prepared row holds the Welcome of a successor nobody has joined yet.
+ * Mirror of `apps/web/src/chat/group-closed-store.ts`.
  */
 
 /** This device's own claim, posted and not yet decided. */
@@ -145,7 +148,9 @@ internal fun decodeStoredClaims(raw: String?): StoredClaims? {
 public interface SuccessorClaimBackend {
     public fun load(accountIdB64: String, groupIdHex: String): StoredClaims?
 
-    public fun save(accountIdB64: String, groupIdHex: String, value: StoredClaims)
+    /** `false` when the row could not be written to disk (it is still what
+     *  [load] answers for the rest of the session). */
+    public fun save(accountIdB64: String, groupIdHex: String, value: StoredClaims): Boolean
 
     public fun remove(accountIdB64: String, groupIdHex: String)
 
@@ -161,8 +166,9 @@ public class InMemorySuccessorClaimBackend : SuccessorClaimBackend {
     override fun load(accountIdB64: String, groupIdHex: String): StoredClaims? =
         synchronized(rows) { rows[key(accountIdB64, groupIdHex)] }
 
-    override fun save(accountIdB64: String, groupIdHex: String, value: StoredClaims) {
+    override fun save(accountIdB64: String, groupIdHex: String, value: StoredClaims): Boolean {
         synchronized(rows) { rows[key(accountIdB64, groupIdHex)] = value }
+        return true
     }
 
     override fun remove(accountIdB64: String, groupIdHex: String) {
@@ -175,60 +181,162 @@ public class InMemorySuccessorClaimBackend : SuccessorClaimBackend {
         }
 }
 
-/**
- * Production backend: plain preferences, one row per `(account, old group)`.
- * Group ids, public account keys, DS message ids and a Welcome (a public MLS
- * artefact sealed to its recipients) - no key material. Written
- * synchronously: the own-claim record must be on disk before the publish.
- */
-public class SharedPrefsSuccessorClaimBackend(context: Context) : SuccessorClaimBackend {
-    private val appContext = context.applicationContext
+private val CLAIM_FILE = MapSerializer(String.serializer(), String.serializer())
 
-    private fun prefs(): SharedPreferences = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+/** Every claim state of one account as one stored text. Visible for the
+ *  codec test. */
+internal fun encodeClaimFile(rows: Map<String, StoredClaims>): String =
+    claimsJson.encodeToString(
+        CLAIM_FILE,
+        rows.mapKeys { it.key.lowercase() }.mapValues { encodeStoredClaims(it.value) },
+    )
 
-    private fun prefix(accountIdB64: String) = "$KEY_PREFIX$accountIdB64:"
+/** The inverse; a text that is not this schema is "no claims", and a row
+ *  that does not decode is left out rather than trusted. */
+internal fun decodeClaimFile(raw: String?): Map<String, StoredClaims> {
+    if (raw.isNullOrEmpty()) return emptyMap()
+    return try {
+        claimsJson.decodeFromString(
+            CLAIM_FILE,
+            raw,
+        ).mapNotNull { (group, row) -> decodeStoredClaims(row)?.let { group.lowercase() to it } }.toMap()
+    } catch (_: Exception) {
+        emptyMap()
+    }
+}
 
-    override fun load(accountIdB64: String, groupIdHex: String): StoredClaims? =
-        try {
-            decodeStoredClaims(prefs().getString(prefix(accountIdB64) + groupIdHex.lowercase(), null))
-        } catch (_: Throwable) {
-            null
-        }
+/** One sealed text per account: what [SealedSuccessorClaimBackend] reads
+ *  and writes. Production seals with the device's Keystore key. */
+public interface ClaimBlobs {
+    public fun read(accountIdB64: String): String?
 
-    override fun save(accountIdB64: String, groupIdHex: String, value: StoredClaims) {
-        prefs().edit().putString(prefix(accountIdB64) + groupIdHex.lowercase(), encodeStoredClaims(value)).commit()
+    /** `false` when nothing was written. */
+    public fun write(accountIdB64: String, text: String): Boolean
+
+    public fun delete(accountIdB64: String)
+}
+
+/** Unsealed, in memory (tests). */
+public class InMemoryClaimBlobs : ClaimBlobs {
+    public val texts: MutableMap<String, String> = java.util.concurrent.ConcurrentHashMap()
+
+    /** While `true` every write fails, as a full disk or a locked Keystore
+     *  would. */
+    @Volatile
+    public var failing: Boolean = false
+
+    override fun read(accountIdB64: String): String? = texts[accountIdB64]
+
+    override fun write(accountIdB64: String, text: String): Boolean {
+        if (failing) return false
+        texts[accountIdB64] = text
+        return true
     }
 
+    override fun delete(accountIdB64: String) {
+        texts.remove(accountIdB64)
+    }
+}
+
+/**
+ * Production backend: ONE file per account, sealed (AES-GCM) under the
+ * device's Keystore key, under `noBackupFilesDir`
+ * ([me.lakko.app.feed.FeedSealedStore], the same root and key as the other
+ * sealed local stores). It holds group ids, public account keys, DS message
+ * ids and, in a prepared row, the Welcome of the successor's founding commit.
+ * The Welcome is sealed to its recipients, but it is also what lets them in,
+ * and until the claim is confirmed nobody is meant to hold it: so the file
+ * is not left readable to anything that can read this app's storage.
+ *
+ * Written synchronously and whole on every change; the file is read once per
+ * account and kept in memory. A failed write is answered `false` and the row
+ * stays in memory, so the session goes on; the caller that needs the row on
+ * disk before it publishes (the own claim, a prepared successor) checks.
+ */
+public class SealedSuccessorClaimBackend(private val blobs: ClaimBlobs) : SuccessorClaimBackend {
+    private val lock = Any()
+    private val cache = HashMap<String, MutableMap<String, StoredClaims>>()
+    private var seenWipes = wipes.get()
+
+    private fun rows(accountIdB64: String): MutableMap<String, StoredClaims> {
+        val now = wipes.get()
+        if (now != seenWipes) {
+            // An account's file was deleted behind this instance.
+            cache.clear()
+            seenWipes = now
+        }
+        return cache.getOrPut(accountIdB64) {
+            val read = try {
+                blobs.read(accountIdB64)
+            } catch (_: Throwable) {
+                null
+            }
+            HashMap(decodeClaimFile(read))
+        }
+    }
+
+    private fun persist(accountIdB64: String, rows: Map<String, StoredClaims>): Boolean =
+        try {
+            if (rows.isEmpty()) {
+                blobs.delete(accountIdB64)
+                true
+            } else {
+                blobs.write(accountIdB64, encodeClaimFile(rows))
+            }
+        } catch (_: Throwable) {
+            false
+        }
+
+    override fun load(accountIdB64: String, groupIdHex: String): StoredClaims? =
+        synchronized(lock) { rows(accountIdB64)[groupIdHex.lowercase()] }
+
+    override fun save(accountIdB64: String, groupIdHex: String, value: StoredClaims): Boolean =
+        synchronized(lock) {
+            val rows = rows(accountIdB64)
+            rows[groupIdHex.lowercase()] = value
+            persist(accountIdB64, rows)
+        }
+
     override fun remove(accountIdB64: String, groupIdHex: String) {
-        prefs().edit().remove(prefix(accountIdB64) + groupIdHex.lowercase()).apply()
+        synchronized(lock) {
+            val rows = rows(accountIdB64)
+            if (rows.remove(groupIdHex.lowercase()) != null) persist(accountIdB64, rows)
+        }
     }
 
     override fun loadAll(accountIdB64: String): Map<String, StoredClaims> =
-        try {
-            val p = prefix(accountIdB64)
-            prefs().all.entries
-                .filter { it.key.startsWith(p) }
-                .mapNotNull { e -> decodeStoredClaims(e.value as? String)?.let { e.key.removePrefix(p) to it } }
-                .toMap()
-        } catch (_: Throwable) {
-            emptyMap()
-        }
+        synchronized(lock) { HashMap(rows(accountIdB64)) }
 
     public companion object {
-        public const val PREFS: String = "lakko-successor-claims"
+        /** The directory under the sealed-store root
+         *  (`noBackupFilesDir/lakko-feed/`). */
+        public const val DIR: String = "successor-claims"
 
-        /** Version 3 is the claim state; rows of the visible flow lived in
-         *  other preference files and are never read. */
-        private const val KEY_PREFIX = "claims-v3:"
+        private val wipes = java.util.concurrent.atomic.AtomicLong(0)
+
+        /** The backend over this device's sealed storage. */
+        public fun onDevice(context: Context): SealedSuccessorClaimBackend {
+            val app = context.applicationContext
+            return SealedSuccessorClaimBackend(
+                object : ClaimBlobs {
+                    override fun read(accountIdB64: String): String? =
+                        me.lakko.app.feed.FeedSealedStore.read(app, DIR, accountIdB64)
+
+                    override fun write(accountIdB64: String, text: String): Boolean =
+                        me.lakko.app.feed.FeedSealedStore.write(app, DIR, accountIdB64, text)
+
+                    override fun delete(accountIdB64: String) {
+                        me.lakko.app.feed.FeedSealedStore.delete(app, DIR, accountIdB64)
+                    }
+                },
+            )
+        }
 
         /** Forget every claim state of the account (its data is wiped). */
         public fun deleteAccount(context: Context, accountIdB64: String) {
+            wipes.incrementAndGet()
             try {
-                val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                val prefix = "$KEY_PREFIX$accountIdB64:"
-                val e = p.edit()
-                for (k in p.all.keys) if (k.startsWith(prefix)) e.remove(k)
-                e.apply()
+                me.lakko.app.feed.FeedSealedStore.delete(context.applicationContext, DIR, accountIdB64)
             } catch (_: Throwable) {
                 // best-effort
             }

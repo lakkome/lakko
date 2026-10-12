@@ -36,7 +36,11 @@ extension ChatRepository {
         continuityPins.loadSupersededKeys()
     }
 
-    var groupClosedStore: GroupClosedStore { GroupClosedStore(ownerAccountIdB64: currentAccountIdB64) }
+    /// The claim store, sealed under the device key (it can hold a prepared
+    /// Welcome): the wrap the held-send queue uses.
+    var groupClosedStore: GroupClosedStore {
+        GroupClosedStore(ownerAccountIdB64: currentAccountIdB64, sealer: heldSendSealer)
+    }
 
     /// What the continuity rules read off one live group, or `nil` when it
     /// cannot be read.
@@ -107,6 +111,8 @@ extension ChatRepository {
                     // are judged again, and every held group is offered a
                     // pass.
                     for hex in Array(self.groups.keys) { self.rejudgeClaims(groupIdHex: hex) }
+                    // The extension learns the key this reset retired.
+                    self.mirrorContinuityFacts()
                     self.continueAllSoon(force: true)
                 }
             }
@@ -277,6 +283,9 @@ extension ChatRepository {
         let now = Self.nowMs()
         if !force, now - lastContinuitySweepAtMs < Self.continuitySweepIntervalMs { return }
         lastContinuitySweepAtMs = now
+        // What the notification extension could not withhold (a push for a
+        // row this app shows nothing for) is taken down.
+        removeQuietNotifications()
         // Not gated on a superseded key: a device that learned the lineage
         // from another device of the account retires the old subscription and
         // ends a call in the moved conversation too.
@@ -363,8 +372,9 @@ extension ChatRepository {
         memberAccountIdHints[newKey] = newIdentityAccountId
         // Only the devices bound to the key this device ACCEPTED: the
         // directory is not trusted to say whose devices these are.
-        let listed = try await discovery.fetchKeyPackages(accountId: newIdentityAccountId) ?? []
-        let recipientDevices = devicesOfExpectedPerson(listed, expectedKey: newKey)
+        // The gate runs first, like every other add (``expectedPersonDevices``).
+        let recipientDevices = try await expectedPersonDevices(
+            accountId: newIdentityAccountId, expectedKey: newKey)
         guard !recipientDevices.isEmpty else {
             throw ChatError.argument("the reset identity publishes no device yet")
         }
@@ -600,6 +610,8 @@ extension ChatRepository {
             return
         }
         let stored = old.messages
+        // An interrupted re-send continues after the last message that
+        // landed (the durable cursor), never from the first.
         let ids = ResetRepair.messagesToResend(
             stored.filter { $0.messageId > 0 && $0.ack == .sent }.map {
                 ResetRepair.OldSegmentMessage(
@@ -608,42 +620,77 @@ extension ChatRepository {
                     sentAtMs: Self.parseDsTimestampMs($0.createdAt),
                     resendable: !$0.deleted && (!$0.text.isEmpty || !$0.attachments.isEmpty))
             },
-            resetSignedAtMs: signedAtMs)
+            resetSignedAtMs: signedAtMs,
+            afterMessageId: marks.resendCursor(oldGroupIdB64: oldB64))
         for id in ids {
             guard let message = stored.first(where: { $0.messageId == id }) else { continue }
             // The same content, sealed again for the new session. The stored
             // attachment references are reused: it is the same conversation.
+            // A reply keeps its quote and a forward its attribution and
+            // origin (`ResetRepair.resendParts`).
+            let parts = ResetRepair.resendParts(
+                replyAuthor: message.reply?.author, replyExcerpt: message.reply?.excerpt,
+                isReply: message.reply != nil,
+                forwardAuthor: message.forward?.author,
+                forwardOriginGroupB64: message.forward?.originGroupIdHex
+                    .flatMap(ForwardPayload.groupIdB64(fromHex:)),
+                forwardOriginMessageId: message.forward?.originMessageId,
+                isForward: message.forward != nil,
+                originGroupB64: oldB64, originMessageId: id)
             let envelope = try LakkoCore.composeChatEnvelope(
                 text: message.text,
                 attachments: message.attachments,
-                parts: ChatEnvelopeParts(resendOriginGroupB64: oldB64, resendOriginMessageId: id))
+                parts: ChatEnvelopeParts(
+                    replyTo: parts.replyTo,
+                    replyAuthor: parts.replyAuthor,
+                    replyExcerpt: parts.replyExcerpt,
+                    forwardedFrom: parts.forwardedFrom,
+                    forwardOriginGroupB64: parts.forwardOriginGroupB64,
+                    forwardOriginMessageId: parts.forwardOriginMessageId,
+                    resendOriginGroupB64: parts.resendOriginGroupB64,
+                    resendOriginMessageId: parts.resendOriginMessageId))
             _ = try await withCommitLock(groupIdHex: successorHex) { [self] in
                 try await sealAndPublishLocked(
                     groupIdHex: successorHex, plaintextBytes: envelope, wake: .message)
             }
+            // It landed: a failure of a later message resumes after it.
+            marks.advanceResendCursor(oldGroupIdB64: oldB64, to: id)
         }
         marks.markResent(oldGroupIdB64: oldB64)
     }
 
     // MARK: - The two silent drops of the receive paths
 
-    /// Drop, before anything is counted or drawn:
+    /// Drop, before anything is counted, drawn or acted on:
     ///
-    ///   * a chat row whose sender is a key an accepted reset retired
-    ///     (`ResetRepair.dropsSupersededSender`): a removed device that still
-    ///     holds the old keys can post until its leaf is removed;
+    ///   * EVERY application row whose sender is a key an accepted reset
+    ///     retired (`ResetRepair.dropsSupersededSender`): a chat row, an op,
+    ///     a control or service envelope (a profile, a group name, a pin, a
+    ///     push routing secret, a successor claim, ...) and call signaling. A
+    ///     removed device that still holds the old keys can post until its
+    ///     leaf is removed, and nothing it sends acts: its call does not
+    ///     ring, its envelope changes no state. An MLS handshake row has no
+    ///     application sender and is never dropped here (it was applied by
+    ///     the core; skipping it would fork the group);
     ///   * a re-send whose marker names a row this device already holds, in
     ///     an older segment of the same conversation and from the same author
     ///     (`ResendMarker`). A marker that matches nothing changes nothing.
+    ///
+    /// `eventSenders` is the application sender of each event, in order
+    /// (`PollMessagesResult.eventSenders`).
     func silentlyFiltered(
         _ events: [IncomingChatEvent],
         resendOrigins: [Int64: ResendMarker.Origin],
+        eventSenders: [MemberIdentity?],
         groupIdHex: String
     ) -> [IncomingChatEvent] {
         let superseded = Set(supersededKeyMap().keys)
         if superseded.isEmpty && resendOrigins.isEmpty { return events }
+        let kept = ResetRepair.keptAfterSupersededSenders(
+            events, senders: eventSenders, supersededKeys: superseded)
+        if resendOrigins.isEmpty { return kept }
         var received: [ResendMarker.Received] = []
-        for event in events {
+        for event in kept {
             if case .application(let messageId, _, _, let senderKey, _, _, _) = event {
                 received.append(ResendMarker.Received(
                     resendOrigin: resendOrigins[messageId], senderKeyB64: senderKey))
@@ -651,36 +698,33 @@ extension ChatRepository {
         }
         let own = groups[groupIdHex].flatMap { AuthorIdentity.own(group: $0.group) }
         let resolver = ReachCenter.shared.keyResolver
-        let alreadyHeld: (ResendMarker.Received) -> Bool = resendOrigins.isEmpty
-            ? { _ in false }
-            : ResendMarker.heldResendPredicate(
-                batch: received,
-                port: ResendMarker.ReceivePort(
-                    receivedGroupIdHex: groupIdHex,
-                    conversationOf: { [conversationLineage] in conversationLineage.conversationOf($0) },
-                    segmentIndexOf: { [conversationLineage] in conversationLineage.segmentIndexOf($0) },
-                    ownPersonKeyB64: own,
-                    canonical: { key in
-                        guard let bytes = base64Decode(key) else { return key }
-                        return base64Encode(resolver.current(of: bytes))
-                    },
-                    loadLog: { [weak self] in
-                        guard let self else { return nil }
-                        return ResendMarker.HeldLog(rows: { hex in
-                            self.groups[hex]?.messages.filter { $0.messageId > 0 }.map {
-                                ResendMarker.HeldRow(
-                                    messageId: $0.messageId,
-                                    direction: $0.direction == .outgoing
-                                        ? .outgoing : ($0.direction == .incoming ? .incoming : .system),
-                                    authorKeyB64: $0.authorKeyB64)
-                            }
-                        })
-                    }))
-        return events.filter { event in
+        let alreadyHeld = ResendMarker.heldResendPredicate(
+            batch: received,
+            port: ResendMarker.ReceivePort(
+                receivedGroupIdHex: groupIdHex,
+                conversationOf: { [conversationLineage] in conversationLineage.conversationOf($0) },
+                segmentIndexOf: { [conversationLineage] in conversationLineage.segmentIndexOf($0) },
+                ownPersonKeyB64: own,
+                canonical: { key in
+                    guard let bytes = base64Decode(key) else { return key }
+                    return base64Encode(resolver.current(of: bytes))
+                },
+                loadLog: { [weak self] in
+                    guard let self else { return nil }
+                    return ResendMarker.HeldLog(rows: { hex in
+                        self.groups[hex]?.messages.filter { $0.messageId > 0 }.map {
+                            ResendMarker.HeldRow(
+                                messageId: $0.messageId,
+                                direction: $0.direction == .outgoing
+                                    ? .outgoing : ($0.direction == .incoming ? .incoming : .system),
+                                authorKeyB64: $0.authorKeyB64)
+                        }
+                    })
+                }))
+        return kept.filter { event in
             guard case .application(let messageId, _, _, let senderKey, _, _, _) = event else {
                 return true
             }
-            if ResetRepair.dropsSupersededSender(senderKey, supersededKeys: superseded) { return false }
             return !alreadyHeld(ResendMarker.Received(
                 resendOrigin: resendOrigins[messageId], senderKeyB64: senderKey))
         }
@@ -991,11 +1035,12 @@ final class RepositoryContinuityPort: ContinuityPort {
     func newIdentityHasDevices(accountIdB64: String) async throws -> Bool {
         guard let keyB64 = currentKeyOf(accountIdB64: accountIdB64), let key = base64Decode(keyB64),
               let accountId = base64Decode(accountIdB64) else { return false }
-        guard let listed = try? await repository.discovery.fetchKeyPackages(accountId: accountId) else {
-            return false
-        }
-        // Only a device bound to the key this device ACCEPTED counts.
-        return !repository.devicesOfExpectedPerson(listed, expectedKey: key).isEmpty
+        // Only a device bound to the key this device ACCEPTED counts. A
+        // question, not an add: the acceptance that pinned the key is the
+        // gate, so it is not run again here.
+        guard let devices = try? await repository.expectedPersonDevices(
+            accountId: accountId, expectedKey: key, gateAlreadyRan: true) else { return false }
+        return !devices.isEmpty
     }
 
     func prepareSuccessor(oldGroupIdB64: String, newIdentityAccountIdB64: String) async throws -> String {

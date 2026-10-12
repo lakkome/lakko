@@ -97,3 +97,58 @@ public fun heldRowAuthor(
 /** The marker a parsed body carries: both fields or nothing. */
 public fun resendOriginFrom(groupIdB64: String?, messageId: Long?): ResendOrigin? =
     if (groupIdB64.isNullOrEmpty() || messageId == null) null else ResendOrigin(groupIdB64, messageId)
+
+/** A stored row as the marker rule needs it: how it was produced and by whom. */
+public data class HeldRow(val direction: HeldRowDirection, val authorKeyB64: String?)
+
+/**
+ * [resendVerdict] for a reader that holds no live group records, only what
+ * the app stored: the lineage and the message log. The background push
+ * reader is one (C-59: it reads, and writes nothing).
+ *
+ * [heldRowOf] answers for `(group hex, message id)` from the stored log, or
+ * `null` when this device holds no such row (or no such group). Keys are
+ * compared as they are: the founder re-sends its OWN account's messages, so
+ * the row this device holds is one its own account sent, and the sender the
+ * MLS layer authenticated is that same account.
+ */
+public fun storedResendVerdict(
+    marker: ResendOrigin?,
+    receivedGroupHex: String,
+    lineage: Lineage,
+    heldRowOf: (groupHex: String, messageId: Long) -> HeldRow?,
+    ownPersonKeyB64: String?,
+    senderKeyB64: String?,
+): ResendVerdict {
+    if (marker == null) return ResendVerdict.DRAW
+    val originHex = groupHexOfB64(marker.groupIdB64)
+    if (originHex.isEmpty() || marker.messageId <= 0) return ResendVerdict.DRAW
+    val received = receivedGroupHex.lowercase()
+    val row = heldRowOf(originHex, marker.messageId)
+    return resendVerdict(
+        marker = marker,
+        receivedConversation = lineage.conversationOf(received),
+        originConversation = if (row == null) null else lineage.conversationOf(originHex),
+        originIsOlderSegment = lineage.segmentIndexOf(originHex) < lineage.segmentIndexOf(received),
+        heldAuthor = heldRowAuthor(row?.direction, row?.authorKeyB64, ownPersonKeyB64) { it },
+        senderAuthor = senderKeyB64,
+    )
+}
+
+/** The direction a stored row's `direction` text names, or `null`. */
+public fun heldRowDirectionOf(stored: String?): HeldRowDirection? = when (stored?.lowercase()) {
+    "outgoing" -> HeldRowDirection.OUTGOING
+    "incoming" -> HeldRowDirection.INCOMING
+    "system" -> HeldRowDirection.SYSTEM
+    else -> null
+}
+
+/** The row `(group, message id)` of a stored message log, or `null`. */
+public fun heldRowIn(log: MessageLogPayload?, groupHex: String, messageId: Long): HeldRow? {
+    if (log == null || messageId <= 0) return null
+    val key = groupHex.lowercase()
+    val group = log.groups[key] ?: log.groups.entries.firstOrNull { it.key.lowercase() == key }?.value ?: return null
+    val row = group.messages.firstOrNull { it.messageId == messageId } ?: return null
+    val direction = heldRowDirectionOf(row.direction) ?: return null
+    return HeldRow(direction, row.authorKeyB64)
+}

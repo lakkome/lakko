@@ -360,10 +360,6 @@ class AccountLocalWipeTest {
         me.lakko.app.contacts.SharedPrefsVerifiedBindingStore(context).record(
             acct, "peer", me.lakko.app.contacts.VerifiedBinding("key", 1L, 1L),
         )
-        me.lakko.app.chat.SharedPrefsSuccessorClaimBackend(context).save(
-            acct, group,
-            me.lakko.app.chat.StoredClaims(own = me.lakko.app.chat.OwnClaim("ab".repeat(32), 7L)),
-        )
         me.lakko.app.chat.SharedPrefsContinuityBackend(context).save(
             acct, me.lakko.app.chat.ContinuityRow(moved = mapOf(group to 1L)),
         )
@@ -418,6 +414,9 @@ class AccountLocalWipeTest {
             me.lakko.app.auth.KeyRotationFiles.DIR + "/" + me.lakko.app.auth.KeyRotationFiles.hexOf(acct) +
                 me.lakko.app.auth.KeyRotationFiles.PREDECESSOR_SUFFIX,
             me.lakko.app.contacts.SentRequestsFiles.DIR + "/" + me.lakko.app.contacts.SentRequestsFiles.nameOf(acct),
+            // ADR-0065 R.6: the successor claim states (they hold a prepared
+            // Welcome, so they are sealed under the Keystore wrap key).
+            "lakko-feed/" + me.lakko.app.chat.SealedSuccessorClaimBackend.DIR + "/$safe.bin",
         )) {
             File(nb, path).apply { parentFile?.mkdirs() }.writeText(marker)
         }
@@ -527,7 +526,7 @@ class AccountLocalWipeTest {
             "lakko-profile-requests", "lakko.notifications", "me.lakko.push-routing.v2", "me.lakko.push-routing.v1",
             "me.lakko.push-wake-binding.v1", "lakko-chat-folders", "lakko-group-presentation", "lakko-appearance",
             "lakko.anticensorship", "lakko.release", "lakko.feed", "lakko-key-reset-owed",
-            "lakko-reset-ledger", "lakko-verified-bindings", "lakko-successor-claims", "lakko-reset-continuity",
+            "lakko-reset-ledger", "lakko-verified-bindings", "lakko-reset-continuity",
             "lakko-lineage-mirror", "lakko-orphaned-channels",
         )
 
@@ -541,15 +540,15 @@ class AccountLocalWipeTest {
             "me.lakko.push-routing.v2", "me.lakko.push-routing.v1", "lakko-device-sync-pending",
             "lakko-chat-folders", "lakko-media-prefs",
             "lakko-recovery-owed", "lakko-three-words-budget", "lakko-key-reset-owed",
-            "lakko-reset-ledger", "lakko-verified-bindings", "lakko-successor-claims", "lakko-reset-continuity",
+            "lakko-reset-ledger", "lakko-verified-bindings", "lakko-reset-continuity",
             "lakko-lineage-mirror", "lakko-orphaned-channels",
             CHANNEL_PUBLISHER_PREFS,
         )
 
         /** Eight Keystore-envelope files, one played-marks file, one recall
-         *  record, one commit-outbox entry and one anonymous-token pool per
-         *  account. */
-        const val FILES_SEEDED_PER_ACCOUNT = 14
+         *  record, one commit-outbox entry, one anonymous-token pool and one
+         *  sealed successor-claim file per account. */
+        const val FILES_SEEDED_PER_ACCOUNT = 15
 
         /** Device-wide rows of builds before 2026-09-30, never read. */
         val RETIRED_ROWS = listOf(

@@ -133,7 +133,7 @@ final class ConversationContinuityTests: XCTestCase {
             messageLogStore: MessageLogStore(),
             commitOutbox: CommitOutboxStore(
                 rootDir: FileManager.default.temporaryDirectory.appendingPathComponent(suite)),
-            pushRouting: PushGroupRouting(),
+            pushRouting: Offline.pushRouting(),
             beaconStore: BeaconObservationStore(defaults: UserDefaults(suiteName: suite + "-b")!),
             pendingRequestStore: PendingRequestStore(defaults: UserDefaults(suiteName: suite + "-p")!)
         )

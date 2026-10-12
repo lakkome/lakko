@@ -116,4 +116,51 @@ class UnreadCountTest {
         assertEquals(6, combinedUnread(6, LocalUnread(4, false)))
         assertEquals(4, combinedUnread(6, LocalUnread(4, true)))
     }
+
+    // ---- ADR-0065 R.5: the badge across a conversation's segments ---------
+
+    private fun folded(): ChatThread {
+        val lineage = me.lakko.app.chat.buildLineage(listOf(me.lakko.app.chat.LineageEntry("s1", "root", 1uL)))
+        return me.lakko.app.chat.foldConversations(
+            listOf(
+                ChatThread(groupIdHex = "root", messages = listOf(incoming(1), incoming(2), incoming(3)), cursor = 0, membershipEnded = true),
+                ChatThread(groupIdHex = "s1", messages = listOf(incoming(1), outgoing(2), incoming(3)), cursor = 0),
+            ),
+            lineage,
+        ).single()
+    }
+
+    private fun cursorAt(segment: Int, id: Long) = ReadCursorState(
+        upToMessageId = me.lakko.app.chat.encodeReadPosition(me.lakko.app.chat.TimelinePosition(segment, id)),
+        readAtMs = 0uL,
+        updatedAtHlc = 0uL,
+    )
+
+    @Test
+    fun `unread rows of an older segment count toward the badge`() {
+        // Read up to message 1 of the old group: its messages 2 and 3, and
+        // the two incoming rows of the successor.
+        assertEquals(4, unreadCount(folded(), cursorAt(0, 1)))
+        // The 8-byte form every earlier build wrote reads the same.
+        assertEquals(4, unreadCount(folded(), cursorAt(1)))
+    }
+
+    @Test
+    fun `a position in the successor reads the whole older segment`() {
+        assertEquals(1, unreadCount(folded(), cursorAt(1, 1)))
+        assertEquals(0, unreadCount(folded(), cursorAt(1, 3)))
+    }
+
+    @Test
+    fun `a position that only reached the old group reads nothing of the successor`() {
+        // Message ids restart in a successor: "read up to 3" in the old group
+        // must not read the successor's messages 1 to 3.
+        assertEquals(2, unreadCount(folded(), cursorAt(0, 3)))
+    }
+
+    @Test
+    fun `an undecodable cursor counts nothing from the cursor`() {
+        val broken = ReadCursorState(upToMessageId = ByteArray(3), readAtMs = 0uL, updatedAtHlc = 0uL)
+        assertEquals(0, unreadCount(folded(), broken))
+    }
 }

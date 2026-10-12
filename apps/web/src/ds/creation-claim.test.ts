@@ -69,13 +69,17 @@ describe("a conversation group: no Welcome before the claim lands", () => {
       identityProvider: () => device,
       accountIdentityProvider: () => account,
     });
-    return { client, ds, order, free: () => [device, account, peer].forEach((i) => i.free()) };
+    // The key the caller expects the peer to have: the one its KeyPackage's
+    // binding names. `startGroupWith` adds only a device bound to it
+    // (ADR-0065 R.2, `contacts/add-member-key.ts`).
+    const peerKey = peer.signaturePublicKey;
+    return { client, ds, order, peerKey, free: () => [device, account, peer].forEach((i) => i.free()) };
   }
 
   it("204: the claim goes first, then the Welcome", async () => {
     const s = setup(204);
     try {
-      await s.client.startGroupWith(null, new Uint8Array(16).fill(1), new Uint8Array(32), "chat");
+      await s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat");
       expect(s.order).toEqual(["claim:claim", "welcome"]);
     } finally {
       s.free();
@@ -88,7 +92,7 @@ describe("a conversation group: no Welcome before the claim lands", () => {
       const s = setup(status);
       try {
         await expect(
-          s.client.startGroupWith(null, new Uint8Array(16).fill(1), new Uint8Array(32), "chat"),
+          s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat"),
         ).rejects.toBeDefined();
         expect(s.order).toEqual(["claim:claim"]);
         expect(s.ds.publishMailbox).not.toHaveBeenCalled();

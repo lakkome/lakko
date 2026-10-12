@@ -164,6 +164,22 @@ public data class ProcessedRow(
     /** Set only for [ProcessedKind.CALL_SIGNALING]: the offer or end this
      *  row carried, as much of it as the ring needs. */
     val callSignal: me.lakko.app.calls.CallRingSignal? = null,
+    /** The ACCOUNT key (standard base64) the MLS layer resolved the sender
+     *  leaf to at receipt (C-68), or `null` when it did not resolve. What
+     *  the superseded-sender rule and the re-send marker read. */
+    val senderAccountB64: String? = null,
+    /** ADR-0065 R.7 case 1 — the re-send marker a chat body carried. */
+    val resendOrigin: me.lakko.app.chat.ResendOrigin? = null,
+)
+
+/** What the superseded-sender rule reads off the group as the batch left it
+ *  ([me.lakko.app.chat.unrepairableBy]). All reads. */
+public data class WakeGroupFacts(
+    val kind: me.lakko.app.chat.ConversationKind,
+    val rosterPersonKeysB64: List<String>,
+    /** `null` = no role table. */
+    val ownerKeyB64: String?,
+    val ownPersonKeyB64: String?,
 )
 
 /** The notification preview the FMS renders when the decrypt succeeds. */
@@ -200,6 +216,14 @@ public interface ThrowawayGroup : AutoCloseable {
      * notification.
      */
     public fun dsSigner(): me.lakko.app.ds.DsJournalSigner? = null
+
+    /**
+     * ADR-0065 R.5 / R.8 — the roster, the kind and the owner of the
+     * throwaway group as the rows processed so far left it. Reads of the
+     * in-memory group; nothing is written (C-59). `null` when they cannot be
+     * read: the rule then drops only what needs no such fact.
+     */
+    public fun facts(): WakeGroupFacts? = null
 }
 
 /**
@@ -279,6 +303,89 @@ public interface PushDecryptDeps {
      * live conversation.
      */
     public fun isClosedOneToOne(accountIdB64: String, groupHex: String): Boolean = false
+
+    /**
+     * ADR-0065 R.5 / R.8 — the account keys accepted resets RETIRED, from
+     * the reset ledger the identity gate writes. A READ. Defaulted to empty,
+     * and a store that fails to open answers empty: nothing is dropped on an
+     * unreadable ledger.
+     */
+    public fun supersededKeys(accountIdB64: String): Set<String> = emptySet()
+
+    /** ADR-0065 R.5 — whether the conversation [groupHex] was a segment of
+     *  has moved to a successor (the continuity facts). A READ. */
+    public fun conversationMoved(accountIdB64: String, groupHex: String): Boolean = false
+
+    /** ADR-0065 R.5 — the lineage registers, from their plain mirror. A READ. */
+    public fun lineage(accountIdB64: String): List<me.lakko.app.chat.LineageEntry> = emptyList()
+
+    /**
+     * ADR-0065 R.7 case 1 — the row `(group, message id)` of the app's own
+     * stored message log, as the re-send marker needs it, or `null` when the
+     * app holds no such row. A READ of the log the start cursor is already
+     * read from; this path never writes it.
+     */
+    public fun heldRow(accountIdB64: String, groupHex: String, messageId: Long): me.lakko.app.chat.HeldRow? = null
+}
+
+/**
+ * ADR-0065 R.5 / R.8 and R.7 case 1 — whether a processed row of a wake is
+ * NOT acted on: nothing is shown for it and it rings for nothing.
+ *
+ * | row                                                              | answer |
+ * |------------------------------------------------------------------|--------|
+ * | a chat row, an edit, ... from a key an accepted reset retired    | yes    |
+ * | a call offer from such a key, the conversation moved             | yes    |
+ * | a call offer from such a key, unrepairable because of its reset  | yes    |
+ * | a call offer from such a key, the group is repaired in place     | no     |
+ * | a re-sent message whose original this device holds               | yes    |
+ * | anything else                                                    | no     |
+ *
+ * The first four rows are [me.lakko.app.chat.supersededActDropped], the same
+ * function the foreground poll applies; the fifth is
+ * [me.lakko.app.chat.storedResendVerdict] over the stored message log.
+ */
+internal fun wakeRowSuppressed(
+    row: ProcessedRow,
+    groupHex: String,
+    supersededKeys: Set<String>,
+    facts: () -> WakeGroupFacts?,
+    moved: () -> Boolean,
+    lineage: () -> me.lakko.app.chat.Lineage,
+    heldRowOf: (groupHex: String, messageId: Long) -> me.lakko.app.chat.HeldRow?,
+): Boolean {
+    if (me.lakko.app.chat.dropsSupersededSender(row.senderAccountB64, supersededKeys)) {
+        val act = if (row.kind == ProcessedKind.CALL_SIGNALING) me.lakko.app.chat.SenderAct.CALL else me.lakko.app.chat.SenderAct.ROW
+        val dropped = act == me.lakko.app.chat.SenderAct.ROW || run {
+            val f = facts()
+            me.lakko.app.chat.supersededActDropped(
+                act = act,
+                senderKeyB64 = row.senderAccountB64,
+                supersededKeys = supersededKeys,
+                unrepairableKeyB64 = f?.let {
+                    me.lakko.app.chat.unrepairableBy(
+                        kind = it.kind,
+                        rosterPersonKeysB64 = it.rosterPersonKeysB64,
+                        ownPersonKeyB64 = it.ownPersonKeyB64,
+                        ownerKeyB64 = it.ownerKeyB64,
+                        supersededKeys = supersededKeys,
+                    )
+                },
+                moved = moved(),
+            )
+        }
+        if (dropped) return true
+    }
+    val marker = row.resendOrigin ?: return false
+    if (row.kind != ProcessedKind.CHAT) return false
+    return me.lakko.app.chat.storedResendVerdict(
+        marker = marker,
+        receivedGroupHex = groupHex,
+        lineage = lineage(),
+        heldRowOf = heldRowOf,
+        ownPersonKeyB64 = facts()?.ownPersonKeyB64,
+        senderKeyB64 = row.senderAccountB64,
+    ) == me.lakko.app.chat.ResendVerdict.SKIP
 }
 
 /**
@@ -327,6 +434,17 @@ public data class PushWakeOutcome(
             PushWakeOutcome(preview = null, ring = null, cancelledCallIds = emptyList(), suppressed = true)
     }
 }
+
+/**
+ * | a preview | a ring | rows not acted on | the wake posts nothing |
+ * |-----------|--------|-------------------|------------------------|
+ * | yes       | any    | any               | no                     |
+ * | no        | yes    | any               | no                     |
+ * | no        | no     | none              | no (generic fallback)  |
+ * | no        | no     | one or more       | yes                    |
+ */
+internal fun wakePostsNothing(hasPreview: Boolean, rings: Boolean, suppressedRows: Int): Boolean =
+    !hasPreview && !rings && suppressedRows > 0
 
 /**
  * The full read-only background pass over one wake.
@@ -463,16 +581,61 @@ public suspend fun decryptPushWake(
         //    never guessed. NOTE: `process` mutates the THROWAWAY
         //    provider ONLY; it is never persisted.
         var latest: PushPreview? = null
+        var suppressedRows = 0
         // The batch's call signaling, in arrival order. Folded once at the end
         // rather than acted on per row: a batch routinely carries both halves
         // of a finished call, and ringing for a call whose End is three rows
         // later leaves a phone the user has to silence by hand.
         val callSignals = ArrayList<me.lakko.app.calls.CallRingSignal>()
+        // ADR-0065 — what the two silent rules read, each store opened at
+        // most once per wake and only when a row asks. All READS (C-59); a
+        // store that does not open drops nothing.
+        val superseded = try {
+            deps.supersededKeys(account.accountIdB64)
+        } catch (_: Throwable) {
+            emptySet()
+        }
+        val moved by lazy {
+            try {
+                deps.conversationMoved(account.accountIdB64, realGroupHex)
+            } catch (_: Throwable) {
+                false
+            }
+        }
+        val lineage by lazy {
+            try {
+                me.lakko.app.chat.buildLineage(deps.lineage(account.accountIdB64))
+            } catch (_: Throwable) {
+                me.lakko.app.chat.NO_LINEAGE
+            }
+        }
         for (row in rows) {
             val processed = try {
                 group.process(row.payload)
             } catch (_: Throwable) {
                 continue
+            }
+            if (processed != null) {
+                val suppressed = try {
+                    wakeRowSuppressed(
+                        row = processed,
+                        groupHex = realGroupHex,
+                        supersededKeys = superseded,
+                        facts = { runCatching { group.facts() }.getOrNull() },
+                        moved = { moved },
+                        lineage = { lineage },
+                        heldRowOf = { hex, id -> deps.heldRow(account.accountIdB64, hex, id) },
+                    )
+                } catch (_: Throwable) {
+                    false
+                }
+                // Neither a preview nor a ring: an older real message stays
+                // the preview, and a wake that carried nothing else posts
+                // nothing at all.
+                if (suppressed) {
+                    suppressedRows += 1
+                    continue
+                }
             }
             processed?.callSignal?.let { callSignals += it }
             val body = previewBodyOf(processed) ?: continue
@@ -506,6 +669,10 @@ public suspend fun decryptPushWake(
             preview = latest,
             ring = calls.ring,
             cancelledCallIds = calls.cancelled,
+            // ADR-0065 — the wake carried only what is not acted on (a row
+            // of a retired key, or a re-send this device holds the original
+            // of): nothing is posted for it, not even the generic banner.
+            suppressed = wakePostsNothing(latest != null, calls.ring != null, suppressedRows),
         )
     } finally {
         // Discard the throwaway MLS state. We NEVER snapshot it back —

@@ -39,14 +39,20 @@ public final class BackupClient {
     /// `/auth/backup/head` mint (ADR-0037). Set via ``setSessionToken(_:)``.
     private var sessionToken: String?
 
+    /// The session the head mint travels on (the storage routes travel on
+    /// the storage client's own).
+    private let authSession: URLSession
+
     public init(
         storage: StorageClient = StorageClient(),
         phraseStore: PhraseStore = PhraseStore(),
-        authBaseURL: String = AuthClient.defaultBaseURL
+        authBaseURL: String = AuthClient.defaultBaseURL,
+        authSession: URLSession = .shared
     ) {
         self.storage = storage
         self.phraseStore = phraseStore
         self.authBaseURL = authBaseURL
+        self.authSession = authSession
         self.sessionToken = nil
     }
 
@@ -141,7 +147,8 @@ public final class BackupClient {
             let minted = try await mintBackupHead(
                 sessionToken: sessionToken,
                 envelopeHash: hash,
-                baseURL: authBaseURL
+                baseURL: authBaseURL,
+                session: authSession
             )
             let blob = try frameBackupBlob(head: minted.head, envelope: envelope)
             return (blob, BackupFloor(version: minted.version, envelopeHash: hash))

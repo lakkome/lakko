@@ -14,36 +14,74 @@
  * the caller is: the rule lives in the function that adds, so no call site
  * can forget it.
  *
+ * Every path that adds an account's devices takes the accepted keys from
+ * this module: the user-facing add, a successor build and a new chat
+ * (`acceptableBoundKeys` with the expected key), and the ADR-0050
+ * re-admission arm and membership re-request (`trustedBoundKeys`, which has
+ * no caller's key and reads what this device trusts for the account id).
+ *
  * Pure; `contacts/client.ts` supplies the binding reader.
  */
 import type { AccountKeys } from "./predecessor";
 
+/** A set of retired keys in any of the shapes the stores hand out. */
+type KeySet = ReadonlySet<string> | ReadonlyMap<string, unknown>;
+
+const NO_KEYS: ReadonlySet<string> = new Set();
+
 /**
  * The account keys a device may be bound to and still be the expected
- * person's.
+ * person's. Call it AFTER the identity gate ran for the account, so a proven
+ * rotation is already recorded in `accountKeys`.
  *
- * | the expected key is in the account's pinned proven chain | accepted keys                         |
- * |-----------------------------------------------------------|---------------------------------------|
- * | no pin, or the pin's chain does not hold the expected key | the expected key alone                |
- * | yes (the current key or a proven predecessor)             | the current key and every predecessor |
+ * | the expected key is ...                                    | accepted keys                         |
+ * |------------------------------------------------------------|---------------------------------------|
+ * | a key an accepted reset retired                            | none                                  |
+ * | not in the account's pinned proven chain (or no pin)       | the expected key alone                |
+ * | in the chain (the current key or a proven predecessor)     | the current key and every predecessor |
  *
- * The second row is ADR-0066 section 3.5: after a PROVEN rotation a device
+ * The third row is ADR-0066 section 3.5: after a PROVEN rotation a device
  * that was kept stays bound to the key it was enrolled under while a device
- * paired later binds to the new one, and both are the same person. A key an
- * accepted RESET retired is in no proven chain, so it is never accepted
- * through this row.
+ * paired later may bind to the new one, and both are the same person. A key
+ * an accepted RESET retired (`supersededKeysB64`) is never accepted, whoever
+ * asks for it and whatever chain names it: old keys do not come back.
  */
 export function acceptableBoundKeys(
   expectedKeyB64: string,
   accountKeys: AccountKeys | undefined,
+  supersededKeysB64: KeySet = NO_KEYS,
 ): ReadonlySet<string> {
   const out = new Set<string>();
-  if (expectedKeyB64.length === 0) return out;
+  if (expectedKeyB64.length === 0 || supersededKeysB64.has(expectedKeyB64)) return out;
   out.add(expectedKeyB64);
   if (accountKeys === undefined) return out;
   const chain = [accountKeys.currentKeyB64, ...accountKeys.provenPredecessorsB64];
   if (!chain.includes(expectedKeyB64)) return out;
-  for (const k of chain) if (k.length > 0) out.add(k);
+  for (const k of chain) if (k.length > 0 && !supersededKeysB64.has(k)) out.add(k);
+  return out;
+}
+
+/**
+ * The account keys this device TRUSTS for an account id, for a path that has
+ * no caller's key (the re-admission arm, the membership re-request): the
+ * pin's current key and proven predecessors, else the key of the binding
+ * this device verified against the directory. Never a key an accepted reset
+ * retired. An account that is neither pinned nor bound has no trusted key:
+ * nobody is added under its id.
+ */
+export function trustedBoundKeys(
+  accountKeys: AccountKeys | undefined,
+  verifiedBindingKeyB64: string | undefined,
+  supersededKeysB64: KeySet = NO_KEYS,
+): ReadonlySet<string> {
+  const out = new Set<string>();
+  const candidates =
+    accountKeys !== undefined
+      ? [accountKeys.currentKeyB64, ...accountKeys.provenPredecessorsB64]
+      : verifiedBindingKeyB64 !== undefined
+        ? [verifiedBindingKeyB64]
+        : [];
+  for (const k of candidates) if (k.length > 0 && !supersededKeysB64.has(k)) out.add(k);
   return out;
 }
 

@@ -2052,6 +2052,15 @@ Consequences of the rule as first built (1 decided as rule 5, 2 and 3 closed by 
 3. **People search refuses a hit whose key is a proven predecessor** of the fetched bundle's key
    (iOS; not checked on the others).
 
+**Alignment pass 2026-10-12 (see ADR-0065 R.13b).** Every add path on the three clients now filters
+another person's devices by KeyPackage binding (the expected key or its pinned proven chain). One
+consequence is open: **a person who rotated before this device ever saw them cannot be added or
+written to until their devices are re-bound to the new key**, since nothing this device holds links
+the served key to the key the devices are bound to, and a supersession proof alone is not accepted
+at first sight. Closing it needs the predecessor anchored in the KT log at first sight, or the new
+key's signature over the old binding. Decided 2026-10-12: the refusal stays for now and is
+revisited after it has been tried in use.
+
 ## Not verified
 
 - Outside sprint T1 nothing here was built or run; every line number is

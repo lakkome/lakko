@@ -969,12 +969,18 @@ internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
     // the chat was opened: its id sits in `feedSeen` or under the feed's own
     // watermark.
     val feedThrough = thread.feedSeenThrough
+    // ADR-0065 R.5 — the cursor is a position in the conversation's
+    // TIMELINE (segment, message id): a row of an older segment the position
+    // has not passed is unread, and a position that only reached the old
+    // group reads nothing of its successor, whose ids restart.
     val cursorCount = cursor?.let { c ->
-        val cursorId = decodeBeI64(c.upToMessageId)
+        // An undecodable cursor counts nothing, as before.
+        val position = me.lakko.app.chat.decodeReadPosition(c.upToMessageId) ?: return@let 0
         thread.messages.count { m ->
-            m.direction != Direction.Outgoing && m.messageId > cursorId &&
-                m.messageId !in thread.feedSeen &&
-                (feedThrough == null || m.messageId > feedThrough)
+            m.direction != Direction.Outgoing &&
+                me.lakko.app.chat.rowPastReadPosition(thread, m, position) &&
+                // The feed's own marks are the head group's ids.
+                (m.isHistory || (m.messageId !in thread.feedSeen && (feedThrough == null || m.messageId > feedThrough)))
         }
     }
     return me.lakko.app.chat.combinedUnread(
@@ -984,15 +990,6 @@ internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
             viewedThisSession = thread.unreadViewedThisSession,
         ),
     )
-}
-
-private fun decodeBeI64(bytes: ByteArray): Long {
-    if (bytes.size < 8) return Long.MAX_VALUE
-    var v: Long = 0L
-    for (i in 0 until 8) {
-        v = (v shl 8) or (bytes[i].toLong() and 0xff)
-    }
-    return v
 }
 
 private fun hexToBytes(hex: String): ByteArray? {

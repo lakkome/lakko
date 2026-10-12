@@ -174,19 +174,52 @@ public struct NseProcessedRow: Equatable {
     /// what the app reads back to clear that alert when the call is answered
     /// here (``LakkoCallNotification/callIdUserInfoKey``).
     public let callIdHex: String?
+    /// ADR-0065 R.8 — the ACCOUNT key (standard base64) of the row's
+    /// MLS-authenticated sender, resolved by the core at receipt (C-68).
+    /// `nil` when the sender does not resolve. Read to drop a row from a key
+    /// an accepted reset retired.
+    public let senderKeyB64: String?
+    /// ADR-0065 R.7 case 1 — the re-send marker of a chat row, when its
+    /// sealed envelope carried one: where the message was ORIGINALLY sent.
+    public let resendOrigin: NseResendOrigin?
 
     public init(
         kind: NseProcessedKind,
         text: String,
         attachmentCount: Int,
         singleAttachmentKind: String? = nil,
-        callIdHex: String? = nil
+        callIdHex: String? = nil,
+        senderKeyB64: String? = nil,
+        resendOrigin: NseResendOrigin? = nil
     ) {
         self.kind = kind
         self.text = text
         self.attachmentCount = attachmentCount
         self.singleAttachmentKind = attachmentCount == 1 ? singleAttachmentKind : nil
         self.callIdHex = callIdHex
+        self.senderKeyB64 = senderKeyB64
+        self.resendOrigin = kind == .chat ? resendOrigin : nil
+    }
+
+    /// The same row with its sender and re-send marker set (the call
+    /// classifier builds a row before either is known).
+    public func attributed(senderKeyB64: String?, resendOrigin: NseResendOrigin? = nil) -> NseProcessedRow {
+        NseProcessedRow(
+            kind: kind, text: text, attachmentCount: attachmentCount,
+            singleAttachmentKind: singleAttachmentKind, callIdHex: callIdHex,
+            senderKeyB64: senderKeyB64, resendOrigin: resendOrigin)
+    }
+}
+
+/// ADR-0065 R.7 case 1 — where a re-sent message was originally sent: the
+/// original group's id (standard base64) and the DS message id there.
+public struct NseResendOrigin: Equatable {
+    public let groupIdB64: String
+    public let messageId: Int64
+
+    public init(groupIdB64: String, messageId: Int64) {
+        self.groupIdB64 = groupIdB64
+        self.messageId = messageId
     }
 }
 
@@ -263,6 +296,13 @@ public enum NsePushOutcome: Equatable {
     case callSilent(NseCallAlert)
     /// A call this device may be showing an alert for is over.
     case callEnded(callIdHex: String)
+    /// ADR-0065 R.8 / R.7 — every row this wake brought is one the APP shows
+    /// nothing for: a row from a key an accepted reset retired, or a re-send
+    /// of a message this device already holds. The extension must still
+    /// deliver something (it cannot post nothing), so it delivers the
+    /// quietest thing it can: passive and silent, in the conversation's
+    /// stack (``tag``).
+    case quiet(tag: String)
     /// Nothing to say — the extension shows its generic fallback.
     case none
 }
@@ -404,9 +444,30 @@ public protocol NsePushDecryptDeps {
     /// group keeps one stack. READ-ONLY, from the App Group lineage mirror
     /// (C-59).
     func conversationHex(accountIdB64: String, groupIdHex: String) -> String
+
+    /// ADR-0065 R.8 — is `senderKeyB64` a key an accepted reset retired?
+    /// READ-ONLY, from the App Group mirror the APP writes (the pins live in
+    /// the app's own store, which this process does not open). Defaulted
+    /// `false`: a missing mirror drops nothing.
+    func isSupersededSender(accountIdB64: String, senderKeyB64: String?) -> Bool
+
+    /// ADR-0065 R.7 case 1 — is this chat row a re-send whose original the
+    /// app already holds: the named row exists in an OLDER segment of the
+    /// SAME conversation and is by the SAME account as the sender? READ-ONLY:
+    /// the message log the app wrote and the lineage mirror (C-59). Defaulted
+    /// `false`: when the facts cannot be read the row is an ordinary message.
+    func holdsResendOriginal(
+        accountIdB64: String, receivedGroupIdHex: String,
+        origin: NseResendOrigin, senderKeyB64: String?
+    ) -> Bool
 }
 
 public extension NsePushDecryptDeps {
+    func isSupersededSender(accountIdB64: String, senderKeyB64: String?) -> Bool { false }
+    func holdsResendOriginal(
+        accountIdB64: String, receivedGroupIdHex: String,
+        origin: NseResendOrigin, senderKeyB64: String?
+    ) -> Bool { false }
     func callerName(accountIdB64: String, groupIdHex: String) -> String? { nil }
     func isMuted(accountIdB64: String, groupIdHex: String) -> Bool { false }
     func conversationHex(accountIdB64: String, groupIdHex: String) -> String { groupIdHex }
@@ -578,8 +639,20 @@ public func decryptPushOutcome(
         accountIdB64: account.accountIdB64, groupIdHex: realGroupHex)
     var latest: NsePushPreview?
     var latestCall: (row: NseProcessedRow, createdAt: String)?
+    // Did the batch hold a row the app shows nothing for?
+    var silenced = false
     for row in rows {
         guard let processed = group.process(row.payload) else { continue }
+        // ADR-0065 R.8 — nothing from a superseded sender acts: its call does
+        // not ring and its message is not previewed (the app drops the same
+        // row before storage). Asked before the kind, so a kind added later
+        // is covered.
+        if nseDropsSilently(
+            processed, accountIdB64: account.accountIdB64, receivedGroupIdHex: realGroupHex, deps: deps
+        ) {
+            silenced = true
+            continue
+        }
         switch processed.kind {
         case .callOffer, .callEnd:
             latestCall = (row: processed, createdAt: row.createdAt)
@@ -632,7 +705,68 @@ public func decryptPushOutcome(
         }
     }
     if let latest { return .preview(latest) }
+    // Only rows the app shows nothing for: the quietest delivery there is.
+    // (A batch with nothing readable at all stays `.none`: the generic line,
+    // because an unread message may be behind it.)
+    if silenced { return .quiet(tag: conversationTag) }
     return .none
+}
+
+/// ADR-0065 R.8 / R.7 case 1 — the rows the background reader shows nothing
+/// for, the same two silent drops the app's receive paths apply
+/// (`ChatRepository.silentlyFiltered`):
+///
+/// | the row                                                              | dropped |
+/// |----------------------------------------------------------------------|---------|
+/// | any kind, from a key an accepted reset retired                       | yes     |
+/// | a chat row carrying a re-send marker whose original the app holds    | yes     |
+/// | a chat row carrying a marker that matches nothing the app holds      | no      |
+/// | anything else                                                        | no      |
+///
+/// Both answers come from the dependency object, which only reads (C-59).
+public func nseDropsSilently(
+    _ row: NseProcessedRow, accountIdB64: String, receivedGroupIdHex: String,
+    deps: NsePushDecryptDeps
+) -> Bool {
+    if deps.isSupersededSender(accountIdB64: accountIdB64, senderKeyB64: row.senderKeyB64) {
+        return true
+    }
+    if row.kind == .chat, let origin = row.resendOrigin {
+        return deps.holdsResendOriginal(
+            accountIdB64: accountIdB64, receivedGroupIdHex: receivedGroupIdHex,
+            origin: origin, senderKeyB64: row.senderKeyB64)
+    }
+    return false
+}
+
+/// ADR-0065 R.5 — the notification stack a wake belongs to, known BEFORE any
+/// decrypt: the conversation of the group the wake's routing id names.
+///
+/// A wake carries `g`, an opaque per-group routing id that also changes when
+/// the routing secret rotates (ADR-0043). Grouping by it splits one
+/// conversation's notifications at every rotation and at the move to a
+/// successor group. The stack is therefore the CONVERSATION's id (the lineage
+/// root's group id, hex), which survives both: notifications delivered before
+/// a conversation moved and those of its successor carry the same thread.
+///
+/// `nil` when the wake cannot be routed (no binding, an unknown routing id):
+/// the caller keeps the wake's own `g`. Reads only (C-59); no seed, no
+/// snapshot, no network.
+public func nseConversationThread(_ wake: NsePushWake?, _ deps: NsePushDecryptDeps) -> String? {
+    guard let rawGroupHex = wake?.groupHex else { return nil }
+    let groupHex = rawGroupHex.lowercased()
+    guard groupHex.count == groupHexLen, isLowerHex(groupHex) else { return nil }
+    guard let accountIdB64 = deps.boundAccount(wakeDevicePseudonymHex: wake?.devicePseudonymHex),
+          !accountIdB64.isEmpty else { return nil }
+    let realGroupHex: String
+    if let routed = routedGroup(deps.lookupRoute(accountIdB64: accountIdB64, pushGidHex: groupHex)) {
+        realGroupHex = routed.hex
+    } else if deps.accountKnowsGroup(accountIdB64: accountIdB64, groupHex: groupHex) {
+        realGroupHex = groupHex
+    } else {
+        return nil
+    }
+    return deps.conversationHex(accountIdB64: accountIdB64, groupIdHex: realGroupHex).lowercased()
 }
 
 // MARK: - Ringing

@@ -485,14 +485,14 @@ final class CommitterBeaconTests: XCTestCase {
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
             dsClient: ds,
-            discovery: DiscoveryClient(),
+            discovery: Offline.discovery(),
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroups,
             messageLogStore: MessageLogStore(),
             commitOutbox: CommitOutboxStore(
                 rootDir: FileManager.default.temporaryDirectory
                     .appendingPathComponent("emit-\(UUID().uuidString)")),
-            pushRouting: PushGroupRouting(),
+            pushRouting: Offline.pushRouting(),
             beaconStore: makeStore(),
             pendingRequestStore: PendingRequestStore(
                 defaults: UserDefaults(suiteName: "emit-p-\(UUID().uuidString)")!)

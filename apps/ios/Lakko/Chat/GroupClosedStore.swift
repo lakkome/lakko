@@ -259,22 +259,43 @@ public enum GroupClosedRules {
     }
 }
 
-/// The claim states of one signed-in account, in `UserDefaults`: one JSON
-/// blob per `(owner account id, old group id)`, in the row codec above with
-/// a single entry. Group ids, account keys, DS message ids and a Welcome (a
-/// public MLS artefact sealed to its recipients); nothing secret. Decisions
-/// are the caller's (`SuccessorClaimRules`); this only stores what it is
-/// told to. Removed with the account's data.
+/// The claim states of one signed-in account, in `UserDefaults`: one blob per
+/// `(owner account id, old group id)`, the row codec above with a single
+/// entry, SEALED under the device key before it is written.
+///
+/// A row can hold a prepared Welcome (R.6 step 1): the founding commit's
+/// Welcome of a successor nobody was told about yet. It is sealed to its
+/// recipients, but it also names who they are and which group continues
+/// which, and web keeps the same row under its device key; so it is never
+/// written as it is. Every write goes through the `Sealer` the caller
+/// supplies (the Keychain wrap the message log and the held-send queue use);
+/// a failed seal writes nothing, and a blob that does not open, or a row
+/// written before the store was sealed, reads as "no claim state": nothing
+/// is judged from it.
+///
+/// Decisions are the caller's (`SuccessorClaimRules`); this only stores what
+/// it is told to. Removed with the account's data.
 public final class GroupClosedStore {
 
-    static let prefix = "lakko.group-closed.v2."
+    /// `v3`: the sealed rows. `v2` rows were plaintext JSON strings; they are
+    /// never read, and are removed with the account's data.
+    static let prefix = "lakko.group-closed.v3."
+    static let plaintextPrefix = "lakko.group-closed.v2."
+
+    /// How a row is protected at rest: the same shape the held-send queue
+    /// takes.
+    public typealias Sealer = HeldSendQueue.Sealer
 
     private let defaults: UserDefaults
     private let ownerAccountIdB64: String?
+    private let sealer: Sealer
 
-    public init(defaults: UserDefaults = .standard, ownerAccountIdB64: String? = nil) {
+    public init(
+        defaults: UserDefaults = .standard, ownerAccountIdB64: String? = nil, sealer: Sealer
+    ) {
         self.defaults = defaults
         self.ownerAccountIdB64 = ownerAccountIdB64
+        self.sealer = sealer
     }
 
     /// Standard base64 has no `.`, so the account part ends at the first one.
@@ -290,19 +311,25 @@ public final class GroupClosedStore {
         accountPrefix.map { $0 + groupIdB64 }
     }
 
-    /// The claim state of an old group, or `nil` when it has none. An
-    /// unreadable blob reads as none: nothing is judged from it.
+    /// The claim state of an old group, or `nil` when it has none. A blob
+    /// that does not open or does not decode reads as none.
     public func read(groupIdB64: String) -> StoredGroupClosed? {
-        guard let key = storageKey(groupIdB64), let json = defaults.string(forKey: key) else { return nil }
+        guard let key = storageKey(groupIdB64), let sealed = defaults.data(forKey: key),
+              let opened = try? sealer.open(sealed),
+              let json = String(data: opened, encoding: .utf8)
+        else { return nil }
         return GroupClosedRules.decodeRow(json)?[groupIdB64]
     }
 
     /// Replace the value for a group. Returns whether it was written (`false`
-    /// with no account bound).
+    /// with no account bound, or when the row could not be sealed: it is
+    /// never stored unsealed).
     @discardableResult
     public func write(groupIdB64: String, _ value: StoredGroupClosed) -> Bool {
         guard let key = storageKey(groupIdB64) else { return false }
-        defaults.set(GroupClosedRules.encodeRow([groupIdB64: value]), forKey: key)
+        let json = GroupClosedRules.encodeRow([groupIdB64: value])
+        guard let sealed = try? sealer.seal(Data(json.utf8)) else { return false }
+        defaults.set(sealed, forKey: key)
         return true
     }
 
@@ -323,10 +350,13 @@ public final class GroupClosedStore {
         return out
     }
 
-    /// Forget every claim state of the account (its data is wiped).
+    /// Forget every claim state of the account (its data is wiped),
+    /// plaintext rows of the earlier store included.
     public static func clear(ownerAccountIdB64: String, defaults: UserDefaults = .standard) {
-        let accountPrefix = accountPrefix(ownerAccountIdB64)
-        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(accountPrefix) {
+        let sealedRows = accountPrefix(ownerAccountIdB64)
+        let plaintextRows = plaintextPrefix + ownerAccountIdB64 + "."
+        for key in defaults.dictionaryRepresentation().keys
+        where key.hasPrefix(sealedRows) || key.hasPrefix(plaintextRows) {
             defaults.removeObject(forKey: key)
         }
     }

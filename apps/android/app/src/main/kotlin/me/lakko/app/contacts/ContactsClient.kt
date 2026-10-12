@@ -1182,7 +1182,10 @@ public class ContactsClient(
                     // remain the primary trust. A build-time pin
                     // (BuildConfig.LAKKO_DEVICE_ATTEST_KEY) short-circuits the
                     // fetch, so this is a no-network path in the pinned posture.
-                    val genesisAttestKey = try {
+                    // With the log OFF (no client) the key has no reader, so
+                    // it is not fetched: an identity check must not cost a
+                    // request whose answer nothing uses.
+                    val genesisAttestKey = if (c == null) null else try {
                         DeviceAttestKey.fetch()
                     } catch (cause: Throwable) {
                         Log.w(

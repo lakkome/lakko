@@ -250,14 +250,14 @@ final class CommitSerializationTests: XCTestCase {
             .appendingPathComponent("commit-serialization-\(UUID().uuidString)")
 
         let repo = ChatRepository(
-            chatClient: ChatClient(),
+            chatClient: Offline.chatClient(),
             dsClient: makeGatedDs(),
-            discovery: DiscoveryClient(),
+            discovery: Offline.discovery(),
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroupsStore,
             messageLogStore: MessageLogStore(),
             commitOutbox: CommitOutboxStore(rootDir: outboxDir),
-            pushRouting: PushGroupRouting(),
+            pushRouting: Offline.pushRouting(),
             beaconStore: BeaconObservationStore(
                 defaults: UserDefaults(suiteName: "commit-serialization-b-\(UUID().uuidString)")!),
             pendingRequestStore: PendingRequestStore(

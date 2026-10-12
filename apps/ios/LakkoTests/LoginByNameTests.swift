@@ -302,7 +302,8 @@ final class LoginByNameFlowTests: XCTestCase {
             authClientFactory: { NameRouteStub.client(host) },
             persistence: NoPersistence(),
             nowMs: { 1_000_000 },
-            accountDirectory: directory
+            accountDirectory: directory,
+            restoreDirectory: OfflineRestoreDirectory()
         )
     }
 

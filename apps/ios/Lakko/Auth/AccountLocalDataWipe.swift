@@ -229,6 +229,7 @@ enum AccountLocalDataWipe {
         // ADR-0065 R.5-R.7 — the successor-claim state, the continuity
         // bookkeeping, the held messages and the unsent-lineage marker.
         step("lineage-mirror") { ConversationLineageMirror.clear(accountIdB64: accountIdB64) }
+        step("continuity-mirror") { ContinuityMirror.clear(accountIdB64: accountIdB64) }
         step("group-closed") { GroupClosedStore.clear(ownerAccountIdB64: accountIdB64) }
         step("continuity-store") { ContinuityStore.clear(ownerAccountIdB64: accountIdB64) }
         step("held-sends") { HeldSendQueue.clearAccount(ownerAccountId: accountIdB64) }

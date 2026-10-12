@@ -113,6 +113,17 @@ export function buildLineage(entries: readonly LineageEntry[]): Lineage {
   };
 }
 
+/**
+ * Whether the conversation continued past `groupHex`: the lineage names a
+ * later segment. "Already moved" for the rules that stop acting on an old
+ * segment (R.5, R.8).
+ */
+export function laterSegmentExists(lineage: Lineage, groupHex: string): boolean {
+  const segments = lineage.segmentsOf(lineage.conversationOf(groupHex));
+  const at = segments.indexOf(groupHex);
+  return at !== -1 && at < segments.length - 1;
+}
+
 /** The empty lineage: every group is its own conversation. */
 export const NO_LINEAGE: Lineage = buildLineage([]);
 

@@ -57,6 +57,7 @@ class OneToOneCallSurvivesChatScreensTest {
     fun `a call rings for chat A while chat B is open, and survives both chats being torn down`() = runTest {
         Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
         val repo = ChatRepository(applicationContext = InMemoryContext())
+        val built = ArrayList<ChatViewModel>()
         try {
             val now = System.currentTimeMillis()
             val port = OneToOneCallHostTest.FakePort()
@@ -71,10 +72,10 @@ class OneToOneCallSurvivesChatScreensTest {
             repo.oneToOneCallInbound = host::deliver
 
             val store = ViewModelStore()
-            val vmA = ChatViewModel(repo = repo, groupIdHex = groupA, callHost = host)
+            val vmA = ChatViewModel(repo = repo, groupIdHex = groupA, callHost = host).also { built += it }
             store.put("chat-$groupA", vmA)
             // Chat B opened after A — under the old slot, B now owned signaling.
-            val vmB = ChatViewModel(repo = repo, groupIdHex = groupB, callHost = host)
+            val vmB = ChatViewModel(repo = repo, groupIdHex = groupB, callHost = host).also { built += it }
             store.put("chat-$groupB", vmB)
 
             repo.routeParsedCallSignaling(
@@ -102,13 +103,16 @@ class OneToOneCallSurvivesChatScreensTest {
             assertTrue(host.hasCall)
 
             // A chat opened afterwards cannot start a second call over it.
-            val vmC = ChatViewModel(repo = repo, groupIdHex = groupB, callHost = host)
+            val vmC = ChatViewModel(repo = repo, groupIdHex = groupB, callHost = host).also { built += it }
             vmC.startCall()
             runCurrent()
             assertEquals(1, port.created.size)
             assertEquals("Another call is in progress.", vmC.callNotice.value?.en)
             assertFalse(host.startOutgoing(groupB))
         } finally {
+            // Before `resetMain`: see [clearAndJoin]. `store.clear()` above
+            // cancelled two of them and waited for neither.
+            built.forEach { it.clearAndJoin() }
             repo.close()
             Dispatchers.resetMain()
         }

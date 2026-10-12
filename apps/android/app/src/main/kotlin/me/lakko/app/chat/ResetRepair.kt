@@ -293,6 +293,70 @@ public fun messagesToResend(messages: List<OldSegmentMessage>, resetSignedAtMs: 
 }
 
 /**
+ * R.7 case 1: what is left of [ids] (ascending, as [messagesToResend] gives
+ * them) after an interrupted re-send whose last LANDED message is
+ * [cursor]: only the later ones. A re-send that never landed anything
+ * (`null`) starts at the first.
+ */
+public fun resendRemaining(ids: List<Long>, cursor: Long?): List<Long> =
+    if (cursor == null) ids else ids.filter { it > cursor }
+
+/** The quote a stored message carries, as the re-send reads it. */
+public data class ResendReply(val author: String?, val excerpt: String?)
+
+/** The forward attribution a stored message carries. */
+public data class ResendForward(val author: String?, val originGroupIdB64: String?, val originMessageId: Long?)
+
+/** What a re-sent message's envelope carries beside its text and
+ *  attachments. */
+public data class ResendEnvelopeParts(
+    val replyTo: Long?,
+    val replyAuthor: String?,
+    val replyExcerpt: String?,
+    val forwardedFrom: String?,
+    val forwardOriginGroupB64: String?,
+    val forwardOriginMessageId: Long?,
+    val resendOriginGroupB64: String,
+    val resendOriginMessageId: Long,
+)
+
+/**
+ * R.7 case 1: a re-sent message is the SAME message, so what it said about
+ * other messages goes with it.
+ *
+ * | the original | the re-sent envelope carries                                        |
+ * |--------------|---------------------------------------------------------------------|
+ * | plain        | the marker                                                          |
+ * | a reply      | the marker, the quote's author and excerpt, and target 0 (no jump)  |
+ * | a forward    | the marker, the attribution, and the origin pair when it was whole  |
+ *
+ * A reply's target is an id in the OLD journal, which means nothing in the
+ * successor's: the quote keeps its snapshot and loses its jump
+ * ([REPLY_NO_JUMP_TARGET]), as a held reply does. A quote with neither an
+ * author nor an excerpt is nothing to carry. A forward's origin names
+ * another conversation and stays as it was; half a pair is dropped.
+ */
+public fun resendEnvelopeParts(
+    originGroupB64: String,
+    originMessageId: Long,
+    reply: ResendReply?,
+    forward: ResendForward?,
+): ResendEnvelopeParts {
+    val quote = reply?.takeIf { !it.author.isNullOrEmpty() || !it.excerpt.isNullOrEmpty() }
+    val wholeOrigin = forward != null && !forward.originGroupIdB64.isNullOrEmpty() && forward.originMessageId != null
+    return ResendEnvelopeParts(
+        replyTo = if (quote != null) REPLY_NO_JUMP_TARGET else null,
+        replyAuthor = quote?.author,
+        replyExcerpt = quote?.excerpt,
+        forwardedFrom = forward?.author,
+        forwardOriginGroupB64 = if (wholeOrigin) forward?.originGroupIdB64 else null,
+        forwardOriginMessageId = if (wholeOrigin) forward?.originMessageId else null,
+        resendOriginGroupB64 = originGroupB64,
+        resendOriginMessageId = originMessageId,
+    )
+}
+
+/**
  * R.7 case 3: who the winner adds to an owned group's successor: every person
  * of the old roster except the superseded keys and this device's own account
  * (it is the founder), each once.

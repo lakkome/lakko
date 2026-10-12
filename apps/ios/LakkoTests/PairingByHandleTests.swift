@@ -209,7 +209,7 @@ final class RestoreViaDeviceByNameTests: XCTestCase {
 
     private func viewModel(_ host: String) -> RecoverViewModel {
         let store = SessionStore(defaults: UserDefaults(suiteName: "pairing-by-handle-\(UUID().uuidString)")!)
-        let repository = AuthRepository(
+        let repository = AuthRepository.offline(
             sessionStore: store,
             authClientFactory: { NameRouteStub.client(host) },
             nowMs: { 1_000_000 }

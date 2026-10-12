@@ -284,12 +284,12 @@ final class AuthorIdentityTests: XCTestCase {
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
             dsClient: ds,
-            discovery: DiscoveryClient(),
+            discovery: Offline.discovery(),
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroupsStore,
             messageLogStore: MessageLogStore(),
             commitOutbox: CommitOutboxStore(rootDir: outboxDir),
-            pushRouting: PushGroupRouting(),
+            pushRouting: Offline.pushRouting(),
             beaconStore: BeaconObservationStore(
                 defaults: UserDefaults(suiteName: "author-identity-b-\(UUID().uuidString)")!),
             pendingRequestStore: PendingRequestStore(

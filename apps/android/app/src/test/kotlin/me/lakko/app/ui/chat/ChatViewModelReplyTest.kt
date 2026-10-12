@@ -43,6 +43,8 @@ class ChatViewModelReplyTest {
 
     @After
     fun tearDown() {
+        // Before `resetMain`: see [clearAndJoin].
+        vm.clearAndJoin()
         repo.close()
         Dispatchers.resetMain()
     }

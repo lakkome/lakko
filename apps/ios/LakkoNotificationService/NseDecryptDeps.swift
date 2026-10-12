@@ -86,6 +86,54 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
             .contains { $0.lowercased() == needle }
     }
 
+    /// ADR-0065 R.8 — a key an accepted reset retired, from the App Group
+    /// mirror the APP writes (``ContinuityMirror``). READ-ONLY.
+    func isSupersededSender(accountIdB64: String, senderKeyB64: String?) -> Bool {
+        ContinuityMirror.isSuperseded(senderKeyB64, in: ContinuityMirror.read(accountIdB64: accountIdB64))
+    }
+
+    /// ADR-0065 R.7 case 1 — the rule the app's own receive paths run
+    /// (``ResendMarker/heldResendPredicate(batch:port:)``), over what this
+    /// process may READ: the message log the app wrote (the stored rows of
+    /// the marker's group), the lineage mirror (which conversation a group
+    /// belongs to) and the continuity mirror (segment order, this account's
+    /// own key). Nothing is written, and no key is put through its proven
+    /// aliases here (that map is the app's): a re-send whose sender rotated
+    /// since simply does not match, and its notification is shown.
+    func holdsResendOriginal(
+        accountIdB64: String, receivedGroupIdHex: String,
+        origin: NseResendOrigin, senderKeyB64: String?
+    ) -> Bool {
+        let mirror = ContinuityMirror.read(accountIdB64: accountIdB64)
+        let received = ResendMarker.Received(
+            resendOrigin: ResendMarker.Origin(groupIdB64: origin.groupIdB64, messageId: origin.messageId),
+            senderKeyB64: senderKeyB64)
+        let log = messageLog
+        let held = ResendMarker.heldResendPredicate(
+            batch: [received],
+            port: ResendMarker.ReceivePort(
+                receivedGroupIdHex: receivedGroupIdHex.lowercased(),
+                conversationOf: {
+                    ConversationLineageMirror.conversationHex(accountIdB64: accountIdB64, groupIdHex: $0)
+                },
+                segmentIndexOf: { mirror.segmentIndexOfGroupHex[$0.lowercased()] ?? 0 },
+                ownPersonKeyB64: mirror.ownPersonKeyB64,
+                canonical: { $0 },
+                loadLog: {
+                    guard let payload = log.getLog(accountIdB64: accountIdB64) else { return nil }
+                    return ResendMarker.HeldLog(rows: { hex in
+                        payload.groups[hex]?.messages.filter { $0.messageId > 0 }.map {
+                            ResendMarker.HeldRow(
+                                messageId: $0.messageId,
+                                direction: $0.direction == "outgoing"
+                                    ? .outgoing : ($0.direction == "incoming" ? .incoming : .system),
+                                authorKeyB64: $0.authorKeyB64)
+                        }
+                    })
+                }))
+        return held(received)
+    }
+
     func loadIdentitySeed(accountIdB64: String) -> Data? {
         // ADR-0050 — the app's MLS snapshot is taken under this device's
         // DEVICE identity (the conversation leaf), so that seed rebuilds the
@@ -242,14 +290,18 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // Only Application messages carry a user-visible preview. A Commit /
         // Proposal / ExternalJoinProposal advances state (in the THROWAWAY
         // provider only) but has no body to show.
-        guard case let .application(data, _, _) = processed else { return nil }
+        guard case let .application(data, _, senderAccount) = processed else { return nil }
+        // ADR-0065 R.8 — the PERSON the row came from: the account key the
+        // core resolved the sender leaf to, at receipt (C-68). What the core
+        // asks the superseded-key mirror about, for every kind of row.
+        let senderKeyB64 = senderAccount?.base64EncodedString()
         // CALL SIGNALING — asked FIRST, because this is the one kind of body
         // that must produce something on the lock screen rather than be
         // suppressed (`docs/ux/calls.md` section 2.1: a closed app has to be
         // able to ring). A row this cannot read falls through to the
         // service-envelope filter below, which drops it exactly as before.
         if let call = nseClassifyCallSignaling(data, parser: Self.callParser) {
-            return call
+            return call.attributed(senderKeyB64: senderKeyB64)
         }
         // SERVICE-ENVELOPE FILTER — the background half of the gate the
         // foreground `ChatClient.toEvent` has always run, in the same order.
@@ -312,8 +364,22 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             kind: kind,
             text: body.text,
             attachmentCount: body.attachments.count,
-            singleAttachmentKind: body.attachments.count == 1 ? body.attachments[0].kind : nil
+            singleAttachmentKind: body.attachments.count == 1 ? body.attachments[0].kind : nil,
+            senderKeyB64: senderKeyB64,
+            resendOrigin: Self.resendOrigin(of: body)
         )
+    }
+
+    /// ADR-0065 R.7 case 1 — the re-send marker of a chat body.
+    ///
+    /// The marker is two fields of the chat envelope, read by the ONE parser
+    /// of that wire format, in Rust; the slim extension surface carries the
+    /// pair on `ParsedBody`, whole or not at all.
+    private static func resendOrigin(of body: ParsedBody) -> NseResendOrigin? {
+        guard let group = body.resendOriginGroupB64, let message = body.resendOriginMessageId else {
+            return nil
+        }
+        return NseResendOrigin(groupIdB64: group, messageId: message)
     }
 
     /// The call-signaling parse: the slim FFI's `parseCallSignal`

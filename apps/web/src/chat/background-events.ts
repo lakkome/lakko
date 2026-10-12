@@ -101,6 +101,74 @@ export interface BackgroundEventPlan {
   readonly sawCommit: boolean;
 }
 
+type ServiceEnvelopeEvent = Of<
+  | "profile"
+  | "profileRequest"
+  | "pushRoutingSecret"
+  | "committerBeacon"
+  | "group-name"
+  | "group-closed"
+  | "pin"
+  | "shared-channels"
+  | "scopedDiscovery"
+>;
+
+/** The control and service envelopes a member posts (never a timeline row). */
+function isServiceEnvelopeKind(e: IncomingChatEvent): e is ServiceEnvelopeEvent {
+  switch (e.kind) {
+    case "profile":
+    case "profileRequest":
+    case "pushRoutingSecret":
+    case "committerBeacon":
+    case "group-name":
+    case "group-closed":
+    case "pin":
+    case "shared-channels":
+    case "scopedDiscovery":
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** The inert-sender question of {@link dropsFromSupersededSender}. */
+export interface InertSender {
+  /** `reset-repair.ts` `supersededSenderInert` for this conversation. */
+  readonly sender: (senderKeyB64: string) => boolean;
+  /** The PERSON key at a leaf, for the two envelope kinds that carry a leaf
+   *  only (the push-routing secret, the committer beacon). */
+  readonly senderKeyOfLeaf?: (leaf: number) => string | undefined;
+}
+
+/**
+ * ADR-0065 R.5 / R.8 — whether an event is dropped because of WHO sent it.
+ * The one rule both consumers apply (the background settle through
+ * {@link planBackgroundEvents}, the open chat's own poll):
+ *
+ * | event                                         | dropped when its sender ...                          |
+ * |-----------------------------------------------|------------------------------------------------------|
+ * | a chat row, an op, a call signal              | is a key an accepted reset retired (any conversation)|
+ * | a control or service envelope                 | is inert in this conversation (`InertSender`)        |
+ * | a commit, a proposal, an external-join request| never: MLS state, already applied                    |
+ */
+export function dropsFromSupersededSender(
+  e: IncomingChatEvent,
+  senderSuperseded: (senderKeyB64: string) => boolean,
+  inert: InertSender = { sender: () => false },
+): boolean {
+  if (e.kind === "application" || e.kind === "op" || e.kind === "callSignaling") {
+    return e.senderKey !== undefined && senderSuperseded(e.senderKey);
+  }
+  if (!isServiceEnvelopeKind(e)) return false;
+  const sender =
+    "senderKey" in e && e.senderKey !== undefined
+      ? e.senderKey
+      : e.senderLeaf !== undefined
+        ? inert.senderKeyOfLeaf?.(e.senderLeaf)
+        : undefined;
+  return sender !== undefined && inert.sender(sender);
+}
+
 /** Split a batch per the table in the module header. Order within each list is
  *  journal order. */
 export function planBackgroundEvents(
@@ -116,6 +184,9 @@ export function planBackgroundEvents(
    *  `skip`). Such a message is dropped here, before it is stored, shown,
    *  counted or notified: the history row is the one copy. */
   resendAlreadyHeld: (e: Of<"application">) => boolean = () => false,
+  /** ADR-0065 R.8 — whether NOTHING from a sender acts in this conversation
+   *  (see {@link dropsFromSupersededSender}). */
+  inert: InertSender = { sender: () => false },
 ): BackgroundEventPlan {
   const timeline: Of<"application" | "system">[] = [];
   const toView: IncomingChatEvent[] = [];
@@ -134,13 +205,7 @@ export function planBackgroundEvents(
   const storedProposals: Of<"membershipProposal">[] = [];
   let sawCommit = false;
   for (const e of events) {
-    if (
-      (e.kind === "application" || e.kind === "op" || e.kind === "callSignaling") &&
-      e.senderKey !== undefined &&
-      senderSuperseded(e.senderKey)
-    ) {
-      continue;
-    }
+    if (dropsFromSupersededSender(e, senderSuperseded, inert)) continue;
     if (e.kind === "application" && e.resendOrigin !== undefined && resendAlreadyHeld(e)) {
       continue;
     }

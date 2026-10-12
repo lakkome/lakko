@@ -16,8 +16,12 @@ import {
   messagesToResend,
   peopleByAccount,
   repairPlan,
+  RESEND_REPLY_TARGET,
   resendOwnMessagesAfterReset,
+  resendParts,
+  resendRemaining,
   resetCase,
+  supersededSenderInert,
   restoreOwnershipToResetIdentity,
   successorAdmins,
   successorMissingPeople,
@@ -319,5 +323,66 @@ describe("deviceSwapAcrossCommits (UX 16.5, the Remove and the Add in two commit
       suppress: false,
       awaited: { "acct-anna": 1_000 },
     });
+  });
+});
+
+describe("resendRemaining (R.7 case 1: an interrupted re-send resumes)", () => {
+  it("with no cursor everything is still to send, in order", () => {
+    expect(resendRemaining([3, 5, 8], null)).toEqual([3, 5, 8]);
+  });
+  it("continues after the last message that landed, never from the first", () => {
+    expect(resendRemaining([3, 5, 8], 3)).toEqual([5, 8]);
+    expect(resendRemaining([3, 5, 8], 5)).toEqual([8]);
+  });
+  it("a finished re-send has nothing left", () => {
+    expect(resendRemaining([3, 5, 8], 8)).toEqual([]);
+  });
+  it("a cursor between two ids skips only what is at or below it", () => {
+    expect(resendRemaining([3, 5, 8], 6)).toEqual([8]);
+  });
+});
+
+describe("resendParts (R.7 case 1: a re-send is faithful)", () => {
+  it("a reply keeps its quote and carries target 0", () => {
+    expect(resendParts({ reply: { target: 17, author: "Ada", excerpt: "nine" } })).toEqual({
+      reply: { target: RESEND_REPLY_TARGET, author: "Ada", excerpt: "nine" },
+    });
+    expect(RESEND_REPLY_TARGET).toBe(0);
+  });
+  it("a forward keeps its attribution and origin untouched", () => {
+    const forward = { author: "Grace", origin: { groupIdB64: "Zw==", messageId: 9 } };
+    expect(resendParts({ forward })).toEqual({ forward });
+  });
+  it("a plain message carries nothing more", () => {
+    expect(resendParts({})).toEqual({});
+    expect(resendParts({ reply: undefined, forward: undefined })).toEqual({});
+  });
+});
+
+describe("supersededSenderInert (R.8: nothing from a superseded sender acts)", () => {
+  const superseded = new Set(["retired"]);
+  const base = { supersededKeys: superseded, moved: false } as const;
+  it("a sender whose key no reset retired is never inert", () => {
+    expect(
+      supersededSenderInert({ ...base, senderKeyB64: "current", kind: "chat", ownerKeyB64: undefined, moved: true }),
+    ).toBe(false);
+    expect(
+      supersededSenderInert({ ...base, senderKeyB64: undefined, kind: "chat", ownerKeyB64: undefined }),
+    ).toBe(false);
+  });
+  it("a one-to-one cannot be repaired in place: the retired key is inert", () => {
+    expect(supersededSenderInert({ ...base, senderKeyB64: "retired", kind: "chat", ownerKeyB64: undefined })).toBe(true);
+  });
+  it("a group the retired key owned, and a group with no role table, likewise", () => {
+    expect(supersededSenderInert({ ...base, senderKeyB64: "retired", kind: "group", ownerKeyB64: "retired" })).toBe(true);
+    expect(supersededSenderInert({ ...base, senderKeyB64: "retired", kind: "group", ownerKeyB64: undefined })).toBe(true);
+  });
+  it("a group repaired in place still applies its service envelopes until the eviction lands", () => {
+    expect(supersededSenderInert({ ...base, senderKeyB64: "retired", kind: "group", ownerKeyB64: "owner" })).toBe(false);
+  });
+  it("a conversation that already moved is inert for the retired key whatever its case", () => {
+    expect(
+      supersededSenderInert({ ...base, senderKeyB64: "retired", kind: "group", ownerKeyB64: "owner", moved: true }),
+    ).toBe(true);
   });
 });

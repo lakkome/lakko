@@ -207,7 +207,7 @@ final class OwnEchoRegistryTests: XCTestCase {
         let journalB = DsClient.pseudonymHex(try b.groupId())
         XCTAssertNotEqual(journalA, journalB, "two groups, two journals")
 
-        let client = ChatClient()
+        let client = Offline.chatClient()
         // The user sent something in chat A. Its id is 7 on THAT journal.
         client.markOwnPublishedCommit(groupIdHex: journalA, messageId: 7)
 

@@ -257,10 +257,11 @@ final class PushAccountBindingTests: XCTestCase {
     ) -> AuthRepository {
         AuthRepository(
             sessionStore: sessionStore ?? makeSessionStore(),
-            authClientFactory: { AuthClient(baseURL: "http://auth.test") },
+            authClientFactory: { Offline.auth() },
             persistence: persistence,
             nowMs: { 1_000_000 },
             accountDirectory: NoDirectory(),
+            restoreDirectory: OfflineRestoreDirectory(),
             pushBinding: binding,
             removeDeliveredNotifications: removeDeliveredNotifications
         )

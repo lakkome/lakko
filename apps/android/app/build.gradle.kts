@@ -448,6 +448,40 @@ android.testOptions.unitTests.all {
     val recording = (project.findProperty("lakko.roborazzi.record") as String?).toBoolean()
     it.systemProperty("roborazzi.test.record", recording.toString())
     it.systemProperty("roborazzi.test.verify", (!recording).toString())
+    // Test hygiene. `lakko.test.networkLog`: every request a unit test sent
+    // without a stubbed engine (the test source set replaces the app's base
+    // engine with one that refuses and records, see
+    // `src/test/kotlin/me/lakko/app/testing/ForbiddenNetworkEngine.kt`).
+    // `lakko.test.leakLog`: every exception a coroutine could deliver to
+    // nobody, which `runTest` otherwise reports in whichever test starts
+    // next. A run that leaves either file non-empty FAILS, and says what
+    // was recorded. Paths are plain strings so the configuration cache
+    // holds no project reference.
+    val networkLogPath = layout.buildDirectory.file("test-hygiene/unstubbed-network.log").get().asFile.absolutePath
+    val leakLogPath = layout.buildDirectory.file("test-hygiene/leaked-coroutine-exceptions.log").get().asFile.absolutePath
+    it.systemProperty("lakko.test.networkLog", networkLogPath)
+    it.systemProperty("lakko.test.leakLog", leakLogPath)
+    it.doFirst {
+        for (path in listOf(networkLogPath, leakLogPath)) {
+            val file = File(path)
+            file.parentFile.mkdirs()
+            file.delete()
+        }
+    }
+    it.doLast {
+        val problems = listOf(
+            "unit tests reached the network without a stubbed engine" to networkLogPath,
+            "coroutines leaked exceptions nobody caught" to leakLogPath,
+        ).filter { (_, path) -> File(path).let { f -> f.exists() && f.length() > 0L } }
+        if (problems.isNotEmpty()) {
+            throw GradleException(
+                problems.joinToString("\n") { (what, path) ->
+                    what + ": see " + path + "\n" +
+                        File(path).readLines().filter { l -> l.startsWith("----") }.distinct().take(40).joinToString("\n")
+                },
+            )
+        }
+    }
 }
 
 dependencies {

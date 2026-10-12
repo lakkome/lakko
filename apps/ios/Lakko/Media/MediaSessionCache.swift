@@ -34,6 +34,16 @@ public final class MediaSessionCache {
     nonisolated static let videoDirectory = MediaTempFiles.defaultParent
         .appendingPathComponent("session-video", isDirectory: true)
 
+    /// How a thumb and a full attachment are downloaded and decrypted. Seams:
+    /// a test that mounts a media bubble swaps both, so drawing a bubble
+    /// never opens a connection.
+    var fetchThumb: @Sendable (ThumbRef) async throws -> Data = {
+        try await AttachmentBridge.downloadAndDecrypt(thumb: $0)
+    }
+    var fetchAttachment: @Sendable (AttachmentRef) async throws -> Data = {
+        try await AttachmentBridge.downloadAndDecrypt(ref: $0)
+    }
+
     init() {
         data.totalCostLimit = 256 * 1024 * 1024
         images.totalCostLimit = 128 * 1024 * 1024
@@ -61,8 +71,9 @@ public final class MediaSessionCache {
         guard InlineMedia.isImageThumb(thumb) else { return nil }
         let key = Self.key(for: thumb)
         if let hit = cachedData(key) { return hit }
+        let fetch = fetchThumb
         return try? await single(key) {
-            try await AttachmentBridge.downloadAndDecrypt(thumb: thumb)
+            try await fetch(thumb)
         }
     }
 
@@ -74,8 +85,9 @@ public final class MediaSessionCache {
         }
         let key = Self.key(for: ref)
         if let hit = cachedData(key) { return hit }
+        let fetch = fetchAttachment
         return try await single(key) {
-            try await AttachmentBridge.downloadAndDecrypt(ref: ref)
+            try await fetch(ref)
         }
     }
 

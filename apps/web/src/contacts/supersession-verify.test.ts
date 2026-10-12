@@ -19,7 +19,9 @@ import { fileURLToPath } from "node:url";
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { ContactsClient, SupersessionRefused } from "./client";
-import { bindContactsAccount, loadSupersededKeys, readPin } from "./local-store";
+import { accountKeysOf, bindContactsAccount, loadSupersededKeys, readPin } from "./local-store";
+import { acceptableBoundKeys, trustedBoundKeys } from "./add-member-key";
+import { readVerifiedBinding, recordVerifiedBinding } from "./verified-binding";
 import type { IdentityFetchResponse } from "../discovery/wire";
 
 /** In-memory `localStorage` shim (vitest `node` environment has
@@ -201,6 +203,41 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     expect(loadSupersededKeys().size).toBe(0);
     // The generation baseline is the first pin's; a rotation does not move it.
     expect(pin?.acceptedKeyGeneration).toBe(1);
+  });
+
+  it("a rotated NON-CONTACT is added: the gate turns its verified binding into a pin with the chain, and the add filter accepts devices bound to either key", async () => {
+    const oldPeer = identityFromSeed(51);
+    const newPeer = identityFromSeed(52);
+    const accountIdB64 = b64(ACCOUNT_ID);
+    // A group member this device never pinned: it verified the binding
+    // (account id -> roster key) against the directory earlier.
+    recordVerifiedBinding(accountIdB64, {
+      keyB64: oldPeer.signaturePubkeyB64,
+      keyGeneration: 1,
+      verifiedAtMs: 1,
+    });
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const proof = wasm.signSupersessionProof(oldPeer.ed25519Seed, newPeer.ed25519Seed, now, now + WINDOW_SECS);
+    // The gate every add path runs first (no roster key handed in).
+    await gate({
+      signature_pubkey: newPeer.signaturePubkeyB64,
+      x25519_pubkey: newPeer.x25519PubkeyB64,
+      key_generation: 2,
+      supersession_proof: b64(proof),
+    });
+    expect(readVerifiedBinding(accountIdB64)).toBeUndefined();
+    expect(accountKeysOf(accountIdB64)).toEqual({
+      currentKeyB64: newPeer.signaturePubkeyB64,
+      provenPredecessorsB64: [oldPeer.signaturePubkeyB64],
+    });
+    const both = [newPeer.signaturePubkeyB64, oldPeer.signaturePubkeyB64].sort();
+    const keys = accountKeysOf(accountIdB64);
+    const superseded = loadSupersededKeys();
+    // Asked for under the roster's (old) key or the directory's (new) one,
+    // and on the paths that have no caller's key.
+    expect([...acceptableBoundKeys(oldPeer.signaturePubkeyB64, keys, superseded)].sort()).toEqual(both);
+    expect([...acceptableBoundKeys(newPeer.signaturePubkeyB64, keys, superseded)].sort()).toEqual(both);
+    expect([...trustedBoundKeys(keys, undefined, superseded)].sort()).toEqual(both);
   });
 
   it("ADR-0066: a changed key WITHOUT a proof is refused and leaves NO predecessor", async () => {
