@@ -78,7 +78,54 @@ pub use synced::{should_send_snapshot, SyncedState};
 /// oracle* rather than a parse wrapper.
 #[doc(hidden)]
 pub mod fuzz_api {
-    use crate::{EditChain, EditOp, Hlc, HybridLogicalClock};
+    use crate::synced::{compose_lineage_envelope, decode_lineage_envelope};
+    use crate::{EditChain, EditOp, Hlc, HybridLogicalClock, SyncedState};
+
+    /// Drive the two byte decoders of the synced state on arbitrary input
+    /// and check what they accept (ADR-0065 R.5, ADR-0058):
+    ///
+    /// * [`decode_lineage_envelope`] — reached from a DeviceGroup service
+    ///   envelope another device of the account sent. Whatever decodes must
+    ///   re-encode to the identical bytes (the encoding is canonical) and
+    ///   fold into a state whose own envelopes carry the same registers.
+    /// * [`SyncedState::from_bytes`] — reached from local persistence and
+    ///   from the backup payload a storage tier serves. Whatever decodes
+    ///   must persist to bytes that read back as the same state.
+    ///
+    /// Neither may panic. Returns `false` when a property is violated.
+    #[must_use]
+    pub fn decode_synced_and_check(bytes: &[u8]) -> bool {
+        if let Ok(entries) = decode_lineage_envelope(bytes) {
+            if compose_lineage_envelope(&entries).as_deref() != Ok(bytes) {
+                return false;
+            }
+            let mut state = SyncedState::new();
+            if state.apply_lineage_envelope(bytes).is_err() {
+                return false;
+            }
+            if state.all_lineage() != entries {
+                return false;
+            }
+            if state.lineage_envelopes() != vec![bytes.to_vec()] {
+                return false;
+            }
+        }
+        if let Ok(state) = SyncedState::from_bytes(bytes) {
+            if SyncedState::from_bytes(&state.to_bytes()).as_ref() != Ok(&state) {
+                return false;
+            }
+            let mut rebuilt = SyncedState::new();
+            for envelope in state.lineage_envelopes() {
+                if rebuilt.apply_lineage_envelope(&envelope).is_err() {
+                    return false;
+                }
+            }
+            if rebuilt.all_lineage() != state.all_lineage() {
+                return false;
+            }
+        }
+        true
+    }
 
     /// Upper bound on decoded events — caps allocation so a short
     /// fuzzer input cannot drive an unbounded `Vec`.
@@ -215,7 +262,26 @@ pub mod fuzz_api {
 
 #[cfg(test)]
 mod fuzz_api_tests {
-    use crate::fuzz_api::replay_and_check;
+    use crate::fuzz_api::{decode_synced_and_check, replay_and_check};
+
+    #[test]
+    fn the_synced_decode_oracle_holds_on_valid_and_damaged_input() {
+        let mut state = crate::SyncedState::new();
+        state.set_lineage(3, b"succ-a", b"root").unwrap();
+        state.set_lineage(4, b"succ-b", b"root").unwrap();
+        let envelope = state.lineage_envelopes().remove(0);
+        let persisted = state.to_bytes();
+        for wire in [&envelope, &persisted] {
+            assert!(decode_synced_and_check(wire));
+            for i in 0..wire.len() {
+                assert!(decode_synced_and_check(&wire[..i]));
+                let mut flipped = wire.clone();
+                flipped[i] ^= 0x41;
+                assert!(decode_synced_and_check(&flipped));
+            }
+        }
+        assert!(decode_synced_and_check(&[]));
+    }
 
     // Encode one event in the `fuzz_api::decode` wire shape (the low two
     // bits of the control byte pick the variant).

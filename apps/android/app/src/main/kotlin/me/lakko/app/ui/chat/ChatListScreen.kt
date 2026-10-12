@@ -561,7 +561,8 @@ internal fun rememberConversationRows(
             context = context,
             repository = repository,
             directory = directory,
-            threads = state.threads,
+            // ADR-0065 R.5 — one row per conversation.
+            threads = state.conversations,
             flagsMap = flagsMap,
             readCursorMap = readCursorMap,
             nowMs = System.currentTimeMillis(),
@@ -688,7 +689,7 @@ private fun ConversationList(
                     // Section 2.1.1 — the row carries Accept and Decline for
                     // exactly the conversation the muted call is ringing in,
                     // and for no other.
-                    quietCallOffer = handlers.quietCallOffer?.takeIf { it.isFor(row.id) },
+                    quietCallOffer = handlers.quietCallOffer?.takeIf { it.isFor(row.headId) },
                     // The same two entry points the full-screen ring screen
                     // drives.
                     onAcceptCall = handlers.onAcceptCall,
@@ -878,10 +879,14 @@ internal fun threadConversationRows(
     val lastMs = last?.let { parseMessageTimeMs(it.createdAt) }
     val senderName = last?.takeIf { it.direction == Direction.Incoming }
         ?.authorKey?.let { directory.resolve(it).primary }
-    val flags = flagsMap[thread.groupIdHex]
+    val flags = flagsMap[thread.conversationHex]
     val title = conversationTitle(context, repository, directory, thread.groupIdHex, strings)
     ConversationListRow(
-        id = thread.groupIdHex,
+        // ADR-0065 R.5 — the conversation id: pins, mutes, the archive,
+        // folders and the order are keyed on it and stay with the
+        // conversation when it continues in a successor group.
+        id = thread.conversationHex,
+        headId = thread.groupIdHex,
         kind = kind.toRowKind(),
         title = title,
         preview = rowPreview(
@@ -890,9 +895,6 @@ internal fun threadConversationRows(
             isGroup = kind == ConversationKind.Group,
             senderName = senderName,
             strings = strings,
-            // ADR-0065 phase 2 — a closed one-to-one names the person in its
-            // line; the title of a one-to-one is that person.
-            peerName = title,
         ),
         time = lastMs?.let { formatListTime(it, nowMs, zone, use24h, locale) },
         // A conversation nothing has happened in yet has no activity
@@ -902,7 +904,7 @@ internal fun threadConversationRows(
         lastActivityMs = lastMs,
         // ADR-0045 UX §6.2.4 / §6.2.11 — no badge once the membership
         // has ended; the count would be frozen for good.
-        unread = if (thread.membershipEnded || thread.closed != null) {
+        unread = if (thread.membershipEnded) {
             0
         } else {
             unreadCount(thread = thread, cursor = readCursorMap[thread.groupIdHex])
@@ -910,7 +912,7 @@ internal fun threadConversationRows(
         pinned = flags?.pinned == true,
         muted = flags?.muted == true,
         archived = flags?.archived == true,
-        unreadOverride = flags?.unreadOverride == true && !thread.membershipEnded && thread.closed == null,
+        unreadOverride = flags?.unreadOverride == true && !thread.membershipEnded,
         membershipEnded = thread.membershipEnded,
     )
 }
@@ -926,8 +928,6 @@ internal fun rowPreview(
     isGroup: Boolean,
     senderName: String?,
     strings: Strings = Localization.strings.value,
-    /** ADR-0065 phase 2 / UX 16.4 — the person a closed one-to-one names. */
-    peerName: String? = null,
 ): String {
     val endedLine = me.lakko.app.chat.chatListLine(
         me.lakko.app.chat.membershipState(
@@ -936,15 +936,6 @@ internal fun rowPreview(
         ),
     )
     if (endedLine != null) return endedLine.renderWith(strings)
-    // ADR-0065 phase 2 / UX 16.4 and 16.5 — a closed conversation's line,
-    // in place; no unread badge, no typing, no live anything.
-    thread.closed?.let { closed ->
-        return when (closed.reason) {
-            me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET ->
-                me.lakko.app.chat.OneToOneClosedCopy.listRow(peerName ?: strings["chat.members.unnamed"])
-            me.lakko.app.chat.ClosedReason.GROUP_CLOSED_BY_ADMIN -> me.lakko.app.chat.GroupClosedCopy.LIST_ROW
-        }.renderWith(strings)
-    }
     val noMessages = strings["chats.row.no_messages"]
     if (last == null) return noMessages
     if (last.direction == Direction.System) {

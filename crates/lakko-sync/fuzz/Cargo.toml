@@ -32,3 +32,14 @@ path = "fuzz_targets/sync_replay.rs"
 test = false
 doc = false
 bench = false
+
+# The two byte decoders of the ADR-0058 synced state: the lineage envelope
+# (ADR-0065 R.5), which arrives from another device of the account inside a
+# DeviceGroup service envelope, and `SyncedState::from_bytes`, which reads
+# local persistence and the backup payload a storage tier serves.
+[[bin]]
+name = "synced_state_decode"
+path = "fuzz_targets/synced_state_decode.rs"
+test = false
+doc = false
+bench = false

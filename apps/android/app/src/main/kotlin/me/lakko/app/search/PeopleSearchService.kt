@@ -333,14 +333,6 @@ public class PeopleSearchService(
         }
 
         override fun errorMessage(error: Throwable): UiText {
-            // UX 16.1 — a found person who is a contact with reset, unverified
-            // keys answers the action's own line.
-            val refused = error as? me.lakko.app.contacts.SupersessionRefused
-            if (refused != null &&
-                me.lakko.app.contacts.refusalIsLoggedReset(refused.reason, refused.loggedReset)
-            ) {
-                return me.lakko.app.contacts.KeysResetCopy.verifyFirst(shownUsername?.let { "@$it" })
-            }
             return contactsErrorText(error, "contacts.error.send", AllowanceKind.LOOKUP)
         }
     }

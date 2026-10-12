@@ -320,6 +320,17 @@ final class AccountLocalDataWipeTests: XCTestCase {
             accountKey: x, context: .pushRegister,
             tokens: [AnonToken(context: AnonTokenContext.pushRegister.rawValue, epoch: 1, headerValue: "h")])
         KeychainReachPersistence().save(ReachRecord(), accountIdB64: x)
+        // ADR-0066 part 3 — the account's own predecessor seed (key material
+        // a pairing state bundle may have brought) with its adoption time,
+        // and the unanswered outgoing contact requests with their intro.
+        try KeychainOwnPredecessorStore().add(
+            Data(repeating: 0x0C, count: AccountIdentitySeedStore.seedLength), accountIdB64: x)
+        PredecessorMailbox.AdoptionStore().recordIfAbsent(accountIdB64: x, keyB64: "old-key", nowMs: 1)
+        try KeychainSentRequestsStore().save(
+            [SentContactRequest(
+                recipientUsername: "bob", recipientAccountIdB64: "peer", messageId: 1,
+                createdAt: "2026-10-11T00:00:00Z", intro: "hello")],
+            accountIdB64: x)
         ChannelPublisherKeyStore.save(Data([1]), accountIdB64: x)
         ChannelPublishCounterStore.save(Data([1]), accountIdB64: x)
         ChannelSubscriberKeyStore.save(Data([1]), accountIdB64: x)

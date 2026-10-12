@@ -51,6 +51,10 @@ public protocol OwnPredecessorStoring {
     func load(accountIdB64: String) -> [Data]
     /// Append `seed` (a no-op when already stored).
     func add(_ seed: Data, accountIdB64: String) throws
+    /// Replace the whole slot with `seeds` (oldest first). Used when a
+    /// pairing state bundle hands a device paired AFTER a rotation the chain
+    /// it could not have adopted itself.
+    func replace(_ seeds: [Data], accountIdB64: String) throws
     func clear(accountIdB64: String)
 }
 
@@ -77,6 +81,17 @@ public struct KeychainOwnPredecessorStore: OwnPredecessorStoring {
         seeds.append(seed)
         try KeychainJSONItem.write(
             try JSONEncoder().encode(seeds), service: Self.serviceTag, account: accountIdB64)
+    }
+
+    public func replace(_ seeds: [Data], accountIdB64: String) throws {
+        var out: [Data] = []
+        for seed in seeds where !seed.isEmpty && !out.contains(seed) { out.append(seed) }
+        guard !out.isEmpty else {
+            clear(accountIdB64: accountIdB64)
+            return
+        }
+        try KeychainJSONItem.write(
+            try JSONEncoder().encode(out), service: Self.serviceTag, account: accountIdB64)
     }
 
     public func clear(accountIdB64: String) {
@@ -106,6 +121,65 @@ public enum OwnAccountKeys {
         bindingAccountKey: Data, currentAccountKey: Data, predecessorKeys: [Data]
     ) -> Bool {
         bindingAccountKey == currentAccountKey || predecessorKeys.contains(bindingAccountKey)
+    }
+
+    /// The account seed a device's conversation binding is minted under:
+    /// the OLDEST own predecessor when the account rotated (the key every
+    /// device that was there before the first rotation is bound to, and the
+    /// one a pairing state bundle lists first), else the current seed. A
+    /// device paired after a rotation thereby binds under the SAME account
+    /// key as the device that paired it.
+    public static func conversationSeed(currentSeed: Data, predecessorSeeds: [Data]) -> Data {
+        predecessorSeeds.first ?? currentSeed
+    }
+
+    /// What to do with a device's stored conversation binding.
+    public enum BindingVerdict: Equatable {
+        /// The binding is this account's and is kept.
+        case keep
+        /// No usable binding, or one naming a key that is not this
+        /// account's: mint one under the conversation key.
+        case mint
+        /// The binding names the CURRENT key although the account has
+        /// predecessors (it was minted before the pairing state bundle
+        /// brought them) and this device holds no conversation yet: mint it
+        /// again under the conversation key, before any KeyPackage naming
+        /// the current key admits this device anywhere.
+        case remint
+        /// The same, but this device already holds conversations whose
+        /// leaves carry the current-key binding: it is kept (a re-mint would
+        /// split this device between two account keys). Such a device is not
+        /// admitted to the account's older conversations.
+        case keepUnderCurrentKey
+    }
+
+    /// - Parameters:
+    ///   - boundKey: the account key the stored binding names; `nil` when
+    ///     there is none or it did not verify.
+    ///   - predecessorKeys: the own predecessor keys, oldest first.
+    ///   - holdsConversations: whether this device is in any conversation.
+    public static func bindingVerdict(
+        boundKey: Data?, currentKey: Data, predecessorKeys: [Data], holdsConversations: Bool
+    ) -> BindingVerdict {
+        guard let boundKey else { return .mint }
+        if predecessorKeys.contains(boundKey) { return .keep }
+        guard boundKey == currentKey else { return .mint }
+        if predecessorKeys.isEmpty { return .keep }
+        return holdsConversations ? .keepUnderCurrentKey : .remint
+    }
+
+    /// ADR-0066 part 3 — whether a KeyPackage of THIS account names the
+    /// wrong account key for a conversation: its binding is under one of the
+    /// account's own keys, but not the one this account's leaves in that
+    /// conversation are bound to. Such a device (one that minted its binding
+    /// before the pairing bundle reached it) is not admitted; it re-mints
+    /// and publishes again, and the re-admission arm takes it then.
+    public static func namesWrongOwnKey(
+        keyPackageAccountKey: Data, ownKeyInConversation: Data,
+        currentAccountKey: Data?, predecessorKeys: [Data]
+    ) -> Bool {
+        keyPackageAccountKey != ownKeyInConversation
+            && isOwn(keyPackageAccountKey, currentAccountKey: currentAccountKey, predecessorKeys: predecessorKeys)
     }
 
     /// Whether `key` is this account's own key, now or before a rotation.

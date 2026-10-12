@@ -91,6 +91,7 @@ import {
 import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
 import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
 import { mintHlc, observeHlc } from "./hlc";
+import type { LineageEntry } from "../../chat/lineage";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
 import { sealKeyRotationAfterRemoval } from "../key-rotation";
 import { installKeyRotationPort, type JournalCatchUp } from "./key-rotation-port";
@@ -173,6 +174,9 @@ export interface DeviceGroupSyncApi {
   /** Reactive: a folder edit made here has not reached the other devices
    *  yet (UX spec section 6). */
   readonly pendingFolderSync: Accessor<boolean>;
+  /** Reactive: the conversation lineage registers (ADR-0065 R.5): which
+   *  group continues which conversation. Read through `chat/lineage.ts`. */
+  readonly lineage: Accessor<readonly LineageEntry[]>;
   /** Reactive: another device removed this one from the account, and this
    *  device has applied that removal (its DeviceGroup is inactive). The poll
    *  loop has stopped for good; the app shell shows "This device was
@@ -233,6 +237,17 @@ export interface DeviceGroupSyncApi {
    * error, it waits in the outbox.
    */
   applyFolderEdits(edits: readonly RegisterEdit[]): Promise<void>;
+
+  /**
+   * ADR-0065 R.5 — record that `successorGroupId` continues the conversation
+   * `rootConversationId`. Write-once: `false` when this device already holds
+   * a register for the successor (nothing is written or sent). On `true` the
+   * register is folded here at once and its envelope is sent to the account's
+   * other devices over the DeviceGroup's `ServiceEnvelope`, now if this
+   * device is online, at the next start if not. Never throws for a failed
+   * send; `false` also when the runtime has not started.
+   */
+  setLineage(successorGroupId: Uint8Array, rootConversationId: Uint8Array): Promise<boolean>;
 }
 
 /** How long a catch-up waits for the journal's head before it reports no
@@ -272,6 +287,7 @@ export function DeviceGroupSyncProvider(props: {
   const [readCursors, setReadCursors] = createSignal<ReadCursorMap>({});
   const [order, setOrder] = createSignal<OrderState | null>(null);
   const [folders, setFolders] = createSignal<readonly FolderModel[]>([]);
+  const [lineage, setLineageEntries] = createSignal<readonly LineageEntry[]>([]);
   const [outbox, setOutbox] = createSignal<readonly OutboxBatch[]>([]);
   const [ready, setReady] = createSignal(false);
   const [deviceRemoved, setDeviceRemoved] = createSignal(false);
@@ -322,6 +338,11 @@ export function DeviceGroupSyncProvider(props: {
   let group: WasmDeviceGroup | null = null;
   /** The one fold of the account's synced state (ADR-0058). */
   let synced: WasmSyncedState | null = null;
+  /** The loaded wasm module, for the synchronous receive path. */
+  let wasmSync: Awaited<ReturnType<typeof loadWasm>> | null = null;
+  void loadWasm().then((w) => {
+    wasmSync = w;
+  });
   let pollAbort: AbortController | null = null;
   let pollDone: Promise<void> | null = null;
   let activeAccountIdB64: string | null = null;
@@ -431,6 +452,7 @@ export function DeviceGroupSyncProvider(props: {
     setReadCursors(p.readCursors);
     setOrder(p.order);
     setFolders(p.folders);
+    setLineageEntries(p.lineage);
     setStateVersion((v) => v + 1);
   }
 
@@ -593,6 +615,7 @@ export function DeviceGroupSyncProvider(props: {
 
     startPollLoop(accountIdB64, deviceKey);
     void drainFolderOutbox();
+    void flushUnsentLineage();
   }
 
   function startPollLoop(accountIdB64: string, deviceKey: CryptoKey): void {
@@ -736,6 +759,7 @@ export function DeviceGroupSyncProvider(props: {
     setReadCursors({});
     setOrder(null);
     setFolders([]);
+    setLineageEntries([]);
     setOutbox([]);
   }
 
@@ -797,6 +821,10 @@ export function DeviceGroupSyncProvider(props: {
         const bytes = group.createDeviceGroupSnapshotMessage(identity, part, mintHlc());
         await publishGroupMessage(bytes);
       }
+      // ADR-0065 R.13a - the lineage is not in `snapshotParts()`: a catch-up
+      // is the snapshot parts PLUS every lineage envelope, each with its
+      // original stamp.
+      await sendLineageEnvelopes(synced.lineageEnvelopes());
     } catch (err) {
       // The next growth, or the new device's own writes, carry the state
       // forward; a failed re-send is not retried in a loop.
@@ -805,6 +833,70 @@ export function DeviceGroupSyncProvider(props: {
     } finally {
       for (const part of parts) part.free();
     }
+  }
+
+  // ----- ADR-0065 R.5: the lineage register ------------------------
+
+  /** `localStorage` marker: a lineage register written here has not been
+   *  confirmed sent. Set before the publish, cleared after it, so a device
+   *  that was offline (or closed mid-send) sends every register again at its
+   *  next start. Re-sending is idempotent: the fold keeps the first stamp. */
+  const lineageUnsentKey = (account: string): string => `lakko.lineage.unsent.v1.${account}`;
+
+  async function sendLineageEnvelopes(envelopes: readonly Uint8Array[]): Promise<void> {
+    for (const envelope of envelopes) {
+      if (group === null || identity === null || reloading || deviceRemoved()) {
+        throw new Error("DeviceGroupSyncProvider is not ready");
+      }
+      await publishGroupMessage(group.createServiceEnvelopeMessage(identity, envelope, mintHlc()));
+    }
+  }
+
+  /** Send every register again when an earlier send was not confirmed. */
+  async function flushUnsentLineage(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(lineageUnsentKey(account)) === null) return;
+      await sendLineageEnvelopes(synced.lineageEnvelopes());
+      localStorage.removeItem(lineageUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("lineage register send failed; retried at the next start", err);
+    }
+  }
+
+  async function setLineageImpl(
+    successorGroupId: Uint8Array,
+    rootConversationId: Uint8Array,
+  ): Promise<boolean> {
+    if (synced === null) return false;
+    let written: boolean;
+    try {
+      written = synced.setLineage(mintHlc(), successorGroupId, rootConversationId);
+    } catch (err) {
+      // An id out of bounds, or a successor naming itself.
+      // eslint-disable-next-line no-console
+      console.warn("lineage register refused", err);
+      return false;
+    }
+    if (!written) return false;
+    refresh();
+    const account = activeAccountIdB64;
+    try {
+      if (account !== null) localStorage.setItem(lineageUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: the send below is the only attempt */
+    }
+    try {
+      const envelope = synced.lineageEnvelopeFor(successorGroupId);
+      if (envelope !== undefined) await sendLineageEnvelopes([envelope]);
+      if (account !== null) localStorage.removeItem(lineageUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("lineage register send failed; retried at the next start", err);
+    }
+    return true;
   }
 
   // ----- Inbound poll loop ---------------------------------------
@@ -1276,6 +1368,21 @@ export function DeviceGroupSyncProvider(props: {
       // own Profile envelope from another device of this account, ordered by
       // its own stamp (not the HLC) and not a synced register; anything else
       // inside is dropped by the intake.
+      // ADR-0065 R.5 / R.13a - a lineage envelope is routed BEFORE that
+      // dispatcher: it is a `lakko-sync` register, folded by the one fold.
+      if (wasmSync !== null && wasmSync.isLineageEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyLineageEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch (err) {
+          // A malformed register is dropped, never folded.
+          // eslint-disable-next-line no-console
+          console.warn("lineage envelope refused", err);
+        }
+        return;
+      }
       void receiveServiceEnvelope(parsed.serviceEnvelope);
       return;
     }
@@ -1474,6 +1581,8 @@ export function DeviceGroupSyncProvider(props: {
     order,
     folders,
     pendingFolderSync: () => outbox().length > 0,
+    lineage,
+    setLineage: setLineageImpl,
     deviceRemoved,
     deviceRoster,
     getDraft(groupId) {

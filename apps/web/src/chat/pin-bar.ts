@@ -75,6 +75,128 @@ export function pinBarItems(args: {
   ];
 }
 
+/** The pins of ONE segment (group) of a conversation. */
+export interface SegmentPins {
+  /** How many segments this one is before the conversation's current group
+   *  (`0` = the current group). */
+  readonly distanceFromHead: number;
+  readonly shared: ReadonlyMap<number, StoredPin>;
+  readonly personal: ReadonlyMap<number, bigint>;
+}
+
+/**
+ * ADR-0065 R.5 — a conversation's pins span its segments. The pin store
+ * stays keyed on `(group, message id)` and is never rewritten when a
+ * conversation continues in a successor group, so a pin of an older segment
+ * is still held under the older group. This folds every held segment's pins
+ * into ONE pair of maps keyed on the ON-SCREEN row id: the message id itself
+ * for the current group, `rowId(messageId, distance)` for an older one
+ * (`lineage.ts` `historyRowId`), which is the id the timeline draws that row
+ * under and the id a tap jumps to. So a pin of an older segment stays in the
+ * bar and opens where it was.
+ *
+ * Pure; `pinBarItems` then orders the result exactly as before.
+ */
+export function pinsAcrossSegments(
+  segments: readonly SegmentPins[],
+  rowId: (messageId: number, distanceFromHead: number) => number,
+): { readonly shared: Map<number, StoredPin>; readonly personal: Map<number, bigint> } {
+  const shared = new Map<number, StoredPin>();
+  const personal = new Map<number, bigint>();
+  for (const segment of segments) {
+    const d = Math.max(0, Math.trunc(segment.distanceFromHead));
+    const key = (messageId: number): number => (d === 0 ? messageId : rowId(messageId, d));
+    for (const [id, pin] of segment.shared) shared.set(key(id), pin);
+    for (const [id, at] of segment.personal) personal.set(key(id), at);
+  }
+  return { shared, personal };
+}
+
+/** The stored pin an on-screen row id stands for. */
+export interface PinTarget {
+  /** The group the pin is stored under (standard base64). */
+  readonly groupIdB64: string;
+  /** The message id in THAT group. */
+  readonly messageId: number;
+  /** Whether that group is an older segment of the conversation. */
+  readonly older: boolean;
+}
+
+/**
+ * ADR-0065 R.5 — the inverse of {@link pinsAcrossSegments}: which stored
+ * `(group, message id)` an on-screen row id is. A pin of an older segment
+ * is drawn under its history id; to UNPIN it the store has to be told the
+ * older group and the original id.
+ *
+ * `olderGroupIdsB64` is the conversation's older segments, oldest first
+ * (distance `length - index` from the head), exactly as the bar folds them.
+ * `null` for a history id whose segment this device does not hold.
+ */
+export function pinTargetOfRow(input: {
+  readonly rowId: number;
+  readonly headGroupIdB64: string;
+  readonly olderGroupIdsB64: readonly string[];
+  readonly origin: (
+    rowId: number,
+  ) => { readonly messageId: number; readonly distanceFromHead: number } | null;
+}): PinTarget | null {
+  if (input.rowId >= 0) {
+    return { groupIdB64: input.headGroupIdB64, messageId: input.rowId, older: false };
+  }
+  const origin = input.origin(input.rowId);
+  if (origin === null) return null;
+  const groupIdB64 = input.olderGroupIdsB64[input.olderGroupIdsB64.length - origin.distanceFromHead];
+  if (groupIdB64 === undefined) return null;
+  return { groupIdB64, messageId: origin.messageId, older: true };
+}
+
+/** How an unpin (or a pin) of one scope is carried out. */
+export type PinRoute =
+  /** The ordinary path: a shared change is sent to the group. */
+  | "ordinary"
+  /** Applied on this device only: nothing is published. */
+  | "local-only"
+  /** Not offered. */
+  | "refused";
+
+/**
+ * ADR-0065 R.5 — a pin of an OLDER segment can be removed, and nothing
+ * else can be done to it: an older segment is read-only on the wire (no op
+ * can name its rows in the current group's journal, and nothing is sent
+ * into a superseded session), so its shared unpin is recorded on this
+ * device alone, with a fresh stamp so a late re-send of the old pin cannot
+ * bring it back.
+ *
+ * | segment | change | scope    | route        |
+ * |---------|--------|----------|--------------|
+ * | current | any    | any      | `ordinary`   |
+ * | older   | unpin  | personal | `ordinary`   |
+ * | older   | unpin  | shared   | `local-only` |
+ * | older   | pin    | any      | `refused`    |
+ */
+export function pinRoute(input: {
+  readonly older: boolean;
+  readonly pinned: boolean;
+  readonly scope: "shared" | "personal";
+}): PinRoute {
+  if (!input.older) return "ordinary";
+  if (input.pinned) return "refused";
+  return input.scope === "shared" ? "local-only" : "ordinary";
+}
+
+/**
+ * ADR-0065 R.5 — what the action menu of a row of an OLDER segment offers:
+ * the `Unpin` row alone when the row is pinned in a way this device may
+ * clear, and nothing otherwise (a history row takes no edit, delete,
+ * reaction, reply, forward or new pin).
+ */
+export function historyRowOffersUnpin(input: {
+  readonly isHistoryRow: boolean;
+  readonly pinRow: "Pin" | "Unpin";
+}): boolean {
+  return input.isHistoryRow && input.pinRow === "Unpin";
+}
+
 /** The tap: the next older pin, wrapping past the oldest to the newest.
  *  With one pin the bar stays where it is. */
 export function nextPinIndex(current: number, count: number): number {

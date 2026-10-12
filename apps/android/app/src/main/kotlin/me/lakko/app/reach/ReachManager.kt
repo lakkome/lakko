@@ -81,7 +81,21 @@ public class ReachManager internal constructor(
      *  delegation may name any of them. SECRET; the caller of the provider
      *  wipes the seeds. */
     private val ownPredecessorKeys: (ownerAccountIdB64: String) -> List<Pair<ByteArray, ByteArray>> = { emptyList() },
+    /** ADR-0065 R.4 - the marker of this device's own last account-key reset
+     *  ([ContinuityMarkerStore]), by the signed-in account id; `null` when
+     *  this device never reset the account. */
+    private val continuityMarker: (ownerAccountIdB64: String) -> ContinuityMarker? = { null },
 ) {
+    /**
+     * ADR-0065 R.4 - the account and generation behind [ownerKey] when this
+     * device ACCEPTED a reset that re-pinned the person to it, with the
+     * attestation's `signed_at`: what the continuity reach key of that
+     * person's new mailbox derives from. Installed by the contacts
+     * repository; `null` (or a `null` answer) offers no continuity key.
+     */
+    @Volatile
+    public var acceptedResetOf: ((ownerKey: ByteArray) -> me.lakko.app.contacts.AcceptedResetOfKey?)? = null
+
     /** The own-profile store (ADR-0048 section 4a), keyed by the raw account
      *  id: the own name travels between the account's devices beside the
      *  setting. */
@@ -209,6 +223,7 @@ public class ReachManager internal constructor(
                     registeredOpen = null,
                     registeredForKeyHex = boundKeyHex,
                     profileResendOwedForKeyHex = boundKeyHex,
+                    grantsSpendOwedForKeyHex = boundKeyHex,
                     links = emptyList(),
                     replies = emptyList(),
                     spentLinks = spentLinksAfterMove(doc.spentLinks, doc.links),
@@ -288,6 +303,24 @@ public class ReachManager internal constructor(
         lock.withLock {
             if (binding.get() !== b || doc.profileResendOwedForKeyHex == null) return@withLock
             doc = doc.copy(profileResendOwedForKeyHex = null)
+            store.save(b.accountIdB64, doc)
+        }
+    }
+
+    /** Rule 5 - whether this device still has to spend what it granted
+     *  before the keys moved to the bound key (durable; asked at each
+     *  session start, on the rotating device and on a kept one). */
+    public fun grantsSpendOwed(): Boolean {
+        val b = binding.get() ?: return false
+        return spendRoundOwed(doc.grantsSpendOwedForKeyHex, reachHex(b.accountKey))
+    }
+
+    /** Rule 5 - the spend round found nothing left to do. */
+    public suspend fun grantsSpendDone() {
+        val b = binding.get() ?: return
+        lock.withLock {
+            if (binding.get() !== b || doc.grantsSpendOwedForKeyHex == null) return@withLock
+            doc = doc.copy(grantsSpendOwedForKeyHex = null)
             store.save(b.accountIdB64, doc)
         }
     }
@@ -701,6 +734,9 @@ public class ReachManager internal constructor(
             r.pkHex to RegisteredReachKey(ReachSlot(kind, r.scopeHex), r.version, r.expiresAtMs)
         }.toMap()
         val diff = diffReachKeys(desired, registered)
+        // ADR-0065 R.4 - the continuity key rides beside the class keys.
+        syncContinuityLocked(b, nowMs)
+        if (binding.get() !== b) return false
         val wantOpen = setting.mode == FfiVisibilityMode.EVERYONE
         // The Everyone flag waits for the recovery too: it is part of the
         // setting the versions are reconciled with.
@@ -1192,6 +1228,14 @@ public class ReachManager internal constructor(
                 out += { DsReachAuth(reachSigner(seed)) }
             }
         }
+        // ADR-0065 R.4 - a Welcome to a person whose reset this device
+        // accepted may be signed with the continuity key of their new
+        // mailbox: nobody holds a grant for it. After the grants the person
+        // issued (once they are in a conversation their profile hands those
+        // out and this key is not used again), before a committer delegation.
+        if (purpose == WritePurpose.WELCOME) {
+            out += { continuityAuthFor(ownerKey) }
+        }
         if (purpose == WritePurpose.WELCOME && groupHex != null) {
             out += {
                 // The write is signed with the own key the delegation
@@ -1202,6 +1246,78 @@ public class ReachManager internal constructor(
             }
         }
         return out
+    }
+
+    /** The continuity key of [ownerKey]'s mailbox as a write authorisation,
+     *  or `null` when this device accepted no reset that produced that key or
+     *  the key's window is over ([continuityKeyUsable]). */
+    private fun continuityAuthFor(ownerKey: ByteArray): DsReachAuth? {
+        val reset = try {
+            acceptedResetOf?.invoke(mailboxAccountKey(ownerKey))
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+        if (!continuityKeyUsable(reset.signedAtMs, System.currentTimeMillis())) return null
+        val accountId = try {
+            java.util.Base64.getDecoder().decode(reset.accountIdB64)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        val seed = uniffi.lakko_ffi_uniffi.continuityReachSeed(accountId, reset.keyGeneration.toULong())
+        return try {
+            DsReachAuth(reachSigner(seed))
+        } finally {
+            seed.fill(0)
+        }
+    }
+
+    /**
+     * ADR-0065 R.4 - keep the continuity key of THIS account registered on
+     * its mailbox until its expiry, after a reset this device ran. Derived
+     * from public values (the account id and the generation); removed once it
+     * is no longer wanted. Best-effort: a failure leaves the record as it was
+     * and the next sync tries again.
+     */
+    private suspend fun syncContinuityLocked(b: Binding, nowMs: Long) {
+        val mailboxHex = reachHex(b.mailbox)
+        val wanted = try {
+            continuityKeyWanted(continuityMarker(b.accountIdB64), nowMs)?.let { key ->
+                val seed = uniffi.lakko_ffi_uniffi.continuityReachSeed(
+                    java.util.Base64.getDecoder().decode(b.accountIdB64),
+                    key.keyGeneration.toULong(),
+                )
+                try {
+                    RegisteredContinuityKey(reachHex(publicKeyOf(seed)), key.expiresAtMs)
+                } finally {
+                    seed.fill(0)
+                }
+            }
+        } catch (_: Throwable) {
+            return
+        }
+        // What was registered on another mailbox (before a rotation moved the
+        // account's keys) is not on this one.
+        val registered = doc.continuityRegistered.takeIf { doc.continuityMailboxHex == mailboxHex }
+        val change = continuityChange(wanted, registered)
+        if (change.isEmpty) return
+        try {
+            dsFactory().use { ds ->
+                ds.putMailboxReach(
+                    pseudonym = b.mailbox,
+                    signer = b.mailboxSigner,
+                    add = listOfNotNull(change.add?.let { DsReachKeyAdd(reachUnhex(it.publicKeyHex)!!, it.expiresAtMs) }),
+                    remove = listOfNotNull(change.removeHex?.let(::reachUnhex)),
+                    open = null,
+                )
+            }
+            if (binding.get() !== b) return
+            doc = doc.copy(continuityRegistered = wanted, continuityMailboxHex = if (wanted == null) null else mailboxHex)
+            store.save(b.accountIdB64, doc)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "continuity key not synced: ${cause.javaClass.simpleName}")
+        }
     }
 
     /** ADR-0050 section 2.5a item 7 — told the owner key of a grant (or a
@@ -1499,6 +1615,7 @@ public class ReachManager internal constructor(
                     ownProfiles = ContextOwnProfileAccess(context.applicationContext),
                     provenLinks = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context.applicationContext)::load,
                     ownPredecessorKeys = { accountIdB64 -> ownPredecessorKeysOnDevice(context.applicationContext, accountIdB64) },
+                    continuityMarker = { accountIdB64 -> ContinuityMarkerStore.read(context.applicationContext, accountIdB64) },
                 ).also { instance = it }
             }
 

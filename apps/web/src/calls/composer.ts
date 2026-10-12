@@ -123,6 +123,9 @@ export interface ComposedCallInvite {
   readonly callId: Uint8Array;
   /** The sealed blob the server now holds (opaque to it). */
   readonly sealed: Uint8Array;
+  /** The 12-byte link secret (the URL fragment), for the device's own
+   *  record of the link (`contacts/minted-links.ts`). */
+  readonly linkSecret: Uint8Array;
 }
 
 /** Programmer-error path: input validation caught before any
@@ -276,6 +279,7 @@ export async function composeAndUploadCallInvite(
     url,
     callId,
     sealed,
+    linkSecret,
   };
 }
 

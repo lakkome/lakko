@@ -56,34 +56,36 @@ public final class ContactsClient {
     /// and the check is a no-op (fail-open). Injectable for tests.
     private let transparencyVerify: TransparencyVerify
 
-    /// ADR-0065 phase 2 (UX 16.1) — where a confirmed key reset is reported:
-    /// `(account id, the pinned key before the reset, the published key the
-    /// log confirmed as a reset)`, both keys base64. One process-wide hook
-    /// rather than a per-instance one, because a `ContactsClient` is built
-    /// wherever an identity is fetched and every one of them must report.
-    /// The composition root points it at
-    /// ``ContactsRepository/noteKeyReset(accountId:previousKeyB64:pendingKeyB64:)``;
-    /// `nil` (a test, a tool) drops the observation.
-    public static var keyResetSink: ((_ accountId: Data, _ previousKeyB64: String, _ pendingKeyB64: String) -> Void)?
-
     /// ADR-0066 section 3.5 — the proven-predecessor map. A key change the
     /// gate accepted BY PROOF records the old key as the proven predecessor
     /// of the new one (the same person; nothing is shown); a change reported
     /// as a reset drops the person's predecessors.
     private let predecessors: ProvenPredecessorStore
+    /// ADR-0065 R.2 — the verified bindings of accounts this device never
+    /// pinned (`VerifiedBinding.swift`): what a group member's roster key is
+    /// judged from.
+    private let bindings: VerifiedBindingStore
+    /// ADR-0065 R.2 — the trusted attest key a key-reset attestation is
+    /// verified under: the build-time pin when set, else the cached JWKS key.
+    /// A throw is "no key": no verdict, never a refusal. Injectable for tests.
+    private let attestKey: () async throws -> Data
 
     public init(
         discovery: DiscoveryClient = DiscoveryClient(),
         ds: DsClient = DsClient(),
         pinStore: PeerPinStore = PeerPinStore(),
         transparencyVerify: TransparencyVerify = TransparencyVerify(),
-        predecessors: ProvenPredecessorStore = ProvenPredecessorStore()
+        predecessors: ProvenPredecessorStore = ProvenPredecessorStore(),
+        bindings: VerifiedBindingStore = VerifiedBindingStore(),
+        attestKey: (() async throws -> Data)? = nil
     ) {
         self.discovery = discovery
         self.ds = ds
         self.pinStore = pinStore
         self.transparencyVerify = transparencyVerify
         self.predecessors = predecessors
+        self.bindings = bindings
+        self.attestKey = attestKey ?? { try await DeviceAttestKey.fetch() }
     }
 
     // MARK: - G-4 (ADR-0016) supersession verify + KT-log S3d on fetch
@@ -119,47 +121,56 @@ public final class ContactsClient {
     ///   branch, ``LogRollbackDetected`` on a transparency-log rollback.
     func verifyBundleAccountKey(
         accountId: Data,
-        bundle: IdentityFetchResponse
+        bundle: IdentityFetchResponse,
+        heldKeyB64: String? = nil
     ) async throws {
         // G-30 #2 (ADR-0019): snapshot the pin BEFORE gate 1 runs. Gate 1
         // re-pins to the new key on a verified rotation (overwriting the
         // pin), but gate 2's rotation-chain check needs the OLD pinned key
         // + the OLD chain-version floor to anchor the chain. Capturing it
         // here keeps gate 1 untouched.
-        let oldPin = pinStore.readPin(accountIdB64: base64Encode(accountId))
+        let accountIdB64 = base64Encode(accountId)
+        let oldPin = pinStore.readPin(accountIdB64: accountIdB64)
+        // ADR-0065 R.2 — with no pin, the held key is the verified binding;
+        // read before gate 1, which drops it when it re-pins.
+        let oldBinding = oldPin == nil ? bindings.read(accountIdB64: accountIdB64) : nil
 
         // Gate 1 (primary, fail-closed). A throw here short-circuits
         // gate 2.
         do {
-            try verifySupersessionGate(accountId: accountId, bundle: bundle)
+            try verifySupersessionGate(accountId: accountId, bundle: bundle, heldKeyB64: heldKeyB64)
         } catch var refused as SupersessionRefused {
-            // KT-log S4 — on a fail-closed refusal of an UNPROVEN
-            // CHANGED key (the moment the reset-vs-compromise distinction
-            // matters most), enrich the error with a BEST-EFFORT
-            // transparency lookup of the NEW key's `is_reset` marker.
-            // This NEVER weakens the gate: gate 1 already threw, we
-            // re-throw it unchanged save for the added context. Any log
-            // fault leaves `loggedReset` nil.
-            refused.loggedReset = await bestEffortServedKeyReset(
-                accountId: accountId,
-                bundle: bundle
-            )
-            // ADR-0065 phase 2 (UX 16.1) — when the log confirms the new key
-            // as an owner-initiated RESET, the refusal is also a STATE of the
-            // contact: recorded here, at the one place every identity fetch
-            // passes, so a plain member who never starts anything with the
-            // contact learns of it through the scheduled device-list check
-            // too. The gate still threw and still throws; nothing is re-pinned
-            // (invariant #6: the acceptance gate stays fail-closed until the
-            // person verifies the new safety number).
-            if KeyResetDetection.isReset(reason: refused.reason, loggedReset: refused.loggedReset),
-               let pin = oldPin {
-                // ADR-0066 section 3.5 — a later reset of the same account
-                // makes every predecessor, proven or not, a superseded key.
-                predecessors.forgetPerson(currentKeyB64: pin.pinnedSignaturePubkeyB64)
-                Self.keyResetSink?(accountId, pin.pinnedSignaturePubkeyB64, bundle.signaturePubkey)
+            // ADR-0065 R.2 — a CHANGED key with NO supersession proof is asked
+            // whether it is an attested reset. Accepted: the re-pin is written
+            // and the call proceeds as for any trusted key, with nothing
+            // shown. Refused: the gate's own refusal, with the copy the
+            // verdict names. No verdict: nothing changes. A change that CAME
+            // with a proof which failed is never a reset (a proven rotation
+            // and a reset are two paths) and stays the gate's refusal.
+            guard refused.reason == .proofAbsent else {
+                refused.loggedReset = await loggedResetForRefusal(accountId: accountId, bundle: bundle)
+                throw refused
             }
-            throw refused
+            // The held key is the pin, else the verified binding the gate
+            // judged the change from. A roster key is never the held key by
+            // itself.
+            let heldBinding = oldPin == nil ? bindings.read(accountIdB64: accountIdB64) : nil
+            let verdict = await judgeReset(
+                accountId: accountId,
+                bundle: bundle,
+                heldKeyB64: oldPin?.pinnedSignaturePubkeyB64 ?? heldBinding?.keyB64,
+                acceptedGeneration: oldPin?.acceptedKeyGeneration ?? heldBinding?.keyGeneration ?? 0)
+            switch verdict {
+            case .refused(let why):
+                refused.loggedReset = why == .unexplained ? false : nil
+                throw refused
+            case .noVerdict:
+                throw IdentityCheckInconclusive(accountIdB64: accountIdB64)
+            case .accepted:
+                // Accepted and re-pinned: the log check already ran inside
+                // the verdict.
+                return
+            }
         }
 
         // ADR-0066 section 3.5 — gate 1 passed. When the published key
@@ -168,11 +179,25 @@ public final class ContactsClient {
         // for a changed key) and re-pinned: a PROVEN ROTATION, with or
         // without a key-reset attestation beside it. The old key becomes the
         // account's proven predecessor: the leaves bound to it stay the same
-        // person. No flag, no banner, no closed chat, no eviction; the
-        // ADR-0065 phase-2 sink above is never reached on this path.
+        // person. Nothing is shown and nothing is repaired: a proven
+        // rotation is not a reset and never enters the ADR-0065 R.2 path.
         if let pin = oldPin, pin.pinnedSignaturePubkeyB64 != bundle.signaturePubkey {
             predecessors.record(
                 oldKeyB64: pin.pinnedSignaturePubkeyB64,
+                newKeyB64: bundle.signaturePubkey,
+                evidence: .verifiedProof)
+        } else if oldPin == nil, let binding = oldBinding,
+                  binding.keyB64 != bundle.signaturePubkey,
+                  pinStore.readPin(accountIdB64: accountIdB64)?.pinnedSignaturePubkeyB64
+                    == bundle.signaturePubkey {
+            // The same proven rotation, judged from a VERIFIED BINDING
+            // instead of a pin (a group member this device never pinned):
+            // the gate accepted the changed key by its supersession proof
+            // against the binding's key and wrote the pin. The binding's key
+            // is the proven predecessor, so the member's leaves bound to it
+            // stay the same person.
+            predecessors.record(
+                oldKeyB64: binding.keyB64,
                 newKeyB64: bundle.signaturePubkey,
                 evidence: .verifiedProof)
         }
@@ -182,7 +207,6 @@ public final class ContactsClient {
         // proof so the log check can route a key ROTATION through the
         // chain verifier (anchoring the transition to the operator-signed
         // log) instead of the standalone single-key inclusion check.
-        let accountIdB64 = base64Encode(accountId)
         guard let servedPubkey = base64Decode(bundle.signaturePubkey) else {
             // The supersession gate already accepted this bundle's
             // pubkey (it TOFU-pinned / matched it via base64), so this
@@ -198,28 +222,127 @@ public final class ContactsClient {
         )
     }
 
-    /// KT-log S4 — best-effort lookup of the served (refused) key's
-    /// `is_reset` marker, used ONLY to enrich a ``SupersessionRefused``.
-    ///
-    /// Wraps ``TransparencyVerify/lookupServedKeyReset(accountId:servedPubkey:)``
-    /// (which never throws) and falls back to `nil` if the served pubkey
-    /// is not decodable. Returns `true` / `false` only when the log's
-    /// latest entry commits to exactly the served key; `nil` otherwise
-    /// (off / unreachable / absent / pubkey-divergence). The enrichment
-    /// must never break the already-failing refusal path.
-    ///
-    /// Mirror of the web `bestEffortServedKeyReset`.
-    private func bestEffortServedKeyReset(
+    /// ADR-0065 R.2 — gather the rule's inputs for a proof-less key change
+    /// and act on the verdict (`ResetVerdict.swift`). On `accepted` the
+    /// re-pin is written and the listeners that re-key the contact and move
+    /// the shared conversations are told; nothing is shown anywhere. Never
+    /// throws.
+    private func judgeReset(
+        accountId: Data,
+        bundle: IdentityFetchResponse,
+        heldKeyB64: String?,
+        acceptedGeneration: UInt64
+    ) async -> ResetVerdict {
+        let accountIdB64 = base64Encode(accountId)
+        guard let heldKeyB64 else { return .noVerdict }
+        guard let servedPubkey = base64Decode(bundle.signaturePubkey) else {
+            return .refused(.unconfirmed)
+        }
+        let attest = await checkResetAttestation(
+            accountId: accountId, servedPubkey: servedPubkey, bundle: bundle)
+        let logResult = await transparencyVerify.verifyIdentityInLog(
+            accountId: accountId, publishedSignaturePubkey: servedPubkey)
+        let log = LogCheck(status: logResult.status, isReset: logResult.isReset)
+        let verdict = resetVerdict(ResetVerdictInput(
+            heldKeyB64: heldKeyB64,
+            acceptedGeneration: acceptedGeneration,
+            fetchedKeyB64: bundle.signaturePubkey,
+            bundleGeneration: bundle.keyGeneration,
+            attest: attest,
+            log: log))
+        guard case .accepted(let keyGeneration, let signedAtMs) = verdict else { return verdict }
+        // ADR-0066 section 3.5 — a reset supersedes every key the account
+        // held before it, the proven predecessors of the held key included.
+        let retiredPredecessors = predecessors.load().predecessors(of: heldKeyB64)
+        let written = pinStore.acceptReset(
+            PeerPinStore.AcceptedReset(
+                accountIdB64: accountIdB64,
+                heldKeyB64: heldKeyB64,
+                newKeyB64: bundle.signaturePubkey,
+                keyGeneration: keyGeneration,
+                signedAtMs: signedAtMs,
+                nowMs: Int64(Date().timeIntervalSince1970 * 1000)),
+            retiredPredecessorsB64: retiredPredecessors)
+        if written == .stale || written == .noAccount { return .refused(.unconfirmed) }
+        predecessors.forgetPerson(currentKeyB64: heldKeyB64)
+        // The account is pinned now: the pin is the verified binding.
+        bindings.drop(accountIdB64: accountIdB64)
+        pinStore.recordLogStatus(accountIdB64: accountIdB64, logStatus: log.status.rawValue)
+        pinStore.recordLogReset(accountIdB64: accountIdB64, isReset: log.isReset)
+        if written == .accepted {
+            ResetEvents.notify(ResetAccepted(
+                accountIdB64: accountIdB64,
+                previousKeyB64: heldKeyB64,
+                newKeyB64: bundle.signaturePubkey,
+                keyGeneration: keyGeneration,
+                signedAtMs: signedAtMs))
+        }
+        return verdict
+    }
+
+    /// R.2 step 1: the bundle's attestation under the trusted attest key (the
+    /// build-time pin when set, else the cached JWKS key).
+    private func checkResetAttestation(
+        accountId: Data,
+        servedPubkey: Data,
+        bundle: IdentityFetchResponse
+    ) async -> AttestCheck {
+        guard let raw = bundle.keyResetAttest, !raw.isEmpty else { return .absent }
+        guard let attestation = base64Decode(raw) else { return .invalid }
+        let key: Data
+        do {
+            key = try await attestKey()
+        } catch {
+            return .noKey
+        }
+        do {
+            let verified = try verifyKeyResetAttestation(
+                attestation: attestation,
+                attestVerifyingKey: key,
+                expectedAccountId: accountId,
+                expectedPubkey: servedPubkey)
+            return .verified(keyGeneration: verified.keyGeneration, signedAtMs: verified.signedAtMillis)
+        } catch {
+            return .invalid
+        }
+    }
+
+    /// The copy marker for a refusal that is NOT a reset question (a proof
+    /// that failed, a proof for another key): `false` only when the key log,
+    /// read through the VERIFIED path, shows the served key without a reset.
+    /// Never throws.
+    private func loggedResetForRefusal(
         accountId: Data,
         bundle: IdentityFetchResponse
     ) async -> Bool? {
-        guard let servedPubkey = base64Decode(bundle.signaturePubkey) else {
-            return nil
+        guard let servedPubkey = base64Decode(bundle.signaturePubkey) else { return nil }
+        let result = await transparencyVerify.verifyIdentityInLog(
+            accountId: accountId, publishedSignaturePubkey: servedPubkey)
+        return result.status == .confirmed && result.isReset == false ? false : nil
+    }
+
+    /// ADR-0065 R.2 — fetch an account's published identity and run the
+    /// fail-closed check. One of the rule's triggers: the scheduled per-chat
+    /// device check, opening a one-to-one, a send whose last check is old.
+    ///
+    /// - Parameter heldKeyB64: the roster's account key of a group member
+    ///   this device never pinned. Ignored when a pin exists. It is NOT taken
+    ///   as the held key on the caller's word (the account id may be a
+    ///   member's own claim): `VerifiedBinding.swift` decides.
+    /// - Returns: the verified bundle, or `nil` when the directory has none.
+    /// - Throws: ``SupersessionRefused`` for a change that is neither proven
+    ///   nor an attested reset; ``IdentityCheckInconclusive`` when that could
+    ///   not be established yet; a rollback and a network failure propagate.
+    func checkContactIdentity(accountId: Data, heldKeyB64: String? = nil) async throws -> IdentityFetchResponse? {
+        let fetched: IdentityFetchResponse?
+        do {
+            fetched = try await discovery.identityFetch(accountId: accountId)
+        } catch {
+            throw ContactsError.wrap(error)
         }
-        return await transparencyVerify.lookupServedKeyReset(
-            accountId: accountId,
-            servedPubkey: servedPubkey
-        )
+        guard let bundle = fetched else { return nil }
+        try await verifyBundleAccountKey(accountId: accountId, bundle: bundle, heldKeyB64: heldKeyB64)
+        return bundle
     }
 
     /// G-4 (ADR-0016) — verify a freshly-fetched peer identity
@@ -255,23 +378,90 @@ public final class ContactsClient {
     /// - Throws: ``SupersessionRefused`` on any fail-closed branch.
     func verifySupersessionGate(
         accountId: Data,
-        bundle: IdentityFetchResponse
+        bundle: IdentityFetchResponse,
+        heldKeyB64: String? = nil
     ) throws {
         let accountIdB64 = base64Encode(accountId)
         let fetchedPubkeyB64 = bundle.signaturePubkey
 
-        guard let existing = pinStore.readPin(accountIdB64: accountIdB64) else {
-            // Case 1 — first-ever observation. TOFU-pin and proceed.
+        let pinned = pinStore.readPin(accountIdB64: accountIdB64)
+        // With no pin, what this device HOLDS for the account is a VERIFIED
+        // BINDING (`VerifiedBinding.swift`), never the roster key on the
+        // strength of a claimed account id: a member's own profile can name
+        // any id.
+        let binding = pinned == nil ? bindings.read(accountIdB64: accountIdB64) : nil
+        func asPin(keyB64: String, keyGeneration: UInt64) -> PeerPinStore.AccountPubkeyPin {
+            PeerPinStore.AccountPubkeyPin(
+                pinnedSignaturePubkeyB64: keyB64, rotationMarker: 0, acceptedKeyGeneration: keyGeneration)
+        }
+        var held: PeerPinStore.AccountPubkeyPin? = pinned
+        if pinned == nil, let rosterKeyB64 = heldKeyB64 {
+            // The member path: a roster key under an account id this device
+            // never pinned. Nothing is pinned here.
+            switch memberHeldKey(
+                pinned: false, binding: binding, rosterKeyB64: rosterKeyB64, fetchedKeyB64: fetchedPubkeyB64
+            ) {
+            case .record:
+                // The directory serves exactly the roster key: this device
+                // has now seen the binding for itself. A first observation,
+                // never a reset.
+                bindings.record(
+                    accountIdB64: accountIdB64,
+                    binding: VerifiedBinding(
+                        keyB64: fetchedPubkeyB64,
+                        keyGeneration: bundle.keyGeneration,
+                        verifiedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
+                return
+            case .confirmed:
+                return
+            case .held(let heldKey, let acceptedGeneration):
+                held = asPin(keyB64: heldKey, keyGeneration: acceptedGeneration)
+            case .pin, .none:
+                // Nothing is established for this roster key under this
+                // account id (a claimed id, or a first sight of an account
+                // that already moved on): no verdict, nothing done, nothing
+                // shown.
+                throw IdentityCheckInconclusive(accountIdB64: accountIdB64)
+            }
+        } else if pinned == nil, let binding {
+            // A caller with no roster key (a contact request, a search
+            // result): the binding this device verified earlier stands in for
+            // the pin, so a key that changed since is a CHANGE, not a first
+            // observation.
+            held = asPin(keyB64: binding.keyB64, keyGeneration: binding.keyGeneration)
+        }
+
+        guard let existing = held else {
+            // Case 1 — first-ever observation. TOFU-pin and proceed. The
+            // bundle's generation is recorded as the accepted-generation
+            // baseline (ADR-0065 R.2).
             pinStore.setPin(
                 accountIdB64: accountIdB64,
                 pinnedSignaturePubkeyB64: fetchedPubkeyB64,
-                rotationMarker: 0
+                rotationMarker: 0,
+                keyGeneration: bundle.keyGeneration
             )
             return
         }
 
-        // Case 2 — unchanged key. Nothing to verify.
+        // Case 2 — unchanged key. Nothing to verify. A pin from before the
+        // generation was recorded takes its baseline now; a verified binding
+        // met on the contact path becomes the pin, keeping its baseline.
         if existing.pinnedSignaturePubkeyB64 == fetchedPubkeyB64 {
+            if pinned == nil {
+                pinStore.setPin(
+                    accountIdB64: accountIdB64,
+                    pinnedSignaturePubkeyB64: fetchedPubkeyB64,
+                    rotationMarker: 0,
+                    keyGeneration: existing.acceptedKeyGeneration ?? bundle.keyGeneration)
+                bindings.drop(accountIdB64: accountIdB64)
+            } else if existing.acceptedKeyGeneration == nil {
+                pinStore.setPin(
+                    accountIdB64: accountIdB64,
+                    pinnedSignaturePubkeyB64: fetchedPubkeyB64,
+                    rotationMarker: existing.rotationMarker,
+                    keyGeneration: bundle.keyGeneration)
+            }
             return
         }
 
@@ -369,6 +559,7 @@ public final class ContactsClient {
             pinnedSignaturePubkeyB64: fetchedPubkeyB64,
             rotationMarker: proofExpiresAt
         )
+        if result == .set, pinned == nil { bindings.drop(accountIdB64: accountIdB64) }
         if result == .rejectedBackward {
             throw SupersessionRefused(
                 reason: .markerBackward,
@@ -594,6 +785,41 @@ public final class ContactsClient {
             )
         }
         return (recipientAccountId, recipientSignaturePub)
+    }
+
+    /// A contact request sent to keys the caller already holds (an invite
+    /// link's capability), where no identity fetch runs in the send itself.
+    /// Call it BEFORE anything is spent or sent. Mirror of the web
+    /// `refuseContactRequestToUnverifiedKeys`.
+    ///
+    /// - no pin for the account (a stranger): passes;
+    /// - a pinned account under a key that is not the pin: the published
+    ///   identity is fetched and run through the fail-closed gate (an
+    ///   attested reset is accepted there, silently; an unproven change is
+    ///   the gate's own ``SupersessionRefused``); if the gate passes and the
+    ///   key is STILL neither the pin nor a proven predecessor of it (an old
+    ///   link naming a superseded key), the send is refused as a key
+    ///   mismatch. Old keys do not come back.
+    func refuseContactRequestToUnverifiedKeys(
+        accountId: Data,
+        recipientSignaturePubkey: Data
+    ) async throws {
+        let accountIdB64 = base64Encode(accountId)
+        let recipientKeyB64 = base64Encode(recipientSignaturePubkey)
+        if ContactRequestGate.decide(
+            pinnedKeyB64: pinStore.readPin(accountIdB64: accountIdB64)?.pinnedSignaturePubkeyB64,
+            recipientKeyB64: recipientKeyB64) == .send { return }
+        _ = try await checkContactIdentity(accountId: accountId)
+        let pinnedNow = pinStore.readPin(accountIdB64: accountIdB64)?.pinnedSignaturePubkeyB64
+        let provenPredecessor = pinnedNow != nil
+            && predecessors.load().current(of: recipientKeyB64) == pinnedNow
+        if !provenPredecessor,
+           ContactRequestGate.decide(pinnedKeyB64: pinnedNow, recipientKeyB64: recipientKeyB64) != .send {
+            throw SupersessionRefused(
+                reason: .keyMismatch,
+                accountIdB64: accountIdB64,
+                message: "the key this request would be sealed for is not the account's trusted key")
+        }
     }
 
     /// ADR-0060 — the identity bundle of an account a search found, through
@@ -1337,6 +1563,21 @@ extension ContactsError: LocalizedError {
 ///
 /// `reason` discriminates the failure mode for diagnostics — the UX
 /// is the same OOB-reverify prompt regardless.
+/// ADR-0065 R.2 — the published identity of an account could not be judged
+/// yet: a key change with no proof whose attestation or log answer is not
+/// available (no attest key, the log unreachable), or a group member's
+/// roster key that nothing establishes under the claimed account id. Nothing
+/// was written and nothing is shown; the caller does not act on the fetched
+/// keys and asks again at the next trigger.
+public struct IdentityCheckInconclusive: Error, Equatable {
+    /// base64 of the account id.
+    public let accountIdB64: String
+
+    public init(accountIdB64: String) {
+        self.accountIdB64 = accountIdB64
+    }
+}
+
 public struct SupersessionRefused: Error, LocalizedError, Equatable {
 
     /// Why the supersession check refused the changed key. Mirror of
@@ -1418,7 +1659,7 @@ public struct SupersessionRefused: Error, LocalizedError, Equatable {
 /// other verdicts (`absent` / `unreachable` / `off` / `mismatch`) are
 /// recorded + surfaced but do NOT block, because the log is
 /// eventually-consistent and the supersession/pin gate is the primary
-/// trust (see ``ContactsClient/verifyBundleAccountKey(accountId:bundle:)``).
+/// trust (see ``ContactsClient/verifyBundleAccountKey(accountId:bundle:heldKeyB64:)``).
 ///
 /// Mirror of the web `LogRollbackDetected`.
 public struct LogRollbackDetected: Error, LocalizedError, Equatable {
@@ -1448,5 +1689,20 @@ extension FfiError {
         default:
             return false
         }
+    }
+}
+
+/// Whether a contact request to keys the caller holds may go out as it is.
+/// Mirror of the web `contactRequestGate` (`contacts/request-target.ts`).
+public enum ContactRequestGate: Equatable {
+    /// Nothing stands in the way: no pin (a stranger), or the key is the pin.
+    case send
+    /// A pinned account is about to be reached under a key that is NOT the
+    /// pin: the published identity must pass the fail-closed gate first.
+    case checkIdentity
+
+    public static func decide(pinnedKeyB64: String?, recipientKeyB64: String) -> ContactRequestGate {
+        guard let pinnedKeyB64 else { return .send }
+        return pinnedKeyB64 == recipientKeyB64 ? .send : .checkIdentity
     }
 }

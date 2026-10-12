@@ -38,7 +38,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.GppMaybe
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.semantics.Role
@@ -231,17 +230,6 @@ public fun ChatScreen(
     val membership by viewModel.membership.collectAsStateWithLifecycle()
     val membershipEnded = me.lakko.app.chat.membershipEnded(membership)
 
-    // ADR-0065 phase 2 / UX section 16 — the closed state of this conversation
-    // (16.4 a one-to-one whose peer reset their keys; 16.5 a group an admin
-    // closed) and the reset records this account holds. Every rule lives in
-    // `me.lakko.app.chat.KeysReset` / `GroupClosed`; this screen renders them.
-    val closed by viewModel.closed.collectAsStateWithLifecycle()
-    val resetRecords by contactsRepository.resetRecords.collectAsStateWithLifecycle()
-    val flaggedPendingKeys = remember(resetRecords) {
-        resetRecords.values.filter { it.unverified }.map { it.pendingKeyB64 }.toSet()
-    }
-    val conversationClosed = closed != null
-
     // 1.19c4 — preview-attachment sheet state. When the user
     // taps "Open" on an image chip we resolve the bytes off
     // the main thread + populate this, which surfaces an
@@ -362,7 +350,14 @@ public fun ChatScreen(
     // The timeline's rows come first in the lazy list, before the pending
     // media, so a timeline index is a list index.
     val jumpToMessage: (Long) -> Unit = { target ->
-        val index = timeline.indexOfFirst { it is TimelineItem.Row && it.message.messageId == target }
+        // ADR-0065 rule 7 — a quote whose target is 0 has no jump (a held
+        // reply that went out in the successor): never matched against a
+        // row that has no id yet.
+        val index = if (target == me.lakko.app.chat.REPLY_NO_JUMP_TARGET) {
+            -1
+        } else {
+            timeline.indexOfFirst { it is TimelineItem.Row && it.message.messageId == target }
+        }
         if (index >= 0) {
             scope.launch {
                 listState.animateScrollToItem(index)
@@ -667,7 +662,7 @@ public fun ChatScreen(
     // a dead group), else "@username" in a 1x1, else "N members" in a group.
     val typingLine = state.typingText?.text()
     val headerSubtitle = when {
-        typingLine != null && !membershipEnded && !conversationClosed -> typingLine
+        typingLine != null && !membershipEnded -> typingLine
         isGroupChat -> t("chat.members.count", emptyMap(), mapOf("count" to (otherMembers.size + 1).toULong()))
         peerUsername != null -> "@$peerUsername"
         else -> null
@@ -697,10 +692,7 @@ public fun ChatScreen(
             // enough: a call control asserts a live E2EE session, and there is
             // not one. Folded into `callActive` because the two reasons to hide
             // them are the same rendering decision.
-            // ADR-0065 phase 2 / UX 16.4 — and a closed one-to-one has no live
-            // anything: its call keys would come from a chat that is closed.
-            callActive = callOccupant != null || membershipEnded ||
-                closed?.reason == me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET,
+            callActive = callOccupant != null || membershipEnded,
             onNavigateBack = onNavigateBack,
             // A live group call on this chat is JOINED rather than
             // duplicated; otherwise a group chat (>2 MLS members) starts a
@@ -762,7 +754,7 @@ public fun ChatScreen(
         // device is not in. Hidden once this device's membership has ended —
         // the call key can no longer be derived, so Join could only fail.
         val joinable = joinableGroupCall
-        if (joinable != null && !membershipEnded && closed?.reason != me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET) {
+        if (joinable != null && !membershipEnded) {
             GroupCallBanner(
                 call = joinable,
                 onJoin = {
@@ -876,9 +868,6 @@ public fun ChatScreen(
             MembersSheet(
                 viewModel = viewModel,
                 onChatDeleted = onNavigateBack,
-                contactsRepository = contactsRepository,
-                onOpenConversation = onOpenConversation,
-                onOpenContact = onOpenContact,
             )
         }
 
@@ -979,31 +968,9 @@ public fun ChatScreen(
                             // composer is gated on, two `when`s below.
                             // UX section 8 — and never while selecting: the
                             // reaction row and the action card do not open.
-                            actionsAvailable = !selecting && !conversationClosed && me.lakko.app.chat.messageActionsState(
+                            actionsAvailable = !selecting && me.lakko.app.chat.messageActionsState(
                                 membership,
                             ) == me.lakko.app.chat.MessageActions.AVAILABLE,
-                            // UX 16.1 — a bubble from a flagged contact's NEW
-                            // keys carries the warning line, once per run, for
-                            // a member who has not verified them.
-                            keysResetWarning = if (
-                                isGroupChat && msg.direction == Direction.Incoming &&
-                                me.lakko.app.chat.bubbleWarningFor(msg.authorKey, flaggedPendingKeys)
-                            ) {
-                                msg.authorKey?.let { key ->
-                                    me.lakko.app.chat.bubbleWarningText(nameVersion.let { viewModel.nameOf(key) }).text()
-                                }
-                            } else {
-                                null
-                            },
-                            onOpenAuthorContact = {
-                                msg.authorKey?.let { keyB64 ->
-                                    val bytes = runCatching { java.util.Base64.getDecoder().decode(keyB64) }.getOrNull()
-                                    val contact = bytes?.let {
-                                        contactsRepository.contactByRouteKey(me.lakko.app.ui.contacts.contactRouteKey(it))
-                                    }
-                                    contact?.let { onOpenContact(me.lakko.app.ui.contacts.contactRouteKey(it.request.fromPubkey)) }
-                                }
-                            },
                             // ADR-0024 — read-state inputs (own
                             // bubbles render "Sent" / "Read").
                             otherMembers = otherMembers,
@@ -1084,6 +1051,7 @@ public fun ChatScreen(
                             // missing row is the explanation); only an Unpin in
                             // one scope acts at once.
                             pinLabel = pinMenu.label.text(),
+                            pinUndoes = pinMenu.label.key == "chat.message.unpin",
                             onPin = {
                                 val single = pinMenu.actions.singleOrNull()
                                 if (single != null && pinMenu.label.key == "chat.message.unpin") {
@@ -1134,24 +1102,6 @@ public fun ChatScreen(
         me.lakko.app.chat.terminalRow(membership)?.let { row ->
             TerminalMembershipRow(row)
         }
-        // ADR-0065 phase 2 / UX 16.4 and 16.5 — the closed conversation's own
-        // terminal row, in the reset's words, where the history stops.
-        closed?.let { c ->
-            TerminalMembershipRow(
-                me.lakko.app.chat.TerminalRowCopy(
-                    headline = when (c.reason) {
-                        me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET ->
-                            me.lakko.app.chat.OneToOneClosedCopy.terminalHeadline(peerName ?: t("chat.members.unnamed"))
-                        me.lakko.app.chat.ClosedReason.GROUP_CLOSED_BY_ADMIN ->
-                            me.lakko.app.chat.GroupClosedCopy.terminalHeadline(
-                                nameVersion.let { c.closerKeyB64?.let(viewModel::nameOf) } ?: t("chat.members.unnamed"),
-                            )
-                    },
-                    consequence = me.lakko.app.chat.ENDED_CONSEQUENCE,
-                ),
-            )
-        }
-
         // ADR-0024 — the typing indicator lives in the header's second line
         // (UX 5.2), not above the input bar; see `headerSubtitle`.
 
@@ -1180,46 +1130,7 @@ public fun ChatScreen(
                 },
                 onDelete = { confirmBulkDelete = true },
             )
-        } else if (closed != null && !membershipEnded) {
-            // ADR-0065 phase 2 / UX 16.4 and 16.5 — the composer slot of a
-            // closed conversation: the static bar, the draft kept as
-            // selectable text, and beside it `Start a new chat` (a one-to-one,
-            // disabled until the contact is verified) or `Open the new group`
-            // (a group, only once this device has joined the successor).
-            val c = closed!!
-            val peerAccountB64 = c.peerAccountIdB64
-            val peerRecord = peerAccountB64?.let { resetRecords[it] }
-            ClosedComposerBar(
-                closed = c,
-                draft = state.draft,
-                startNewChat = if (c.reason == me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET) {
-                    me.lakko.app.chat.startNewChatAffordance(
-                        contactUnverified = peerRecord?.unverified != false,
-                        name = peerName,
-                    )
-                } else {
-                    null
-                },
-                openNewGroupTarget = viewModel.openNewGroupTarget(),
-                onStartNewChat = {
-                    val account = peerAccountB64 ?: return@ClosedComposerBar
-                    scope.launch {
-                        val hex = runCatching { contactsRepository.startNewChatAfterReset(account) }
-                            .onFailure { android.util.Log.w("ChatScreen", "ADR-0065 new chat failed", it) }
-                            .getOrNull()
-                        if (hex != null) onOpenConversation(hex)
-                    }
-                },
-                onOpenContact = {
-                    val account = peerAccountB64 ?: return@ClosedComposerBar
-                    val contact = contactsRepository.state.value.accepted.firstOrNull { ac ->
-                        ac.request.fromAccountId?.let { me.lakko.app.auth.base64Encode(it) } == account
-                    }
-                    contact?.let { onOpenContact(me.lakko.app.ui.contacts.contactRouteKey(it.request.fromPubkey)) }
-                },
-                onOpenNewGroup = { hex -> onOpenConversation(hex) },
-            )
-        } else when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
+                } else when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
             me.lakko.app.chat.ComposerSlot.Composer -> Composer(
                 recorder = recorder,
                 emojiInsert = pendingEmojiInsert,
@@ -1528,13 +1439,11 @@ private fun MessageRow(
     onPin: () -> Unit = {},
     /** UX 4.1 — the row's word, `Pin` or `Unpin`, decided by the caller. */
     pinLabel: String = me.lakko.app.l10n.Localization.strings.value["chat.message.pin"],
+    /** ADR-0065 R.5 — the row's pin row would UNDO a pin: the one thing a
+     *  read-only row of an older segment still offers. */
+    pinUndoes: Boolean = false,
     /** UX section 8 — Select was chosen on this message. */
     onSelect: () -> Unit = {},
-    /** ADR-0065 phase 2 / UX 16.1 — the warning line under the author name,
-     *  or `null`: `Not verified since {name} reset their account keys.` */
-    keysResetWarning: String? = null,
-    /** UX 16.1 — the warning line is a tap target of its own, to the contact screen. */
-    onOpenAuthorContact: () -> Unit = {},
 ) {
     val gapAbove = if (firstInRun) 8.dp else 2.dp
     // UX 3.1 — "the surface tint used for the pressed state": Material's
@@ -1571,6 +1480,7 @@ private fun MessageRow(
                 onJumpToForward = onJumpToForward,
                 onPin = onPin,
                 pinLabel = pinLabel,
+                pinUndoes = pinUndoes,
                 onSelect = onSelect,
                 // ADR-0024 — own bubble: compute the read tick.
                 readState = ownReadStateFor(
@@ -1622,30 +1532,6 @@ private fun MessageRow(
                         maxLines = 1,
                         modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
                     )
-                    // UX 16.1 — once per sender run, a muted warning line with
-                    // the shield glyph; the bubble below renders the message
-                    // (a warning, not a redaction). Tapping opens the contact.
-                    if (keysResetWarning != null) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clickable(onClick = onOpenAuthorContact)
-                                .padding(start = 4.dp, bottom = 2.dp),
-                        ) {
-                            Icon(
-                                Icons.Filled.GppMaybe,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(14.dp),
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                text = keysResetWarning,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
                 }
                 Bubble(
                     msg = msg,
@@ -1662,6 +1548,7 @@ private fun MessageRow(
                     onJumpToForward = onJumpToForward,
                     onPin = onPin,
                     pinLabel = pinLabel,
+                    pinUndoes = pinUndoes,
                     onSelect = onSelect,
                     // Incoming bubbles never show our read state.
                     readState = OwnReadState.None,
@@ -1861,6 +1748,9 @@ internal fun Bubble(
     onPin: () -> Unit = {},
     /** UX 4.1 — the row's word, `Pin` or `Unpin`, decided by the caller. */
     pinLabel: String = me.lakko.app.l10n.Localization.strings.value["chat.message.pin"],
+    /** ADR-0065 R.5 — the row's pin row would UNDO a pin: the one thing a
+     *  read-only row of an older segment still offers. */
+    pinUndoes: Boolean = false,
     /** UX section 8 — Select was chosen on this message. */
     onSelect: () -> Unit = {},
 ) {
@@ -1912,7 +1802,13 @@ internal fun Bubble(
         val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly
         // ADR-0061 section 6 — a newer-version row has no content this build
         // can read, so nothing to copy, edit, quote or forward: no menu.
-        val menuAvailable = actionsAvailable && hasId && !msg.deleted && msg.unsupportedVersion == null
+        // ADR-0065 R.5 — a row of an older segment is read-only history: its
+        // card exists only to undo a pin.
+        val menuAvailable = if (msg.isHistory) {
+            actionsAvailable && pinUndoes
+        } else {
+            actionsAvailable && hasId && !msg.deleted && msg.unsupportedVersion == null
+        }
         val openMenu: (() -> Unit)? = if (menuAvailable) {
             { menuOpen = true }
         } else {
@@ -2096,18 +1992,24 @@ internal fun Bubble(
                 MessageActionMenuOverlay(
                     bubbleBounds = bounds,
                     alignEnd = isOwn,
-                    actions = messageActionsFor(
-                        isOwn = isOwn,
-                        deleted = msg.deleted,
-                        text = msg.text,
-                        menuAvailable = menuAvailable,
-                        // UX 5.1 — no Forward on a row still sending or
-                        // one that failed.
-                        sendComplete = msg.ack == Ack.SENT,
-                        // UX 4.1 — `Pin` or `Unpin`, decided by the screen.
-                        pinLabel = pinLabel,
-                    ),
-                    reactions = REACTION_EMOJIS,
+                    actions = if (msg.isHistory) {
+                        // ADR-0065 R.5 — a row of an older segment is
+                        // read-only: `Unpin` alone, when it is pinned.
+                        historyRowActions(rowIsPinned = pinUndoes, pinLabel = pinLabel)
+                    } else {
+                        messageActionsFor(
+                            isOwn = isOwn,
+                            deleted = msg.deleted,
+                            text = msg.text,
+                            menuAvailable = menuAvailable,
+                            // UX 5.1 — no Forward on a row still sending or
+                            // one that failed.
+                            sendComplete = msg.ack == Ack.SENT,
+                            // UX 4.1 — `Pin` or `Unpin`, decided by the screen.
+                            pinLabel = pinLabel,
+                        )
+                    },
+                    reactions = if (msg.isHistory) emptyList() else REACTION_EMOJIS,
                     onReact = { emoji ->
                         menuOpen = false
                         onReact(emoji)
@@ -2991,89 +2893,6 @@ private fun WithdrawnComposer(slot: me.lakko.app.chat.ComposerSlot.Withdrawn) {
     }
 }
 
-/**
- * ADR-0065 phase 2 / UX 16.4 and 16.5 — what stands where the composer was in
- * a CLOSED conversation: replaced, not disabled, like the ended-membership
- * bar (the permission is gone for good), with one button beside it.
- *
- * A one-to-one: `Start a new chat`, disabled with the helper line and the
- * `Open contact` link while the contact is `reset-unverified`, enabled once
- * verified. A group: `Open the new group`, shown only once this device has
- * joined the successor — a device that was not invited sees the bar alone.
- * The unsent draft is kept above as selectable text (6.2.5).
- */
-@Composable
-private fun ClosedComposerBar(
-    closed: me.lakko.app.chat.ConversationClosed,
-    draft: String,
-    startNewChat: me.lakko.app.chat.StartNewChatAffordance?,
-    openNewGroupTarget: String?,
-    onStartNewChat: () -> Unit,
-    onOpenContact: () -> Unit,
-    onOpenNewGroup: (String) -> Unit,
-) {
-    Column {
-        HorizontalDivider()
-        Column(modifier = Modifier.padding(12.dp)) {
-            if (draft.isNotBlank()) {
-                Text(
-                    text = me.lakko.app.chat.UNSENT_DRAFT_LABEL.text(),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(2.dp))
-                SelectionContainer {
-                    Text(text = draft, style = MaterialTheme.typography.bodyMedium)
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = when (closed.reason) {
-                        me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET -> me.lakko.app.chat.OneToOneClosedCopy.COMPOSER.text()
-                        me.lakko.app.chat.ClosedReason.GROUP_CLOSED_BY_ADMIN -> me.lakko.app.chat.GroupClosedCopy.COMPOSER.text()
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .weight(1f)
-                        .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
-                )
-                when (closed.reason) {
-                    me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET -> {
-                        TextButton(
-                            onClick = onStartNewChat,
-                            enabled = startNewChat?.enabled == true,
-                        ) { Text(me.lakko.app.chat.OneToOneClosedCopy.START_NEW_CHAT.text()) }
-                    }
-                    me.lakko.app.chat.ClosedReason.GROUP_CLOSED_BY_ADMIN -> {
-                        openNewGroupTarget?.let { hex ->
-                            TextButton(onClick = { onOpenNewGroup(hex) }) {
-                                Text(me.lakko.app.chat.GroupClosedCopy.OPEN_NEW.text())
-                            }
-                        }
-                    }
-                }
-            }
-            // 16.4 — the helper under a disabled `Start a new chat`, with the
-            // link to the one surface that enables it.
-            startNewChat?.helper?.let { helper ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = helper.text(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f),
-                    )
-                    startNewChat.openContact?.let { link ->
-                        TextButton(onClick = onOpenContact) { Text(link.text()) }
-                    }
-                }
-            }
-        }
-    }
-}
-
 @Composable
 private fun PendingAttachmentsTray(
     attachments: List<AttachmentRef>,
@@ -3605,35 +3424,11 @@ private fun MembersSheet(
     /** ADR-0045 UX §6.2.4 — invoked after `Delete this chat` has removed the
      *  registry row, so the screen leaves a thread it can no longer open. */
     onChatDeleted: () -> Unit,
-    /** ADR-0065 phase 2 — the reset records (16.3 rows, 16.5 notice) and the
-     *  contacts the recreate sheet pre-fills (16.5). */
-    contactsRepository: me.lakko.app.contacts.ContactsRepository,
-    /** UX 16.5 — open the recreated group once it exists. */
-    onOpenConversation: (groupIdHex: String) -> Unit,
-    /** UX 16.1 — `Open contact` beside a keys-reset refusal line. */
-    onOpenContact: (contactKey: String) -> Unit,
 ) {
     val members by viewModel.members.collectAsStateWithLifecycle()
-    // ADR-0065 phase 2 / UX section 16 — the reset records, and for each
-    // flagged (or verified, still-carrying-its-previous-key) contact whose old
-    // key is in this roster, the branch this group falls in.
-    val resetRecords by contactsRepository.resetRecords.collectAsStateWithLifecycle()
-    val closedState by viewModel.closed.collectAsStateWithLifecycle()
-    val resetBranches = remember(resetRecords, members) {
-        resetRecords.values.mapNotNull { record ->
-            viewModel.resetBranchOf(record)?.let { record to it }
-        }
-    }
-    val ownedGroupRecord = resetBranches
-        .firstOrNull { it.second == me.lakko.app.chat.KeysResetBranch.OwnedGroupNotice }?.first
-    val flaggedPendingKeys = remember(resetRecords) {
-        resetRecords.values.filter { it.unverified }.map { it.pendingKeyB64 }.toSet()
-    }
-    var recreateOpen by remember { mutableStateOf(false) }
     val input by viewModel.addMemberInput.collectAsStateWithLifecycle()
     val busy by viewModel.membershipBusy.collectAsStateWithLifecycle()
     val error by viewModel.membershipError.collectAsStateWithLifecycle()
-    val errorContact by viewModel.membershipErrorContact.collectAsStateWithLifecycle()
     val canManage by viewModel.canManageMembers.collectAsStateWithLifecycle()
     val isOwner by viewModel.isOwner.collectAsStateWithLifecycle()
     val roleTable by viewModel.roleTable.collectAsStateWithLifecycle()
@@ -3783,23 +3578,6 @@ private fun MembersSheet(
             onRemove = {
                 confirmingRemove = null
                 viewModel.onRemoveMember(leaf)
-            },
-        )
-    }
-
-    // ADR-0065 phase 2 / UX 16.5 — the recreate sheet: the new-group flow,
-    // pre-filled with every current member except the old owner.
-    if (recreateOpen && ownedGroupRecord != null) {
-        RecreateGroupDialog(
-            viewModel = viewModel,
-            contactsRepository = contactsRepository,
-            oldOwnerRecord = ownedGroupRecord,
-            members = members,
-            onDismiss = { recreateOpen = false },
-            onCreated = { hex ->
-                recreateOpen = false
-                viewModel.toggleMembersPanel()
-                onOpenConversation(hex)
             },
         )
     }
@@ -3960,17 +3738,6 @@ private fun MembersSheet(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
-                    // UX 16.1 — the keys-reset refusal carries `Open contact`
-                    // when the person is a contact this device can open.
-                    val contactKey = errorContact
-                        ?.takeIf { it.first == message }
-                        ?.second
-                        ?.takeIf { contactsRepository.contactByRouteKey(it) != null }
-                    if (contactKey != null) {
-                        TextButton(onClick = { onOpenContact(contactKey) }) {
-                            Text(me.lakko.app.contacts.KeysResetCopy.OPEN_CONTACT.text())
-                        }
-                    }
                 }
                 Spacer(Modifier.height(12.dp))
                 // ADR-0045 / UX §5.1 — the pending-membership notice. Renders
@@ -3984,46 +3751,6 @@ private fun MembersSheet(
                 // ONE liveness line, not an escalating pair: ADR-0045 gives a
                 // waiting request no deadline, so there is no moment at which
                 // the client learns something new to say.
-                // ADR-0065 phase 2 / UX 16.5 — the owned-group notice, ABOVE
-                // the pending notice: the owner's old devices cannot be removed
-                // and the group cannot get a new owner. An admin is offered
-                // `Recreate group`; a plain member is told an admin can. Once
-                // closed, the notice names where to continue instead.
-                val closedGroup = closedState
-                if (closedGroup != null && closedGroup.reason == me.lakko.app.chat.ClosedReason.GROUP_CLOSED_BY_ADMIN) {
-                    val successorName = closedGroup.successorGroupIdHex?.let { hex ->
-                        viewModel.groupNameOf(hex)
-                    } ?: t("chat.group.fallback_name")
-                    Text(
-                        text = me.lakko.app.chat.GroupClosedCopy.panel(successorName).text(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                } else if (ownedGroupRecord != null && !membershipEnded) {
-                    val ownerName = viewModel.nameOfKeyB64(ownedGroupRecord.previousKeyB64)
-                    val notice = me.lakko.app.chat.ownedGroupNotice(
-                        ownerName = ownerName,
-                        ownRole = viewModel.ownRole(),
-                    )
-                    Text(
-                        text = notice.text.text(),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    notice.memberLine?.let { line ->
-                        Text(
-                            text = line.text(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    if (notice.canRecreate) {
-                        TextButton(onClick = { recreateOpen = true }, enabled = !busy) {
-                            Text(t("group.recreate.action"))
-                        }
-                    }
-                    Spacer(Modifier.height(12.dp))
-                }
                 pendingNotice?.let { notice ->
                     Text(text = notice.count.text(), style = MaterialTheme.typography.titleSmall)
                     Text(
@@ -4194,24 +3921,10 @@ private fun MembersSheet(
                                     )
                                 }
                             }
-                            // UX 16.1 — a join request from a flagged
-                            // contact's NEW keys: Approve disabled with the
-                            // sentence, Reject stays live, the request stays.
-                            val joinerFlagged = viewModel.pendingJoinAccountKeyB64(ref)
-                                ?.let { it in flaggedPendingKeys } == true
-                            Column(horizontalAlignment = Alignment.End) {
-                                TextButton(
-                                    onClick = { viewModel.onApproveJoin(ref) },
-                                    enabled = !busy && !joinerFlagged,
-                                ) { Text(t("chat.members.join.approve")) }
-                                if (joinerFlagged) {
-                                    Text(
-                                        text = me.lakko.app.contacts.KeysResetCopy.PICKER_SUB.text(),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
+                            TextButton(
+                                onClick = { viewModel.onApproveJoin(ref) },
+                                enabled = !busy,
+                            ) { Text(t("chat.members.join.approve")) }
                             TextButton(
                                 onClick = { viewModel.onRejectJoin(ref) },
                                 enabled = !busy,
@@ -4281,34 +3994,8 @@ private fun MembersSheet(
                                     member.leafIndex,
                                     ownLeaf,
                                 )
-                                // ADR-0065 phase 2 / UX 16.3 and 16.5 — the
-                                // old-key member's row: the shield glyph and
-                                // the reset's own line (`Being removed.` only
-                                // where this device proposed it).
-                                val memberKeyB64 = me.lakko.app.chat.outboxB64(member.signaturePublicKey)
-                                val resetBranch = resetBranches
-                                    .firstOrNull { it.first.previousKeyB64 == memberKeyB64 }?.second
-                                val resetLine = resetBranch?.let { me.lakko.app.chat.resetMemberLine(it) }
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        if (resetLine != null) {
-                                            Icon(
-                                                Icons.Filled.GppMaybe,
-                                                contentDescription = null,
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                modifier = Modifier.size(16.dp),
-                                            )
-                                            Spacer(Modifier.width(4.dp))
-                                        }
-                                        Text(text = viewModel.memberLabel(member))
-                                    }
-                                    resetLine?.let {
-                                        Text(
-                                            text = it.text(),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
+                                    Text(text = viewModel.memberLabel(member))
                                     annotation?.let {
                                         Text(
                                             text = it.text(),

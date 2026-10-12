@@ -8,6 +8,7 @@
  * (`TimelineBubble.tsx`) and the layout computation (`timeline-layout.ts`)
  * can share it without importing the route.
  */
+import { historyRowId } from "./lineage";
 import type { MemberIdentity } from "./author-identity";
 import type { AttachmentRefBytes, ForwardRef, ReplyRef } from "./attachments";
 import type { IncomingChatEvent } from "./client";
@@ -151,4 +152,39 @@ export function dedupByMessageId(rows: readonly TimelineRow[]): TimelineRow[] {
     out.push(row);
   }
   return out;
+}
+
+/**
+ * ADR-0065 R.5 - a stored row of an OLDER segment of the conversation, as
+ * the open timeline shows it: the same row under its on-screen history id
+ * (`lineage.ts` `historyRowId`), with a reply's target moved the same way so
+ * a quote still jumps to the message it answered. A reply target is a
+ * message of the SAME segment (ADR-0052: one level, one journal).
+ *
+ * The result is display-only: it is never persisted and never the target of
+ * an edit, a deletion, a reaction, a reply or a pin.
+ */
+export function asHistoryRow(row: TimelineRow, distanceFromHead: number): TimelineRow {
+  const shift = (id: number): number => historyRowId(id, distanceFromHead);
+  if (row.kind === "outgoing") {
+    return {
+      ...row,
+      ...(row.messageId === undefined ? {} : { messageId: shift(row.messageId) }),
+      ...(row.reply === undefined ? {} : { reply: { ...row.reply, target: shift(row.reply.target) } }),
+    };
+  }
+  const event = row.event;
+  if (event.kind === "application") {
+    return {
+      kind: "incoming",
+      event: {
+        ...event,
+        messageId: shift(event.messageId),
+        ...(event.reply === undefined
+          ? {}
+          : { reply: { ...event.reply, target: shift(event.reply.target) } }),
+      },
+    };
+  }
+  return { kind: "incoming", event: { ...event, messageId: shift(event.messageId) } };
 }

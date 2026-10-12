@@ -145,7 +145,12 @@ export default function Calls(): JSX.Element {
 
   const callBack = (row: CallHistoryRow): void => {
     // Back in the mode the row records: a video call re-dials video.
-    void callHost.dial(row.groupIdB64, row.entry.video);
+    // A call that could not start (also: no session the person's devices
+    // are in exists here yet, ADR-0065 R.12) reads as it does in the chat.
+    setStartError(null);
+    callHost.dial(row.groupIdB64, row.entry.video).catch(() => {
+      setStartError(() => t("chat.call.error.start"));
+    });
   };
 
   const iconFor = (row: CallHistoryRow): "incoming" | "outgoing" | "missed" => {

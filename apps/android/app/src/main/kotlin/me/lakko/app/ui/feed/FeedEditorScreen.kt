@@ -198,8 +198,8 @@ public fun FeedEditorScreen(
                 for (s in sources) {
                     ConversationMembershipRow(
                         title = s.title,
-                        value = membershipOf(draft, s.idHex),
-                        onChange = { draft = withMembership(draft, s.idHex, it) },
+                        value = membershipOf(draft, me.lakko.app.feed.feedSourceKey(s)),
+                        onChange = { draft = withMembership(draft, me.lakko.app.feed.feedSourceKey(s), it) },
                     )
                 }
             }

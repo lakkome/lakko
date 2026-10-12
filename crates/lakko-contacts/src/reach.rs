@@ -37,6 +37,18 @@
 //! [`crate::visibility::ReachState`], so a caller cannot derive a `group` key
 //! for "no group" by mistake.
 //!
+//! ## The continuity key
+//!
+//! One reach key is **not** derived from the account seed:
+//! [`continuity_reach_seed`] ([ADR-0065](../../../docs/adr/0065-account-key-reset.md)
+//! R.4). After an account key reset the new identity knows none of its former
+//! contacts and so can hand nobody a grant, while the peers hold only grants
+//! for a mailbox that no longer exists. Both sides can compute this seed from
+//! the account id and the key generation the reset moved to, so the resetting
+//! device registers its public key and a peer that accepted the reset signs
+//! its Welcome with it. It is known to anyone who knows the account id and
+//! the generation; it is a reach key, not a credential.
+//!
 //! ## A grant is a secret
 //!
 //! A [`ReachGrant`] carries the **seed**, not the public key: whoever holds it
@@ -57,6 +69,13 @@ use thiserror::Error;
 /// BLAKE3 derive-key context for reach seeds. Frozen: changing it changes
 /// every reach key of every account.
 pub const REACH_SEED_DOMAIN: &str = "lakko/reach/v1";
+
+/// BLAKE3 derive-key context for the continuity reach seed (ADR-0065 R.4).
+/// Frozen: changing it strands every peer of every account that reset.
+pub const CONTINUITY_REACH_SEED_DOMAIN: &str = "lakko/reach/continuity/v1";
+
+/// Length of an account id, the first input of [`continuity_reach_seed`].
+pub const CONTINUITY_ACCOUNT_ID_LEN: usize = 16;
 
 /// Length of an account seed, a reach seed and an Ed25519 public key.
 pub const REACH_SEED_LEN: usize = 32;
@@ -239,6 +258,38 @@ pub fn reach_seed(
     Ok(SecretBytes::new(seed))
 }
 
+/// Derive the continuity reach seed of an account at a key generation
+/// (ADR-0065 R.4):
+///
+/// ```text
+/// BLAKE3-derive-key("lakko/reach/continuity/v1",
+///     account_id(16) || key_generation(8, BE))
+/// ```
+///
+/// Unlike [`reach_seed`] no input is secret: the account id and the
+/// generation are what a peer verified in the key-reset attestation, and the
+/// resetting device knows both. Whoever knows them can write to the mailbox
+/// while the owner keeps the key registered; that is the stated scope of the
+/// key, and why the owner registers it with an expiry. The fixed-width
+/// material cannot collide with a [`reach_seed`] input, and the two use
+/// different derive-key contexts in any case.
+///
+/// The result is wrapped in [`SecretBytes`] for a uniform type with
+/// [`reach_seed`], not because it is confidential.
+#[must_use]
+pub fn continuity_reach_seed(
+    account_id: &[u8; CONTINUITY_ACCOUNT_ID_LEN],
+    key_generation: u64,
+) -> SecretBytes<REACH_SEED_LEN> {
+    let mut material = [0u8; CONTINUITY_ACCOUNT_ID_LEN + 8];
+    material[..CONTINUITY_ACCOUNT_ID_LEN].copy_from_slice(account_id);
+    material[CONTINUITY_ACCOUNT_ID_LEN..].copy_from_slice(&key_generation.to_be_bytes());
+    SecretBytes::new(blake3_derive_key_from_material(
+        CONTINUITY_REACH_SEED_DOMAIN,
+        &material,
+    ))
+}
+
 /// The Ed25519 public key of a reach seed: what the owner registers with the
 /// Delivery Service and what a mailbox write is verified against.
 #[must_use]
@@ -379,6 +430,59 @@ mod tests {
             hex(&reach_verifying_key(seed.as_bytes())),
             "e7c2e2aa6ff74083318d5f6b1dfa7939c3cc074549376d9e91c5592a67a35e8f"
         );
+    }
+
+    #[test]
+    fn golden_pins_the_continuity_derivation() {
+        let seed = continuity_reach_seed(&[0x11; 16], 2);
+        assert_eq!(
+            hex(seed.as_bytes()),
+            "764a0db71d87bb535affdc9dc1d51df8648a26c8c670fa4708dcc6f31b5cc228",
+            "a change here strands every peer of every account that reset"
+        );
+        assert_eq!(
+            hex(&reach_verifying_key(seed.as_bytes())),
+            "c797f30bb7df3eed9ea6a65c183f7d5fc391387022a2a1150adddea3c4caf02c"
+        );
+    }
+
+    #[test]
+    fn continuity_seed_separates_on_every_input_and_is_deterministic() {
+        let base = continuity_reach_seed(&[0x11; 16], 2);
+        assert_eq!(base, continuity_reach_seed(&[0x11; 16], 2));
+        assert_ne!(base, continuity_reach_seed(&[0x12; 16], 2));
+        assert_ne!(base, continuity_reach_seed(&[0x11; 16], 3));
+        assert_ne!(base, continuity_reach_seed(&[0x11; 16], 2 << 8));
+    }
+
+    #[test]
+    fn continuity_seed_is_domain_separated_from_reach_seed() {
+        // The same 24 bytes of material under the two contexts.
+        let account_id = [0x11u8; 16];
+        let generation = 2u64;
+        let mut material = account_id.to_vec();
+        material.extend_from_slice(&generation.to_be_bytes());
+        let under_reach_domain = blake3_derive_key_from_material(REACH_SEED_DOMAIN, &material);
+        let continuity = continuity_reach_seed(&account_id, generation);
+        assert_ne!(continuity.as_bytes(), &under_reach_domain);
+        assert_eq!(
+            continuity.as_bytes(),
+            &blake3_derive_key_from_material(CONTINUITY_REACH_SEED_DOMAIN, &material),
+            "the material is account_id(16) || key_generation(8, BE), nothing else"
+        );
+        assert_ne!(CONTINUITY_REACH_SEED_DOMAIN, REACH_SEED_DOMAIN);
+
+        // And no reach_seed of an account whose seed embeds the account id
+        // equals it, for any class.
+        let mut account_seed = [0u8; 32];
+        account_seed[..16].copy_from_slice(&account_id);
+        for class in ReachClass::ALL {
+            let scope: &[u8] = if class.is_account_wide() { b"" } else { b"s" };
+            for version in [0u32, 2] {
+                let other = reach_seed(&account_seed, class, scope, version).unwrap();
+                assert_ne!(continuity, other);
+            }
+        }
     }
 
     #[test]

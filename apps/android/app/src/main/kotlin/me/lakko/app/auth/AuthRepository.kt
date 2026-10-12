@@ -1061,6 +1061,14 @@ public class AuthRepository(
                 return
             }
             is ResetAttestationVerdict.Usable -> {
+                // ADR-0065 R.4 - the marker of this device's own reset: the
+                // continuity key of the new mailbox is registered from it,
+                // with its expiry, by the reach sync that follows the reset.
+                me.lakko.app.reach.ContinuityMarkerStore.write(
+                    applicationContext,
+                    accountIdB64,
+                    me.lakko.app.reach.ContinuityMarker(owed.keyGeneration, verified.signedAtMs),
+                )
                 // The 30-day bound counts from the mint time the attestation
                 // carries, not from when this device received it.
                 if (verified.signedAtMs != owed.signedAtMs) {

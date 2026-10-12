@@ -16,7 +16,6 @@ import { useGroupNames } from "../chat/GroupNameContext";
 import { accountIdBytesFromHex, setPendingGroupSetup } from "../chat/pending-group-setup";
 import { ContactsClient } from "../contacts/client";
 import {
-  keyResetOfContact,
   loadAccepted,
   subscribeAcceptedChanged,
   type AcceptedContact,
@@ -62,14 +61,7 @@ export default function NewGroup(): JSX.Element {
 
   // A contact can be added without a username lookup only when its account id
   // was captured at accept (ADR-0021); older records lack it.
-  // ADR-0065 phase 2 (UX 16.1): a contact whose keys were reset and whom this
-  // device has not verified is listed, disabled, with its own line — their
-  // devices in the directory are the new identity's, which nobody compared.
-  const keysReset = (c: AcceptedContact): boolean => {
-    accepted();
-    return keyResetOfContact(c) !== undefined;
-  };
-  const addable = (c: AcceptedContact): boolean => c.accountIdHex !== undefined && !keysReset(c);
+  const addable = (c: AcceptedContact): boolean => c.accountIdHex !== undefined;
   const toggle = (key: string): void => {
     const next = new Set(picked());
     if (next.has(key)) next.delete(key);
@@ -201,10 +193,7 @@ export default function NewGroup(): JSX.Element {
                   <Avatar label={labelOf(c)} id={c.signaturePubkeyB64} />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{labelOf(c)}</span>
-                    <Show when={keysReset(c)}>
-                      <span class="lk-row-sub">{t("contacts.keys_reset.picker_sub")}</span>
-                    </Show>
-                    <Show when={!addable(c) && !keysReset(c)}>
+                    <Show when={!addable(c)}>
                       <span class="lk-row-sub">{t("chats.new_group.accept_again")}</span>
                     </Show>
                   </div>

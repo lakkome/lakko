@@ -135,7 +135,7 @@ final class DeviceLeavesTests: XCTestCase {
 
     // MARK: - state bundle
 
-    private let bundle = StateBundle.V1(
+    private let bundle = StateBundle.V2(
         contacts: [
             StateBundle.CarriedContact(
                 signaturePubkeyB64: "c2ln",
@@ -155,22 +155,33 @@ final class DeviceLeavesTests: XCTestCase {
         XCTAssertEqual(StateBundle.decode(StateBundle.encode(bundle)), bundle)
     }
 
-    func testStateBundleDecodesTheWebEncoding() {
-        // The exact JSON the web `encodeStateBundle` produces for the web test
-        // fixture: iOS must read it.
-        let web = """
-        {"v":1,"contacts":[{"signaturePubkeyB64":"c2ln","displayName":"Bob",\
+    func testStateBundleDecodesTheContractEncoding() {
+        // The JSON shape of the cross-client contract (format 2): iOS must
+        // read it whichever client wrote it.
+        let wire = """
+        {"v":2,"contacts":[{"signaturePubkeyB64":"c2ln","displayName":"Bob",\
         "acceptedAtMs":1700000000000,"accountIdHex":"00112233445566778899aabbccddeeff"}],\
         "pins":[{"accountIdB64":"ABEiM0RVZneImaq7zN3u/w==","pinnedSignaturePubkeyB64":"c2ln",\
-        "rotationMarker":0}],"knownGroupIdsB64":["Z3JvdXA="]}
+        "rotationMarker":0,"provenPredecessorsB64":[]}],"knownGroupIdsB64":["Z3JvdXA="],\
+        "ownPredecessors":[]}
         """
-        XCTAssertEqual(StateBundle.decode(Data(web.utf8)), bundle)
+        XCTAssertEqual(StateBundle.decode(Data(wire.utf8)), bundle)
     }
 
     func testStateBundleRefusesAnotherVersionOrAMalformedContact() {
-        let other = Data(#"{"v":2,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)
-        XCTAssertNil(StateBundle.decode(other))
-        let broken = Data(#"{"v":1,"contacts":[{"displayName":1}],"pins":[],"knownGroupIdsB64":[]}"#.utf8)
+        // Format 1 is refused outright (flag day, no dual accept), with or
+        // without the new fields.
+        let v1 = Data(#"{"v":1,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)
+        XCTAssertNil(StateBundle.decode(v1))
+        let v1WithNewFields = Data(
+            #"{"v":1,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[]}"#.utf8)
+        XCTAssertNil(StateBundle.decode(v1WithNewFields))
+        let v3 = Data(#"{"v":3,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[]}"#.utf8)
+        XCTAssertNil(StateBundle.decode(v3))
+        let empty = Data(#"{"v":2,"contacts":[],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[]}"#.utf8)
+        XCTAssertNotNil(StateBundle.decode(empty))
+        let broken = Data(
+            #"{"v":2,"contacts":[{"displayName":1}],"pins":[],"knownGroupIdsB64":[],"ownPredecessors":[]}"#.utf8)
         XCTAssertNil(StateBundle.decode(broken))
         XCTAssertNil(StateBundle.decode(Data([0x7B])))
     }

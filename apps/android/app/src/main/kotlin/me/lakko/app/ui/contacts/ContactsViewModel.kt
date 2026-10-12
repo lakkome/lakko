@@ -80,12 +80,6 @@ public class ContactsViewModel(
                 combined.value = buildUi(repo.state.value, uiSlice)
             }
         }
-        // ADR-0065 phase 2 — a contact flagged or verified re-renders its row.
-        viewModelScope.launch {
-            repo.resetRecords.collect {
-                combined.value = buildUi(repo.state.value, mutableUi.value)
-            }
-        }
         return combined.asStateFlow()
     }
 
@@ -148,9 +142,6 @@ public class ContactsViewModel(
             introInput = ui.introInput,
             sending = ui.sending,
             sendError = ui.sendError,
-            sendErrorContactKey = ui.sendErrorOpenContact
-                ?.takeIf { ui.sendError != null && it.first == ui.sendError }
-                ?.second,
             sendSucceeded = ui.sendSucceeded,
             pending = repoState.pending,
             accepted = repoState.accepted,
@@ -167,10 +158,6 @@ public class ContactsViewModel(
             refreshing = repoState.refreshing,
             refreshError = repoState.lastError,
             requiresReauth = repoState.requiresReauth,
-            resetRecords = repo.resetRecords.value,
-            confirmingReset = ui.confirmingReset,
-            confirmResetFailed = ui.confirmResetFailed,
-            confirmedResetName = ui.confirmedResetName,
         )
 
     /** ADR-0048 §4 — the search field applies the username rule as the user
@@ -235,21 +222,13 @@ public class ContactsViewModel(
                 // client attached (`loggedReset`). The refusal itself is
                 // unchanged — gate 1 threw regardless of the log; this only
                 // colours the prompt.
-                //
-                // ADR-0065 phase 2 / UX 16.1 — when the log confirmed a
-                // RESET the refusal became a state of the contact (recorded
-                // by the repository) and the action's error line points at
-                // it: `Verify {name}'s new safety number first.`
-                val message = refusalMessage(refused, atLabel(username))
-                // UX 16.1 — `Open contact` beside the line, when the person
-                // is a contact this device can open.
-                val contactKey = refusalOpenContactRouteKey(refused)
-                    ?.takeIf { repo.contactByRouteKey(it) != null }
                 mutableUi.update {
                     it.copy(
                         sending = false,
-                        sendError = message,
-                        sendErrorOpenContact = contactKey?.let { key -> message to key },
+                        sendError = supersessionRefusedMessage(
+                            refused.loggedReset,
+                            atLabel(username),
+                        ),
                     )
                 }
             } catch (err: Throwable) {
@@ -263,37 +242,6 @@ public class ContactsViewModel(
                 }
             }
         }
-    }
-
-    /**
-     * ADR-0065 phase 2 / UX 16.2 — `I verified the new safety number`: re-pin
-     * and clear the flag. `Verifying...` while it runs; `Could not save. Try
-     * again.` on a store failure; a one-line toast on success (the screen
-     * reads [ContactsUiState.confirmedResetName] once).
-     */
-    public fun onConfirmResetClicked(accountIdB64: String, name: String?) {
-        if (mutableUi.value.confirmingReset) return
-        mutableUi.update { it.copy(confirmingReset = true, confirmResetFailed = false) }
-        viewModelScope.launch {
-            val ok = try {
-                kotlinx.coroutines.withContext(Dispatchers.Default) { repo.confirmReset(accountIdB64) }
-            } catch (cause: Throwable) {
-                logFailure("confirm reset", cause)
-                false
-            }
-            mutableUi.update {
-                it.copy(
-                    confirmingReset = false,
-                    confirmResetFailed = !ok,
-                    confirmedResetName = if (ok) (name ?: "") else null,
-                )
-            }
-        }
-    }
-
-    /** The screen showed the toast. */
-    public fun consumeConfirmedReset() {
-        mutableUi.update { if (it.confirmedResetName != null) it.copy(confirmedResetName = null) else it }
     }
 
     /** The add-by-username sheet acknowledged the success (it closed). */
@@ -582,9 +530,6 @@ public class ContactsViewModel(
         val introInput: String = "",
         val sending: Boolean = false,
         val sendError: UiText? = null,
-        /** UX 16.1 — the contact to open beside a keys-reset refusal line,
-         *  paired with the line it belongs to so it never outlives it. */
-        val sendErrorOpenContact: Pair<UiText, String>? = null,
         /** Set once a request was sent; the sheet closes on it and calls
          *  [consumeSendSuccess]. */
         val sendSucceeded: Boolean = false,
@@ -606,13 +551,6 @@ public class ContactsViewModel(
          *  any. The screen disables the Revoke button on that
          *  row + shows a spinner. */
         val revokingActiveInviteSlug: String? = null,
-        /** ADR-0065 phase 2 / UX 16.2 — the confirmation in flight. */
-        val confirmingReset: Boolean = false,
-        /** 16.2 — the last confirmation could not be saved. */
-        val confirmResetFailed: Boolean = false,
-        /** 16.2 — a confirmation just succeeded (the name, "" when unnamed);
-         *  consumed by the screen's toast. */
-        val confirmedResetName: String? = null,
     )
 }
 
@@ -626,9 +564,6 @@ public data class ContactsUiState(
     val sending: Boolean,
     /** ADR-0061 — rendered from the failure's kind, never from core prose. */
     val sendError: UiText?,
-    /** UX 16.1 — the route key of the contact `Open contact` opens beside
-     *  [sendError], `null` when the line is not a keys-reset refusal. */
-    val sendErrorContactKey: String? = null,
     /** A request was just sent; consumed by the add sheet. */
     val sendSucceeded: Boolean = false,
     val pending: List<me.lakko.app.contacts.IncomingContactRequest>,
@@ -649,11 +584,6 @@ public data class ContactsUiState(
     val refreshing: Boolean,
     val refreshError: me.lakko.app.contacts.InboxError?,
     val requiresReauth: Boolean,
-    /** ADR-0065 phase 2 / UX 16.8 — the reset records, by account id. */
-    val resetRecords: Map<String, me.lakko.app.contacts.ResetRecord> = emptyMap(),
-    val confirmingReset: Boolean = false,
-    val confirmResetFailed: Boolean = false,
-    val confirmedResetName: String? = null,
 )
 
 // =============================================================================
@@ -673,71 +603,34 @@ internal fun atLabel(raw: String): String? {
 }
 
 /**
- * KT-log S4 — the PURE 3-way mapping from `(loggedReset, peerLabel)` to the
- * catalog message (`contacts.identity_changed.*`, ADR-0061) for a
- * fail-closed [SupersessionRefused].
+ * The copy for a fail-closed identity refusal: a `SupersessionRefused` is
+ * thrown when a contact's `signature_pubkey` changed and the change is
+ * neither a proven rotation (ADR-0016) nor an attested reset this device
+ * accepted (ADR-0065 R.2). An accepted reset never reaches this function: it
+ * is silent. So the refusal has two readings, by the best-effort key-log
+ * marker the client attached ([SupersessionRefused.loggedReset]):
  *
- * A [SupersessionRefused] is thrown when a peer's discovery bundle carries
- * an AccountIdentity key that DIFFERS from the locally-pinned one and the
- * change cannot be authorised by a supersession proof (ADR-0016,
- * fail-closed). KT-log S4 enriches that refusal with a best-effort
- * transparency-log marker ([SupersessionRefused.loggedReset]) so the UI can
- * let a contact DISTINGUISH an owner-initiated identity RESET (the
- * lost-everything fresh-start, ADR-0017 — logged with `is_reset=true`) from
- * an unexplained key change (a possible compromise).
+ * | marker  | meaning                                                  | message       |
+ * |---------|----------------------------------------------------------|---------------|
+ * | `false` | the verified log shows the served key WITHOUT a reset    | `unexplained` |
+ * | other   | the log is off, unreachable, absent or inconclusive      | `unconfirmed` |
  *
- * The refusal itself is NEVER changed by the log — gate 1 throws regardless
- * of `loggedReset`; this only colours the message. A pure top-level
- * function (not a member) so it is unit-testable without the Compose VM.
- * Mirror of the web `supersessionRefusedMessage`.
+ * The refusal itself is NEVER changed by the log; this only colours the
+ * message. A pure top-level function so it is unit-testable without the
+ * Compose VM. Mirror of the web `supersessionRefusedMessage`.
  *
- * @param loggedReset the best-effort log marker attached to the refusal:
- *   `true` (confirmed owner reset), `false` (no owner reset → possible
- *   compromise), `null` (off / unreachable / absent / inconclusive).
- * @param peerLabel   the handle the user typed (e.g. `@alice`), rendered
- *                    verbatim as the subject; the `_unnamed` message is used
- *                    when `null` / empty.
+ * @param peerLabel the handle the user typed (e.g. `@alice`), rendered
+ *                  verbatim as the subject; the `_unnamed` message is used
+ *                  when `null` / empty.
  */
-/**
- * ADR-0065 phase 2 / UX 16.1 — the sentence for a [SupersessionRefused]: when
- * the refusal is a logged reset (the contact is now `reset-unverified`), the
- * action's own line, `Verify {name}'s new safety number first.`; otherwise the
- * KT-log S4 three-way copy. Pure, so the host suite runs it.
- */
-/**
- * UX 16.1 — the contact-screen route key `Open contact` navigates to for a
- * [SupersessionRefused], or `null` when the refusal is not a logged reset or
- * its pin does not decode. Pure; the caller checks the contact exists.
- */
-internal fun refusalOpenContactRouteKey(refused: SupersessionRefused): String? {
-    val keyB64 = me.lakko.app.contacts.refusalOpenContactKeyB64(
-        refused.reason,
-        refused.loggedReset,
-        refused.pinnedPubkeyB64,
-    ) ?: return null
-    val bytes = try {
-        java.util.Base64.getDecoder().decode(keyB64)
-    } catch (_: IllegalArgumentException) {
-        return null
-    }
-    return contactRouteKey(bytes)
-}
-
-internal fun refusalMessage(refused: SupersessionRefused, peerLabel: String?): UiText =
-    if (me.lakko.app.contacts.refusalIsLoggedReset(refused.reason, refused.loggedReset)) {
-        me.lakko.app.contacts.KeysResetCopy.verifyFirst(peerLabel)
-    } else {
-        supersessionRefusedMessage(refused.loggedReset, peerLabel)
-    }
-
 internal fun supersessionRefusedMessage(
     loggedReset: Boolean?,
     peerLabel: String?,
 ): UiText {
-    val base = when (loggedReset) {
-        true -> "contacts.identity_changed.reset"
-        false -> "contacts.identity_changed.unexplained"
-        null -> "contacts.identity_changed.unconfirmed"
+    val base = if (loggedReset == false) {
+        "contacts.identity_changed.unexplained"
+    } else {
+        "contacts.identity_changed.unconfirmed"
     }
     return if (!peerLabel.isNullOrEmpty()) {
         UiText(base, texts = mapOf("name" to peerLabel))

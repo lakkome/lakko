@@ -182,11 +182,16 @@ public object AccountLocalWipe {
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },
         Step("group-names") { ctx, acct -> me.lakko.app.chat.GroupNameStore.deleteAccount(ctx, acct) },
-        // ADR-0065 phase 2 — the closed conversations, the eviction bookkeeping,
-        // the contact reset records and the orphaned channels.
-        Step("conversations-closed") { ctx, acct -> me.lakko.app.chat.ConversationClosedStore.deleteAccount(ctx, acct) },
-        Step("keys-reset-evictions") { ctx, acct -> me.lakko.app.chat.EvictionStore.deleteAccount(ctx, acct) },
-        Step("contact-key-state") { ctx, acct -> me.lakko.app.contacts.SharedPrefsContactKeyStateStore(ctx).clearForOwner(acct) },
+        // ADR-0065 "Phase 2 revised" — what an accepted reset of a contact
+        // left on this device: the reset ledger, the verified bindings, the
+        // successor claims, the continuity facts and the lineage mirror.
+        Step("reset-ledger") { ctx, acct -> me.lakko.app.contacts.SharedPrefsResetLedgerStore(ctx).clearForOwner(acct) },
+        Step("verified-bindings") { ctx, acct -> me.lakko.app.contacts.SharedPrefsVerifiedBindingStore(ctx).clearForOwner(acct) },
+        Step("successor-claims") { ctx, acct -> me.lakko.app.chat.SharedPrefsSuccessorClaimBackend.deleteAccount(ctx, acct) },
+        Step("reset-continuity") { ctx, acct -> me.lakko.app.chat.SharedPrefsContinuityBackend.deleteAccount(ctx, acct) },
+        Step("lineage-mirror") { ctx, acct -> me.lakko.app.chat.LineageMirror.deleteAccount(ctx, acct) },
+        Step("held-sends") { ctx, acct -> me.lakko.app.chat.SealedHeldSendBackend.deleteAccount(ctx, acct) },
+        Step("reach-continuity") { ctx, acct -> me.lakko.app.reach.ContinuityMarkerStore.clear(ctx, acct) },
         // ADR-0066 part 3 - a key rotation's sealed files (the prepared
         // entropy and proof, pending envelopes, this account's previous
         // identities), its owed record and the kept device's notice flag.
@@ -242,6 +247,11 @@ public object AccountLocalWipe {
         Step("accepted-contacts") { ctx, acct -> me.lakko.app.contacts.AcceptedContactsStore.delete(ctx, acct) },
         Step("contacts-inbox") { ctx, acct ->
             me.lakko.app.contacts.SharedPreferencesContactsInboxStore(ctx).delete(acct)
+        },
+        // ADR-0066 3.5a rule 5 - the sealed list of unanswered outgoing
+        // requests (recipients and intro texts).
+        Step("sent-contact-requests") { ctx, acct ->
+            me.lakko.app.contacts.SentRequestsFiles.deleteAccount(ctx, acct)
         },
         Step("identity-pins") { ctx, acct -> me.lakko.app.contacts.PeerPinStore.deleteForOwner(ctx, acct) },
         Step("invite-link-secrets") { ctx, acct ->

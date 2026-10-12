@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -130,6 +131,20 @@ public class ContactsRepository(
                     }
                 } ?: key
             },
+            // ADR-0065 R.2 - the reset ledger and the verified bindings are
+            // the signed-in account's, like the pins.
+            ownerAccountIdB64 = authRepo.identitySecrets.value?.let { base64Encode(it.accountId) }.orEmpty(),
+            resetLedger = appContext?.let { SharedPrefsResetLedgerStore(it) } ?: InMemoryResetLedgerStore(),
+            verifiedBindings = appContext?.let { SharedPrefsVerifiedBindingStore(it) } ?: InMemoryVerifiedBindingStore(),
+            provenPredecessorsOf = { _, pinnedKey ->
+                val ctx = appContext
+                val owner = authRepo.identitySecrets.value?.let { base64Encode(it.accountId) }
+                if (ctx != null && owner != null) {
+                    keysOfPerson(pinnedKey, SharedPrefsProvenLinkStore(ctx).load(owner)).filter { it != pinnedKey }
+                } else {
+                    emptyList()
+                }
+            },
         )
     },
     /** Factory for the [me.lakko.app.discovery.DiscoveryClient] the invite-
@@ -154,11 +169,14 @@ public class ContactsRepository(
      *  in memory without a [Context]). */
     private val inviteSecretStore: InviteLinkSecretStore =
         appContext?.let { EncryptedInviteLinkSecretStore(it) } ?: InMemoryInviteLinkSecretStore(),
-    /** ADR-0065 phase 2 / UX 16.8 — the per-contact reset records, per
-     *  account across restarts (plain preferences in production, in memory
-     *  without a [Context]). */
-    private val keyStateStore: ContactKeyStateStore =
-        appContext?.let { SharedPrefsContactKeyStateStore(it) } ?: InMemoryContactKeyStateStore(),
+    /** ADR-0065 R.2 - the accepted generation, the retired keys and the
+     *  reset's `signed_at` per peer account (public values only). */
+    private val resetLedgerStore: ResetLedgerStore =
+        appContext?.let { SharedPrefsResetLedgerStore(it) } ?: InMemoryResetLedgerStore(),
+    /** ADR-0065 R.2 - what this device verified for accounts it never
+     *  pinned. */
+    private val verifiedBindingStore: VerifiedBindingStore =
+        appContext?.let { SharedPrefsVerifiedBindingStore(it) } ?: InMemoryVerifiedBindingStore(),
     /** ADR-0066 part 3 - which key's mailbox the kept inbox cursor reads,
      *  and the cursor of each later mailbox of the account. */
     private val inboxMailboxStore: InboxMailboxStore? =
@@ -169,10 +187,9 @@ public class ContactsRepository(
      *  (public keys only). */
     private val provenLinkStore: ProvenLinkStore =
         appContext?.let { SharedPrefsProvenLinkStore(it) } ?: InMemoryProvenLinkStore(),
-    /** ADR-0065 phase 2 / UX 16.2 — the pin store the confirmation re-pins
-     *  through: the SAME persistent per-account store the fetch-path gate
-     *  reads, so a confirmed key is what the next identity fetch compares
-     *  against. Built per call because the owner account may change. */
+    /** The SAME persistent per-account pin store the fetch-path gate writes:
+     *  read here for the key an account is pinned under now. Built per call
+     *  because the owner account may change. */
     private val pinStoreFactory: () -> PinStore? = {
         appContext?.let { ctx ->
             authRepo.identitySecrets.value?.let { PeerPinStore(ctx, base64Encode(it.accountId)) }
@@ -180,155 +197,150 @@ public class ContactsRepository(
     },
 ) {
     // -----------------------------------------------------------------
-    // ADR-0065 phase 2 / UX section 16 — a contact reset their account keys
+    // ADR-0065 "Phase 2 revised: silent continuity" - a contact reset their
+    // account keys. Nothing here has a surface (R.0).
     // -----------------------------------------------------------------
 
-    private val mutableResetRecords: MutableStateFlow<Map<String, ResetRecord>> =
-        MutableStateFlow(emptyMap())
+    /** The ledger rows of the bound account. */
+    private fun resetLedgerRows(): Map<String, ResetLedgerRow> =
+        boundAccountB64?.let { resetLedgerStore.loadAll(it) }.orEmpty()
 
-    /** Every reset record this account holds, keyed on the contact's account
-     *  id (standard base64) — flagged and verified alike, since the verified
-     *  ones still carry the previous key the eviction bookkeeping needs. */
-    public val resetRecords: StateFlow<Map<String, ResetRecord>> = mutableResetRecords.asStateFlow()
+    /** The key [accountIdB64] is pinned under now, or `null`. */
+    private fun pinnedKeyOf(accountIdB64: String): String? =
+        try {
+            pinStoreFactory()?.readPin(accountIdB64)?.pinnedSignaturePubkeyB64
+        } catch (_: Throwable) {
+            null
+        }
 
-    private fun loadResetRecords(accountB64: String) {
-        mutableResetRecords.value = keyStateStore.loadAll(accountB64).associateBy { it.accountIdB64 }
-        pushAliasesToDirectory()
+    /** R.5 / R.6 - every key an accepted reset retired, mapped to the account
+     *  id it belonged to (standard base64 on both sides). A row or a claim
+     *  from a leaf bound to one of these is dropped. */
+    public fun supersededKeys(): Map<String, String> = supersededKeysOf(resetLedgerRows())
+
+    /** R.4 - the account and generation behind [currentKeyB64] when an
+     *  ACCEPTED RESET re-pinned this device to it, or `null`. */
+    public fun acceptedResetOfKey(currentKeyB64: String): AcceptedResetOfKey? =
+        acceptedResetOfKey(currentKeyB64, resetLedgerRows(), ::pinnedKeyOf)
+
+    /** The account id (standard base64) whose pin or retired keys include
+     *  [keyB64], or `null`: how a person key is named by account. */
+    public fun accountOfKnownKey(keyB64: String): String? {
+        val rows = resetLedgerRows()
+        supersededKeysOf(rows)[keyB64]?.let { return it }
+        for ((accountIdB64, row) in rows) if (keyB64 in row.previousKeysB64) return accountIdB64
+        mutableState.value.accepted.firstOrNull { base64Encode(it.request.fromPubkey) == keyB64 }
+            ?.request?.fromAccountId?.let { return base64Encode(it) }
+        return null
     }
 
-    /** The record for a contact by account id, or `null`. */
-    public fun resetRecordOf(accountId: ByteArray): ResetRecord? =
-        mutableResetRecords.value[base64Encode(accountId)]
-
-    /** The record for a contact by either of its keys (the previous or the
-     *  pending one, standard base64), or `null`. */
-    public fun resetRecordOfKey(keyB64: String): ResetRecord? =
-        mutableResetRecords.value.values.firstOrNull { it.previousKeyB64 == keyB64 || it.pendingKeyB64 == keyB64 }
-
-    /** 16.1 — is the contact with this account id `reset-unverified`? */
-    public fun isResetUnverified(accountId: ByteArray?): Boolean =
-        accountId != null && resetRecordOf(accountId)?.unverified == true
-
-    /** 16.1 — is the contact holding this key (either key) `reset-unverified`? */
-    public fun isResetUnverifiedKey(keyB64: String): Boolean =
-        resetRecordOfKey(keyB64)?.unverified == true
-
-    /** The pending keys of every flagged contact (the bubble-warning set). */
-    public fun flaggedPendingKeysB64(): Set<String> =
-        mutableResetRecords.value.values.filter { it.unverified }.map { it.pendingKeyB64 }.toSet()
+    /**
+     * R.7 case 1 / UX 16.6 - the contact this device has ESTABLISHED for an
+     * account id ([establishedContactOfAccount]): a row names the account and
+     * its own key is named by the pin (current or a proven predecessor) or by
+     * a verified binding. A row completed only from a profile is not one.
+     */
+    public fun establishedContact(accountId: ByteArray): AcceptedContact? {
+        val accountIdB64 = base64Encode(accountId)
+        val owner = boundAccountB64 ?: return null
+        val accepted = mutableState.value.accepted
+        val pinned = pinnedKeyOf(accountIdB64)
+        val index = establishedContactOfAccount(
+            rows = accepted.map {
+                ContactRowKeys(it.request.fromAccountId?.let(::base64Encode), base64Encode(it.request.fromPubkey))
+            },
+            accountIdB64 = accountIdB64,
+            pinKeysB64 = pinned?.let { keysOfPerson(it, provenLinks()).let { chain -> chain.take(chain.indexOf(it) + 1) } }
+                .orEmpty(),
+            bindingKeyB64 = verifiedBindingStore.read(owner, accountIdB64)?.keyB64,
+        ) ?: return null
+        return accepted[index]
+    }
 
     /**
-     * 16.1 — a fail-closed refusal on the identity-fetch path becomes the
-     * reset STATE of the contact when the log confirmed the served key as a
-     * reset ([refusalIsLoggedReset]); any other refusal records nothing. Idempotent
-     * for a re-observation. The chat side is told so it can run the three
-     * branches of 16.3 - 16.5.
+     * R.2 "The re-pin", the contact half: the gate wrote the pin and the
+     * ledger row; the contact ROW follows the person. The same row, its
+     * rename, chat link and account id untouched, now holding the new key. A
+     * second row already under the new key (a request from the new identity
+     * accepted before the reset was noticed) folds into this one. No state is
+     * left on the contact: nothing reads as "reset".
      */
-    public fun noteSupersessionRefusal(refused: SupersessionRefused) {
-        if (!refusalIsLoggedReset(refused.reason, refused.loggedReset)) return
-        val pending = refused.servedPubkeyB64 ?: return
-        val previous = refused.pinnedPubkeyB64 ?: return
+    private fun onResetAccepted(event: ResetAccepted) {
         bindAccountIfSignedIn()
         val owner = boundAccountB64 ?: return
-        val peer = AcceptedContactsStore.canonicalAccountB64(refused.accountIdB64)
-        val incoming = resetRecordFor(
-            accountIdB64 = peer,
-            previousKeyB64 = previous,
-            pendingKeyB64 = pending,
-            observedAtMs = System.currentTimeMillis(),
-            keyGeneration = refused.servedKeyGeneration,
-        )
-        val existing = mutableResetRecords.value[peer]
-        val merged = mergeResetObservation(existing, incoming)
-        if (merged == existing) return
-        keyStateStore.save(owner, merged)
-        mutableResetRecords.update { it + (peer to merged) }
+        if (event.ownerAccountIdB64.isNotEmpty() && event.ownerAccountIdB64 != owner) return
+        val peer = AcceptedContactsStore.canonicalAccountB64(event.accountIdB64)
+        val newKey = try {
+            java.util.Base64.getDecoder().decode(event.newKeyB64)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        if (newKey != null) {
+            var changed = false
+            mutableState.update { state ->
+                val plan = rekeyContactRows(
+                    rows = state.accepted.map { c ->
+                        ContactRowKeys(
+                            accountIdB64 = c.request.fromAccountId?.let(::base64Encode),
+                            keyB64 = base64Encode(c.request.fromPubkey),
+                        )
+                    },
+                    accountIdB64 = peer,
+                    retiredKeysB64 = event.retiredKeysB64 + event.previousKeyB64,
+                    newKeyB64 = event.newKeyB64,
+                )
+                changed = plan != null
+                if (plan == null) {
+                    state
+                } else {
+                    val row = state.accepted[plan.rowIndex]
+                    val moved = row.copy(request = row.request.copy(fromPubkey = newKey))
+                    state.copy(
+                        accepted = state.accepted.mapIndexedNotNull { i, c ->
+                            when {
+                                i == plan.rowIndex -> moved
+                                i in plan.foldedIndices -> null
+                                else -> c
+                            }
+                        },
+                    )
+                }
+            }
+            if (changed) persistAccepted()
+        }
         // ADR-0066 section 3.5 - a RESET ends every proven predecessor the
         // account had: none of its earlier keys is the person any more.
         ProvenPredecessors.dropAccount(provenLinkStore, owner, peer)
         pushAliasesToDirectory()
-        Log.i(TAG, "ADR-0065: contact flagged reset-unverified")
-        chatRepo?.onContactKeysReset(merged)
+        Log.i(TAG, "ADR-0065: an attested key reset was accepted")
+        try {
+            chatRepo?.onResetAccepted(event)
+        } catch (cause: Throwable) {
+            Log.w(TAG, "ADR-0065: chat layer not told: ${cause.javaClass.simpleName}")
+        }
     }
 
     /**
-     * 16.2 — `I verified the new safety number`: re-pin the account id to the
-     * pending key with a monotone marker, set the state back to normal, and
-     * move the contact row to the new key so `Message` / the picker / an add
-     * reach the new keys. The previous key stays on the record for the
-     * eviction bookkeeping. Returns `false` when nothing could be written
-     * (`Could not save. Try again.`).
+     * R.2 - the identity check of an account, as one of the rule's triggers
+     * (the scheduled per-chat device check, opening a one-to-one, a send
+     * whose last check is old). [heldKeyB64] is the roster's account key of
+     * a member this device never pinned ([ContactsClient.checkPeerIdentity]).
+     * Never throws; nothing is shown for any outcome.
      */
-    public fun confirmReset(accountIdB64: String): Boolean {
-        bindAccountIfSignedIn()
-        val owner = boundAccountB64 ?: return false
-        val peer = AcceptedContactsStore.canonicalAccountB64(accountIdB64)
-        val record = mutableResetRecords.value[peer] ?: return false
-        if (!record.unverified) return true
-        val pins = pinStoreFactory() ?: return false
-        val nowSecs = System.currentTimeMillis() / 1000L
-        val current = pins.readPin(peer)
-        val marker = resetRepinMarker(current?.rotationMarker ?: 0L, nowSecs)
-        val set = try {
-            pins.setPin(peer, record.pendingKeyB64, marker)
-        } catch (cause: Throwable) {
-            Log.w(TAG, "ADR-0065: re-pin failed: ${cause.javaClass.simpleName}")
-            return false
-        }
-        if (set != SetPinResult.Set) return false
-        val confirmed = confirmedRecord(record)
-        try {
-            keyStateStore.save(owner, confirmed)
-        } catch (cause: Throwable) {
-            Log.w(TAG, "ADR-0065: record not saved: ${cause.javaClass.simpleName}")
-            return false
-        }
-        mutableResetRecords.update { it + (peer to confirmed) }
-        // The contact row follows the person (16.8): the same row, its rename,
-        // chat link and account id untouched, now holding the verified key.
-        val pendingKey = try {
-            java.util.Base64.getDecoder().decode(record.pendingKeyB64)
-        } catch (_: IllegalArgumentException) {
-            null
-        }
-        if (pendingKey != null) {
-            var changed = false
-            mutableState.update { state ->
-                changed = false
-                val next = state.accepted.map { c ->
-                    val id = c.request.fromAccountId?.let(::base64Encode)
-                    if (id == peer && !c.request.fromPubkey.contentEquals(pendingKey)) {
-                        changed = true
-                        c.copy(request = c.request.copy(fromPubkey = pendingKey))
-                    } else {
-                        c
-                    }
-                }
-                if (changed) state.copy(accepted = next) else state
-            }
-            if (changed) persistAccepted()
-        }
-        pushAliasesToDirectory()
-        chatRepo?.onContactReverified(confirmed)
-        return true
-    }
-
-    /**
-     * 16.1 point 2 — the identity check the scheduled device-list arm runs
-     * for a contact it is about to re-admit: the same fail-closed gate as a
-     * contact request. A logged reset is recorded; every other failure is
-     * logged and ignored (the arm is best-effort).
-     */
-    public suspend fun checkContactIdentity(accountId: ByteArray) {
-        val secrets = authRepo.identitySecrets.value ?: return
-        try {
-            useClientWith(secrets) { client, _ -> client.checkPeerIdentity(accountId) }
+    public suspend fun checkContactIdentity(accountId: ByteArray, heldKeyB64: String? = null): KnownRequestCheck {
+        val secrets = authRepo.identitySecrets.value ?: return KnownRequestCheck.INCONCLUSIVE
+        return try {
+            val served = useClientWith(secrets) { client, _ -> client.checkPeerIdentity(accountId, heldKeyB64) }
+            if (served == null) KnownRequestCheck.INCONCLUSIVE else KnownRequestCheck.CURRENT
         } catch (_: SupersessionRefused) {
-            // Recorded by [useClientWith].
+            KnownRequestCheck.REFUSED
+        } catch (_: IdentityCheckInconclusive) {
+            KnownRequestCheck.INCONCLUSIVE
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
             Log.w(TAG, "ADR-0065: contact identity check failed: ${cause.javaClass.simpleName}")
+            KnownRequestCheck.INCONCLUSIVE
         }
     }
 
@@ -353,7 +365,9 @@ public class ContactsRepository(
         val served = try {
             useClientWith(secrets) { client, _ -> client.checkPeerIdentity(accountId) }
         } catch (_: SupersessionRefused) {
-            // Recorded by [useClientWith]; an unproven change moves nothing.
+            // An unproven change moves nothing.
+            return false
+        } catch (_: IdentityCheckInconclusive) {
             return false
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
@@ -381,7 +395,8 @@ public class ContactsRepository(
 
     /**
      * ADR-0066 section 3.5a rule 5 - on the device that rotated the account
-     * keys: what was granted before the rotation is spent.
+     * keys, and on every kept device once it adopted them (over its own
+     * links and requests): what was granted before the rotation is spent.
      *
      *  - the `/i/` and `/c/` links this account minted under a previous key
      *    are revoked at the ledger (the revoke is signed by the key that
@@ -392,11 +407,22 @@ public class ContactsRepository(
      *    the entry it re-sends.
      *
      * `true` only when nothing is left to do; `false` keeps the rotation's
-     * step owed (the ledger or a recipient could not be reached). The
-     * outgoing requests live in memory on this client, so a process that
-     * died since the rotation has none to re-send.
+     * step owed (the ledger or a recipient could not be reached), and
+     * leaves the durable marker that retries the round at the next session
+     * start. The outgoing requests are stored under the device key
+     * ([SentRequestsStore]), so a process that died since the rotation still
+     * re-sends them, intro included.
      */
-    public suspend fun spendPreRotationGrants(): Boolean {
+    public suspend fun spendPreRotationGrants(): Boolean = spendLock.withLock {
+        val done = spendPreRotationGrantsLocked()
+        // The marker the key move left ([ReachManager.grantsSpendOwed]) is
+        // what retries this at each session start, on the rotating device
+        // and on a kept one alike; it goes once nothing is left to do.
+        if (done) reach()?.grantsSpendDone()
+        done
+    }
+
+    private suspend fun spendPreRotationGrantsLocked(): Boolean {
         val secrets = authRepo.identitySecrets.value ?: return false
         bindAccountIfSignedIn()
         val predecessors = try {
@@ -491,6 +517,7 @@ public class ContactsRepository(
             // replaced by what the pass left of them.
             state.copy(sent = state.sent.filterNot { it in spent } + outcome.pending)
         }
+        persistSent()
         return outcome.done
     }
 
@@ -532,9 +559,9 @@ public class ContactsRepository(
 
     /**
      * The contact a route key names (base64url of a signature key): by the
-     * row's current key, else through a reset record carrying that key as its
-     * previous or pending one — so a screen opened on the old key still finds
-     * the person after the row moved to the new one (16.8).
+     * row's current key, else through a key an accepted reset retired, so a
+     * screen opened on the old key still finds the person after the row
+     * moved to the new one.
      */
     public fun contactByRouteKey(routeKey: String): AcceptedContact? {
         val accepted = mutableState.value.accepted
@@ -550,54 +577,24 @@ public class ContactsRepository(
         if (links.isNotEmpty()) {
             accepted.firstOrNull { samePerson(base64Encode(it.request.fromPubkey), keyB64, links) }?.let { return it }
         }
-        val record = resetRecordOfKey(keyB64) ?: return null
-        return accepted.firstOrNull { c -> c.request.fromAccountId?.let(::base64Encode) == record.accountIdB64 }
+        val current = retiredKeyAliases(resetLedgerRows(), ::pinnedKeyOf)[keyB64] ?: return null
+        return accepted.firstOrNull { base64Encode(it.request.fromPubkey) == current }
     }
 
-    /**
-     * 16.4 — `Start a new chat` once the contact is verified: a chat with the
-     * new keys exactly as a first chat is created (no contact-request round
-     * trip; they are already a contact). The contact row's chat link moves to
-     * the new chat; the closed row stays until deleted. Returns the new chat's
-     * hex id, or `null` when the contact is unverified, unknown, or the chat
-     * surface is not wired.
-     */
-    public suspend fun startNewChatAfterReset(accountIdB64: String): String? {
-        val chat = chatRepo ?: return null
-        val peer = AcceptedContactsStore.canonicalAccountB64(accountIdB64)
-        val record = mutableResetRecords.value[peer] ?: return null
-        if (record.unverified) return null
-        val contact = mutableState.value.accepted.firstOrNull { c ->
-            c.request.fromAccountId?.let(::base64Encode) == peer
-        } ?: return null
-        val accountId = contact.request.fromAccountId ?: return null
-        val groupIdHex = chat.startGroupWith(
-            recipientAccountId = accountId,
-            recipientSignaturePubkey = contact.request.fromPubkey,
-            kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
-        )
-        mutableState.update { state ->
-            state.copy(
-                accepted = state.accepted.map { c ->
-                    if (c.request.messageId == contact.request.messageId) c.copy(groupIdHex = groupIdHex) else c
-                },
-            )
-        }
-        persistAccepted()
-        return groupIdHex
-    }
-
-    /** 16.8 — the resolver falls through from a flagged contact's pending key
-     *  to the person: the directory aliases the new key to the old one. */
+    /** Name resolution falls through between the keys of one person: a key
+     *  an accepted reset retired names the row under the current key (old
+     *  bubbles keep the person's name), and the current key inherits what was
+     *  learned under the key it replaced until a profile arrives for it. */
     private fun pushAliasesToDirectory() {
         val directory = profileDirectory ?: return
         // ADR-0066 section 3.5 - and from a proven successor key to the key
         // the person was first known by: a proven rotation is the same
         // person, with nothing shown.
-        directory.setAliases(
-            provenAliases(provenLinks()) +
-                mutableResetRecords.value.values.associate { it.pendingKeyB64 to it.previousKeyB64 },
-        )
+        val rows = resetLedgerRows()
+        val retired = retiredKeyAliases(rows, ::pinnedKeyOf)
+        val inherited = LinkedHashMap<String, String>()
+        for ((old, current) in retired) if (current !in inherited) inherited[current] = old
+        directory.setAliases(provenAliases(provenLinks()) + inherited + retired)
     }
 
     /** The proven steps recorded for the bound account. */
@@ -654,6 +651,26 @@ public class ContactsRepository(
 
     private val bindLock = Any()
 
+    /** ADR-0066 3.5a rule 5 - the unanswered outgoing requests, durable
+     *  under the device key so a re-send after a rotation of the account
+     *  keys survives a process death and carries the intro. `null` in tests
+     *  that supply no [Context] (in memory only, as before). */
+    private val sentStore: SentRequestsStore? = appContext?.let { SentRequestsFiles.onDevice(it) }
+
+    /** One spend round at a time: the rotating device's owed step and the
+     *  session-start retry would otherwise both re-send the same request. */
+    private val spendLock = kotlinx.coroutines.sync.Mutex()
+
+    /** Persist the Sent list of the bound account. Called after every
+     *  mutation of [ContactsState.sent] has landed in state. */
+    private fun persistSent() {
+        val store = sentStore ?: return
+        val accountB64 = boundAccountB64 ?: return
+        if (!store.save(accountB64, mutableState.value.sent)) {
+            Log.w(TAG, "the sent requests were not stored")
+        }
+    }
+
     /** The account whose accepted list and inbox snapshot are loaded into
      *  [state]; `null` until [bindAccount] ran, and again after [clear].
      *  Read by the persist helpers, so nothing is written for an unbound
@@ -689,6 +706,7 @@ public class ContactsRepository(
             val switching = boundAccountB64 != null
             val storedAccepted = appCtx?.let { AcceptedContactsStore.load(it, accountB64) }
             val snapshot = inboxStore?.load(accountB64) ?: ContactsInboxSnapshot()
+            val storedSent = sentStore?.load(accountB64)
             mutableState.update { current ->
                 // `update` may re-run the lambda on a lost CAS.
                 acceptedGrew = false
@@ -709,16 +727,110 @@ public class ContactsRepository(
                 state.copy(
                     accepted = accepted,
                     pending = merged.pending,
+                    sent = if (storedSent == null) state.sent else mergedSentRequests(storedSent, state.sent),
                     cursor = advanceInboxCursor(state.cursor, snapshot.cursor),
                 )
             }
             boundAccountB64 = accountB64
+            synchronized(waitingKnownRequests) {
+                waitingKnownRequests.clear()
+                waitingKnownRequests.addAll(snapshot.waiting)
+            }
         }
         // The learned names are per account too: screens re-read them.
         profileDirectory?.onAccountChanged()
         if (acceptedGrew) persistAccepted() else pushRenamesToDirectory()
-        // ADR-0065 phase 2 — the reset records are the account's too.
-        loadResetRecords(accountB64)
+        // A request sent before the bind joins the stored list.
+        if (sentStore != null && mutableState.value.sent.isNotEmpty()) persistSent()
+        // The key aliases are the account's too.
+        pushAliasesToDirectory()
+    }
+
+    // ---- ADR-0065 R.7 case 1 / UX 16.6: a request from an existing contact --
+
+    /** Requests from existing contacts with no verdict yet ("the request
+     *  waits, unshown, for the next check"). The mailbox cursor has moved
+     *  past them, so they are also kept by the inbox store and read back at
+     *  the next bind. Bounded ([MAX_WAITING_REQUESTS]). */
+    private val waitingKnownRequests = ArrayList<IncomingContactRequest>()
+
+    private fun persistWaiting() {
+        val store = inboxStore ?: return
+        val accountB64 = boundAccountB64 ?: return
+        store.saveWaiting(accountB64, synchronized(waitingKnownRequests) { waitingKnownRequests.toList() })
+    }
+
+    private fun dropWaiting(messageId: Long) {
+        val changed = synchronized(waitingKnownRequests) { waitingKnownRequests.removeAll { it.messageId == messageId } }
+        if (changed) persistWaiting()
+    }
+
+    /**
+     * `true` when [request] came from an account that is ALREADY a contact
+     * and was dealt with here (answered, dropped or kept waiting): the caller
+     * then lists nothing. `false` for a stranger's request.
+     *
+     * "Already a contact" is [establishedContact], read BEFORE the check
+     * below (which may write a first pin): a row whose account id came only
+     * from the peer's own profile establishes nothing, so a member who
+     * claimed this account's id cannot make its request vanish. On a refusal
+     * nothing is sent to the keys that sent the request, and nothing is
+     * shown for any outcome.
+     */
+    private suspend fun handleKnownContactRequest(request: IncomingContactRequest): Boolean {
+        val fromAccountId = request.fromAccountId ?: return false
+        if (establishedContact(fromAccountId) == null) return false
+        val check = checkContactIdentity(fromAccountId)
+        val verdict = knownContactRequestVerdict(
+            senderIsContact = true,
+            check = check,
+            requestKeyB64 = base64Encode(request.fromPubkey),
+            trustedKeyB64 = pinnedKeyOf(base64Encode(fromAccountId)),
+        )
+        when (verdict) {
+            KnownRequestVerdict.SHOW -> return false
+            KnownRequestVerdict.WAIT -> {
+                // Kept on disk first: the cursor is about to move past it.
+                val kept = synchronized(waitingKnownRequests) {
+                    val next = withWaitingRequest(waitingKnownRequests, request)
+                    if (next.kept && next.waiting.size != waitingKnownRequests.size) waitingKnownRequests.add(request)
+                    next.kept
+                }
+                if (kept) persistWaiting()
+                return true
+            }
+            KnownRequestVerdict.ANSWER -> {
+                // The ack is the whole of the answer on this path: the reset
+                // the check just accepted (or accepted earlier) is what moves
+                // the conversation.
+                try {
+                    sendContactAck(request)
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    Log.w(TAG, "ADR-0065: silent ack to an existing contact failed: ${cause.javaClass.simpleName}")
+                }
+            }
+            KnownRequestVerdict.DROP -> Unit
+        }
+        // Answered or dropped: it waits no longer.
+        dropWaiting(request.messageId)
+        return true
+    }
+
+    /** Judge again the requests that were waiting for a verdict. A sender who
+     *  is no longer a contact by then is an ordinary request and is returned
+     *  to be listed. */
+    private suspend fun retryWaitingKnownRequests(): List<IncomingContactRequest> {
+        val again = synchronized(waitingKnownRequests) { waitingKnownRequests.toList() }
+        if (again.isEmpty()) return emptyList()
+        val toList = ArrayList<IncomingContactRequest>()
+        for (request in again) {
+            if (handleKnownContactRequest(request)) continue
+            dropWaiting(request.messageId)
+            toList += request
+        }
+        return toList
     }
 
     /** [bindAccount] for the current session's account, when there is one. */
@@ -864,15 +976,35 @@ public class ContactsRepository(
     }
 
     init {
-        // ADR-0065 phase 2 / UX 16.1 point 2 — the scheduled device-list arm
-        // checks a contact's published identity through this repository's
-        // fail-closed gate, which is what records a logged reset.
-        chatRepo?.contactIdentityCheck = { accountId -> checkContactIdentity(accountId) }
+        // ADR-0065 R.2 - the scheduled device-list arm checks an account's
+        // published identity through this repository's fail-closed gate,
+        // which is what accepts an attested reset.
+        chatRepo?.contactIdentityCheck = { accountId, heldKeyB64 -> checkContactIdentity(accountId, heldKeyB64) }
+        // The one seam between the gate and everything that follows an
+        // accepted reset (R.5 to R.7).
+        ResetEvents.subscribeAs("contacts-repository", ::onResetAccepted)
+        // R.4 - a Welcome to a person whose reset this device accepted may be
+        // signed with the continuity key of their new mailbox.
+        reach()?.acceptedResetOf = { ownerKey -> acceptedResetOfKey(base64Encode(ownerKey)) }
         // ADR-0066 section 3.5a rule 6 - a refused mailbox write re-checks
         // the person's address through the same gate, once.
         chatRepo?.addressRecheck = { accountKey, accountId -> recheckAddress(accountKey, accountId) }
-        // Rule 5 - the rotating device's owed step.
+        // Rule 5 - the rotating device's owed step, and the round a kept
+        // device runs over its own links and requests after adopting.
         chatRepo?.spendPreRotationGrants = { spendPreRotationGrants() }
+        // ADR-0066 (a device paired after a rotation) - a pairing state
+        // bundle that moved the conversation key rebuilds a chat layer that
+        // was already loaded under the current key.
+        if (appContext != null) {
+            me.lakko.app.devices.StateBundle.conversationKeySink = { accountIdB64 ->
+                val secrets = authRepo.identitySecrets.value
+                if (secrets != null &&
+                    base64Encode(secrets.accountId) == AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+                ) {
+                    chatRepo?.rebindConversationIdentity(secrets)
+                }
+            }
+        }
         // A session already live at construction (a cold-start restore lands
         // before the repository is built): its contacts are the ones shown.
         // Placed after [profileDirectory] so the renames reach the directory.
@@ -1041,6 +1173,7 @@ public class ContactsRepository(
                     ),
                 )
             }
+            persistSent()
             result
         }
     }
@@ -1111,9 +1244,6 @@ public class ContactsRepository(
                     recipientSignaturePubkey,
                     me.lakko.app.reach.WritePurpose.CONTACT_REQUEST,
                 ),
-                // UX 16.1 — search still finds a contact who reset; nothing
-                // is sealed to their new keys before they are verified.
-                resetUnverified = isResetUnverified(recipientAccountId),
             )
             // The Sent list shows `@username`; a person found by name alone
             // has none to show there.
@@ -1134,6 +1264,7 @@ public class ContactsRepository(
                 ),
             )
         }
+        persistSent()
     }
 
     private fun reachAuthOfGrantWire(wire: ByteArray): me.lakko.app.ds.DsReachAuth {
@@ -1236,9 +1367,16 @@ public class ContactsRepository(
                         waitSecs = waitSecs,
                         mailboxSigner = sender.mailboxSigner,
                     )
-                    val newIncoming = result.events.filterIsInstance<
+                    val fetchedRequests = result.events.filterIsInstance<
                         IncomingMailboxEvent.ContactRequest>(
                     ).map { it.request }
+                    // ADR-0065 R.7 case 1 / UX 16.6 — a request from an
+                    // account that is ALREADY a contact is never a request
+                    // row: the R.2 check runs on the sender's account and the
+                    // request is answered silently or dropped. The ones that
+                    // waited for a verdict are judged again first.
+                    val newIncoming = retryWaitingKnownRequests() +
+                        fetchedRequests.filterNot { handleKnownContactRequest(it) }
                     val welcomes = result.events.filterIsInstance<
                         IncomingMailboxEvent.Welcome>(
                     )
@@ -1393,6 +1531,8 @@ public class ContactsRepository(
                     // dedupe above absorbs it) rather than losing it.
                     if (acceptedChanged) persistAccepted()
                     if (newIncoming.isNotEmpty() || acceptedChanged) persistInboxPending()
+                    // An answered request leaves the durable Sent list.
+                    if (acks.isNotEmpty()) persistSent()
                     persistInboxCursor()
                 }
             } catch (e: ContactsError) {
@@ -1571,24 +1711,14 @@ public class ContactsRepository(
         bindAccountIfSignedIn()
         var changed = false
         var removedKey: ByteArray? = null
-        var removedAccountB64: String? = null
         mutableState.update { state ->
             val remaining = state.accepted.filterNot { it.request.messageId == messageId }
             changed = remaining.size != state.accepted.size
             val removed = state.accepted.firstOrNull { it.request.messageId == messageId }
             removedKey = removed?.request?.fromPubkey
-            removedAccountB64 = removed?.request?.fromAccountId?.let(::base64Encode)
             if (changed) state.copy(accepted = remaining) else state
         }
         if (changed) persistAccepted()
-        // UX 16.1 — removing the contact clears the reset state with it.
-        val removedAccount = removedAccountB64
-        val owner = boundAccountB64
-        if (changed && removedAccount != null && owner != null && mutableResetRecords.value.containsKey(removedAccount)) {
-            keyStateStore.remove(owner, removedAccount)
-            mutableResetRecords.update { it - removedAccount }
-            pushAliasesToDirectory()
-        }
         // ADR-0060 §1 — the removed person held this account's `contact` key
         // (and, through their contacts, its `fof` key): both rotate, the old
         // ones come off the mailbox at once, and the remaining one-to-ones get
@@ -1727,10 +1857,10 @@ public class ContactsRepository(
             val inviterSigPubkey = capability.ownerSignaturePubkey()
             val inviterX25519Pubkey = capability.ownerX25519Pubkey()
 
-            // UX 16.1 / ADR-0016 rule 2 — the capability's inline bundle never
-            // went through the fetch gate. An inviter who is a contact flagged
-            // `reset-unverified`, or whose account is pinned to another key
-            // the directory cannot explain, is refused HERE: before the use
+            // ADR-0016 rule 2 / ADR-0065 R.2 — the capability's inline bundle
+            // never went through the fetch gate. An inviter whose account is
+            // pinned to another key the directory cannot explain (neither a
+            // proven rotation nor an attested reset) is refused HERE: before the use
             // is consumed, before the request is sealed, before the chat is
             // founded and its Welcome sealed. A stranger passes untouched.
             try {
@@ -1738,7 +1868,6 @@ public class ContactsRepository(
                     client.gateBundleRecipient(
                         recipientAccountId = inviterAccountId,
                         recipientSignaturePubkey = inviterSigPubkey,
-                        resetUnverified = isResetUnverified(inviterAccountId),
                     )
                 }
             } catch (cancel: kotlinx.coroutines.CancellationException) {
@@ -1746,6 +1875,19 @@ public class ContactsRepository(
             } catch (e: Throwable) {
                 return@use AcceptInviteResult.Failed(
                     message = e.message ?: "inviter identity refused",
+                )
+            }
+
+            // ADR-0065 R.7 case 1 / UX 16.6 — a link from a person who is
+            // already a contact (a reset loses their contacts; they may hand
+            // out a new link) opens the existing contact: no request is sent
+            // and no use of the link is spent. The gate above ran R.2 first,
+            // so an attested reset was accepted there and an unproven change
+            // refused. "Already a contact" is the pin or a verified binding
+            // naming the row's own key ([establishedContact]).
+            establishedContact(inviterAccountId)?.let { existing ->
+                return@use AcceptInviteResult.ExistingContact(
+                    routeKey = base64UrlEncodeNoPad(existing.request.fromPubkey),
                 )
             }
 
@@ -1801,7 +1943,6 @@ public class ContactsRepository(
                         // ADR-0060 §6 — this device's own reply key.
                         replyGrant = reach()?.mintReply(inviterSigPubkey),
                         reach = linkReach,
-                        resetUnverified = isResetUnverified(inviterAccountId),
                     )
                 }
             } catch (e: Throwable) {
@@ -2113,7 +2254,6 @@ public class ContactsRepository(
             // heap if some collector cached them, but our reference
             // drops here.
             mutableState.value = ContactsState()
-            mutableResetRecords.value = emptyMap()
         }
         // The name directory stops carrying this account's renames, and the
         // names it learned stop resolving.
@@ -2222,11 +2362,6 @@ public class ContactsRepository(
                 )
                 try {
                     block(client, sender)
-                } catch (refused: SupersessionRefused) {
-                    // ADR-0065 phase 2 / UX 16.1 — a logged reset becomes the
-                    // contact's state; the refusal itself propagates unchanged.
-                    noteSupersessionRefusal(refused)
-                    throw refused
                 } finally {
                     sender.signingSeed.fill(0)
                     sender.x25519Secret.fill(0)
@@ -2386,6 +2521,10 @@ public sealed interface AcceptInviteResult {
     }
 
     public data object AlreadyAccepted : AcceptInviteResult
+
+    /** ADR-0065 UX 16.6 — the link's owner is already a contact: nothing was
+     *  sent or spent; the caller opens the contact [routeKey] names. */
+    public data class ExistingContact(val routeKey: String) : AcceptInviteResult
     public data object Expired : AcceptInviteResult
     public data object Exhausted : AcceptInviteResult
     public data object NotFound : AcceptInviteResult
@@ -2505,7 +2644,7 @@ public data class SentContactRequest(
     val recipientAccountIdB64: String,
     val messageId: Long,
     val createdAt: String,
-    /** The intro the request carried, kept (in memory, like the entry) so
+    /** The intro the request carried, kept (stored with the entry) so
      *  the request can be sent again from a rotated account key (ADR-0066
      *  section 3.5a rule 5). */
     val introMessage: ByteArray = ByteArray(0),

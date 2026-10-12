@@ -175,4 +175,41 @@ class DeviceReadmissionTest {
         assertTrue(DeviceReadmission.takeSlot("g", 1_000L + DeviceReadmission.INTERVAL_MS))
         DeviceReadmission.clearSlots()
     }
+
+    @Test
+    fun `an own device whose KeyPackage names another account key is not admitted and not retired`() {
+        // ADR-0066: a device paired after a key rotation published under the
+        // current key before the state bundle reached it.
+        val stale = DirectoryDevice("me-2", "kp:me-2".toByteArray(), admissible = false)
+        val plan = DeviceReadmission.plan(
+            roster = listOf(RosterLeaf("me-1", "me"), RosterLeaf("me-3", "me")),
+            ownPersonKey = "me",
+            accounts = listOf(AccountDevices("me", listOf(kp("me-1"), stale, kp("me-3")))),
+            removed = emptySet(),
+            ownDeviceRoster = setOf("me-1", "me-2", "me-3"),
+        )
+        assertTrue(plan.admit.isEmpty())
+        // Its row is still listed, so nothing of the account is retired.
+        assertTrue(plan.retire.isEmpty())
+        // Once it re-published under the conversation key it is admitted.
+        val again = DeviceReadmission.plan(
+            roster = listOf(RosterLeaf("me-1", "me")),
+            ownPersonKey = "me",
+            accounts = listOf(AccountDevices("me", listOf(kp("me-1"), kp("me-2")))),
+            removed = emptySet(),
+            ownDeviceRoster = setOf("me-1", "me-2"),
+        )
+        assertEquals(listOf("me-2"), again.admit.map { it.deviceKey })
+    }
+
+    @Test
+    fun `an own KeyPackage is usable only when bound to the conversation key`() {
+        val conversation = ByteArray(32) { 1 }
+        val current = ByteArray(32) { 2 }
+        assertTrue(DeviceReadmission.ownKeyPackageUsable(conversation.copyOf(), conversation))
+        assertTrue(!DeviceReadmission.ownKeyPackageUsable(current, conversation))
+        // An unbound KeyPackage and an unknown conversation key change nothing.
+        assertTrue(DeviceReadmission.ownKeyPackageUsable(null, conversation))
+        assertTrue(DeviceReadmission.ownKeyPackageUsable(current, null))
+    }
 }

@@ -159,7 +159,14 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
     /// (``CallPeerNameMirror``). READ-ONLY; this process resolves no names and
     /// writes nothing (C-59). Absent → the alert is unnamed.
     func callerName(accountIdB64: String, groupIdHex: String) -> String? {
-        CallPeerNameMirror.name(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        if let name = CallPeerNameMirror.name(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
+            return name
+        }
+        // ADR-0065 R.5 — a group that continues a conversation is titled as
+        // the conversation when the app has not mirrored its own title yet.
+        let conversation = conversationHex(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        guard conversation != groupIdHex else { return nil }
+        return CallPeerNameMirror.name(accountIdB64: accountIdB64, groupIdHex: conversation)
     }
 
     /// `docs/ux/calls.md` section 2.1 — the App Group muted-conversation
@@ -169,6 +176,13 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
     /// may fail in.
     func isMuted(accountIdB64: String, groupIdHex: String) -> Bool {
         ConversationMuteMirror.isMuted(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+    }
+
+    /// ADR-0065 R.5 — the conversation a group belongs to, from the App Group
+    /// lineage mirror the app writes. READ-ONLY (C-59). Absent → the group
+    /// itself.
+    func conversationHex(accountIdB64: String, groupIdHex: String) -> String {
+        ConversationLineageMirror.conversationHex(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
     }
 
     /// Decode a lowercase-hex string into bytes. `nil` on any malformed input

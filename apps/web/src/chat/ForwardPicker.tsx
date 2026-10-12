@@ -31,6 +31,7 @@ import {
 } from "../contacts/local-store";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { useLineage } from "./use-lineage";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
@@ -73,6 +74,9 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   const profiles = useProfiles();
   const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
+  // ADR-0065 R.5 — one candidate per conversation: its current group, with
+  // the conversation's own pin / mute / archive.
+  const lineageView = useLineage();
   const auth = useAuth();
 
   const accountId = (): string | null => {
@@ -126,7 +130,8 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
 
   const candidates = createMemo((): readonly ForwardCandidate[] => {
     const flagsMap = sync.flags();
-    return chats.groups().map((g) => {
+    return lineageView.conversations().map((c) => {
+      const g = c.head;
       const hex = syncGroupIdHex(g.group.groupId);
       const kind = conversationKindOf(g.group);
       const summary = summarizeGroupSlot(logSlots()[hex], null);
@@ -140,7 +145,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
         isGroup: kind === "group",
       });
       const lastAt = summary.lastAt === null ? Number.NaN : new Date(summary.lastAt).getTime();
-      const f = flagsMap[hex];
+      const f = flagsMap[c.conversationHex];
       return {
         groupIdB64: g.groupIdB64,
         kind,

@@ -23,6 +23,7 @@ import { base64UrlEncodeNoPad, base64Decode } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { ContactsClient } from "../contacts/client";
 import { recordSentRequest } from "../contacts/sent-requests";
+import { rememberSentIntro } from "../contacts/sent-request-intros";
 import { t } from "../l10n";
 import { useProfiles } from "../profile/ProfileContext";
 import { reachSession } from "../reach/reach-service";
@@ -177,8 +178,6 @@ function PersonRow(props: {
   const [note, setNote] = createSignal<{
     readonly error: boolean;
     readonly text: () => string;
-    /** UX 16.1 — the contact screen a keys-reset refusal points at. */
-    readonly openContactHref?: string | null;
   } | null>(null);
   const [sent, setSent] = createSignal(false);
 
@@ -223,6 +222,7 @@ function PersonRow(props: {
               recipientAccountIdHex: props.person.accountIdHex,
               sentAtMs: Date.now(),
             });
+            void rememberSentIntro(account, props.person.accountIdHex, intro());
           }
           setSent(true);
           setAdding(false);
@@ -234,7 +234,7 @@ function PersonRow(props: {
           setNote({ error: true, text: REQUEST_REFUSED });
           break;
         case "failed":
-          setNote({ error: true, text: outcome.message, openContactHref: outcome.openContactHref });
+          setNote({ error: true, text: outcome.message });
           break;
       }
     } finally {
@@ -303,16 +303,6 @@ function PersonRow(props: {
         {(n) => (
           <div class={n().error ? "form-error" : "form-info"} role="status" style={{ margin: "0 12px 8px" }}>
             {n().text()}
-            <Show when={n().openContactHref}>
-              {(href) => (
-                <>
-                  {" "}
-                  <A href={href()} class="ghost small">
-                    {t("contacts.keys_reset.open_contact")}
-                  </A>
-                </>
-              )}
-            </Show>
           </div>
         )}
       </Show>

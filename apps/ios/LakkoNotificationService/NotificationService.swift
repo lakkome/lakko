@@ -137,6 +137,13 @@ public final class NotificationService: UNNotificationServiceExtension {
             switch outcome {
             case .preview(let preview):
                 best.body = preview.body
+                // ADR-0065 R.5 — the wake is grouped by its routing id, which
+                // is per GROUP; a group that continues a conversation is
+                // grouped under the conversation instead (the tag differs
+                // from the wake's group only then).
+                if preview.movedConversation {
+                    best.threadIdentifier = preview.tag
+                }
                 self.deliver(best)
             case .callOffer(let alert):
                 self.deliverCallAlert(alert, into: best)

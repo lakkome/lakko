@@ -96,6 +96,7 @@ public class InviteLandingViewModel(
                 groupIdHex = result.groupIdHex,
             )
             AcceptInviteResult.AlreadyAccepted -> InviteLandingState.AlreadyAccepted
+            is AcceptInviteResult.ExistingContact -> InviteLandingState.ExistingContact(result.routeKey)
             AcceptInviteResult.Expired -> InviteLandingState.Expired
             AcceptInviteResult.Exhausted -> InviteLandingState.Exhausted
             AcceptInviteResult.NotFound -> InviteLandingState.NotFound
@@ -114,6 +115,10 @@ public class InviteLandingViewModel(
 /** Discriminated state the [InviteLandingScreen] renders. */
 public sealed interface InviteLandingState {
     public data object Loading : InviteLandingState
+
+    /** ADR-0065 UX 16.6 — the link's owner is already a contact: the screen
+     *  opens that contact and draws nothing of its own. */
+    public data class ExistingContact(val routeKey: String) : InviteLandingState
 
     public data class Accepted(
         val recipientAccountId: ByteArray,

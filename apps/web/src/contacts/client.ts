@@ -43,6 +43,7 @@
  */
 import { loadWasm } from "../wasm";
 import { hexOfKey, ownDeviceAdmissible, ownDeviceRoster } from "../devices/own-device-roster";
+import { ownDeviceKeyPackageUsable } from "../devices/own-conversation-key";
 import type { ConversationKind } from "../chat/conversation-kind";
 import type { Wasm } from "../wasm";
 import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
@@ -72,29 +73,32 @@ import type {
 import type { IdentityFetchResponse } from "../discovery/wire";
 import type { ReceivedProfile } from "../profile/profile-envelope";
 import type { AccountPubkeyPin } from "./local-store";
+import { acceptableBoundKeys, devicesBoundTo } from "./add-member-key";
+import { contactRequestGate, requestTargetAfterFetch } from "./request-target";
+import { resetVerdict, type AttestCheck, type LogCheck } from "./reset-verdict";
+import { notifyResetAccepted } from "./reset-events";
 import {
-  contactRequestGate,
-  refusalIsRecordedReset,
-  requestTargetAfterFetch,
-} from "./keys-reset-send-gate";
+  dropVerifiedBinding,
+  memberHeldKey,
+  readVerifiedBinding,
+  recordVerifiedBinding,
+} from "./verified-binding";
+import { fetchDeviceAttestKey } from "../auth/device-attest-key";
 import { provenSuccessorWith } from "./proven-successor";
 import { pendingAfterArrival } from "./inbox-store";
 import { spentFailureOutcome, type SpentOutcome } from "./rotation-spent";
+import { addressRecheckAllowed, lastAddressRecheckAtMs } from "./address-recheck-throttle";
 import {
-  readKeyReset,
+  acceptReset,
   accountIdB64OfKey,
+  accountKeysOf,
   readPin,
-  recordKeyReset,
   setPin,
   recordLogStatus,
   recordLogReset,
   recordLogVersion,
 } from "./local-store";
-import {
-  verifyIdentityInLog,
-  verifyRotationChain,
-  lookupServedKeyReset,
-} from "../transparency/verify";
+import { verifyIdentityInLog, verifyRotationChain } from "../transparency/verify";
 import type { LogVerifyStatus } from "../transparency/verify";
 import {
   KIND_CONTACT_ACK,
@@ -490,6 +494,16 @@ export type ContactsClientError =
  * inspects `error.kind`; UI code that just wants a message can
  * fall back to `error.message`.
  */
+/** A group created with its first members and its DS journal claimed, whose
+ *  Welcome has NOT been sent ({@link ContactsClient.prepareGroupWith}). */
+export interface PreparedGroup {
+  readonly group: WasmGroup;
+  /** The Welcome of the founding commit, byte-identical for every target. */
+  readonly welcome: Uint8Array;
+  /** One per added person: the account key their mailbox is named after. */
+  readonly targets: readonly { readonly accountKey: Uint8Array; readonly isRecipient: boolean }[];
+}
+
 export class ContactsError extends Error {
   override name = "ContactsError";
   constructor(public readonly variant: ContactsClientError, message: string) {
@@ -558,23 +572,15 @@ export class SupersessionRefused extends Error {
   override name = "SupersessionRefused";
 
   /**
-   * KT-log S4 — best-effort transparency-log context for the NEW
-   * (refused) key, attached so the UI can distinguish an
-   * owner-initiated identity RESET from an unexplained key change.
+   * Which refusal copy the action shows (`contacts.identity_changed.*`):
    *
-   *   * `true`  — the log's latest entry commits to EXACTLY the served
-   *     new key AND records it as an owner-initiated reset (ADR-0017
-   *     lost-everything fresh-start).
-   *   * `false` — the log's latest entry commits to the served new key
-   *     but does NOT record a reset (an unexplained change → possible
-   *     compromise).
-   *   * `null`  — the log is off / unreachable / the account is absent
-   *     / the log's latest pubkey does not match the served key (the
-   *     marker is then about a different key, so it is unknown).
+   *   * `false` — the key log, read to the end, shows the new key WITHOUT
+   *     a reset: `unexplained`.
+   *   * `null`  — everything else: `unconfirmed`.
    *
-   * This is **best-effort enrichment only**: a log failure NEVER
-   * changes the refusal — gate 1 (the supersession/pin gate) throws
-   * regardless. It only colours the OOB-reverify prompt.
+   * Never `true`: a change that IS an attested reset is accepted silently
+   * (ADR-0065 R.2) and never reaches a refusal. The type keeps `boolean`
+   * for the persisted log marker's shape.
    */
   public loggedReset: boolean | null = null;
 
@@ -589,38 +595,29 @@ export class SupersessionRefused extends Error {
 }
 
 /**
- * ADR-0065 phase 2 (UX 16.1 "what is blocked") — thrown by the paths that
- * would reach a contact with their NEW keys while this device has not yet
- * verified them: starting a one-to-one, adding them to a group. The
- * contact is `reset-unverified` in the local store (`readKeyReset`); the
- * person verifies in the contact screen and the same action then works.
- *
- * Distinct from {@link SupersessionRefused}: that one is the gate's own
- * refusal of a key it could not authorise; this one is the product rule
- * that sits on top of the recorded state, and it fires even when no
- * identity fetch ran (the state is enough).
+ * ADR-0065 R.2 "no verdict" — a contact's published key differs from the
+ * one this device holds, no proof came with it, and whether the change is
+ * an attested reset could not be established YET (the attest key or the key
+ * log could not be reached). Nothing was changed and nothing is recorded;
+ * the next trigger asks again. An action that needed the new key fails like
+ * any action that could not reach the server; it is not a refusal.
  */
-export class KeysResetUnverified extends Error {
-  override name = "KeysResetUnverified";
+export class IdentityCheckInconclusive extends Error {
+  override name = "IdentityCheckInconclusive";
   constructor(
     /** base64 of the contact's account_id. */
     public readonly accountIdB64: string,
   ) {
-    super("the contact reset their account keys; verify the new safety number first");
+    super("the contact's published identity could not be checked yet");
   }
 }
 
 /** The outcome of {@link ContactsClient.checkContactIdentity}. */
 export type ContactIdentityCheck =
-  /** The published key is the pin (or was just TOFU-pinned). */
+  /** The published key is what this device trusts: the pin, a key just
+   *  TOFU-pinned, a proven successor, or an attested reset just accepted
+   *  (ADR-0065 R.2). */
   | "current"
-  /** The published key changed and the log confirmed a RESET: the contact
-   *  is now (or already was) `reset-unverified`. */
-  | "reset"
-  /** The published key changed and the change is NOT a confirmed reset
-   *  (no proof, or an invalid one): a possible compromise. The gate's own
-   *  refusal; nothing recorded. */
-  | "changed"
   /** The account publishes no identity bundle. */
   | "absent";
 
@@ -1249,9 +1246,17 @@ export class ContactsClient {
       // holds: a removed device that publishes itself again is not put into
       // a new conversation. With no roster loaded none is added here.
       const roster = ownDeviceRoster(base64Encode(secrets.accountId));
+      // ADR-0066 (a device paired after a key rotation) — and only from a
+      // KeyPackage bound to the account key this device's leaves are bound
+      // to; a device that published before the pairing state bundle reached
+      // it is added by the re-admission arm once it has published again.
+      const wasm = await loadWasm();
+      const conversationKeyB64 = ownPersonKeyB64(myIdentity);
       return list.filter(
         (d) =>
-          !bytesEqualCc(d.deviceId, ownKey) && ownDeviceAdmissible(roster, hexOfKey(d.deviceId)),
+          !bytesEqualCc(d.deviceId, ownKey) &&
+          ownDeviceAdmissible(roster, hexOfKey(d.deviceId)) &&
+          ownDeviceKeyPackageUsable(wasm, d.keyPackage, conversationKeyB64),
       );
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -1673,6 +1678,9 @@ export class ContactsClient {
   private async verifyBundleAccountKey(
     accountId: Uint8Array,
     bundle: IdentityFetchResponse,
+    /** ADR-0065 R.2: the key this device HOLDS for the account when it
+     *  never pinned it (a roster's account key for that account id). */
+    heldKeyB64?: string,
   ): Promise<void> {
     // G-30 #2 (ADR-0019): snapshot the pin BEFORE gate 1 runs. Gate 1
     // re-pins to the new key on a verified rotation (overwriting the pin),
@@ -1683,36 +1691,38 @@ export class ContactsClient {
 
     // Gate 1 (primary, fail-closed). A throw here short-circuits gate 2.
     try {
-      await this.verifySupersessionGate(accountId, bundle);
+      await this.verifySupersessionGate(accountId, bundle, heldKeyB64);
     } catch (err) {
-      // KT-log S4 — on a fail-closed refusal of an UNPROVEN CHANGED key
-      // (the moment the reset-vs-compromise distinction matters most),
-      // enrich the error with a BEST-EFFORT transparency lookup of the
-      // NEW key's `is_reset` marker. This NEVER weakens the gate: gate 1
-      // already threw, we re-throw it unchanged save for the added
-      // context. Any log fault leaves `loggedReset` null.
-      if (err instanceof SupersessionRefused) {
-        err.loggedReset = await this.bestEffortServedKeyReset(
-          accountId,
-          bundle,
-        );
-        // ADR-0065 phase 2 (UX 16.1): a changed key WITHOUT a proof that the
-        // log confirms as a reset is a STATE of the contact, not only an
-        // error at the action. Recorded beside the pin — the pin itself is
-        // not advanced (invariant #6); the person confirms in the contact
-        // screen. The gate still throws: nothing downstream may use the new
-        // key until then. A changed key the log does not confirm sets no
-        // state (a possible compromise, not a reset).
-        if (err.loggedReset === true && err.reason === "proof-absent") {
-          recordKeyReset(
-            base64Encode(accountId),
-            bundle.signature_pubkey,
-            bundle.key_generation,
-            Date.now(),
-          );
-        }
+      // ADR-0065 R.2 — a CHANGED key with NO supersession proof is asked
+      // whether it is an attested reset. Accepted: the re-pin is written and
+      // the call proceeds as for any trusted key, with nothing shown.
+      // Refused: the gate's own refusal, with the copy the verdict names.
+      // No verdict: nothing changes. A change that CAME with a proof which
+      // failed is never a reset (a proven rotation and a reset are two
+      // paths) and stays the gate's refusal.
+      if (!(err instanceof SupersessionRefused)) throw err;
+      if (err.reason !== "proof-absent") {
+        err.loggedReset = await this.loggedResetForRefusal(accountId, bundle);
+        throw err;
       }
-      throw err;
+      // The held key is the pin, else the verified binding the gate judged
+      // the change from. A roster key is never the held key by itself.
+      const heldBinding = oldPin === undefined ? readVerifiedBinding(base64Encode(accountId)) : undefined;
+      const verdict = await this.judgeReset(
+        accountId,
+        bundle,
+        oldPin?.pinnedSignaturePubkeyB64 ?? heldBinding?.keyB64,
+        oldPin?.acceptedKeyGeneration ?? heldBinding?.keyGeneration ?? 0,
+      );
+      if (verdict.kind === "refused") {
+        err.loggedReset = verdict.why === "unexplained" ? false : null;
+        throw err;
+      }
+      if (verdict.kind === "no-verdict") {
+        throw new IdentityCheckInconclusive(base64Encode(accountId));
+      }
+      // Accepted and re-pinned: gate 2 below already ran inside the verdict.
+      return;
     }
 
     // Gate 2 (additive, best-effort). Hard-fails only on rollback.
@@ -1732,18 +1742,25 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0065 phase 2 (UX 16.1) — fetch a contact's published identity and
-   * run the fail-closed check, reporting the state it leaves the contact
-   * in rather than throwing on the one branch that is a STATE (a confirmed
-   * reset). Used by the paths that reach a contact (`startGroupWith`,
-   * `addMemberToGroup`) and by the scheduled device-list arm (16.1 point
-   * 2), so a plain member learns of a reset without starting anything.
+   * ADR-0065 R.2 — fetch an account's published identity and run the
+   * fail-closed check. One of the rule's triggers: the scheduled per-chat
+   * device check, opening a one-to-one, a send whose last check is old.
    *
-   * @throws `SupersessionRefused` only for a change the log does NOT
-   *   confirm as a reset — the gate's own refusal, unchanged; a rollback
-   *   (`LogRollbackDetected`) and a network failure propagate too.
+   * @param heldKeyB64 the roster's account key of a group member this device
+   *   never pinned. Ignored when a pin exists. It is NOT taken as the held
+   *   key on the caller's word (the account id may be a member's own claim):
+   *   `verified-binding.ts` decides. The first time the directory serves
+   *   exactly this key a verified binding is recorded; a change is judged
+   *   only from such a binding; anything else is
+   *   `IdentityCheckInconclusive` and nothing is written.
+   * @throws `SupersessionRefused` for a change that is neither proven nor an
+   *   attested reset; `IdentityCheckInconclusive` when that could not be
+   *   established yet; a rollback and a network failure propagate too.
    */
-  async checkContactIdentity(accountId: Uint8Array): Promise<ContactIdentityCheck> {
+  async checkContactIdentity(
+    accountId: Uint8Array,
+    heldKeyB64?: string,
+  ): Promise<ContactIdentityCheck> {
     let bundle: IdentityFetchResponse | null;
     try {
       bundle = await this.discovery.identityFetch(accountId);
@@ -1751,67 +1768,24 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     if (bundle === null) return "absent";
-    try {
-      await this.verifyBundleAccountKey(accountId, bundle);
-    } catch (err) {
-      // "reset" is a STATE: reported only when the gate recorded it (a
-      // proof-less change the log confirmed). A change with an invalid
-      // proof stays the gate's own refusal even if the log says reset.
-      if (
-        err instanceof SupersessionRefused &&
-        refusalIsRecordedReset(
-          err.loggedReset,
-          readKeyReset(base64Encode(accountId)) !== undefined,
-        )
-      ) {
-        return "reset";
-      }
-      throw err;
-    }
+    await this.verifyBundleAccountKey(accountId, bundle, heldKeyB64);
     return "current";
   }
 
   /**
-   * ADR-0065 phase 2 (UX 16.1) — the contact-request form of the rule, for
-   * a bundle this call already fetched: a contact that is
-   * `reset-unverified` (recorded before, or found so by this very bundle)
-   * is refused with {@link KeysResetUnverified} before anything is sealed.
-   * A stranger (no pin) is TOFU-pinned by the gate and passes as before;
-   * every other refusal of the gate propagates as itself.
-   */
-  private async verifyBundleOrKeysReset(
-    accountId: Uint8Array,
-    bundle: IdentityFetchResponse,
-  ): Promise<void> {
-    const accountIdB64 = base64Encode(accountId);
-    if (readKeyReset(accountIdB64) !== undefined) throw new KeysResetUnverified(accountIdB64);
-    try {
-      await this.verifyBundleAccountKey(accountId, bundle);
-    } catch (err) {
-      if (
-        err instanceof SupersessionRefused &&
-        refusalIsRecordedReset(err.loggedReset, readKeyReset(accountIdB64) !== undefined)
-      ) {
-        throw new KeysResetUnverified(accountIdB64);
-      }
-      throw err;
-    }
-  }
-
-  /**
-   * ADR-0065 phase 2 (UX 16.1) — the same rule for a contact request sent
-   * to keys the caller already holds (an invite link's capability, a
-   * search result's cross-checked bundle), where no identity fetch runs in
-   * the send itself. Call it BEFORE anything is spent or sent.
+   * A contact request sent to keys the caller already holds (an invite
+   * link's capability, a search result's cross-checked bundle), where no
+   * identity fetch runs in the send itself. Call it BEFORE anything is
+   * spent or sent.
    *
-   * - no pin for the account (a stranger): passes, as before;
-   * - the contact is `reset-unverified`: {@link KeysResetUnverified};
+   * - no pin for the account (a stranger): passes;
    * - a pinned account under a key that is not the pin: the published
-   *   identity is fetched and run through the fail-closed gate (a
-   *   confirmed reset is `KeysResetUnverified`, an unproven change the
-   *   gate's own `SupersessionRefused`); if the gate passes and the key
-   *   is STILL not the pin (e.g. an old link naming a superseded key),
-   *   the send is refused as a key mismatch. Old keys do not come back.
+   *   identity is fetched and run through the fail-closed gate (an attested
+   *   reset is accepted there, silently; an unproven change is the gate's
+   *   own `SupersessionRefused`); if the gate passes and the key is STILL
+   *   neither the pin nor a proven predecessor of it (e.g. an old link
+   *   naming a superseded key), the send is refused as a key mismatch. Old
+   *   keys do not come back.
    */
   async refuseContactRequestToUnverifiedKeys(
     accountId: Uint8Array,
@@ -1819,17 +1793,14 @@ export class ContactsClient {
   ): Promise<void> {
     const accountIdB64 = base64Encode(accountId);
     const recipientKeyB64 = base64Encode(recipientSignaturePubkey);
-    const verdict = contactRequestGate(readPin(accountIdB64), recipientKeyB64);
-    if (verdict === "send") return;
-    if (verdict === "keys-reset") throw new KeysResetUnverified(accountIdB64);
-    await this.refuseUnlessIdentityCurrent(accountId);
+    if (contactRequestGate(readPin(accountIdB64), recipientKeyB64) === "send") return;
+    await this.checkContactIdentity(accountId);
     // ADR-0066 section 3.5a rule 1 - a key that is a PROVEN predecessor of
     // the pin is the same person: the send re-fetches and seals to the
     // current keys (`currentRequestTarget`). Any other key is refused.
     const pinnedNow = readPin(accountIdB64);
     const provenPredecessor =
       pinnedNow !== undefined &&
-      pinnedNow.keyReset === undefined &&
       base64Encode(resolveAccountKey(recipientSignaturePubkey)) === pinnedNow.pinnedSignaturePubkeyB64;
     if (!provenPredecessor && contactRequestGate(pinnedNow, recipientKeyB64) !== "send") {
       throw new SupersessionRefused(
@@ -1864,7 +1835,6 @@ export class ContactsClient {
     const suppliedKeyB64 = base64Encode(recipientSignaturePubkey);
     const supplied = { signaturePubkey: recipientSignaturePubkey, x25519Pubkey: recipientX25519Pubkey };
     const verdict = contactRequestGate(readPin(accountIdB64), suppliedKeyB64);
-    if (verdict === "keys-reset") throw new KeysResetUnverified(accountIdB64);
     const resolvesToItself =
       base64Encode(resolveAccountKey(recipientSignaturePubkey)) === suppliedKeyB64;
     if (verdict === "send" && resolvesToItself) return supplied;
@@ -1875,7 +1845,7 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     if (bundle === null) throw ContactsError.noIdentityBundle(accountId);
-    await this.verifyBundleOrKeysReset(accountId, bundle);
+    await this.verifyBundleAccountKey(accountId, bundle);
     const published = base64Decode(bundle.signature_pubkey);
     const target = requestTargetAfterFetch({
       suppliedKeyB64,
@@ -1910,6 +1880,11 @@ export class ContactsClient {
   async recheckAddress(accountKey: Uint8Array): Promise<void> {
     const accountIdB64 = accountIdB64OfKey(base64Encode(accountKey));
     if (accountIdB64 === null) return;
+    // At most one re-check per person in five minutes, on every client: a
+    // run of refused writes to one person costs one directory fetch.
+    const nowMs = Date.now();
+    if (!addressRecheckAllowed(lastAddressRecheckAtMs.get(accountIdB64) ?? null, nowMs)) return;
+    lastAddressRecheckAtMs.set(accountIdB64, nowMs);
     try {
       const accountId = base64Decode(accountIdB64);
       const bundle = await this.discovery.identityFetch(accountId);
@@ -1928,8 +1903,8 @@ export class ContactsClient {
    * ADR-0066 section 3.5a rule 5 - send an unanswered contact request AGAIN
    * after this account's keys were rotated: a fresh request from the new
    * key, with a new `reply` grant, sealed to the recipient's published keys
-   * (fetched through the fail-closed gate). The intro text is not kept on
-   * this device, so the request carries the profile and no intro.
+   * (fetched through the fail-closed gate). It carries the profile and the
+   * intro this device kept for the request, when it kept one.
    *
    * Never throws: answers how it ended (`rotation-spent.ts`). Only a server
    * that could not be reached is `unreachable`.
@@ -1937,16 +1912,19 @@ export class ContactsClient {
   async resendContactRequestAfterRotation(
     identity: IdentitySecrets | null,
     recipientAccountId: Uint8Array,
+    /** The intro the first request carried, as this device kept it
+     *  (`sent-request-intros.ts`); empty when it kept none. */
+    introMessage: Uint8Array = new Uint8Array(0),
   ): Promise<SpentOutcome> {
     try {
       const bundle = await this.discovery.identityFetch(recipientAccountId);
       if (bundle === null) return "skipped";
-      await this.verifyBundleOrKeysReset(recipientAccountId, bundle);
+      await this.verifyBundleAccountKey(recipientAccountId, bundle);
       await this.composeAndPublishContactRequest(
         identity,
         base64Decode(bundle.signature_pubkey),
         base64Decode(bundle.x25519_pubkey),
-        new Uint8Array(0),
+        introMessage,
       );
       return "done";
     } catch (err) {
@@ -2011,44 +1989,123 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0065 phase 2 — the product rule on top of the state: a contact
-   * that is `reset-unverified` (already recorded, or found so by the fetch
-   * this runs) may not be reached with their new keys. Throws
-   * {@link KeysResetUnverified}; any other refusal of the gate propagates
-   * as itself. An account that publishes nothing passes — the KeyPackage
-   * fetch that follows answers for it.
+   * ADR-0065 R.2 — gather the rule's inputs for a proof-less key change and
+   * act on the verdict (`reset-verdict.ts`). On `accepted` the re-pin is
+   * written and the listeners that move the shared conversations are told;
+   * nothing is shown anywhere. Never throws.
    */
-  private async refuseUnlessIdentityCurrent(accountId: Uint8Array): Promise<void> {
+  private async judgeReset(
+    accountId: Uint8Array,
+    bundle: IdentityFetchResponse,
+    heldKeyB64: string | undefined,
+    /** The generation last accepted for the account: the pin's, else the
+     *  verified binding's baseline. */
+    acceptedGeneration: number,
+  ): Promise<ReturnType<typeof resetVerdict>> {
     const accountIdB64 = base64Encode(accountId);
-    if (readKeyReset(accountIdB64) !== undefined) throw new KeysResetUnverified(accountIdB64);
-    const check = await this.checkContactIdentity(accountId);
-    if (check === "reset") throw new KeysResetUnverified(accountIdB64);
+    if (heldKeyB64 === undefined) return { kind: "no-verdict" };
+    let servedPubkey: Uint8Array;
+    try {
+      servedPubkey = base64Decode(bundle.signature_pubkey);
+    } catch {
+      return { kind: "refused", why: "unconfirmed" };
+    }
+    const attest = await this.checkResetAttestation(accountId, servedPubkey, bundle);
+    let log: LogCheck;
+    try {
+      const r = await verifyIdentityInLog(accountId, servedPubkey);
+      log = { status: r.status, isReset: r.isReset };
+    } catch {
+      log = { status: "unreachable", isReset: null };
+    }
+    const verdict = resetVerdict({
+      heldKeyB64,
+      acceptedGeneration,
+      fetchedKeyB64: bundle.signature_pubkey,
+      bundleGeneration: bundle.key_generation,
+      attest,
+      log,
+    });
+    if (verdict.kind !== "accepted") return verdict;
+    const written = acceptReset({
+      accountIdB64,
+      heldKeyB64,
+      newKeyB64: bundle.signature_pubkey,
+      newX25519B64: bundle.x25519_pubkey,
+      keyGeneration: verdict.keyGeneration,
+      signedAtMs: verdict.signedAtMs,
+      nowMs: Date.now(),
+    });
+    if (written === "stale" || written === "no-account") {
+      return { kind: "refused", why: "unconfirmed" };
+    }
+    // The account is pinned now: the pin is the verified binding.
+    dropVerifiedBinding(accountIdB64);
+    recordLogStatus(accountIdB64, log.status);
+    recordLogReset(accountIdB64, log.isReset);
+    if (written === "accepted") {
+      notifyResetAccepted({
+        accountIdB64,
+        previousKeyB64: heldKeyB64,
+        newKeyB64: bundle.signature_pubkey,
+        keyGeneration: verdict.keyGeneration,
+        signedAtMs: verdict.signedAtMs,
+      });
+    }
+    return verdict;
+  }
+
+  /** R.2 step 1: the bundle's attestation under the trusted attest key (the
+   *  build-time pin when set, else the cached JWKS key). */
+  private async checkResetAttestation(
+    accountId: Uint8Array,
+    servedPubkey: Uint8Array,
+    bundle: IdentityFetchResponse,
+  ): Promise<AttestCheck> {
+    const raw = bundle.key_reset_attest;
+    if (raw === undefined || raw.length === 0) return { kind: "absent" };
+    let attestation: Uint8Array;
+    try {
+      attestation = base64Decode(raw);
+    } catch {
+      return { kind: "invalid" };
+    }
+    let attestKey: Uint8Array;
+    try {
+      attestKey = await fetchDeviceAttestKey();
+    } catch {
+      return { kind: "no-key" };
+    }
+    try {
+      const wasm = await loadWasm();
+      const verified = wasm.verifyKeyResetAttestation(attestation, attestKey, accountId, servedPubkey);
+      const keyGeneration = Number(verified.keyGeneration);
+      const signedAtMs = Number(verified.signedAtMillis);
+      try {
+        verified.free();
+      } catch {
+        // Freeing is best-effort.
+      }
+      return { kind: "verified", keyGeneration, signedAtMs };
+    } catch {
+      return { kind: "invalid" };
+    }
   }
 
   /**
-   * KT-log S4 — best-effort lookup of the served (refused) key's
-   * `is_reset` marker, used ONLY to enrich a `SupersessionRefused`.
-   *
-   * Wraps `lookupServedKeyReset` and swallows any throw to a `null`
-   * (the enrichment must never break the already-failing refusal path).
-   * Returns `true` / `false` only when the log's latest entry commits
-   * to exactly the served key; `null` otherwise (off / unreachable /
-   * absent / pubkey-divergence).
+   * The copy marker for a refusal that is NOT a reset question (a proof
+   * that failed, a proof for another key): `false` only when the key log,
+   * read through the VERIFIED path, shows the served key without a reset.
+   * Never throws.
    */
-  private async bestEffortServedKeyReset(
+  private async loggedResetForRefusal(
     accountId: Uint8Array,
     bundle: IdentityFetchResponse,
   ): Promise<boolean | null> {
     try {
-      const servedPubkey = base64Decode(bundle.signature_pubkey);
-      return await lookupServedKeyReset(accountId, servedPubkey);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "ContactsClient: best-effort transparency reset lookup threw " +
-          "(refusal stands; loggedReset stays null)",
-        err,
-      );
+      const r = await verifyIdentityInLog(accountId, base64Decode(bundle.signature_pubkey));
+      return r.status === "confirmed" && r.isReset === false ? false : null;
+    } catch {
       return null;
     }
   }
@@ -2090,20 +2147,91 @@ export class ContactsClient {
   private async verifySupersessionGate(
     accountId: Uint8Array,
     bundle: IdentityFetchResponse,
+    /** ADR-0065 R.2: with no pin, the key a roster names for this account
+     *  id is what the device HOLDS: a fetched key that differs from it is a
+     *  change, not a first observation. */
+    heldKeyB64?: string,
   ): Promise<void> {
     const accountIdB64 = base64Encode(accountId);
     const fetchedPubkeyB64 = bundle.signature_pubkey;
 
-    const existing = readPin(accountIdB64);
+    const pinned = readPin(accountIdB64);
+    // With no pin, what this device HOLDS for the account is a VERIFIED
+    // BINDING (`verified-binding.ts`), never the roster key on the strength
+    // of a claimed account id: a member's own profile can name any id.
+    const binding = pinned === undefined ? readVerifiedBinding(accountIdB64) : undefined;
+    const bindingAsPin = (b: {
+      readonly keyB64: string;
+      readonly keyGeneration: number;
+    }): Pick<AccountPubkeyPin, "pinnedSignaturePubkeyB64" | "rotationMarker"> & Partial<AccountPubkeyPin> => ({
+      pinnedSignaturePubkeyB64: b.keyB64,
+      rotationMarker: 0,
+      acceptedKeyGeneration: b.keyGeneration,
+    });
+    let existing:
+      | (Pick<AccountPubkeyPin, "pinnedSignaturePubkeyB64" | "rotationMarker"> & Partial<AccountPubkeyPin>)
+      | undefined;
+    if (pinned !== undefined) {
+      existing = pinned;
+    } else if (heldKeyB64 !== undefined) {
+      // The member path: a roster key under an account id this device never
+      // pinned. Nothing is pinned here.
+      const held = memberHeldKey({
+        pinned: false,
+        binding,
+        rosterKeyB64: heldKeyB64,
+        fetchedKeyB64: fetchedPubkeyB64,
+      });
+      switch (held.kind) {
+        case "record":
+          // The directory serves exactly the roster key: this device has now
+          // seen the binding for itself. A first observation, never a reset.
+          recordVerifiedBinding(accountIdB64, {
+            keyB64: fetchedPubkeyB64,
+            keyGeneration: Number.isSafeInteger(bundle.key_generation) ? bundle.key_generation : 0,
+            verifiedAtMs: Date.now(),
+          });
+          return;
+        case "confirmed":
+          return;
+        case "held":
+          existing = bindingAsPin({ keyB64: held.heldKeyB64, keyGeneration: held.acceptedGeneration });
+          break;
+        case "pin":
+        case "none":
+          // Nothing is established for this roster key under this account
+          // id (a claimed id, or a first sight of an account that already
+          // moved on): no verdict, nothing done, nothing shown.
+          throw new IdentityCheckInconclusive(accountIdB64);
+      }
+    } else if (binding !== undefined) {
+      // A caller with no roster key (a contact request, a search result):
+      // the binding this device verified earlier stands in for the pin, so
+      // a key that changed since is a CHANGE, not a first observation.
+      existing = bindingAsPin(binding);
+    }
 
-    // Case 1 — first-ever observation. TOFU-pin and proceed.
+    // Case 1 — first-ever observation. TOFU-pin and proceed. The bundle's
+    // generation is recorded as the accepted-generation baseline (R.2).
     if (existing === undefined) {
-      setPin(accountIdB64, fetchedPubkeyB64, 0);
+      setPin(accountIdB64, fetchedPubkeyB64, 0, undefined, { keyGeneration: bundle.key_generation });
       return;
     }
 
-    // Case 2 — unchanged key. Nothing to verify.
+    // Case 2 — unchanged key. Nothing to verify. A pin from before the
+    // generation was recorded takes its baseline now; a verified binding
+    // met on the contact path becomes the pin, keeping its baseline.
     if (existing.pinnedSignaturePubkeyB64 === fetchedPubkeyB64) {
+      if (pinned === undefined) {
+        setPin(accountIdB64, fetchedPubkeyB64, 0, undefined, {
+          keyGeneration: existing.acceptedKeyGeneration ?? bundle.key_generation,
+        });
+        dropVerifiedBinding(accountIdB64);
+      } else if (existing.acceptedKeyGeneration === undefined) {
+        setPin(accountIdB64, fetchedPubkeyB64, existing.rotationMarker, undefined, {
+          keyGeneration: bundle.key_generation,
+        });
+      }
       return;
     }
 
@@ -2177,6 +2305,17 @@ export class ContactsClient {
     // evicted, and nothing is shown. An attestation beside the proof (the
     // proven-rotation arm) does not change this: the proof is what tells a
     // rotation from a reset.
+    if (pinned === undefined) {
+      // The change was judged from a verified binding: the binding's key
+      // becomes the pin first, so the proven re-pin below records it as the
+      // proven predecessor (the member's leaves stay the same person).
+      setPin(accountIdB64, existing.pinnedSignaturePubkeyB64, 0, undefined, {
+        ...(existing.acceptedKeyGeneration !== undefined
+          ? { keyGeneration: existing.acceptedKeyGeneration }
+          : {}),
+      });
+      dropVerifiedBinding(accountIdB64);
+    }
     const result = setPin(accountIdB64, fetchedPubkeyB64, proofExpiresAt, undefined, {
       proven: true,
     });
@@ -2385,10 +2524,9 @@ export class ContactsClient {
     // proof and re-pins. Throws `SupersessionRefused` (fail-closed)
     // on a changed key with no valid proof — the UI surfaces an
     // OOB re-verify prompt. We never blind-TOFU a changed key.
-    // ADR-0065 phase 2 (UX 16.1): a contact whose keys were reset and not
-    // yet verified here is refused (`KeysResetUnverified`) before anything
-    // is sealed to the new keys. A stranger passes exactly as before.
-    await this.verifyBundleOrKeysReset(recipientAccountId, bundle);
+    // ADR-0065 R.2: a proof-less change that is an attested reset is
+    // accepted inside the gate, silently.
+    await this.verifyBundleAccountKey(recipientAccountId, bundle);
     const recipientSignaturePub = base64Decode(bundle.signature_pubkey);
     const recipientX25519Pub = base64Decode(bundle.x25519_pubkey);
     this.reportUsernameResolved(recipientSignaturePub, lookup.normalisedUsername);
@@ -2448,9 +2586,9 @@ export class ContactsClient {
     introMessage: Uint8Array,
     options?: ContactRequestOptions,
   ): Promise<SendResult> {
-    // ADR-0065 phase 2 (UX 16.1): no identity fetch runs on this path, so
-    // the keys-reset rule is applied to the stored pin (a stranger has
-    // none and passes).
+    // ADR-0065 R.2: no identity fetch runs on this path, so a key that is
+    // not the stored pin sends the published identity through the gate
+    // first (a stranger has no pin and passes).
     await this.refuseContactRequestToUnverifiedKeys(recipientAccountId, recipientSignaturePubkey);
     // ADR-0066 section 3.5a rule 1 - a key that is a proven predecessor is
     // replaced by the account's current keys, fetched through the gate.
@@ -2741,6 +2879,8 @@ export class ContactsClient {
         {
           ...(options.groupId === undefined ? {} : { scope: options.groupId }),
           explicit: options.explicitGrantB64 ?? null,
+          // ADR-0065 R.4: `allowMember` marks a Welcome, which signs with the
+          // continuity key for the new identity of an accepted reset.
           allowMember: true,
         },
         (mailbox, auth) => this.ds.publishMailbox(mailbox, envelope, auth),
@@ -3012,25 +3152,17 @@ export class ContactsClient {
    * dropping the reference loses the group on this device
    * (the recipient still has theirs from `joinFromWelcome`).
    */
-  async startGroupWith(
+  async prepareGroupWith(
     identity: IdentitySecrets | null,
     recipientAccountId: Uint8Array,
-    recipientSignaturePubkey: Uint8Array,
     kind: ConversationKind,
-    options: {
-      /** ADR-0060 — the requester's `reply` grant when this accepts their
-       *  contact request: the 1:1 Welcome is written with it. */
-      readonly replyGrantB64?: string | null;
-    } = {},
-  ): Promise<{ group: WasmGroup; welcomeMessageId: number }> {
+  ): Promise<PreparedGroup> {
     const wasm = await loadWasm();
 
-    // 0. ADR-0065 phase 2 (UX 16.1): starting a chat is an identity fetch
-    //    that runs the fail-closed check, and a contact whose keys were
-    //    reset is refused until this device verified the new number. After
-    //    a reset the directory serves the NEW identity's KeyPackages, so
-    //    without this the chat would be founded with keys nobody compared.
-    await this.refuseUnlessIdentityCurrent(recipientAccountId);
+    // 0. ADR-0065 R.2: starting a chat is an identity fetch that runs the
+    //    fail-closed check. An attested reset is accepted here, silently;
+    //    an unproven change is refused before a KeyPackage is fetched.
+    await this.checkContactIdentity(recipientAccountId);
 
     // 1. Fetch every device KeyPackage of the recipient (ADR-0050): a
     //    person is added as all of their devices, each its own leaf.
@@ -3043,7 +3175,6 @@ export class ContactsClient {
     if (recipientDevices === null || recipientDevices.length === 0) {
       throw ContactsError.noIdentityBundle(recipientAccountId);
     }
-    void recipientSignaturePubkey;
 
     // 2. Resolve our DEVICE identity (ADR-0050 — the leaf this device holds
     //    in every group; same instance every Group on this device shares, so
@@ -3117,42 +3248,84 @@ export class ContactsClient {
       }
       throw ContactsError.wrap(err instanceof JournalClaimFailedError ? err.cause : err);
     }
-    // ADR-0060 section 6 — one write per added ACCOUNT, to its account
-    // mailbox: the recipient's (with their reply grant when this accepts
-    // their request) and, when we have other devices, our own.
-    let firstWelcomeMessageId = 0;
-    const delivered = new Set<string>();
+    // One Welcome target per PERSON (a KeyPackage bound to a proven
+    // predecessor names the same mailbox as one bound to the current key).
+    const targets: { accountKey: Uint8Array; isRecipient: boolean }[] = [];
+    const seen = new Set<string>();
     for (const dev of devices) {
       const accountKey = await accountKeyOfKeyPackage(dev.keyPackage);
-      // ADR-0066 section 3.5a rule 1 - one write per PERSON: a KeyPackage
-      // bound to a proven predecessor (a kept device, ours included) names
-      // the same mailbox as one bound to the current key.
       const accountHex = journalHex(resolveAccountKey(accountKey));
-      if (delivered.has(accountHex)) continue;
-      delivered.add(accountHex);
-      const isRecipient =
-        accountHex === journalHex(resolveAccountKey(recipientSignaturePubkey));
+      if (seen.has(accountHex)) continue;
+      seen.add(accountHex);
+      // By the device list this call fetched, not by a caller's key: after
+      // an accepted reset (ADR-0065 R.2) a caller may still hold the old one.
+      targets.push({
+        accountKey,
+        isRecipient: recipientDevices.some((d) => d.keyPackage === dev.keyPackage),
+      });
+    }
+    // The creation mutated the canonical provider's storage (the group's
+    // epoch state, the leaf private key, the queued Welcome state). Snapshot
+    // it so a reload can `Group::load` this group id.
+    await this.persistBestEffort();
+    return { group, welcome: added.welcome, targets };
+  }
+
+  /**
+   * Deliver the Welcome of a group prepared by {@link prepareGroupWith}: one
+   * write per added ACCOUNT, to its account mailbox (ADR-0060 section 6).
+   * The recipient's is written with `replyGrantB64` when this answers their
+   * contact request; a Welcome to the new identity of an accepted reset is
+   * signed with the continuity key (ADR-0065 R.4). Idempotent on the wire: a
+   * second delivery is a duplicate the recipient's join ignores.
+   */
+  async deliverPreparedWelcomes(
+    groupId: Uint8Array,
+    welcome: Uint8Array,
+    targets: readonly { readonly accountKey: Uint8Array; readonly isRecipient: boolean }[],
+    options: { readonly replyGrantB64?: string | null } = {},
+  ): Promise<{ welcomeMessageId: number }> {
+    let firstWelcomeMessageId = 0;
+    for (const target of targets) {
       let publish;
       try {
-        publish = await this.sendWelcome(accountKey, added.welcome, {
-          groupId: group.groupId,
-          explicitGrantB64: isRecipient ? (options.replyGrantB64 ?? null) : null,
+        publish = await this.sendWelcome(target.accountKey, welcome, {
+          groupId,
+          explicitGrantB64: target.isRecipient ? (options.replyGrantB64 ?? null) : null,
         });
       } catch (err) {
         throw ContactsError.wrap(err);
       }
       if (firstWelcomeMessageId === 0) firstWelcomeMessageId = publish.messageId;
     }
-    const publish = { messageId: firstWelcomeMessageId };
+    return { welcomeMessageId: firstWelcomeMessageId };
+  }
 
-    // 1.16e6c2: Group::create + addMember mutated the canonical
-    // provider's storage (initial epoch state, leaf private key,
-    // own KeyPackage init key, queued Welcome state). Snapshot
-    // it so the next reload can `Group::load` this group_id and
-    // pick up where we left off.
+  /**
+   * Create a group with one other person and deliver its Welcome:
+   * {@link prepareGroupWith} then {@link deliverPreparedWelcomes}.
+   */
+  async startGroupWith(
+    identity: IdentitySecrets | null,
+    recipientAccountId: Uint8Array,
+    recipientSignaturePubkey: Uint8Array,
+    kind: ConversationKind,
+    options: {
+      /** ADR-0060 — the requester's `reply` grant when this accepts their
+       *  contact request: the 1:1 Welcome is written with it. */
+      readonly replyGrantB64?: string | null;
+    } = {},
+  ): Promise<{ group: WasmGroup; welcomeMessageId: number }> {
+    void recipientSignaturePubkey;
+    const prepared = await this.prepareGroupWith(identity, recipientAccountId, kind);
+    const delivered = await this.deliverPreparedWelcomes(
+      prepared.group.groupId,
+      prepared.welcome,
+      prepared.targets,
+      options,
+    );
     await this.persistBestEffort();
-
-    return { group, welcomeMessageId: publish.messageId };
+    return { group: prepared.group, welcomeMessageId: delivered.welcomeMessageId };
   }
 
   /**
@@ -3292,13 +3465,11 @@ export class ContactsClient {
     recipientAccountId: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
   ): Promise<MembershipOutcome> {
-    // 0. ADR-0065 phase 2 (UX 16.1): adding someone is an identity fetch
-    //    that runs the fail-closed check; a contact whose keys were reset is
-    //    refused until this device verified the new number (the directory
-    //    now serves the NEW identity's KeyPackages). This is also what the
-    //    automatic re-request of an older add rides, so a request recorded
-    //    before the reset cannot admit the new keys unverified.
-    await this.refuseUnlessIdentityCurrent(recipientAccountId);
+    // 0. ADR-0065 R.2: adding someone is an identity fetch that runs the
+    //    fail-closed check (the directory serves the CURRENT identity's
+    //    KeyPackages). This is also what the automatic re-request of an
+    //    older add rides.
+    await this.checkContactIdentity(recipientAccountId);
 
     // 1. Fetch every device KeyPackage of the new member (ADR-0050).
     let devices;
@@ -3310,7 +3481,28 @@ export class ContactsClient {
     if (devices === null || devices.length === 0) {
       throw ContactsError.noIdentityBundle(recipientAccountId);
     }
-    void recipientSignaturePubkey;
+    // ADR-0065 R.2 - the directory is not trusted to say whose devices these
+    // are. Only a device whose signed binding names the EXPECTED account key
+    // (or a key of its pinned proven chain) is added; anything else is
+    // refused here, for every caller (`add-member-key.ts`).
+    {
+      const wasm = await loadWasm();
+      const acceptedKeys = acceptableBoundKeys(
+        base64Encode(recipientSignaturePubkey),
+        accountKeysOf(base64Encode(recipientAccountId)),
+      );
+      devices = devicesBoundTo(devices, acceptedKeys, (d) => {
+        try {
+          const bound = wasm.keyPackageAccountKey(d.keyPackage);
+          return bound === undefined ? null : base64Encode(bound);
+        } catch {
+          return null;
+        }
+      });
+      if (devices.length === 0) {
+        throw ContactsError.noIdentityBundle(recipientAccountId);
+      }
+    }
 
     // 2. Resolve the canonical Identity — same instance every
     //    Group on this device uses (1.16e6c2). The `addMember`
@@ -3746,6 +3938,23 @@ export class ContactsClient {
       return null;
     }
     const myIdentity = await this.resolveIdentity(identity);
+    // ADR-0066 (a device paired after a key rotation) — a device of THIS
+    // account whose KeyPackage is bound to another account key than the one
+    // this device's own leaves are bound to (it minted its binding before
+    // the pairing state bundle reached it) is not admitted: to every gate of
+    // the conversation it would be another account. It publishes again once
+    // it re-minted, and the re-admission arm takes it then. Every own-device
+    // add path comes through here.
+    if (
+      identity !== null &&
+      accountId !== undefined &&
+      bytesEqualCc(accountId, identity.accountId) &&
+      !ownDeviceKeyPackageUsable(wasm, keyPackage, ownPersonKeyB64(myIdentity))
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn("own device bound under another of the account's keys; not admitted to the chat");
+      return null;
+    }
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
       // Re-checked under the lock: a poll may have applied the very commit
       // that admitted this device while we waited.

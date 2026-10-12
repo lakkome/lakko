@@ -28,20 +28,12 @@ import { previewLine } from "./list-preview";
 import { memberNameOf } from "../profile/member-label";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { chatListLine, membershipState, readIsActive } from "./membership-ended";
-import {
-  closedChatListLine,
-  conversationCloseKind,
-  loadConversationClosed,
-  subscribeConversationClosed,
-} from "./conversation-closed";
-import { useGroupClosed } from "./GroupClosedContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { loadMessageLog, type PersistedGroup } from "./message-log-store";
 import { newestMessageId, summarizeGroupSlot, type ChatListSummary } from "./background-log";
 import { subscribeMessageLogChanged } from "./message-log-events";
 import {
-  accountIdB64OfHex,
   loadAccepted,
   loadKeyAliases,
   peerContactByMemberPubkeys,
@@ -50,6 +42,9 @@ import {
 } from "../contacts/local-store";
 import { useProfiles } from "../profile/ProfileContext";
 import { useGroupNames } from "./GroupNameContext";
+import { useLineage } from "./use-lineage";
+import { decodeReadPosition, encodeReadPosition, readUpToInSegment } from "./lineage";
+import { base64Encode } from "../auth/account-id";
 
 // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
 export function createConversationRows() {
@@ -58,6 +53,10 @@ export function createConversationRows() {
   const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
   const auth = useAuth();
+  // ADR-0065 R.5 — one row per CONVERSATION: a conversation that continued
+  // in a successor group keeps its row, and everything a person attached to
+  // it (pin / mute / archive, folder, read position) stays keyed on its id.
+  const lineageView = useLineage();
 
   const accountId = (): string | null => {
     const s = auth.state();
@@ -66,7 +65,7 @@ export function createConversationRows() {
 
   // Accepted contacts name a chat linked to one; a rename propagates here.
   const [accepted, setAccepted] = createSignal<AcceptedContact[]>(loadAccepted());
-  // ADR-0065 phase 2 — a retired or pending key still names the person.
+  // ADR-0065 R.2 — a retired key still names the person.
   const [aliases, setAliases] = createSignal<Map<string, string>>(loadKeyAliases());
   onMount(() => {
     const unsubscribe = subscribeAcceptedChanged(() => {
@@ -75,14 +74,6 @@ export function createConversationRows() {
     });
     onCleanup(unsubscribe);
   });
-  // ADR-0065 phase 2 (UX 16.4 / 16.5) — the closed states.
-  const groupClosed = useGroupClosed();
-  const [closedVersion, setClosedVersion] = createSignal(0);
-  onMount(() => {
-    const unsubscribe = subscribeConversationClosed(() => setClosedVersion((v) => v + 1));
-    onCleanup(unsubscribe);
-  });
-
   // docs/ux section 3 — the kind the conversation carries (ADR-0062). It is
   // fixed at creation, so reading it from the group is all there is.
   const kindOf = (g: ActiveGroup): ConversationKind => conversationKindOf(g.group);
@@ -158,16 +149,30 @@ export function createConversationRows() {
    *  cross-device read cursor and the newest row this device has shown. */
   function summaryFor(groupIdBytes: Uint8Array): ChatListSummary {
     const hex = syncGroupIdHex(groupIdBytes);
-    const cursor = sync.readCursors()[hex];
-    let syncedReadUpTo: bigint | null = null;
-    if (cursor !== undefined && cursor.upToMessageId.length >= 8) {
-      let id = 0n;
-      for (let i = 0; i < 8; i += 1) {
-        id = (id << 8n) | BigInt(cursor.upToMessageId[i] as number);
-      }
-      syncedReadUpTo = id;
+    // The read position is the CONVERSATION's (R.5); what it means for this
+    // group's own message ids depends on which segment it is in.
+    const cursor = sync.readCursors()[lineageView.conversationHexOf(groupIdBytes)];
+    const upTo = readUpToInSegment(
+      cursor === undefined ? null : decodeReadPosition(cursor.upToMessageId),
+      lineageView.segmentIndexOf(groupIdBytes),
+    );
+    const syncedReadUpTo =
+      upTo === null ? null : upTo === "all" ? BigInt(Number.MAX_SAFE_INTEGER) : BigInt(upTo);
+    const summary = summarizeGroupSlot(logSlots()[hex], syncedReadUpTo);
+    if (summary.preview !== null || summary.lastAt !== null) return summary;
+    // A successor nothing was said in yet: the row keeps the last line and
+    // the place of the conversation's earlier part, so it neither goes blank
+    // nor jumps in the list when the conversation moves.
+    const view = lineageView.resolve(base64Encode(groupIdBytes));
+    const previous = view?.history.at(-1);
+    if (view === undefined || previous === undefined || view.head.group.groupId !== groupIdBytes) {
+      return summary;
     }
-    return summarizeGroupSlot(logSlots()[hex], syncedReadUpTo);
+    const earlier = summarizeGroupSlot(
+      logSlots()[syncGroupIdHex(previous.group.groupId)],
+      BigInt(Number.MAX_SAFE_INTEGER),
+    );
+    return { ...earlier, unread: summary.unread };
   }
 
   /** The last message's time as a sort key: the DS stamp, else the moment
@@ -185,34 +190,11 @@ export function createConversationRows() {
    *  is over, or `null` while the reader is still a member. The chat stays in
    *  the list; only the badge goes quiet. */
   const endedLine = (g: ActiveGroup): string | null => {
-    closedVersion();
     const membership = membershipState({
       isActive: readIsActive(g.group),
       leaveRequestedAtMs: undefined,
     });
-    const ended = chatListLine(membership);
-    if (ended !== null) return ended;
-    // ADR-0065 phase 2 (UX 16.4 / 16.5) — the closed one-to-one and the
-    // closed group take the same slot, with their own words; the row goes
-    // quiet the same way.
-    const account = accountId();
-    const close = conversationCloseKind({
-      membership,
-      closedRecord: account === null ? undefined : loadConversationClosed(account, g.groupIdB64),
-      groupClosed: groupClosed.closedOf(g.groupIdB64),
-    });
-    const contactName =
-      close.kind === "one-to-one-keys-reset"
-        ? (() => {
-            const row = accepted().find(
-              (c) => accountIdB64OfHex(c.accountIdHex) === close.record.contactAccountIdB64,
-            );
-            return row === undefined
-              ? memberNameOf(profiles.resolve(close.record.previousKeyB64))
-              : memberNameOf(profiles.resolve(row.signaturePubkeyB64));
-          })()
-        : "";
-    return closedChatListLine(close, contactName);
+    return chatListLine(membership);
   };
 
   /** The second line: the ended notice, else the last message with its
@@ -293,10 +275,11 @@ export function createConversationRows() {
     return sortConversations(
       [
       ...channelRows(),
-      ...chats.groups().map((g) => {
-        const f = flagsMap[syncGroupIdHex(g.group.groupId)];
+      ...lineageView.conversations().map((c) => {
+        const g = c.head;
+        const f = flagsMap[c.conversationHex];
         return {
-          id: g.groupIdB64,
+          id: c.conversationIdB64,
           kind: kindOf(g),
           title: chatLabel(g),
           preview: subOf(g),
@@ -315,11 +298,26 @@ export function createConversationRows() {
     );
   });
 
-  /** The store entry behind a chat or group row. */
+  /** The store entry behind a chat or group row: the conversation's HEAD
+   *  group (the one it opens and sends into), keyed on the row id, which is
+   *  the conversation id. */
   const groupById = createMemo(
     (): ReadonlyMap<string, ActiveGroup> =>
-      new Map(chats.groups().map((g) => [g.groupIdB64, g])),
+      new Map(lineageView.conversations().map((c) => [c.conversationIdB64, c.head])),
   );
+
+  /** The conversation id of a group this device holds, as bytes and base64:
+   *  the key of every person-facing store (the synced flags and read
+   *  position, a folder ref, the route). */
+  const conversationIdOf = (g: ActiveGroup): Uint8Array =>
+    lineageView.conversationIdOf(g.group.groupId);
+  const conversationIdB64Of = (g: ActiveGroup): string => base64Encode(conversationIdOf(g));
+  /** A read position at `messageId` of `g`, as the cursor's bytes. */
+  const readPositionBytes = (g: ActiveGroup, messageId: bigint): Uint8Array =>
+    encodeReadPosition({
+      segment: lineageView.segmentIndexOf(g.group.groupId),
+      messageId: Number(messageId),
+    });
 
   /** The newest message id this device holds for a group, for Mark all as
    *  read. */
@@ -327,6 +325,9 @@ export function createConversationRows() {
     newestMessageId(logSlots()[syncGroupIdHex(groupIdBytes)]);
 
   return {
+    conversationIdOf,
+    conversationIdB64Of,
+    readPositionBytes,
     newestIdFor,
     accountId,
     accepted,

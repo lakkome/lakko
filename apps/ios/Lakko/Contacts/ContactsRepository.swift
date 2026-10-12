@@ -62,8 +62,23 @@ public final class ContactsRepository: ObservableObject {
                     accountIdB64: accountIdB64
                 )
             }
+            // ADR-0066 section 3.5a rule 5 — the unanswered outgoing requests
+            // survive a process death (a re-send after a key rotation needs
+            // the recipient and the intro). Not while the bound account's
+            // rows are being loaded: a Keychain that could not be read must
+            // not be written back as "none".
+            if let accountIdB64 = boundAccountIdB64, !loadingBoundRows, state.sent != oldValue.sent {
+                do {
+                    try sentStore.save(state.sent, accountIdB64: accountIdB64)
+                } catch {
+                    NSLog("contacts: the sent requests were not persisted")
+                }
+            }
         }
     }
+
+    /// Set while ``bind(accountIdB64:)`` loads the bound account's rows.
+    private var loadingBoundRows = false
 
     // MARK: - Wiring
 
@@ -71,6 +86,7 @@ public final class ContactsRepository: ObservableObject {
     private let clientFactory: () -> ContactsClient
     private let discoveryClientFactory: () -> DiscoveryClient
     private let inboxStore: ContactsInboxStore
+    private let sentStore: SentRequestsStoring
     /// The account whose persisted inbox `state.pending` / `state.cursor`
     /// currently mirror; `nil` while logged out. Set BEFORE the state it
     /// governs is loaded so the `didSet` above never files one account's
@@ -109,13 +125,15 @@ public final class ContactsRepository: ObservableObject {
         authRepository: AuthRepository,
         clientFactory: @escaping () -> ContactsClient = { ContactsClient() },
         discoveryClientFactory: @escaping () -> DiscoveryClient = { DiscoveryClient() },
-        inboxStore: ContactsInboxStore = ContactsInboxStore()
+        inboxStore: ContactsInboxStore = ContactsInboxStore(),
+        sentStore: SentRequestsStoring = KeychainSentRequestsStore()
     ) {
         self.init(
             authRepository: authRepository,
             clientFactory: clientFactory,
             discoveryClientFactory: discoveryClientFactory,
             inboxStore: inboxStore,
+            sentStore: sentStore,
             accountBinding: authRepository.$identitySecrets
                 .map { $0.map { base64Encode($0.accountId) } }
                 .eraseToAnyPublisher()
@@ -131,12 +149,14 @@ public final class ContactsRepository: ObservableObject {
         clientFactory: @escaping () -> ContactsClient = { ContactsClient() },
         discoveryClientFactory: @escaping () -> DiscoveryClient = { DiscoveryClient() },
         inboxStore: ContactsInboxStore = ContactsInboxStore(),
+        sentStore: SentRequestsStoring = KeychainSentRequestsStore(),
         accountBinding: AnyPublisher<String?, Never>
     ) {
         self.authRepository = authRepository
         self.clientFactory = clientFactory
         self.discoveryClientFactory = discoveryClientFactory
         self.inboxStore = inboxStore
+        self.sentStore = sentStore
         // ADR-0050 section 2.9 — contacts carried by a pairing state bundle
         // (or a backup restore), merged only into the account they belong to.
         stateBundleObserver = NotificationCenter.default.addObserver(
@@ -187,10 +207,13 @@ public final class ContactsRepository: ObservableObject {
         }
         let persisted = inboxStore.load(accountIdB64: accountIdB64)
         let accepted = AcceptedContactsStore.load(accountIdB64: accountIdB64)
+        let sent = sentStore.load(accountIdB64: accountIdB64)
         boundAccountIdB64 = accountIdB64
+        loadingBoundRows = true
         state = state.with(
-            pending: persisted.pending, accepted: accepted, sent: [], outstandingInvites: [],
+            pending: persisted.pending, accepted: accepted, sent: sent, outstandingInvites: [],
             cursor: persisted.cursor)
+        loadingBoundRows = false
     }
 
     // MARK: - Send
@@ -230,9 +253,10 @@ public final class ContactsRepository: ObservableObject {
             recipientUsername: result.recipientUsername,
             recipientAccountIdB64: base64Encode(result.recipientAccountId),
             messageId: result.messageId,
-            createdAt: result.createdAt
+            createdAt: result.createdAt,
+            intro: SentRequests.storedIntro(introMessage)
         )
-        state = state.with(sent: state.sent + [sent])
+        state = state.with(sent: SentRequests.adding(sent, to: state.sent))
         return result
     }
 
@@ -267,11 +291,14 @@ public final class ContactsRepository: ObservableObject {
             recipientX25519Pubkey: bundle.x25519Pubkey,
             introMessage: Data(introMessage.utf8),
             linkSeed: person.writeSeed)
-        state = state.with(sent: state.sent + [SentContactRequest(
-            recipientUsername: person.username ?? "",
-            recipientAccountIdB64: base64Encode(accountId),
-            messageId: result.messageId,
-            createdAt: result.createdAt)])
+        state = state.with(sent: SentRequests.adding(
+            SentContactRequest(
+                recipientUsername: person.username ?? "",
+                recipientAccountIdB64: base64Encode(accountId),
+                messageId: result.messageId,
+                createdAt: result.createdAt,
+                intro: SentRequests.storedIntro(introMessage)),
+            to: state.sent))
         return result
     }
 
@@ -461,11 +488,13 @@ public final class ContactsRepository: ObservableObject {
                 // ADR-0053 — the account mailbox is named by the account key.
                 mailboxSigner: dsMailboxSigner(identity: identity)
             )
-            var newPending: [IncomingContactRequest] = []
+            // ADR-0065 R.3 — the requests that were waiting, unshown, for an
+            // identity verdict are judged again first; one whose sender is no
+            // longer an established contact is an ordinary request.
+            var newPending: [IncomingContactRequest] = await retryWaitingKnownRequests(client: client)
             for event in pollResult.events {
                 switch event {
                 case .contactRequest(let req, let replyGrant):
-                    newPending.append(req)
                     // ADR-0060 section 6 — the requester's `reply` grant, filed
                     // under the key the request signature authenticated; the
                     // accept (Welcome) and the ack are written with it.
@@ -482,6 +511,13 @@ public final class ContactsRepository: ObservableObject {
                         ProfileDirectory.shared.acceptReceived(
                             profile, signatureKeyB64: base64Encode(req.fromPubkey))
                     }
+                    // ADR-0065 R.3 — a request from an account that is ALREADY
+                    // an established contact (it reset its keys and is writing
+                    // from the new ones) is never a request row: it is
+                    // answered silently, dropped, or kept waiting for a
+                    // verdict. Nothing is shown either way.
+                    if await handleKnownContactRequest(req, client: client) { continue }
+                    newPending.append(req)
                 case .welcome(_, let welcomeBytes, _):
                     // 1.14f4 wires `ChatRepository.joinGroupFromWelcome`
                     // here. Best-effort: a single bad Welcome
@@ -530,9 +566,8 @@ public final class ContactsRepository: ObservableObject {
                     // ADR-0060 — the request was answered: its `reply` key goes.
                     ReachCenter.shared.retireReplies(
                         purpose: ReplyPurpose.contact(ack.accepterAccountId))
-                    let remainingSent = state.sent.filter {
-                        $0.recipientAccountIdB64 != accepterAccountIdB64
-                    }
+                    let remainingSent = SentRequests.answered(
+                        recipientAccountIdB64: accepterAccountIdB64, in: state.sent)
                     if alreadyKnown {
                         if remainingSent.count != state.sent.count {
                             state = state.with(sent: remainingSent)
@@ -857,84 +892,141 @@ public final class ContactsRepository: ObservableObject {
 
     /// The accepted contact whose account id is `accountIdB64`, or `nil`.
     /// The lookup every reset path uses: the record must be found by the
-    /// stable account id across the key change (16.8), never by a key.
+    /// stable account id across the key change, never by a key.
     public func contact(accountIdB64: String) -> AcceptedContact? {
         state.accepted.first { $0.accountIdB64 == accountIdB64 }
     }
 
-    /// Every contact in the `reset-unverified` state.
-    public var flaggedContacts: [AcceptedContact] {
-        state.accepted.filter { $0.keyReset != nil }
+    /// ADR-0065 R.2 "the re-pin" — the gate accepted a reset of this account:
+    /// re-key the contact row to the new key, keeping the rename, the account
+    /// id, the chat link and the row id, and appending the key it held to
+    /// the display aliases. A second row already under the new key (a contact
+    /// request from the new identity accepted before the reset was noticed)
+    /// folds into this one: one person, one row. Nothing is shown.
+    ///
+    /// Does nothing for an account this device has no contact row for (a
+    /// group member it never pinned): the pin store holds the superseded
+    /// keys, which is what the chat layer reads.
+    // MARK: - ADR-0065 R.3: a request from an account that is already a contact
+
+    /// The contact an account id is ESTABLISHED as here, or `nil`. "Already
+    /// a contact" is the pin (its current key or a proven predecessor) or a
+    /// verified binding naming the row's own key: a row whose account id came
+    /// only from the peer's own profile establishes nothing, so a member who
+    /// claimed this account's id cannot make its request vanish.
+    func establishedContact(ofAccountId accountId: Data) -> AcceptedContact? {
+        let accountIdB64 = base64Encode(accountId)
+        let pin = PeerPinStore().readPin(accountIdB64: accountIdB64)
+        let pinKeys = KnownContactRequest.pinKeys(of: pin.map {
+            KnownContactRequest.PinKeys(
+                currentKeyB64: $0.pinnedSignaturePubkeyB64,
+                provenPredecessorsB64: ProvenPredecessorStore().load()
+                    .predecessors(of: $0.pinnedSignaturePubkeyB64))
+        })
+        return KnownContactRequest.establishedContactOfAccount(
+            accepted: state.accepted,
+            accountIdHex: groupIdHex(accountId),
+            verified: KnownContactRequest.Verified(
+                pinKeysB64: pinKeys,
+                bindingKeyB64: VerifiedBindingStore().read(accountIdB64: accountIdB64)?.keyB64),
+            row: { contact in
+                KnownContactRequest.ContactRow(
+                    signaturePubkeyB64: base64Encode(contact.request.fromPubkey),
+                    accountIdHex: contact.request.fromAccountId.map { groupIdHex($0) })
+            })
     }
 
-    /// UX 16.1 — the identity gate refused a changed key the KT log confirmed
-    /// as a reset. Record the state on the contact (found by account id; a
-    /// contact row keyed on the previous key is the same person) and tell the
-    /// chat layer, which closes the one-to-one and proposes the evictions.
-    ///
-    /// Idempotent for the same pending key. A SECOND reset noticed before the
-    /// first was verified keeps `previousKeyB64` — the pin, which did not move
-    /// — and advances `pendingKeyB64`: the eviction still names the devices
-    /// that are in the groups, and the verification will re-pin the newest key.
-    /// A contact already holding the pending key as its own (verified elsewhere
-    /// in this process) is left alone. Does nothing for an account this device
-    /// has no contact for: the state has nowhere to live, and today's error copy
-    /// stays at the action.
-    public func noteKeyReset(accountId: Data, previousKeyB64: String, pendingKeyB64: String) {
-        let accountIdB64 = base64Encode(accountId)
-        guard let idx = state.accepted.firstIndex(where: {
-            $0.accountIdB64 == accountIdB64 || base64Encode($0.request.fromPubkey) == previousKeyB64
-        }) else { return }
-        let contact = state.accepted[idx]
-        if base64Encode(contact.request.fromPubkey) == pendingKeyB64 { return }
-        if let current = contact.keyReset, current.pendingKeyB64 == pendingKeyB64 { return }
-        var updated = state.accepted
-        updated[idx].keyReset = ContactKeyReset(
-            previousKeyB64: contact.keyReset?.previousKeyB64 ?? previousKeyB64,
-            pendingKeyB64: pendingKeyB64,
-            observedAtMs: Int64(Date().timeIntervalSince1970 * 1000))
-        state = state.with(accepted: updated)
-        if let reset = updated[idx].keyReset {
-            chatRepository?.noteContactKeyReset(
-                accountIdB64: accountIdB64,
-                previousKeyB64: reset.previousKeyB64,
-                pendingKeyB64: reset.pendingKeyB64)
+    /// Returns `true` when `request` came from an account that is already an
+    /// established contact and was dealt with here (answered, dropped or
+    /// kept waiting): the caller then lists nothing. `false` for a
+    /// stranger's request.
+    func handleKnownContactRequest(_ request: IncomingContactRequest, client: ContactsClient) async -> Bool {
+        guard let accountIdB64 = boundAccountIdB64, let fromAccountId = request.fromAccountId else {
+            return false
+        }
+        // Read BEFORE the check below, which may write a first pin.
+        guard establishedContact(ofAccountId: fromAccountId) != nil else { return false }
+        let check: KnownContactRequest.Check
+        do {
+            check = try await client.checkContactIdentity(accountId: fromAccountId) != nil
+                ? .current : .inconclusive
+        } catch is SupersessionRefused {
+            check = .refused
+        } catch {
+            check = .inconclusive
+        }
+        guard boundAccountIdB64 == accountIdB64 else { return true }
+        let verdict = KnownContactRequest.verdict(
+            senderIsContact: true,
+            check: check,
+            requestKeyB64: base64Encode(request.fromPubkey),
+            trustedKeyB64: PeerPinStore().readPin(accountIdB64: base64Encode(fromAccountId))?
+                .pinnedSignaturePubkeyB64)
+        let waiting = KnownRequestWaitingStore()
+        switch verdict {
+        case .show:
+            return false
+        case .answer:
+            // The ack is the whole of the answer on this path: the reset the
+            // check just accepted (or accepted earlier) is what moves the
+            // conversation.
+            do {
+                _ = try await sendContactAck(request: request)
+            } catch {
+                NSLog("contacts inbox: silent ack to an existing contact failed")
+            }
+            waiting.drop(messageId: request.messageId, accountIdB64: accountIdB64)
+        case .wait:
+            // Kept on disk: the cursor is about to move past this row.
+            waiting.hold(request, accountIdB64: accountIdB64)
+        case .drop:
+            waiting.drop(messageId: request.messageId, accountIdB64: accountIdB64)
+        }
+        return true
+    }
+
+    /// Judge again the requests that were waiting for a verdict. Returns the
+    /// ones whose sender is no longer an established contact: ordinary
+    /// requests, for the caller to list.
+    func retryWaitingKnownRequests(client: ContactsClient) async -> [IncomingContactRequest] {
+        guard let accountIdB64 = boundAccountIdB64 else { return [] }
+        let store = KnownRequestWaitingStore()
+        var listed: [IncomingContactRequest] = []
+        for request in store.load(accountIdB64: accountIdB64) {
+            if await handleKnownContactRequest(request, client: client) { continue }
+            guard boundAccountIdB64 == accountIdB64 else { return [] }
+            store.drop(messageId: request.messageId, accountIdB64: accountIdB64)
+            listed.append(request)
+        }
+        return listed
+    }
+
+    /// A reset was accepted: the waiting requests are judged again now, and
+    /// one that turned out to be an ordinary request is listed.
+    private func retryWaitingAfterReset() {
+        Task { @MainActor [weak self] in
+            guard let self, let accountIdB64 = self.boundAccountIdB64,
+                  !KnownRequestWaitingStore().load(accountIdB64: accountIdB64).isEmpty else { return }
+            let client = self.clientFactory()
+            let listed = await self.retryWaitingKnownRequests(client: client)
+            guard !listed.isEmpty, self.boundAccountIdB64 == accountIdB64 else { return }
+            let merged = ContactsInboxMerge.merge(
+                fetched: listed, pending: self.state.pending, accepted: self.state.accepted,
+                currentKey: client.mailboxResolver().current(of:))
+            self.state = self.state.with(pending: merged.applied(to: self.state.pending))
         }
     }
 
-    /// UX 16.2 — the person compared the new safety number and confirmed it.
-    ///
-    /// Re-pins the account id to the pending key under a marker monotone past
-    /// the old one (ADR-0016's store, `keyResetRepinMarker`), then moves the
-    /// contact record to the new key with `keyState = normal`; the rename, the
-    /// chat link and the row id stay with the person. Returns `false` when the
-    /// store refused the write (the UI shows "Could not save"); nothing
-    /// changes then. It changes nothing on any other device and tells the
-    /// contact nothing.
-    @discardableResult
-    public func confirmKeyReset(messageId: Int64, pinStore: PeerPinStore = PeerPinStore()) -> Bool {
-        guard let idx = state.accepted.firstIndex(where: { $0.request.messageId == messageId }),
-              let reset = state.accepted[idx].keyReset,
-              let accountIdB64 = state.accepted[idx].accountIdB64,
-              let pendingKey = base64Decode(reset.pendingKeyB64), pendingKey.count == 32
-        else { return false }
-        let existing = pinStore.readPin(accountIdB64: accountIdB64)
-        let marker = keyResetRepinMarker(
-            existingMarker: existing?.rotationMarker,
-            nowSecs: Int64(Date().timeIntervalSince1970))
-        guard pinStore.setPin(
-            accountIdB64: accountIdB64,
-            pinnedSignaturePubkeyB64: reset.pendingKeyB64,
-            rotationMarker: marker) == .set
-        else { return false }
-        // The log marker the pin carries: the pinned key IS the reset key now.
-        pinStore.recordLogReset(accountIdB64: accountIdB64, isReset: true)
-        var updated = state.accepted
-        updated[idx] = updated[idx].withSignatureKey(pendingKey)
-        state = state.with(accepted: updated)
-        chatRepository?.noteContactKeyResetVerified(
-            accountIdB64: accountIdB64, previousKeyB64: reset.previousKeyB64, newKey: pendingKey)
-        return true
+    public func applyAcceptedReset(_ event: ResetAccepted) {
+        retryWaitingAfterReset()
+        guard let newKey = base64Decode(event.newKeyB64), newKey.count == 32 else { return }
+        let next = ContactRekey.afterReset(
+            accepted: state.accepted,
+            accountIdB64: event.accountIdB64,
+            previousKeyB64: event.previousKeyB64,
+            newKey: newKey)
+        guard next != state.accepted else { return }
+        state = state.with(accepted: next)
     }
 
     /// Send a `ContactAck` back to the original sender's stranger
@@ -1188,8 +1280,9 @@ public final class ContactsRepository: ObservableObject {
     ///     (the recipient's bundle through the fail-closed gate, a fresh
     ///     reply grant for the new mailbox) and the stored entry replaced. A
     ///     request that can no longer be sent is dropped rather than shown as
-    ///     pending. The intro text of the original is not kept anywhere on
-    ///     this device, so the re-sent request carries none.
+    ///     pending. The re-sent request carries the intro stored with the
+    ///     original (``SentRequestsStoring``); a request sent before that
+    ///     store existed carries none.
     ///
     /// Throws while any revoke or re-send got no verdict, so the rotation
     /// keeps the step owed; what did land is not repeated by the retry.
@@ -1261,6 +1354,7 @@ public final class ContactsRepository: ObservableObject {
         for recipient in recipients {
             var failure: Error?
             var replacement: SentContactRequest?
+            let intro = SentRequests.intro(for: base64Encode(recipient), in: state.sent)
             do {
                 let bundle = try await client.resolveVerifiedBundle(accountId: recipient)
                 let result = try await sendRequestToBundle(
@@ -1268,10 +1362,10 @@ public final class ContactsRepository: ObservableObject {
                     recipientAccountId: recipient,
                     recipientSignaturePubkey: bundle.signaturePubkey,
                     recipientX25519Pubkey: bundle.x25519Pubkey,
-                    introMessage: Data(), linkSeed: nil)
+                    introMessage: Data(intro.utf8), linkSeed: nil)
                 replacement = SentContactRequest(
                     recipientUsername: "", recipientAccountIdB64: base64Encode(recipient),
-                    messageId: result.messageId, createdAt: result.createdAt)
+                    messageId: result.messageId, createdAt: result.createdAt, intro: intro)
             } catch {
                 failure = error
             }
@@ -1455,27 +1549,31 @@ public final class ContactsRepository: ObservableObject {
         let inviterSigPubkey = capability.ownerSignaturePubkey()
         let inviterX25519Pubkey = capability.ownerX25519Pubkey()
 
-        // ADR-0065 phase 2 (UX 16.1) — the link carries its owner's keys and
-        // this flow never fetches the bundle, so it never passes the pin
-        // gate. Ask the same question of the link's keys here, before the
-        // link is consumed and before anything is sealed to them: a contact
-        // whose keys were reset and not verified, or a pinned account whose
-        // link names another key, is refused. A stranger (no pin) proceeds.
-        let inviterAccountIdB64 = base64Encode(inviterAccountId)
-        let knownContact = contact(accountIdB64: inviterAccountIdB64)
-        switch InviteAcceptGate.decide(
-            contactKeyState: knownContact?.keyState,
-            pinnedKeyB64: PeerPinStore().readPin(accountIdB64: inviterAccountIdB64)?.pinnedSignaturePubkeyB64,
-            linkOwnerKeyB64: base64Encode(inviterSigPubkey)
-        ) {
-        case .proceed:
-            break
-        case .verifyFirst:
-            return .verifyFirst(contactName: knownContact.map {
-                ProfileDirectory.shared.resolve(signatureKey: $0.request.fromPubkey).name
-            })
-        case .keyChanged:
-            return .failed(message: "the link names a key other than the one pinned for this account")
+        // The link carries its owner's keys and this flow never fetches the
+        // bundle, so it never passes the pin gate. Ask the same question of
+        // the link's keys here, before the link is consumed and before
+        // anything is sealed to them: for a pinned account whose link names
+        // another key, the published identity goes through the fail-closed
+        // gate (an attested reset is accepted there, silently), and a key
+        // that is still not the account's trusted key is refused (old keys
+        // do not come back). A stranger (no pin) proceeds.
+        do {
+            try await clientFactory().refuseContactRequestToUnverifiedKeys(
+                accountId: inviterAccountId, recipientSignaturePubkey: inviterSigPubkey)
+        } catch {
+            return .failed(message: "the link's keys are not the ones trusted for this account")
+        }
+
+        // ADR-0065 R.7 case 1 / UX 16.6 — a link from a person who is already
+        // a contact (a reset loses their contacts; they may hand out a new
+        // link): no request is sent and no use of the link is spent. The
+        // check above ran R.2 first, so an attested reset was accepted there
+        // and an unproven change was refused. "Already a contact" is the pin
+        // or a verified binding naming the row's key: a row whose account id
+        // came only from a peer's own profile does not swallow this person's
+        // link.
+        if establishedContact(ofAccountId: inviterAccountId) != nil {
+            return .alreadyAccepted
         }
 
         // Consume — atomic counter bump + per-joiner dedup.
@@ -1619,10 +1717,6 @@ public enum AcceptInviteResult: Equatable {
     /// screen says "try again later", never "invalid".
     case rateLimited
     case requiresReauth
-    /// ADR-0065 phase 2 (UX 16.1) — the link's owner is a contact whose
-    /// account keys were reset and not verified on this device. Nothing was
-    /// consumed and nothing was sent.
-    case verifyFirst(contactName: String?)
     case failed(message: String)
 }
 
@@ -1722,27 +1816,23 @@ public struct AcceptedContact: Equatable, Codable {
     /// optional — a contact persisted before this field existed decodes
     /// with `displayName == nil`, preserving the old fingerprint display.
     public var displayName: String?
-    /// ADR-0065 phase 2 (UX 16.8) — present from the moment this device
-    /// noticed the contact's account keys were reset until the person verified
-    /// the new safety number here. `nil` is `keyState == normal`. A `Codable`
-    /// optional, so a contact persisted before this field decodes as normal.
-    public var keyReset: ContactKeyReset?
+    /// ADR-0065 R.2 "the re-pin" — the account keys this contact held before
+    /// each reset this device accepted (base64, oldest first). DISPLAY
+    /// aliases for stored history only: a previous key is never accepted for
+    /// new traffic, a new pin, a role or a send. `nil` for a contact that
+    /// never reset.
+    public var previousKeysB64: [String]?
 
     public init(
         request: IncomingContactRequest,
         groupIdHex: String? = nil,
         displayName: String? = nil,
-        keyReset: ContactKeyReset? = nil
+        previousKeysB64: [String]? = nil
     ) {
         self.request = request
         self.groupIdHex = groupIdHex
         self.displayName = displayName
-        self.keyReset = keyReset
-    }
-
-    /// UX 16.8 — `keyState`.
-    public var keyState: ContactKeyState {
-        keyReset == nil ? .normal : .resetUnverified
+        self.previousKeysB64 = previousKeysB64
     }
 
     /// The contact's stable account id (base64), when the request carried
@@ -1751,11 +1841,14 @@ public struct AcceptedContact: Equatable, Codable {
         request.fromAccountId.map { base64Encode($0) }
     }
 
-    /// This contact with its signature key replaced — the 16.2 confirmation
-    /// moves the record to the new keys; the rename, the chat link and the
-    /// row id stay with the person.
+    /// This contact re-keyed to `key` after an accepted reset: the rename,
+    /// the account id, the chat link and the row id stay with the person, and
+    /// the key it held is appended to the display aliases.
     func withSignatureKey(_ key: Data) -> AcceptedContact {
-        AcceptedContact(
+        var previous = previousKeysB64 ?? []
+        let held = base64Encode(request.fromPubkey)
+        if request.fromPubkey != key, !previous.contains(held) { previous.append(held) }
+        return AcceptedContact(
             request: IncomingContactRequest(
                 messageId: request.messageId,
                 fromPubkey: key,
@@ -1767,7 +1860,7 @@ public struct AcceptedContact: Equatable, Codable {
                 createdAt: request.createdAt),
             groupIdHex: groupIdHex,
             displayName: displayName,
-            keyReset: nil)
+            previousKeysB64: previous.isEmpty ? nil : previous)
     }
 
     /// Short pubkey-fingerprint label this peer is shown by elsewhere in
@@ -1798,22 +1891,27 @@ public struct AcceptedContact: Equatable, Codable {
 
 /// Outgoing contact request, surfaced on the UI as an "I asked
 /// @<name> to connect" row.
-public struct SentContactRequest: Equatable {
+public struct SentContactRequest: Equatable, Codable {
     public let recipientUsername: String
     public let recipientAccountIdB64: String
     public let messageId: Int64
     public let createdAt: String
+    /// The intro the person wrote, kept so a re-send after a key rotation
+    /// carries it (ADR-0066 section 3.5a rule 5). Empty when none.
+    public let intro: String
 
     public init(
         recipientUsername: String,
         recipientAccountIdB64: String,
         messageId: Int64,
-        createdAt: String
+        createdAt: String,
+        intro: String = ""
     ) {
         self.recipientUsername = recipientUsername
         self.recipientAccountIdB64 = recipientAccountIdB64
         self.messageId = messageId
         self.createdAt = createdAt
+        self.intro = intro
     }
 }
 
@@ -1899,5 +1997,42 @@ enum PredecessorMailbox {
         func clear(accountIdB64: String) {
             defaults.removeObject(forKey: Self.key(accountIdB64: accountIdB64))
         }
+    }
+}
+
+// MARK: - ADR-0065 R.2 — the contact row after an accepted reset
+
+/// The pure half of ``ContactsRepository/applyAcceptedReset(_:)``.
+public enum ContactRekey {
+
+    /// The accepted list after the account `accountIdB64` reset from
+    /// `previousKeyB64` to `newKey`.
+    ///
+    /// | a row for the account (by id, else by the previous key) | a row under the new key | result                                   |
+    /// |----------------------------------------------------------|-------------------------|------------------------------------------|
+    /// | none                                                     | any                     | unchanged                                |
+    /// | yes, already under the new key                           | -                       | unchanged                                |
+    /// | yes                                                      | none                    | that row re-keyed, the old key an alias  |
+    /// | yes                                                      | another row             | re-keyed, and the other row is dropped   |
+    public static func afterReset(
+        accepted: [AcceptedContact],
+        accountIdB64: String,
+        previousKeyB64: String,
+        newKey: Data
+    ) -> [AcceptedContact] {
+        guard let idx = accepted.firstIndex(where: {
+            $0.accountIdB64 == accountIdB64 || base64Encode($0.request.fromPubkey) == previousKeyB64
+        }) else { return accepted }
+        if accepted[idx].request.fromPubkey == newKey { return accepted }
+        let rekeyed = accepted[idx].withSignatureKey(newKey)
+        var out: [AcceptedContact] = []
+        for (i, contact) in accepted.enumerated() {
+            if i == idx {
+                out.append(rekeyed)
+            } else if contact.request.fromPubkey != newKey {
+                out.append(contact)
+            }
+        }
+        return out
     }
 }

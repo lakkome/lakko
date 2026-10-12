@@ -320,6 +320,11 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   absent dep or a throw all mean "not muted", so a call is never silenced
  *   because a database did not open. Silently swallowing calls is a far worse
  *   defect than an unwanted ring.
+ * @property {(accountId: string, deviceKey: any, groupHex: string) => Promise<string | null>} [lookupConversation]
+ *   ADR-0065 R.5 — READ-ONLY: the conversation `groupHex` belongs to (hex of
+ *   the lineage's first group), from the same sync row as the mute flag.
+ *   `null` when unknown: the notification is then grouped under the group
+ *   id, as before. Optional; a throw is treated as unknown.
  * @property {unknown} [notificationWords]
  *   ADR-0061 — the notification words the page stored in Cache Storage (raw,
  *   as read), so an attachment-only preview reads in the interface language.
@@ -695,6 +700,21 @@ export async function decryptPushPreview(wake, deps) {
         tag: groupHex,
         call: notice,
       };
+    }
+
+    // ADR-0065 R.5 — group the notification under the CONVERSATION, so a
+    // successor group's message replaces the conversation's earlier
+    // notification rather than stacking beside it. Unknown reads as the
+    // group id (the grouping every build had).
+    if (latest !== null && typeof deps.lookupConversation === "function") {
+      try {
+        const conversationHex = await deps.lookupConversation(accountId, deviceKey, groupHex);
+        if (typeof conversationHex === "string" && conversationHex.length > 0) {
+          latest = { ...latest, tag: conversationHex };
+        }
+      } catch {
+        // keep the group id
+      }
     }
 
     // ADR-0048 UX §5 — title the notification with a name this device
@@ -1396,13 +1416,75 @@ export function mutedFromSyncStateRow(payload, groupHex, wasm) {
       groupId[i] = parseInt(groupHex.slice(i * 2, i * 2 + 2), 16);
     }
     state = wasm.SyncedState.fromBytes(bytes);
-    const flags = state.flags(groupId);
+    // ADR-0065 R.5 — the mute flag is the CONVERSATION's: keyed on the id of
+    // the lineage's first group, never rewritten when the conversation
+    // continues in a successor group. A wake for a successor is therefore
+    // asked under the conversation it belongs to. For a group that is its
+    // own conversation this is the same id.
+    let conversationId = groupId;
+    if (typeof state.conversationIdOf === "function") {
+      try {
+        const resolved = state.conversationIdOf(groupId);
+        if (resolved instanceof Uint8Array && resolved.length > 0) conversationId = resolved;
+      } catch {
+        conversationId = groupId;
+      }
+    }
+    const flags = state.flags(conversationId);
     if (flags === undefined || flags === null) return false;
     const muted = flags.muted === true;
     if (typeof flags.free === "function") flags.free();
     return muted;
   } catch {
     return false;
+  } finally {
+    if (state !== null && typeof state.free === "function") state.free();
+  }
+}
+
+/**
+ * ADR-0065 R.5 — the CONVERSATION a group belongs to, as lowercase hex, read
+ * from the same decrypted sync row as the mute flag: the lineage's first
+ * group for a successor, the group itself otherwise. What a notification is
+ * grouped under, so a conversation that continued in a successor group
+ * replaces its own earlier notification instead of opening a second stack.
+ *
+ * `null` on anything unreadable; the caller then groups by the group id, as
+ * before.
+ *
+ * @param {any} payload
+ * @param {string} groupHex
+ * @param {any} wasm
+ * @returns {string | null}
+ */
+export function conversationHexFromSyncStateRow(payload, groupHex, wasm) {
+  if (payload === null || typeof payload !== "object" || payload.v !== 2) return null;
+  if (typeof payload.s !== "string" || payload.s.length === 0) return null;
+  if (typeof groupHex !== "string" || groupHex.length === 0 || groupHex.length % 2 !== 0) {
+    return null;
+  }
+  if (!/^[0-9a-f]+$/.test(groupHex)) return null;
+  if (wasm === null || typeof wasm !== "object" || typeof wasm.SyncedState !== "function") {
+    return null;
+  }
+  let state = null;
+  try {
+    const raw = atob(payload.s);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+    const groupId = new Uint8Array(groupHex.length / 2);
+    for (let i = 0; i < groupId.length; i += 1) {
+      groupId[i] = parseInt(groupHex.slice(i * 2, i * 2 + 2), 16);
+    }
+    state = wasm.SyncedState.fromBytes(bytes);
+    if (typeof state.conversationIdOf !== "function") return null;
+    const resolved = state.conversationIdOf(groupId);
+    if (!(resolved instanceof Uint8Array) || resolved.length === 0) return null;
+    let hex = "";
+    for (const b of resolved) hex += b.toString(16).padStart(2, "0");
+    return hex;
+  } catch {
+    return null;
   } finally {
     if (state !== null && typeof state.free === "function") state.free();
   }

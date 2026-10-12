@@ -436,7 +436,7 @@ class PeerPinStoreTest {
     }
 
     // -----------------------------------------------------------------
-    // KT-log S4 — bestEffortServedKeyReset enriches a SupersessionRefused
+    // A transparency client for the log checks below
     // -----------------------------------------------------------------
 
     private val jsonHeaders = headersOf("Content-Type", "application/json")
@@ -447,8 +447,7 @@ class PeerPinStoreTest {
     /**
      * A transparency client whose `/latest` commits to [servedPubkeyB64]
      * with the given [isReset] marker. Root + proof are stubbed so the
-     * best-effort lookup (which only hits `/latest`) resolves. Note:
-     * `bestEffortServedKeyReset` derives the username_hash via the NATIVE
+     * lookup resolves. Note: the check derives the username_hash via the NATIVE
      * `transparencyAccountKey` (no seam on that helper), so the
      * `/latest/:slug` path is matched by prefix here rather than by an
      * exact slug — the engine returns the same body for any account-key.
@@ -477,39 +476,6 @@ class PeerPinStoreTest {
             pinStore = store,
             transparencyClientFactory = { transparency },
         )
-    }
-
-    @Test
-    fun `bestEffortServedKeyReset returns true when the log commits to the served key with reset`() =
-        runTest {
-            // NOTE: requires liblakko_ffi_uniffi.so for transparencyAccountKey.
-            // Guard so the host suite (no native lib) skips rather than fails.
-            org.junit.Assume.assumeTrue(nativeLibAvailable())
-            val store = InMemoryPinStore()
-            clientWithTransparency(store, transparencyClient(keyB, isReset = true)).use { client ->
-                val refused = SupersessionRefused(
-                    reason = SupersessionRefusedReason.ProofAbsent,
-                    accountIdB64 = base64Encode(accountId),
-                    message = "changed key, no proof",
-                )
-                refused.loggedReset = client.bestEffortServedKeyReset(
-                    accountId,
-                    me.lakko.app.auth.base64Decode(keyB),
-                )
-                assertEquals(true, refused.loggedReset)
-            }
-        }
-
-    @Test
-    fun `bestEffortServedKeyReset returns null when the log is off`() = runTest {
-        val store = InMemoryPinStore()
-        clientWithTransparency(store, transparency = null).use { client ->
-            val marker = client.bestEffortServedKeyReset(
-                accountId,
-                me.lakko.app.auth.base64Decode(keyB),
-            )
-            assertNull(marker)
-        }
     }
 
     // -----------------------------------------------------------------

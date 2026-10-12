@@ -629,7 +629,7 @@ class OneToOneCallHostTest {
         session.mutableState.value = CallSession.WebCallState.Connected
         runCurrent()
 
-        h.host.conversationClosed(groupA.uppercase())
+        h.host.conversationMoved(groupA.uppercase())
         runCurrent()
 
         assertEquals(listOf(CallSession.WebCallEndReason.HungUp), session.hangUps)
@@ -650,7 +650,7 @@ class OneToOneCallHostTest {
         runCurrent()
         assertNotNull(h.host.active.value)
 
-        h.host.conversationClosed(groupA)
+        h.host.conversationMoved(groupA)
         runCurrent()
 
         assertNull(h.host.active.value)
@@ -663,7 +663,7 @@ class OneToOneCallHostTest {
         val h = harness(foreground = false)
         h.host.deliver(groupA, 1, offer(call1), iso(t0))
         runCurrent()
-        h.host.conversationClosed(groupA)
+        h.host.conversationMoved(groupA)
         runCurrent()
         assertTrue(callIdHexOf(call1) in h.ringer.stopped)
         h.host.setForeground(true)
@@ -680,7 +680,7 @@ class OneToOneCallHostTest {
         runCurrent()
         val session = h.session()!!
 
-        h.host.conversationClosed(groupA)
+        h.host.conversationMoved(groupA)
         runCurrent()
         assertTrue(session.hangUps.isEmpty())
         assertTrue(h.host.hasCall)

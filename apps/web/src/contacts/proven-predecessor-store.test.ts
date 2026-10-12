@@ -49,17 +49,14 @@ import {
   accountIdB64OfKey,
   accountKeysOf,
   bindContactsAccount,
-  confirmKeyReset,
+  acceptReset,
   contactByAnyKey,
   loadAccepted,
   loadAccountKeys,
-  loadFlaggedContacts,
+  loadSupersededKeys,
   loadKeyAliases,
   peerContactByMemberPubkeys,
-  readKeyReset,
-  readKeyState,
   readPin,
-  recordKeyReset,
   setPin,
   upsertAccepted,
   type AcceptedContact,
@@ -91,10 +88,8 @@ describe("a proven rotation of a contact (the gate's re-pin)", () => {
     const pin = readPin(ANNA);
     expect(pin?.pinnedSignaturePubkeyB64).toBe(NEW);
     expect(pin?.provenPredecessorsB64).toEqual([OLD]);
-    // Not a reset: no record, no state, nothing for the eviction arm.
-    expect(readKeyReset(ANNA)).toBeUndefined();
-    expect(readKeyState(ANNA)).toBe("normal");
-    expect(loadFlaggedContacts()).toEqual([]);
+    // Not a reset: nothing is superseded, nothing for the repair arm.
+    expect(loadSupersededKeys().size).toBe(0);
   });
 
   it("leaves the contact row, its one-to-one and its keys exactly as they were", () => {
@@ -151,22 +146,42 @@ describe("an unproven change never gets predecessor treatment", () => {
     expect(samePerson(NEW, NEWER, table)).toBe(false);
   });
 
-  it("a reset is a flag, not a predecessor: the pin does not move and no key is proven", () => {
-    setPin(ANNA, OLD, 0);
-    expect(recordKeyReset(ANNA, NEW, 2, 1000)).toBe("recorded");
-    expect(readKeyState(ANNA)).toBe("reset-unverified");
-    expect(accountKeysOf(ANNA)).toEqual({ currentKeyB64: OLD, provenPredecessorsB64: [] });
+  it("an accepted reset re-pins, proves nothing and supersedes the old key", () => {
+    setPin(ANNA, OLD, 0, undefined, { keyGeneration: 1 });
+    expect(
+      acceptReset({
+        accountIdB64: ANNA,
+        heldKeyB64: OLD,
+        newKeyB64: NEW,
+        keyGeneration: 2,
+        signedAtMs: 900,
+        nowMs: 1000,
+      }),
+    ).toBe("accepted");
+    expect(accountKeysOf(ANNA)).toEqual({ currentKeyB64: NEW, provenPredecessorsB64: [] });
+    expect(loadSupersededKeys().get(OLD)).toBe(ANNA);
   });
 
-  it("a confirmed reset after a proven rotation ends every predecessor", () => {
+  it("an accepted reset after a proven rotation ends every predecessor", () => {
     upsertAccepted(annaRow());
-    setPin(ANNA, OLD, 0);
+    setPin(ANNA, OLD, 0, undefined, { keyGeneration: 1 });
     setPin(ANNA, NEW, 500, undefined, { proven: true });
-    recordKeyReset(ANNA, NEWER, 3, 2000);
-    expect(confirmKeyReset(ANNA, 3000)).toBe("confirmed");
+    expect(
+      acceptReset({
+        accountIdB64: ANNA,
+        heldKeyB64: NEW,
+        newKeyB64: NEWER,
+        keyGeneration: 3,
+        signedAtMs: 2000,
+        nowMs: 3_000_000,
+      }),
+    ).toBe("accepted");
     expect(accountKeysOf(ANNA)).toEqual({ currentKeyB64: NEWER, provenPredecessorsB64: [] });
     const table = buildPredecessorTable(loadAccountKeys());
     expect(samePerson(OLD, NEWER, table)).toBe(false);
+    // Both the pin it replaced and that pin's proven predecessor are
+    // superseded: a leaf bound to either is the old identity's.
+    expect([...loadSupersededKeys().keys()].sort()).toEqual([NEW, OLD].sort());
   });
 
   it("a junk predecessor list in storage reads as none", () => {

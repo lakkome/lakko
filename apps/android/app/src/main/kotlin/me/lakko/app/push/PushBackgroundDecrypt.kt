@@ -218,20 +218,25 @@ internal fun buildBackgroundDecryptDeps(
         // like everything else here (C-59), and the one store on this
         // interface that is NOT about decrypting: a wake decides whether to
         // interrupt, and a muted chat never rings.
+        // ADR-0065 R.5 — mute is a fact of the CONVERSATION: a successor
+        // group is muted exactly when its conversation is. The lineage is
+        // read from its plain mirror (a READ, C-59).
         override fun isMuted(accountIdB64: String, groupHex: String): Boolean =
             me.lakko.app.devices.sync.ConversationMute.isMuted(
                 context = appContext,
                 accountIdB64 = accountIdB64,
-                groupIdHex = groupHex,
+                groupIdHex = conversationHexForWake(
+                    groupHex,
+                    me.lakko.app.chat.LineageMirror.load(appContext, accountIdB64),
+                ),
             )
 
-        // ADR-0065 phase 2 / UX 16.4 — the closed-state store is plain
-        // preferences (a reason and a stamp, no key material), so the
-        // background pass can read it. A READ (C-59).
+        // ADR-0065 R.5 — the continuity facts are plain preferences (group
+        // ids and stamps, no key material), so the background pass can read
+        // them. A READ (C-59).
         override fun isClosedOneToOne(accountIdB64: String, groupHex: String): Boolean =
-            me.lakko.app.chat.conversationInert(
-                me.lakko.app.chat.ConversationClosedStore.load(appContext, accountIdB64, groupHex),
-            )
+            groupHex.lowercase() in
+                me.lakko.app.chat.SharedPrefsContinuityBackend(appContext).load(accountIdB64).movedOneToOne
     }
 }
 

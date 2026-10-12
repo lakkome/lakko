@@ -69,6 +69,11 @@ public data class ConversationListRow(
      *  All chats with its ended line; a folder matches nothing it cannot
      *  open (`docs/ux/chat-folders.md` 3.2). */
     val membershipEnded: Boolean = false,
+    /** ADR-0065 R.5 — for a chat or a group, the hex id of the conversation's
+     *  CURRENT group, which is what a call offer or a live call is keyed on;
+     *  [id] is the conversation id every person-facing store is keyed on.
+     *  The same value for a conversation that never moved. */
+    val headId: String = id,
 )
 
 /** The shared kind a chat-or-group row opens under. */

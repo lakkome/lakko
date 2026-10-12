@@ -209,6 +209,20 @@ internal fun messageActionsFor(
  * The clip label is what the OS shows in its own paste UI; the message text is
  * the clip itself.
  */
+/**
+ * ADR-0065 R.5 — the card of a row of an OLDER segment of the conversation:
+ * the `Unpin` row alone when the row is pinned, and nothing otherwise
+ * ([me.lakko.app.chat.historyRowOffersUnpin]). A history row takes no edit,
+ * delete, reaction, reply, forward, selection or new pin.
+ */
+internal fun historyRowActions(rowIsPinned: Boolean, pinLabel: String): MessageActions = MessageActions(
+    canCopy = false,
+    canEdit = false,
+    canDelete = false,
+    canPin = me.lakko.app.chat.historyRowOffersUnpin(isHistoryRow = true, rowIsPinned = rowIsPinned),
+    pinLabel = pinLabel,
+)
+
 internal fun copyMessageText(context: Context, text: String) {
     val clipboard =
         context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager

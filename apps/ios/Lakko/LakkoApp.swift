@@ -217,34 +217,22 @@ struct LakkoApp: App {
         let contacts = ContactsRepository(authRepository: auth)
         self._contactsRepository = StateObject(wrappedValue: contacts)
         contacts.chatRepository = chat
+        // ADR-0065 R.2 — the one seam between the identity gate, which accepts
+        // a contact's attested reset wherever a bundle is fetched, and the
+        // layers that follow it up. Nothing that listens shows anything.
+        ResetEvents.subscribe { [weak contacts] event in
+            Task { @MainActor in
+                contacts?.applyAcceptedReset(event)
+            }
+        }
         // ADR-0050 section 2.4 — the accounts the re-admission check can look
         // up: every accepted contact whose account id is known.
         chat.readmissionContactsProvider = { [weak contacts] in
-            (contacts?.state.accepted ?? []).compactMap { contact in
-                guard let accountId = contact.request.fromAccountId, accountId.count == 16 else {
-                    return nil
-                }
-                return (personKey: contact.request.fromPubkey, accountId: accountId)
-            }
-        }
-        // ADR-0065 phase 2 (UX 16) — the contact facts the chat layer reads
-        // (which keys a reset retired, which contact a message's new keys
-        // belong to), and the one hook every identity fetch reports a
-        // confirmed reset through.
-        chat.contactKeyFactsProvider = { [weak contacts] in
-            (contacts?.state.accepted ?? []).compactMap { contact in
-                guard let accountIdB64 = contact.accountIdB64 else { return nil }
-                return ChatRepository.ContactKeyFacts(
-                    accountIdB64: accountIdB64,
-                    messageId: contact.request.messageId,
-                    currentKeyB64: base64Encode(contact.request.fromPubkey),
-                    keyReset: contact.keyReset)
-            }
-        }
-        ContactsClient.keyResetSink = { [weak contacts] accountId, previousKeyB64, pendingKeyB64 in
-            Task { @MainActor in
-                contacts?.noteKeyReset(
-                    accountId: accountId, previousKeyB64: previousKeyB64, pendingKeyB64: pendingKeyB64)
+            (contacts?.state.accepted ?? []).map { contact in
+                DeviceReadmission.LookupContact(
+                    signaturePubkeyB64: base64Encode(contact.request.fromPubkey),
+                    previousKeysB64: contact.previousKeysB64 ?? [],
+                    accountId: contact.request.fromAccountId)
             }
         }
         // UX 17.4 — the proof block of "Is this you?": one model shared by
@@ -418,6 +406,17 @@ struct LakkoApp: App {
         // ADR-0066 section 2.3 — the account's own DeviceGroup is the record
         // the conversations' own-device admission is filtered by: the live
         // handle's roster, else the snapshot it persists.
+        // ADR-0065 R.5 — the conversation lineage is a register of the
+        // DeviceGroup synced state: the chat repository reads it to fold the
+        // groups it holds into conversations, and writes it through the sync
+        // repository when a conversation continues in a successor group.
+        chat.lineageWatch = sync.$lineage
+            .receive(on: RunLoop.main)
+            .sink { [weak chat] entries in chat?.applyLineage(entries) }
+        chat.applyLineage(sync.lineage)
+        chat.lineageWriter = { [weak sync] successor, root in
+            await sync?.setLineage(successorGroupId: successor, rootConversationId: root) ?? false
+        }
         chat.ownDeviceGroupRosterProvider = { [weak sync, weak auth] in
             if let live = sync?.rosterDeviceKeys() { return live }
             guard let secrets = auth?.identitySecrets else { return nil }
@@ -1260,9 +1259,7 @@ private struct SessionRoot: View, Equatable {
             .tag(SessionTab.feed)
 
             NavigationStack(path: $contactsPath) {
-                ContactsScreen(
-                    viewModel: contactsVM,
-                    onOpenContact: { push(.contactDetail(messageId: $0), on: .contacts) })
+                ContactsScreen(viewModel: contactsVM)
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
             .tabItem { Label(l10n.t("nav.contacts"), systemImage: "person.crop.circle") }
@@ -1391,7 +1388,9 @@ private struct SessionRoot: View, Equatable {
                 // list during startup is never mistaken for "left every group".
                 knownGroupIds: {
                     chatRepository.state.bootstrapped
-                        ? chatRepository.state.threads.map(\.groupIdHex)
+                        // Every GROUP, not every conversation (ADR-0065
+                        // R.5): the older segments are the history.
+                        ? chatRepository.knownGroupIdHexes
                         : nil
                 },
                 snapshot: { chatRepository.currentStorageSnapshot() },
@@ -1555,12 +1554,6 @@ private struct SessionRoot: View, Equatable {
     /// Section 5.1 — call back in the SAME mode the row records, through the
     /// host that owns that kind of call.
     private func callBack(groupIdHex: String, kind: CallHistoryKind, video: Bool) {
-        // ADR-0065 phase 2 (UX 16.4 / 16.5) — a closed conversation offers no
-        // call: the row opens the chat, whose closed shape says why.
-        if services.chatRepository.isClosed(groupIdHex: groupIdHex) {
-            push(.chat(groupIdHex: groupIdHex), on: .calls)
-            return
-        }
         switch kind {
         case .group:
             services.groupCallHost.start(groupIdHex: groupIdHex, video: video, joinCallId: nil)

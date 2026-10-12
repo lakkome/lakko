@@ -993,8 +993,9 @@ English until reviewed.
 
 ### Phase 2 revised (2026-10-04): silent continuity
 
-**Status: designed, not built.** The three clients hold "Phase 2 as built"
-above; nothing in this section exists in code. UX:
+**Status: built 2026-10-11/12 on the core, the server and the three clients
+(R.13a, R.13b), unit-tested only, not walked; "Phase 2 as built" above is
+removed from the clients and is history.** UX:
 [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md) section 16
 (rewritten the same day).
 
@@ -1656,6 +1657,114 @@ copies; `channels.keys_reset.*` stays;
 | R-S2 web (reference) | Remove the visible flow (R.11) and the catalog keys. `resetVerdict` and the re-pin; the wider re-admission lookup; the conversation lineage (id, segments, timeline order, stores); claim-then-build and the new `group_closed` rule; the four cases; the continuity key on both sides (register at reset, sign on Welcome); held send and re-send; the contact-request arm. `tsc`, vitest on every pure decision, `vite build`. |
 | R-S3 iOS, R-S4 Android | The same model, one pass each (the same-class rule), including the three background readers treating a successor as its conversation. `xcodebuild test`, `:app:testDebugUnitTest`. |
 | R-S5 walk | Two accounts, two devices each plus a reset: one-to-one continues in the same row and a message goes through; a role-table group swaps the devices with no row; an owned group continues in the same row with the owner restored; a non-attested change is refused with the kept copy. `docs/PRODUCT-READINESS.md` from what was seen. `lakko-security` on explicit request: this changes an acceptance gate (invariant #6). |
+
+#### R.13a R-S1 as built (2026-10-11)
+
+Core and server, unit- and DB-tested (`lakko-contacts` 506, `lakko-sync` 72, `lakko-ffi-uniffi`
+334, `lakko-ffi-wasm` 225 on the host, `lakko-backup` 48, `lakko-svc-discovery` 116 with the
+DB-gated tests run); `lakko-mls` untouched; bindings regenerated, the native libraries and the wasm
+package NOT rebuilt in this sprint.
+
+- **Discovery** serves `key_reset_attest` on `GET /discovery/identity/{id}` (standard base64,
+  absent when null, unparsed). After a later proven rotation it is still the latest reset's and no
+  longer binds the fetched key, as R.3 says.
+- **`lakko_contacts::reach::continuity_reach_seed(account_id, key_generation)`**, golden-pinned
+  (self-derived, not cross-checked with an independent tool); on both FFI surfaces as
+  `continuityReachSeed`. Signing and registration use the existing `DsProofSigner.forReach(seed)`
+  and `reachVerifyingKey(seed)`.
+- **The lineage register differs from R.5 in its carrier.** R.5 put it in `StateSnapshot`, whose
+  protobuf codec lives in `lakko-mls`; to keep `lakko-mls` untouched it travels as a `lakko-sync`
+  envelope (`lakko/sync/lineage/v1\0`) inside the DeviceGroup's opaque `ServiceEnvelope`
+  (ADR-0060 section 7). It is in the `SyncedState` fold, in `to_bytes` / `from_bytes` (hence the
+  backup payload) and `merge_from`, but not in `snapshot()`: a catch-up re-send is the snapshot
+  parts plus `lineageEnvelopes()`, and a DeviceGroup receive loop routes a service envelope on
+  `isLineageEnvelope` before the `lakko-contacts` dispatcher. `SyncEntry::Lineage`, canonical tag
+  10; ids 1..=64 bytes, successor != root. FFI: `setLineage`, `lineageRoot`, `conversationIdOf`,
+  `lineageSuccessors`, `allLineage`, `lineageEnvelopeFor`, `lineageEnvelopes`,
+  `applyLineageEnvelope`, `isLineageEnvelope`. Fuzz `lakko-sync/synced_state_decode` (smoke-built).
+- "Write-once" is the writer's rule (`setLineage` returns false for a held successor); a received
+  register folds by the ordinary rule, so two devices writing different roots for one successor
+  converge on one value. Successors are ordered by stamp; nothing else carries segment order.
+- Flag day: a build from before this change refuses persisted or backed-up synced state holding a
+  lineage register.
+
+#### R.13b R-S2 to R-S4 as built (2026-10-11/12): the three clients
+
+The visible phase-2 flow is removed on web, iOS and Android and the silent model is built on all
+three; unit-tested only (web vitest 4643; iOS `LakkoTests` 3315 with 0 failures, core rebuilt;
+Android 3501 on the host JVM without the native core, whose `.so` was never rebuilt, so no new FFI
+call has executed there). **Nothing was walked on a device or against a server**; on every client
+the wiring through the chat repository is compiled and covered by pure-decision tests, not run end
+to end. `lakko-mls` untouched. 45 catalog keys of the visible flow are deleted;
+`restore_identity.reset.effect_contacts` and `recovery_phrase.fresh.safety_note` now read "Your
+contacts keep their chats with you. Your safety number changes." (machine translations).
+
+**A flaw in R.2, found and closed while building.** R.2 let the held key of a never-pinned group
+member be "the roster's account key for that account id", with the id taken from the member's own
+profile. A member could claim another account's id; if that account ever reset, an admin's client
+would accept "member key -> that account's key" as a reset, evict the member and admit the other
+account's devices. Rule now, on all three: a claimed id establishes nothing; a reset is judged only
+from a **verified binding** `(account id -> key)` this device recorded when the directory served
+exactly that roster key (`memberHeldKey`). The same check guards who is added to a successor, and
+"already a contact" for the known-contact request arm and an `/i/` link (the pin or a verified
+binding, never a row completed only from a profile). The function that adds an account's devices
+itself refuses a KeyPackage bound to another key than the expected one or its pinned proven chain.
+Cost: a member whose account changed keys before this device first checked it gets no verdict from
+this device.
+
+**One core addition beyond R-S1:** the re-send marker in the chat envelope
+(`lakko-attachments`: `resend_origin_group` + `resend_origin_message`, lenient, kept as a whole
+pair, `MessageBody::Chat.resend`, `compose_chat`; `composeChatEnvelope` / `ChatEnvelopeParts` on
+UniFFI, `EnvelopeBuilder.setResendOrigin` on wasm; fuzz oracle `resend_within_bounds`), so a
+founder's re-sent message is not drawn twice on its own other devices.
+
+**Differs from the text above:**
+
+- R.6: the successor is created WITH the new identity's devices and the founder's other devices in
+  its founding commit, and its Welcomes are withheld (kept in the claim store) until the claim is
+  confirmed; "nothing sent before the claim" holds.
+- R.5: the read position is `message_id(8 BE)` in the first segment and
+  `message_id(8 BE) || segment(4 BE)` later (a successor's ids restart).
+- R.7 case 1: nothing goes into a dead one-to-one except the claim. Text, media and forwards are
+  held in a durable queue and flushed into the successor; edits, deletes and reactions apply
+  locally only; a held reply keeps its quote and carries target 0 (no jump). The silent answer to a
+  known contact's request is the ack; the successor's Welcome is signed with the continuity key.
+- R.2: "no attest key" is no-verdict (shown as the offline error at an action), and a log rollback
+  on the reset path is a refusal.
+- The continuity key is registered by the reach sync from a durable marker, not as a numbered step
+  of the reset.
+- The two decisions of R.10 still awaiting the maintainer (owner restored in case 3; D5 re-send) are
+  at the chosen default behind one function each on every client
+  (`restoreOwnershipToResetIdentity`, `resendOwnMessagesAfterReset`); D3 and the 30-day TTL likewise.
+
+**Client differences and gaps:**
+
+- **Web**: the service worker does not know the re-send marker (a push for a re-sent message is
+  not suppressed); an interrupted re-send restarts from the first message, and a re-sent reply or
+  forward loses its quote or attribution; the feed shows the head segment only.
+- **iOS**: lineage is not in the client's backup payload; the claim store is plaintext
+  `UserDefaults` (it holds a Welcome; web seals it); a call offer from a superseded sender is not
+  filtered before the conversation moves; `/i/` from a contact shows the "already a contact" result
+  instead of opening the contact; message previews of a successor do not merge with notifications
+  delivered before the move; `Members changed` has no row on iOS, so its suppression is unwired; no
+  test drives a full claim-and-build pass.
+- **Android**: the chat screen is keyed on the head group and is rebuilt when the conversation
+  moves (unsent composer text is lost); the unread badge does not count unread rows of an older
+  segment; `Members changed` is judged per poll batch; the ADR-0050 re-request path does not pass
+  the binding filter.
+- **Android, and to be checked on the other two**: the binding filter of the add-member function
+  may refuse an unpinned person whose devices are still bound to a proven predecessor key after an
+  ADR-0066 rotation.
+- **All three**: a shared unpin of an older segment is local only; a genuine contact known only
+  from a profile gets an ordinary request row.
+
+**Test hygiene, to be dealt with:** two intermediate runs of the new iOS
+`ConversationContinuityTests` published MLS ciphertext rows to random unclaimed journal ids on the
+test stack's DS (the fixture used a default `ChatClient()`, which carries a real `DsClient`); the
+fixture is fixed, other iOS suites that build `ChatClient()` the same way were not checked.
+Android's `OneToOneCallSurvivesChatScreensTest` failed once and passed on re-run in three separate
+passes (a leaked exception), unexplained. iOS `JournalClaimOnOpenTests.testConcurrentCallersShareOneClaim`
+failed once, unexplained.
 
 #### R.14 Not verified, and open on paper
 

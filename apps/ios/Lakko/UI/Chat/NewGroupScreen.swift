@@ -40,7 +40,7 @@ struct NewGroupScreen: View {
 
     /// The picks in list order — the first one founds the group.
     private var picks: [AcceptedContact] {
-        accepted.filter { selected.contains($0.request.fromPubkey) && $0.keyState == .normal }
+        accepted.filter { selected.contains($0.request.fromPubkey) }
     }
 
     var body: some View {
@@ -96,10 +96,7 @@ struct NewGroupScreen: View {
         // A contact whose request carried no account id (a pre-ADR-0021
         // record) cannot be added: `startGroupWith` / `addMemberToGroup` need
         // it to fetch the KeyPackages. Listed, dimmed, unselectable.
-        // ADR-0065 phase 2 (UX 16.1) — a contact whose keys were reset and
-        // not yet verified here is shown, disabled, with the sentence.
-        let resetUnverified = KeyResetBlocking.blocksActions(entry.keyState)
-        let addable = entry.request.fromAccountId != nil && !resetUnverified
+        let addable = entry.request.fromAccountId != nil
         let isOn = selected.contains(entry.request.fromPubkey) && addable
         ResolvedName(signatureKey: entry.request.fromPubkey) { resolved in
             Button {
@@ -119,11 +116,7 @@ struct NewGroupScreen: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(resolved.listLabel)
                             .foregroundStyle(addable ? Color.lakkoText : Color.lakkoTextMuted)
-                        if resetUnverified {
-                            Label(l10n.t("contacts.keys_reset.picker_sub"), systemImage: "exclamationmark.shield")
-                                .font(.footnote)
-                                .foregroundStyle(Color.lakkoTextMuted)
-                        } else if !addable {
+                        if !addable {
                             Text(l10n.t("chats.new_group.accept_again"))
                                 .font(.footnote)
                                 .foregroundStyle(Color.lakkoTextMuted)

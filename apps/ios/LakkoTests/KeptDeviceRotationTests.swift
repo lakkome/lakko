@@ -33,6 +33,10 @@ final class InMemoryOwnPredecessorStore: OwnPredecessorStoring {
         guard !(seeds[accountIdB64] ?? []).contains(seed) else { return }
         seeds[accountIdB64, default: []].append(seed)
     }
+    func replace(_ seeds: [Data], accountIdB64: String) throws {
+        if let addError { throw addError }
+        self.seeds[accountIdB64] = seeds
+    }
     func clear(accountIdB64: String) { seeds[accountIdB64] = nil }
 }
 
@@ -784,9 +788,8 @@ final class ProvenPredecessorTests: XCTestCase {
         let oldSeed = Data(repeating: 0x11, count: 32)
         let newSeed = Data(repeating: 0x22, count: 32)
         var reported = 0
-        let previousSink = ContactsClient.keyResetSink
-        ContactsClient.keyResetSink = { _, _, _ in reported += 1 }
-        defer { ContactsClient.keyResetSink = previousSink }
+        let unsubscribe = ResetEvents.subscribe { _ in reported += 1 }
+        defer { unsubscribe() }
 
         // First sight: TOFU.
         try await contacts.verifyBundleAccountKey(

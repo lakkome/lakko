@@ -38,9 +38,8 @@ import type {
 import type { IdentityFetchResponse } from "../discovery/wire";
 
 // Mock the transparency verifier — the contacts client calls
-// `verifyIdentityInLog` (gate 2, non-rotation), `verifyRotationChain`
-// (gate 2, G-30 #2 rotation), and `lookupServedKeyReset` (the gate-1 S4
-// enrichment); we control all three per test.
+// `verifyIdentityInLog` (gate 2, non-rotation) and `verifyRotationChain`
+// (gate 2, G-30 #2 rotation); we control both per test.
 const verifyIdentityInLogMock = vi.fn<
   (a: Uint8Array, b: Uint8Array) => Promise<LogVerifyResult>
 >();
@@ -55,9 +54,6 @@ const verifyRotationChainMock = vi.fn<
     },
   ) => Promise<RotationChainResult>
 >();
-const lookupServedKeyResetMock = vi.fn<
-  (a: Uint8Array, b: Uint8Array) => Promise<boolean | null>
->();
 vi.mock("../transparency/verify", () => ({
   verifyIdentityInLog: (a: Uint8Array, b: Uint8Array) =>
     verifyIdentityInLogMock(a, b),
@@ -70,8 +66,6 @@ vi.mock("../transparency/verify", () => ({
       pinnedLogVersion: number;
     },
   ) => verifyRotationChainMock(a, b, ctx),
-  lookupServedKeyReset: (a: Uint8Array, b: Uint8Array) =>
-    lookupServedKeyResetMock(a, b),
 }));
 
 /** Helper — wrap a bare status into the `{status, isReset}` shape the
@@ -174,10 +168,6 @@ beforeEach(() => {
   bindContactsAccount("dmlld2VyLWFjY291bnQ=");
   verifyIdentityInLogMock.mockReset();
   verifyRotationChainMock.mockReset();
-  lookupServedKeyResetMock.mockReset();
-  // Default the gate-1 enrichment lookup to "unknown" unless a test
-  // overrides it; gate 1 throws regardless of this value.
-  lookupServedKeyResetMock.mockResolvedValue(null);
   // Silence the best-effort console.warn calls during the suite.
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
@@ -266,7 +256,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     );
   });
 
-  it("does NOT weaken the supersession gate: a changed key with no proof still refuses BEFORE the log check", async () => {
+  it("does NOT weaken the supersession gate: a changed key with no proof and no attestation still refuses", async () => {
     const original = identityFromSeed(21);
     const rotated = identityFromSeed(22);
     // First contact TOFU-pins the original key (log says off).
@@ -277,8 +267,9 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     });
     verifyIdentityInLogMock.mockClear();
 
-    // A changed key with NO supersession proof must fail-closed via
-    // the supersession gate — the log check must NOT even run.
+    // A changed key with NO supersession proof and NO key-reset attestation
+    // must fail-closed (ADR-0065 R.2 row 1). The verified log read only
+    // chooses the refusal copy.
     let thrown: unknown;
     try {
       await gate({
@@ -292,8 +283,6 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     expect((thrown as InstanceType<typeof SupersessionRefused>).reason).toBe(
       "proof-absent",
     );
-    // The additive log check never ran — gate 1 short-circuited.
-    expect(verifyIdentityInLogMock).not.toHaveBeenCalled();
     // The pin still holds the ORIGINAL key (the change was refused).
     expect(readPin(b64(ACCOUNT_ID))?.pinnedSignaturePubkeyB64).toBe(
       original.signaturePubkeyB64,
@@ -462,9 +451,8 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
       thrown = e;
     }
     expect(thrown).toBeInstanceOf(SupersessionRefused);
-    // NEITHER gate-2 path ran — gate 1 short-circuited.
+    // The rotation chain never ran: with no proof this is not a rotation.
     expect(verifyRotationChainMock).not.toHaveBeenCalled();
-    expect(verifyIdentityInLogMock).not.toHaveBeenCalled();
   });
 
   it("the chain floor reflects a previously-confirmed version on the SECOND rotation", async () => {
@@ -503,12 +491,12 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
   });
 });
 
-describe("KT-log S4 — SupersessionRefused.loggedReset enrichment", () => {
-  /** TOFU-pin an original key, then attempt an UNPROVEN changed key and
-   *  capture the thrown `SupersessionRefused`. `loggedReset` is driven
-   *  by the mocked `lookupServedKeyReset` result for that test. */
+describe("ADR-0065 R.2 — the refusal copy of a proof-less change with no attestation", () => {
+  /** TOFU-pin an original key, then attempt an UNPROVEN changed key with no
+   *  attestation and capture the thrown `SupersessionRefused`. The copy
+   *  marker comes from the VERIFIED log read (`verifyIdentityInLog`). */
   async function refuseChangedKey(
-    loggedReset: boolean | null,
+    log: LogVerifyResult | Error,
   ): Promise<InstanceType<typeof SupersessionRefused>> {
     const original = identityFromSeed(31);
     const rotated = identityFromSeed(32);
@@ -517,66 +505,43 @@ describe("KT-log S4 — SupersessionRefused.loggedReset enrichment", () => {
       signature_pubkey: original.signaturePubkeyB64,
       x25519_pubkey: original.x25519PubkeyB64, key_generation: 1
     });
-    // The gate-1 enrichment lookup returns the requested marker.
-    lookupServedKeyResetMock.mockResolvedValue(loggedReset);
+    if (log instanceof Error) verifyIdentityInLogMock.mockRejectedValue(log);
+    else verifyIdentityInLogMock.mockResolvedValue(log);
     let thrown: unknown;
     try {
       await gate({
         signature_pubkey: rotated.signaturePubkeyB64,
-        x25519_pubkey: rotated.x25519PubkeyB64, key_generation: 1
+        x25519_pubkey: rotated.x25519PubkeyB64, key_generation: 2
       });
     } catch (e) {
       thrown = e;
     }
     expect(thrown).toBeInstanceOf(SupersessionRefused);
+    // Nothing was re-pinned and nothing recorded.
+    expect(readPin(b64(ACCOUNT_ID))?.pinnedSignaturePubkeyB64).toBe(original.signaturePubkeyB64);
     return thrown as InstanceType<typeof SupersessionRefused>;
   }
 
-  it("attaches loggedReset=true when the log shows an owner reset", async () => {
-    const err = await refuseChangedKey(true);
+  it("the log shows the key WITHOUT a reset: loggedReset=false (unexplained)", async () => {
+    const err = await refuseChangedKey(result("confirmed", false));
     expect(err.reason).toBe("proof-absent");
-    expect(err.loggedReset).toBe(true);
-  });
-
-  it("attaches loggedReset=false when the log shows NO owner reset", async () => {
-    const err = await refuseChangedKey(false);
     expect(err.loggedReset).toBe(false);
   });
 
-  it("attaches loggedReset=null when the log is off/unreachable/absent", async () => {
-    const err = await refuseChangedKey(null);
+  it("the log shows a reset but no attestation is served: still refused, unconfirmed", async () => {
+    const err = await refuseChangedKey(result("confirmed", true));
     expect(err.loggedReset).toBeNull();
   });
 
-  it("the gate still THROWS regardless of the log lookup (gate unweakened)", async () => {
-    // Even with loggedReset=true (a confirmed reset), the refusal stands —
-    // the log only colours the message, it never authorises the new key.
-    const err = await refuseChangedKey(true);
-    expect(err).toBeInstanceOf(SupersessionRefused);
+  it("the log is off / unreachable / absent: refused, unconfirmed", async () => {
+    for (const status of ["off", "unreachable", "absent", "mismatch"] as const) {
+      const err = await refuseChangedKey(result(status));
+      expect(err.loggedReset).toBeNull();
+    }
   });
 
-  it("a throwing enrichment lookup leaves loggedReset null (best-effort, refusal stands)", async () => {
-    const original = identityFromSeed(41);
-    const rotated = identityFromSeed(42);
-    verifyIdentityInLogMock.mockResolvedValue(result("off"));
-    await gate({
-      signature_pubkey: original.signaturePubkeyB64,
-      x25519_pubkey: original.x25519PubkeyB64, key_generation: 1
-    });
-    // The enrichment lookup itself throws — must not break the refusal.
-    lookupServedKeyResetMock.mockRejectedValue(new Error("log boom"));
-    let thrown: unknown;
-    try {
-      await gate({
-        signature_pubkey: rotated.signaturePubkeyB64,
-        x25519_pubkey: rotated.x25519PubkeyB64, key_generation: 1
-      });
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeInstanceOf(SupersessionRefused);
-    expect(
-      (thrown as InstanceType<typeof SupersessionRefused>).loggedReset,
-    ).toBeNull();
+  it("a throwing log read leaves the refusal standing, unconfirmed", async () => {
+    const err = await refuseChangedKey(new Error("log boom"));
+    expect(err.loggedReset).toBeNull();
   });
 });

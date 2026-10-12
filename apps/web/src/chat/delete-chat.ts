@@ -38,7 +38,6 @@
  */
 
 import { getDeviceKey } from "../auth/key-store";
-import { clearConversationClosed } from "./conversation-closed";
 import { clearLeaveRequested } from "./membership-ended";
 import { clearArmedRetries, clearOwnRequestsForGroup, retryScopeKey } from "./membership-retry";
 import { deleteGroupFromMessageLog } from "./message-log-store";
@@ -79,8 +78,6 @@ export async function deleteChat(input: DeleteChatInput): Promise<void> {
   clearUnappliedForGroup(accountIdB64, groupIdB64);
   clearOwnRequestsForGroup(accountIdB64, groupIdB64);
   clearLeaveRequested(accountIdB64, groupIdB64);
-  // ADR-0065 phase 2 — the closed one-to-one record goes with the chat.
-  clearConversationClosed(accountIdB64, groupIdB64);
   // ADR-0045 UX §7 — an armed re-send names a group that is gone from
   // here. The verdict would drop it anyway on `membershipEnded`, so this
   // is tidiness rather than a gate; it is here because leaving a record
@@ -91,4 +88,68 @@ export async function deleteChat(input: DeleteChatInput): Promise<void> {
   // chat reachable rather than orphaning a transcript behind a row the
   // user can no longer open.
   chats.remove(groupIdB64);
+}
+
+/** One group of a conversation, as the delete reads it. */
+export interface ConversationSegment {
+  readonly groupIdB64: string;
+  readonly groupIdHex: string;
+}
+
+/**
+ * ADR-0065 R.5 — the order in which a conversation's groups are deleted:
+ * every held segment that is not the head first (in the order given), the
+ * HEAD last. The head's registry row is what keeps the conversation's row
+ * on screen, so a failure at any earlier segment leaves the conversation
+ * reachable, exactly as {@link deleteChat} does for one group. A segment
+ * named twice is deleted once.
+ */
+export function conversationDeleteOrder(
+  held: readonly ConversationSegment[],
+  headGroupIdB64: string,
+): ConversationSegment[] {
+  const seen = new Set<string>();
+  const rest: ConversationSegment[] = [];
+  let head: ConversationSegment | null = null;
+  for (const segment of held) {
+    if (seen.has(segment.groupIdB64)) continue;
+    seen.add(segment.groupIdB64);
+    if (segment.groupIdB64 === headGroupIdB64) head = segment;
+    else rest.push(segment);
+  }
+  return head === null ? rest : [...rest, head];
+}
+
+/**
+ * Delete a whole CONVERSATION from this device: every group of its lineage
+ * this device holds (ADR-0065 R.5: one conversation over several groups).
+ * A conversation that never moved has one segment and this is
+ * {@link deleteChat}.
+ *
+ * Throws at the first segment that fails; the segments before it are gone
+ * and the head is still there.
+ */
+export async function deleteConversation(input: {
+  readonly accountIdB64: string;
+  /** Every segment this device holds, the head among them. */
+  readonly segments: readonly ConversationSegment[];
+  readonly headGroupIdB64: string;
+  readonly chats: ChatRegistry;
+  /** Called after each segment is gone (its per-group stores the caller
+   *  owns: pins). Best-effort: a throw is swallowed. */
+  readonly afterSegment?: (segment: ConversationSegment) => Promise<void> | void;
+}): Promise<void> {
+  for (const segment of conversationDeleteOrder(input.segments, input.headGroupIdB64)) {
+    await deleteChat({
+      accountIdB64: input.accountIdB64,
+      groupIdB64: segment.groupIdB64,
+      groupIdHex: segment.groupIdHex,
+      chats: input.chats,
+    });
+    try {
+      await input.afterSegment?.(segment);
+    } catch {
+      // best-effort
+    }
+  }
 }

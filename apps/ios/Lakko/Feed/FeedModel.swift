@@ -37,6 +37,14 @@ struct FeedSource: Equatable {
     /// People in a group, for weighing reactions against its size; 0 for a
     /// channel, whose posts carry no reactions.
     let audience: Int
+    /// ADR-0065 R.5 — the conversation a GROUP source belongs to (the
+    /// lineage root), when it differs from nothing: `nil` for a channel.
+    var conversationHex: String? = nil
+
+    /// The key of everything a PERSON attaches to a feed source (the mute
+    /// flag, "hide from feeds", a rule's include / exclude lists): the
+    /// conversation id, never the group a moved conversation currently is.
+    var key: String { LineageViews.feedSourceKey(idHex: idHex, conversationHex: conversationHex) }
 }
 
 /// A message reduced to what the feed draws and ranks. Built from a

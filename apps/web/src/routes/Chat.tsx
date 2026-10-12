@@ -56,10 +56,10 @@ import {
   appendToGroupSlot,
   eventToPersistedMessage,
   mergeForegroundSlot,
-  parseResetRemovedRow,
   systemRowText,
 } from "../chat/background-log";
 import {
+  forwardJumpRow,
   forwardJumpTarget,
   forwardPayloadOf,
   forwardRefFromPersisted,
@@ -96,7 +96,6 @@ import {
   personKeysOf,
   type RosterLeaf as RosterLeafView,
 } from "../chat/person-key";
-import { contactsErrorText } from "../contacts/errors";
 import { groupTitle, isUnnamedGroupLabel } from "../chat/group-title";
 import { UNNAMED_MEMBER, memberListLabelOf, memberNameOf } from "../profile/member-label";
 import { pendingJoinLabel } from "../chat/pending-join-label";
@@ -106,7 +105,6 @@ import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call
 import {
   NO_GROUP_CALLS,
   freshParticipantCount,
-  hexToBytes,
   selectLiveGroupCall,
   type GroupCallViewer,
   type GroupCallRecord,
@@ -131,7 +129,7 @@ import {
   base64UrlDecodeNoPad,
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
-import { ChatClient, type PollMessagesResult } from "../chat/client";
+import { ChatClient, HeldForSuccessor, type PollMessagesResult } from "../chat/client";
 import { isDsNetworkFailure } from "../ds/client";
 import { dsAccess, dsClockSkewNotice } from "../ds/access";
 import {
@@ -141,51 +139,48 @@ import {
   runLongPollLoop,
   sleepCancellable,
 } from "../ds/long-poll-loop";
-import { ContactsClient, ContactsError, KeysResetUnverified, SupersessionRefused } from "../contacts/client";
-import { keysResetVerifyFirst, supersessionRefusedMessage } from "../contacts/supersession-message";
-import { keysResetOpenContactHref, openContactFor } from "../contacts/keys-reset-open-contact";
+import { ContactsClient, ContactsError, SupersessionRefused } from "../contacts/client";
+import { supersessionRefusedMessage } from "../contacts/supersession-message";
 import { DiscoveryClient } from "../discovery/client";
 import {
-  accountIdB64OfHex,
-  contactByAnyKey,
+  accountIdB64OfKey,
   loadAccepted,
-  loadFlaggedContacts,
   loadKeyAliases,
+  loadSupersededKeys,
   subscribeAcceptedChanged,
 } from "../contacts/local-store";
-import {
-  bubbleWarningFor,
-  BUBBLE_WARNING,
-  dropsLateMessage,
-  evictionApplied,
-  KEYS_RESET_OPEN_CONTACT,
-  leavesOfPreviousKey,
-  MEMBER_BEING_REMOVED,
-  memberRowResetFlag,
-  memberRowResetLine,
-  OWNED_NOTICE,
-  OWNED_NOTICE_MEMBER,
-  resetGroupBranch,
-  shouldProposeEviction,
-  SYSTEM_REMOVED,
-  type ResetGroupBranch,
-} from "../chat/keys-reset";
-import {
-  closedComposerState,
-  closedTerminalRow,
-  conversationCloseKind,
-  conversationClosed as closeKindClosed,
-  loadConversationClosed,
-  oneToOneClosesForReset,
-  recordConversationClosed,
-  subscribeConversationClosed,
-} from "../chat/conversation-closed";
 import { useGroupClosed } from "../chat/GroupClosedContext";
+import { useLineage } from "../chat/use-lineage";
+import { awaitedSwaps, setAwaitedSwaps } from "../chat/continuity-store";
+import { subscribeMessageLogChanged } from "../chat/message-log-events";
 import {
-  dispatchRecreateProgress,
-  RecreateGroupSheet,
-  RecreateProgressLayer,
-} from "../chat/RecreateGroupSheet";
+  HELD_SEND_GIVE_UP_MS,
+  REPLY_NO_JUMP_TARGET,
+  flushedRowsToShow,
+  heldVerdict,
+  identityCheckDue,
+  opRoute,
+  replyForSend,
+  sendRoute,
+  type OpRoute,
+} from "../chat/held-send";
+import {
+  heldSends,
+  persistHeldSends,
+  restoreHeldSends,
+  subscribeHeldFlushed,
+  type HeldMessage,
+} from "../chat/held-send-queue";
+import { heldResendPredicate } from "../chat/resend-receive";
+import { unrepairableBy } from "../chat/successor-claim";
+import { READMISSION_INTERVAL_MS } from "../chat/device-readmission";
+import { encodeReadPosition, historyRowId, historyRowOrigin, isHistoryRowId } from "../chat/lineage";
+import {
+  deviceSwapAcrossCommits,
+  dropsSupersededSender,
+  repairPlan,
+  resetCase,
+} from "../chat/reset-repair";
 import {
   findPersonRecord,
   groupInfoSections,
@@ -234,6 +229,7 @@ import {
   encryptAndUploadFile,
   formatAttachmentSize,
   type ForwardOrigin,
+  type ForwardRef,
   type ReplyRef,
   saveDecryptedBytes,
   type AttachmentMediaMeta,
@@ -251,7 +247,17 @@ import { useGroupNames } from "../chat/GroupNameContext";
 import { usePins } from "../chat/PinContext";
 import { useSharedChannels } from "../discover/SharedChannelsContext";
 import { ShareChannelsSwitch } from "../discover/ShareChannelsSwitch";
-import { clampPinIndex, nextPinIndex, pinBarItems, type HeldForPin } from "../chat/pin-bar";
+import {
+  clampPinIndex,
+  nextPinIndex,
+  historyRowOffersUnpin,
+  pinBarItems,
+  pinRoute,
+  pinsAcrossSegments,
+  pinTargetOfRow,
+  type PinTarget,
+  type HeldForPin,
+} from "../chat/pin-bar";
 import { pinRowDecision, type PinOption, type PinState } from "../chat/pin-sheet";
 import { PinList, PinnedBar, type PinBarEntry } from "../chat/PinnedBar";
 import { PinSheet } from "../chat/PinSheet";
@@ -412,7 +418,7 @@ import {
 } from "../chat/membership-ended";
 import { removeMemberConfirmation } from "../chat/remove-member-confirm";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
-import { deleteChat } from "../chat/delete-chat";
+import { deleteConversation } from "../chat/delete-chat";
 import { leaveGroupConfirmation } from "../chat/leave-group-confirm";
 import { namedActionKey, pendingConfirm, requestConfirm } from "../ui/confirm-dialog";
 import { currentLanguage, joinList, t } from "../l10n";
@@ -456,6 +462,7 @@ import {
   rowAuthorIdentity,
   rowCreatedAt,
   rowIdentity,
+  asHistoryRow,
   rowMessageId,
   dedupByMessageId,
   type TimelineRow,
@@ -478,6 +485,15 @@ import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
 /** One attribution gate for the whole page, so the per-group 10 s floor holds
  *  across remounts of the chat view (ADR-0053, `chat/join-attribution-gate.ts`). */
 const joinAttributionGate = new JoinAttributionGate();
+
+/** When this page last ran the identity check of a one-to-one's peer, by
+ *  conversation id (R.2 "Triggers": opening a one-to-one, and a send whose
+ *  last check is older than the re-admission interval). */
+const lastPeerIdentityCheckAtMs = new Map<string, number>();
+/** How long a send waits for that check before it goes ahead. Chosen: long
+ *  enough for one directory fetch, short enough to be unnoticed. A check that
+ *  answers later still takes effect (the re-send covers what slipped by). */
+const SEND_IDENTITY_CHECK_WAIT_MS = 3000;
 
 export default function Chat(props: { backTo?: string }): JSX.Element {
   const auth = useAuth();
@@ -503,10 +519,15 @@ export default function Chat(props: { backTo?: string }): JSX.Element {
     }
   };
 
+  // ADR-0065 R.5 — the route names a CONVERSATION: the id of the lineage's
+  // root, or of any of its groups (a link from before the move). What opens
+  // is the conversation's current group; the view is keyed on that group, so
+  // a conversation that moves to a successor remounts onto it in place.
+  const lineageView = useLineage();
   const entry = (): ActiveGroup | undefined => {
     const id = groupIdB64();
     if (id === null) return undefined;
-    return chats.get(id);
+    return lineageView.resolve(id)?.head ?? chats.get(id);
   };
 
   // Identity gate — the chat needs a fresh export key in
@@ -533,7 +554,7 @@ export default function Chat(props: { backTo?: string }): JSX.Element {
             registry replaces the entry on an ADR-0040 persist-abort reset, which
             must NOT remount the view. */}
         <Show
-          when={entry() !== undefined ? groupIdB64() : null}
+          when={entry()?.groupIdB64 ?? null}
           keyed
           fallback={<GroupNotFound />}
         >
@@ -596,13 +617,20 @@ function ChatView(props: {
   // below to seed the composer from sibling-device drafts
   // and to broadcast composer edits back out.
   const sync = useDeviceGroupSync();
-  // Raw bytes of the conversation group_id — fed straight to
-  // the sync API and into the LWW resolver keying. `Group.groupId`
-  // is a wasm-bindgen getter (no parens), distinct from
-  // `DeviceGroup.groupId()` which is a method (the surfaces
-  // diverged in the Rust source). `createMemo` so the
-  // closure-capturing effects below see a stable reference.
-  const groupIdBytes = createMemo(() => props.entry.group.groupId);
+  // ADR-0065 R.5 — the CONVERSATION this group belongs to. Everything a
+  // person attaches to a conversation (the draft, the read position, call
+  // history) is keyed on its id and never rewritten when the conversation
+  // continues in a successor group; everything protocol-level keeps the
+  // group id above.
+  const lineageView = useLineage();
+  const conversationIdBytes = createMemo(() =>
+    lineageView.conversationIdOf(props.entry.group.groupId),
+  );
+  /** The older groups of this conversation this device still holds, oldest
+   *  first: read-only history above the live timeline. */
+  const historySegments = createMemo(
+    (): readonly ActiveGroup[] => lineageView.resolve(props.entry.groupIdB64)?.history ?? [],
+  );
   const chat = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
     onPersist: async () => {
@@ -674,7 +702,19 @@ function ChatView(props: {
    *  conversation. Local to this device and never on the wire; the store is
    *  `calls/call-log-store.ts`, so they survive a reload the way the
    *  timeline's own rows do. */
-  const callRows = (): readonly CallLogEntry[] => callLog.of(props.entry.groupIdB64);
+  const callRows = (): readonly CallLogEntry[] => [
+    // ADR-0065 R.5 — call history is the conversation's: the calls of its
+    // earlier groups stay in the timeline.
+    ...historySegments().flatMap((g) => callLog.of(g.groupIdB64)),
+    ...callLog.of(props.entry.groupIdB64),
+  ];
+  /** ADR-0065 R.5 — the stored rows of the conversation's OLDER groups,
+   *  under their on-screen history ids (`lineage.ts`). Display-only: never
+   *  in `rows`, so never persisted into this group's log, never counted by
+   *  the read position, and never the target of an op. */
+  const [historyRows, setHistoryRows] = createSignal<TimelineRow[]>([]);
+  /** The edit / delete / reaction overlay of those rows, keyed like them. */
+  const [historyOps, setHistoryOps] = createSignal<Map<number, MessageOpState>>(new Map());
   /** The conversation as the reader sees it: the journal's rows and this
    *  device's call rows, in time order (`chat/call-timeline.ts`). Merged
    *  BEFORE the layout, so a call on a new day carries that day's separator
@@ -685,7 +725,7 @@ function ChatView(props: {
   // load-bearing and what it cost before.
   // One DS id, one bubble (`dedupByMessageId`): a row can reach this list by
   // more than one route, and the list is where every route meets.
-  const uniqueRows = createMemo(() => dedupByMessageId(rows()));
+  const uniqueRows = createMemo(() => dedupByMessageId([...historyRows(), ...rows()]));
   const timelineEntries = createMemo(() =>
     mergeConversationEntries(uniqueRows, callRows(), rowCreatedAt, rowIdentity),
   );
@@ -999,6 +1039,20 @@ function ChatView(props: {
     try {
       result = await chat.sendMessage(props.requireIdentity(), entry.group, bytes);
     } catch (err) {
+      // ADR-0065 R.7 case 1 — a forward INTO a superseded one-to-one is held
+      // for that conversation's successor, with its re-encrypted references
+      // and its attribution; the picker reports it sent, as a typed message
+      // there shows the ordinary sending state.
+      if (err instanceof HeldForSuccessor) {
+        heldSends.hold(
+          lineageView.conversationHexOf(entry.group.groupId),
+          { text: payload.text, attached: fresh, reply: undefined, forward: payload.forward },
+          Date.now(),
+        );
+        void persistHeldSends(accountIdB64ForLog());
+        if (entry.groupIdB64 === props.entry.groupIdB64) resumeHeldSends();
+        return;
+      }
       throw new RenderedError(
         () =>
           dsClockSkewNotice(err) ??
@@ -1069,13 +1123,26 @@ function ChatView(props: {
     if (origin === undefined) return;
     const target = forwardJumpTarget({ origin }, (id) => chats.get(id) !== undefined);
     if (target === null) return;
-    if (target.groupIdB64 === props.entry.groupIdB64) {
-      jumpToMessage(target.messageId);
+    // ADR-0065 R.5 — the origin group may be an OLDER segment of a
+    // conversation that has since continued in a successor: the jump goes to
+    // the conversation (its current group), at the row the older segment's
+    // message is drawn under.
+    const view = lineageView.resolve(target.groupIdB64);
+    const head = view?.head ?? chats.get(target.groupIdB64);
+    if (head === undefined) return;
+    const rowId = forwardJumpRow({
+      originGroupIdB64: target.groupIdB64,
+      messageId: target.messageId,
+      headGroupIdB64: head.groupIdB64,
+      heldHistory: (view?.history ?? []).map((g) => g.groupIdB64),
+      rowId: historyRowId,
+    });
+    if (rowId === null) return;
+    if (head.groupIdB64 === props.entry.groupIdB64) {
+      jumpToMessage(rowId);
       return;
     }
-    const entry = chats.get(target.groupIdB64);
-    if (entry === undefined) return;
-    navigate(`${hrefOfConversation(entry)}?at=${String(target.messageId)}`);
+    navigate(`${hrefOfConversation(head)}?at=${String(rowId)}`);
   }
   // The quick reaction row moved into the per-message action menu, which owns
   // its own open state (`TimelineBubble.tsx` / `MessageMenu.tsx`): one gesture
@@ -1123,14 +1190,6 @@ function ChatView(props: {
   // ADR-0061 — held as how to render them, so a line already on screen
   // follows a language switch.
   const [error, setError] = createLiveText();
-  // ADR-0065 phase 2 (UX 16.1) — the `Open contact` action that belongs to
-  // a keys-reset refusal shown in the error line; shown only while the line
-  // is that very sentence (`contacts/keys-reset-open-contact.ts`).
-  const [errorOpenContact, setErrorOpenContact] = createSignal<{
-    text: () => string;
-    href: string;
-  } | null>(null);
-  const errorOpenContactHref = (): string | null => openContactFor(error(), errorOpenContact());
   const [notice, setNotice] = createLiveText();
 
   // Phase 3a8 — the 1x1 call surface moved to the app-level call host
@@ -1414,7 +1473,8 @@ function ChatView(props: {
   let atHandled = false;
   createEffect(() => {
     const at = searchParams.at;
-    const held = rows();
+    // The older segments' rows too: `?at=` may name one (ADR-0065 R.5).
+    const held = uniqueRows();
     if (atHandled || at === undefined) return;
     const id = Number(at);
     if (!Number.isFinite(id)) {
@@ -1471,7 +1531,7 @@ function ChatView(props: {
   // and wins by LWW.
   let seededDraft = false;
   createEffect(() => {
-    const draft = sync.drafts()[hexOf(groupIdBytes())];
+    const draft = sync.drafts()[hexOf(conversationIdBytes())];
     if (draft === undefined) return;
     if (seededDraft) return;
     if (input() !== "") {
@@ -1501,7 +1561,7 @@ function ChatView(props: {
       // Best-effort — a transient DS failure shouldn't crash
       // the composer; the next keystroke will re-broadcast.
       void sync
-        .setDraft(groupIdBytes(), text)
+        .setDraft(conversationIdBytes(), text)
         .catch((err: unknown) => {
           // eslint-disable-next-line no-console
           console.warn("setDraft failed", err);
@@ -2243,13 +2303,12 @@ function ChatView(props: {
       // ADR-0050 — a leaf this sweep removed is never re-admitted by this
       // client's scheduled check.
       recordRemovedDevices(s.account.accountId, props.entry.groupIdB64, before, after);
-      // ADR-0065 phase 2 (UX 16.3) — this device's own sweep evicted a
-      // flagged contact's old devices: the row names the person.
-      noteResetEvictionLanded(
+      // ADR-0065 R.7 case 2 — this sweep only swapped the devices of people
+      // who stay: no `Members changed` row for it.
+      suppressDeviceSwapRow(
         personsBefore,
         personKeysOrNull(props.entry.group),
         outcome.commitMessageId,
-        new Date().toISOString(),
       );
       // ADR-0045 UX §6.2.8 item 3 — captured synchronously alongside the
       // post-sweep roster, so the eviction and the shrink it caused are judged
@@ -2796,19 +2855,22 @@ function ChatView(props: {
       // an ended ONE-TO-ONE is closed from (this exit block is the group
       // layer's). The registry row goes last there, so a failure leaves the
       // chat reachable.
-      await deleteChat({
+      // ADR-0065 R.5 — a conversation is every group of its lineage this
+      // device holds; the open group (the head) goes last.
+      const held = lineageView.resolve(props.entry.groupIdB64)?.held ?? [props.entry];
+      await deleteConversation({
         accountIdB64: s.account.accountId,
-        groupIdB64: base64Encode(props.entry.group.groupId),
-        groupIdHex: groupIdHexForLog(),
+        segments: held.map((g) => ({
+          groupIdB64: g.groupIdB64,
+          groupIdHex: hexOf(g.group.groupId),
+        })),
+        headGroupIdB64: props.entry.groupIdB64,
         chats,
+        // ADR-0052 decision 3 — the pins are wiped with the conversation.
+        afterSegment: (segment) => pins.forgetConversation(segment.groupIdB64),
       });
-      // ADR-0052 decision 3 — the pins are wiped with the conversation.
-      // Best-effort after the delete itself succeeded.
-      try {
-        await pins.forgetConversation(props.entry.groupIdB64);
-      } catch {
-        // best-effort
-      }
+      // Nothing held for a conversation that is gone is ever sent.
+      if (heldSends.take(conversationHex()).length > 0) void persistHeldSends(s.account.accountId);
       props.onLeave();
     } catch (err) {
       setError(errorText(err, "chat.error.delete_chat"));
@@ -3082,47 +3144,24 @@ function ChatView(props: {
   });
 
   // -------------------------------------------------------------------------
-  // ADR-0065 phase 2 — a contact reset their account keys (UX section 16)
+  // ADR-0065 "Phase 2 revised" — a member reset their account keys
   // -------------------------------------------------------------------------
   //
-  // The decisions are `chat/keys-reset.ts` and `chat/conversation-closed.ts`;
-  // this block reads the contact store's flagged set, composes it with the
-  // roster, the role table and this device's role, and drives the three
-  // branches: the silent eviction (16.3), the closed one-to-one (16.4), the
-  // owned-group notice (16.5). Every read here re-runs on `membersVersion`
-  // (the roster) and `acceptedVersion` (the contact store, which the identity
-  // gate writes from ANY route when it notices a reset).
+  // Nothing here has a surface (R.0): no flag, no line, no row. The identity
+  // gate accepted the reset and re-pinned (`contacts/reset-verdict.ts`); this
+  // block does the one thing the open chat owes it in a group this account
+  // administers: propose, silently, the removal of the leaves still bound to
+  // a superseded key (R.7 case 2). The decisions are `chat/reset-repair.ts`;
+  // the one-to-one and the owned group continue in a successor founded by
+  // the background runtime (`chat/BackgroundReceiveContext.tsx`).
 
   const groupClosed = useGroupClosed();
 
-  /** Bumped by any write of a closed record (this route's or another's). */
-  const [closedVersion, setClosedVersion] = createSignal(0);
-  onMount(() => {
-    const unsubscribe = subscribeConversationClosed(() => setClosedVersion((v) => v + 1));
-    onCleanup(unsubscribe);
-  });
-
-  type FlaggedEntry = ReturnType<typeof loadFlaggedContacts>[number];
-
-  /** Every `reset-unverified` contact of this account. */
-  const flagged = createMemo<FlaggedEntry[]>(() => {
+  /** Every key an accepted reset retired -> its account id. */
+  const supersededKeys = createMemo<Map<string, string>>(() => {
     acceptedVersion();
-    return loadFlaggedContacts();
+    return loadSupersededKeys();
   });
-  /** `pendingKey` (the new keys) → the contact's row key, for the bubble
-   *  warning: a message from the new keys names the person and warns. */
-  const pendingKeysByRow = createMemo<Map<string, string>>(() => {
-    const out = new Map<string, string>();
-    for (const f of flagged()) out.set(f.reset.pendingKeyB64, f.contact.signaturePubkeyB64);
-    return out;
-  });
-  /** The display name of the contact behind an account id, through the one
-   *  resolver (the row's key, so the rename applies), or `null`. */
-  const contactNameByAccount = (accountIdB64: string): string | null => {
-    acceptedVersion();
-    const row = loadAccepted().find((c) => accountIdB64OfHex(c.accountIdHex) === accountIdB64);
-    return row === undefined ? null : memberName(row.signaturePubkeyB64);
-  };
 
   /** The roster as leaves, `undefined` on a torn read (never "nobody"). */
   const rosterLeaves = (): readonly RosterLeafView[] | undefined => {
@@ -3134,263 +3173,25 @@ function ChatView(props: {
     }
   };
 
-  /** The flagged people whose OLD keys hold leaves in this roster (or held
-   *  them until a sweep): their branch, the applied test, their leaves. */
-  const resetMembers = createMemo<
-    Array<{
-      readonly entry: FlaggedEntry;
-      readonly branch: ResetGroupBranch;
-      readonly applied: boolean;
-      readonly leaves: number[];
-    }>
-  >(() => {
-    const roster = rosterLeaves();
-    const owner = ownerKeyB64();
-    const role = ownRole();
-    const kind = isGroupChat() ? "group" : "chat";
-    const out: Array<{
-      entry: FlaggedEntry;
-      branch: ResetGroupBranch;
-      applied: boolean;
-      leaves: number[];
-    }> = [];
-    for (const entry of flagged()) {
-      const previousKeyB64 = entry.reset.previousKeyB64;
-      const leaves = roster === undefined ? [] : leavesOfPreviousKey(roster, previousKeyB64);
-      const applied = evictionApplied(roster, previousKeyB64);
-      // A flagged contact who was never in this group is nobody's business
-      // here: only the people in the roster (or just evicted from it) count.
-      if (leaves.length === 0 && roster !== undefined) continue;
-      out.push({
-        entry,
-        branch: resetGroupBranch({ kind, ownerKeyB64: owner, previousKeyB64, ownRole: role }),
-        applied,
-        leaves,
-      });
-    }
-    return out;
-  });
-
-  /** The members-panel row line for the person at `leafIndex`, or `null`. */
-  const memberResetLine = (leafIndex: number): string | null => {
-    const hit = resetMembers().find((m) => m.leaves.includes(leafIndex));
-    if (hit === undefined) return null;
-    return memberRowResetLine(memberRowResetFlag({ branch: hit.branch, applied: hit.applied }));
-  };
-
-  /** UX 16.5 — the old identity OWNS this group: the notice above the pending
-   *  notice, naming the person; `null` otherwise. */
-  const ownedByResetNotice = createMemo<{ name: string; canRecreate: boolean } | null>(() => {
-    // Replaced by `This group was closed. Continue in …` once a notice landed.
-    if (groupClosed.closedOf(props.entry.groupIdB64) !== undefined) return null;
-    const hit = resetMembers().find((m) => m.branch === "owned-by-reset");
-    if (hit === undefined) return null;
-    const name =
-      contactNameByAccount(hit.entry.accountIdB64) ?? memberName(hit.entry.reset.previousKeyB64);
-    return { name, canRecreate: ownRole() === "admin" && !membershipEnded() };
-  });
-
-  /** UX 16.1 — the bubble warning under a sender's name, or `null`. */
-  const bubbleWarningOf = (senderKeyB64: string | undefined): string | null => {
-    const rowKey = bubbleWarningFor(senderKeyB64, pendingKeysByRow());
-    if (rowKey === null) return null;
-    return BUBBLE_WARNING(memberName(rowKey));
-  };
-
-  /** The warning line was pressed: the contact screen of the person whose
-   *  new keys sent the message. */
-  const openResetContact = (senderKeyB64: string): void => {
-    const rowKey = pendingKeysByRow().get(senderKeyB64);
-    if (rowKey === undefined) return;
-    navigate(paths.contact(base64UrlEncodeNoPad(base64Decode(rowKey))));
-  };
-
-  /** UX 16.1 — a join request from the NEW keys of a flagged contact: Approve
-   *  is disabled with the sentence, Reject stays live. */
-  const joinBlockedLine = (joinerKey: Uint8Array): string | null => {
-    let accountKey: Uint8Array | undefined;
-    try {
-      accountKey = props.entry.group.pendingExternalJoinAccountKey(joinerKey) ?? undefined;
-    } catch {
-      accountKey = undefined;
-    }
-    const candidate = accountKey === undefined ? base64Encode(joinerKey) : base64Encode(accountKey);
-    const rowKey = pendingKeysByRow().get(candidate);
-    if (rowKey === undefined) return null;
-    return keysResetVerifyFirst(memberName(rowKey));
-  };
-
-  /** The closed record of this conversation, re-read on any write. */
-  const closedRecord = createMemo(() => {
-    closedVersion();
-    const s = auth.state();
-    if (s.kind !== "session") return undefined;
-    return loadConversationClosed(s.account.accountId, props.entry.groupIdB64);
-  });
-
-  /** The ONE close state (open / ended / one-to-one closed / group closed). */
-  const closeState = createMemo(() =>
-    conversationCloseKind({
-      membership: membership(),
-      closedRecord: closedRecord(),
-      groupClosed: groupClosed.closedOf(props.entry.groupIdB64),
-    }),
-  );
-  /** Nothing may be sent into the conversation. */
-  const conversationClosed = (): boolean => closeKindClosed(closeState());
-  /** UX 16.4 "nothing is sent, nothing arrives": a closed one-to-one is not
-   *  polled by this route any more (the background receive skips it too). An
-   *  ended membership already stops the loop; a closed GROUP keeps receiving,
-   *  since it is closed, not ended. */
-  const receiveSuspended = (): boolean =>
-    membershipEnded() || closeState().kind === "one-to-one-keys-reset";
-
-  /** The contact a one-to-one close names, and whether they are still
-   *  unverified on this device. */
-  const closedContact = createMemo<{ name: string | null; unverified: boolean } | null>(() => {
-    const close = closeState();
-    if (close.kind !== "one-to-one-keys-reset") return null;
-    const accountIdB64 = close.record.contactAccountIdB64;
-    return {
-      name: contactNameByAccount(accountIdB64),
-      unverified: flagged().some((f) => f.accountIdB64 === accountIdB64),
-    };
-  });
-
-  /** The composer slot for the two reset closes (the ended slot is
-   *  `composerWithdrawn`), narrowed to the `closed` variant. */
-  const closedComposer = createMemo(() => {
-    const close = closeState();
-    if (close.kind !== "one-to-one-keys-reset" && close.kind !== "group-closed") return null;
-    const contact = closedContact();
-    const state = closedComposerState(close, input(), {
-      contactUnverified: contact?.unverified ?? false,
-      contactName: contact?.name ?? null,
-      joinedSuccessor:
-        close.kind === "group-closed" &&
-        close.successorGroupIdB64 !== null &&
-        chats.get(close.successorGroupIdB64) !== undefined,
-    });
-    return state.kind === "closed" ? state : null;
-  });
-
-  /** The terminal row of a reset close, or `null`. */
-  const closedTerminal = createMemo(() => {
-    const close = closeState();
-    const contact = closedContact();
-    return closedTerminalRow(close, {
-      contactName: contact?.name ?? t("chat.members.unnamed"),
-      closerName: groupCloserName(),
-    });
-  });
-
-  /** UX 16.5: the admin who posted the group-closed notice. The envelope
-   *  carries no author; the gate resolved the sender's account key at
-   *  receipt (C-68) and the store keeps it beside the notice, so the name is
-   *  resolved here, at render time, and survives a reload. The unnamed label
-   *  is the fallback only when no key was stored. */
-  const groupCloserName = (): string => {
-    const key = groupClosed.closedOf(props.entry.groupIdB64)?.closedByKeyB64;
-    return key === undefined ? t("chat.members.unnamed") : memberName(key);
-  };
-
-  /** The successor's name for the panel line: the shared name, else the
-   *  registry label, else the generic one. */
-  const successorName = (): string => {
-    const close = closeState();
-    if (close.kind !== "group-closed" || close.successorGroupIdB64 === null) {
-      return t("chat.group.default_name");
-    }
-    const successor = chats.get(close.successorGroupIdB64);
-    return (
-      groupNames.nameOf(close.successorGroupIdB64) ??
-      successor?.label ??
-      t("chat.group.default_name")
-    );
-  };
-
-  /** The successor's route, once this device has joined it. */
-  const successorHref = (): string | null => {
-    const close = closeState();
-    if (close.kind !== "group-closed" || close.successorGroupIdB64 === null) return null;
-    const successor = chats.get(close.successorGroupIdB64);
-    if (successor === undefined) return null;
-    return paths.chat(base64UrlEncodeNoPad(successor.group.groupId));
-  };
-
-  /** The contact screen of the one-to-one's peer (`Open contact`). */
-  const closedContactHref = (): string | null => {
-    const close = closeState();
-    if (close.kind !== "one-to-one-keys-reset") return null;
-    const row = loadAccepted().find(
-      (c) => accountIdB64OfHex(c.accountIdHex) === close.record.contactAccountIdB64,
-    );
-    if (row === undefined) return null;
-    return paths.contact(base64UrlEncodeNoPad(base64Decode(row.signaturePubkeyB64)));
-  };
-
-  /** UX 16.4 `Start a new chat`: creates the chat with the NEW keys exactly
-   *  as a first chat is created — the contact store already holds the
-   *  verified key after confirmation — and opens it. */
-  async function startNewChatAfterReset(): Promise<void> {
-    const close = closeState();
-    if (close.kind !== "one-to-one-keys-reset") return;
-    const row = loadAccepted().find(
-      (c) => accountIdB64OfHex(c.accountIdHex) === close.record.contactAccountIdB64,
-    );
-    if (row === undefined || row.accountIdHex === undefined) return;
-    const accountId = hexToBytes(row.accountIdHex);
-    if (accountId === null) return;
-    setError(null);
-    setBusy(true);
-    try {
-      const result = await contacts.startGroupWith(
-        props.requireIdentity(),
-        accountId,
-        base64Decode(row.signaturePubkeyB64),
-        "chat",
-      );
-      const active = chats.add({ label: resolvePeerName(), group: result.group });
-      profiles.groupJoined(active.groupIdB64);
-      const s = auth.state();
-      if (s.kind === "session") await chats.persistSnapshot(s.account.accountId);
-      navigate(paths.chat(base64UrlEncodeNoPad(active.group.groupId)));
-    } catch (err) {
-      const text = contactsErrorText(
-        err,
-        "contacts.error.start_chat",
-        memberName(row.signaturePubkeyB64),
-      );
-      const href = keysResetOpenContactHref(err, loadAccepted());
-      setErrorOpenContact(href === null ? null : { text, href });
-      setError(text);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  /** In-flight evictions, keyed on `previousKey`, so a re-run of the driver
-   *  (every roster or store change) cannot propose twice. */
+  /** In-flight removals, keyed on the superseded key, so a re-run of the
+   *  driver (every roster or store change) cannot propose twice. */
   const evictionInFlight = new Set<string>();
 
   /**
-   * UX 16.3 — propose, silently, the removal of every leaf resolving to a
-   * flagged contact's old key, in a group this device's account administers
-   * and the old identity does NOT own. Rides the same path as a `Remove` the
-   * admin would tap — the membership retry (re-sent when a full queue
-   * drains), the own-request record (re-sent when a sweep drops it), the
-   * sweep — minus the confirmation: there is no decision, the old devices
-   * are not the person's any more.
+   * R.7 case 2 — propose the removal of one leaf bound to a superseded key.
+   * Rides the same path as a `Remove` the admin would tap (the membership
+   * retry, the own-request record, the sweep) minus the confirmation: there
+   * is no decision, the old devices are not the person's any more. Silent
+   * on failure; the next roster change tries again.
    */
-  async function proposeResetEviction(previousKeyB64: string, leaves: number[]): Promise<void> {
-    const leafIndex = leaves[0];
-    if (leafIndex === undefined || evictionInFlight.has(previousKeyB64)) return;
-    evictionInFlight.add(previousKeyB64);
+  async function proposeResetEviction(supersededKeyB64: string, leafIndex: number): Promise<void> {
+    if (evictionInFlight.has(supersededKeyB64)) return;
+    evictionInFlight.add(supersededKeyB64);
     try {
       const removeRun = () =>
         contacts.removeMemberFromGroup(props.requireIdentity(), props.entry.group, leafIndex);
       const proposed = await withMembershipRetry(
-        { kind: "remove", subjectKeyB64: previousKeyB64 },
+        { kind: "remove", subjectKeyB64: supersededKeyB64 },
         removeRun,
       );
       chat.markOwnPublishedCommit(
@@ -3402,108 +3203,75 @@ function ChatView(props: {
       setMemberCount(peopleCountOf(props.entry.group));
       setMembersVersion(membersVersion() + 1);
     } catch (err) {
-      // Silent by design: the row keeps `Being removed.` only once a request
-      // is actually pending; a refusal leaves the flag alone and the next
-      // open tries again (UX 16.3).
       // eslint-disable-next-line no-console
-      console.warn("[keys-reset] eviction proposal failed", err);
+      console.warn("[reset-repair] removal of a superseded leaf not proposed", err);
     } finally {
-      evictionInFlight.delete(previousKeyB64);
+      evictionInFlight.delete(supersededKeyB64);
     }
   }
 
-  /**
-   * The driver of the three branches, re-run on every roster / store / role
-   * change: close a one-to-one with the old keys (16.4), propose the eviction
-   * where this device may (16.3). The owned group (16.5) and the flag-only
-   * cases need no action — their state renders from `resetMembers`.
-   */
   createEffect(() => {
-    const s = auth.state();
-    if (s.kind !== "session") return;
-    const accountIdB64 = s.account.accountId;
-    const members = resetMembers();
+    const keys = supersededKeys();
+    if (keys.size === 0) return;
+    const roster = rosterLeaves();
     const pending = pendingRequests();
     const ended = membershipEnded();
+    const owner = ownerKeyB64();
+    const role = ownRole();
+    const kind = isGroupChat() ? "group" : "chat";
     untrack(() => {
-      for (const m of members) {
-        if (m.branch === "one-to-one") {
-          const close = oneToOneClosesForReset({
-            kind: "chat",
-            personKeysB64: rosterLeaves()?.map((l) => base64Encode(personKeyOf(l))),
-            ownPersonKeyB64: ownPersonKeyB64(chats.identity()),
-            flaggedPreviousKeys: new Map(
-              flagged().map((f) => [f.reset.previousKeyB64, f.accountIdB64] as const),
-            ),
-          });
-          if (close !== null && closedRecord() === undefined) {
-            recordConversationClosed(accountIdB64, props.entry.groupIdB64, {
-              reason: "one-to-one-keys-reset",
-              contactAccountIdB64: close.contactAccountIdB64,
-              previousKeyB64: close.previousKeyB64,
-              closedAtMs: Date.now(),
-            });
-          }
-          continue;
-        }
-        const alreadyPending =
-          pending.some(
-            (r) =>
-              r.kind === "remove" && r.targetLeaf !== undefined && m.leaves.includes(r.targetLeaf),
-          ) || evictionInFlight.has(m.entry.reset.previousKeyB64);
-        if (
-          shouldProposeEviction({
-            branch: m.branch,
-            applied: m.applied,
-            alreadyPending,
-            membershipEnded: ended,
-          })
-        ) {
-          void proposeResetEviction(m.entry.reset.previousKeyB64, m.leaves);
-        }
+      const leaves = roster?.map((l) => ({
+        leafIndex: l.leafIndex,
+        personKeyB64: base64Encode(personKeyOf(l)),
+      }));
+      for (const supersededKeyB64 of keys.keys()) {
+        if (resetCase({ kind, ownerKeyB64: owner, supersededKeyB64 }) !== "repair") continue;
+        const plan = repairPlan({
+          ownRole: role,
+          roster: leaves,
+          supersededKeyB64,
+          pendingRemoveLeaves: pending
+            .filter((r) => r.kind === "remove" && r.targetLeaf !== undefined)
+            .map((r) => r.targetLeaf as number),
+          removeInFlight: evictionInFlight.has(supersededKeyB64),
+          membershipEnded: ended,
+        });
+        if (plan.removeLeaf !== null) void proposeResetEviction(supersededKeyB64, plan.removeLeaf);
       }
     });
   });
 
-  /** UX 16.3 — the system row's text for a landed eviction, naming the
-   *  contact through the account id; `null` (the generic row) when this
-   *  device no longer holds the contact. */
-  const resetRemovedLine = (contactAccountIdB64: string): string | null => {
-    const name = contactNameByAccount(contactAccountIdB64);
-    return name === null ? null : SYSTEM_REMOVED(name);
-  };
-
   /**
-   * UX 16.3 "when the sweep lands" — a commit removed a flagged (or since
-   * verified) contact's old key from the roster: the generic `Members
-   * changed` row for that commit becomes `{name} reset their account keys.
-   * Their old devices were removed from this group.` on this device. Called
-   * at both shrink sites (the poll and this device's own sweep) with the
-   * PERSON keys either side; a torn read decides nothing.
+   * R.7 case 2 / UX 16.5 — a commit that only swapped the devices of people
+   * who stay leaves no `Members changed` row. Called at both membership-diff
+   * sites (the poll and this device's own sweep) with the PERSON keys either
+   * side; people are compared by the account this device knows each key
+   * under, so a superseded key and its successor are one person. A torn read
+   * suppresses nothing.
    */
-  function noteResetEvictionLanded(
+  function suppressDeviceSwapRow(
     personsBefore: readonly string[] | null,
     personsAfter: readonly string[] | null,
     commitMessageId: number | undefined,
-    createdAt: string,
   ): void {
-    if (personsBefore === null || personsAfter === null) return;
-    const departed = personsBefore.filter((k) => !personsAfter.includes(k));
-    if (departed.length === 0) return;
-    const accepted = loadAccepted();
-    const aliases = loadKeyAliases();
-    for (const key of departed) {
-      // Flagged now, or verified since (the key is then a retired alias of
-      // the contact's row): either way the person reset their keys.
-      const row =
-        flagged().find((f) => f.reset.previousKeyB64 === key)?.contact ??
-        (aliases.has(key) ? contactByAnyKey(key, accepted, aliases) : undefined);
-      const accountIdB64 = accountIdB64OfHex(row?.accountIdHex);
-      if (row === undefined || accountIdB64 === null) continue;
-      const messageId =
-        commitMessageId ??
-        rows().reduce((max, r) => (r.kind === "incoming" ? Math.max(max, r.event.messageId) : max), 0);
-      const without = rows().filter(
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const superseded = supersededKeys();
+    const swap = deviceSwapAcrossCommits({
+      personKeysBefore: personsBefore,
+      personKeysAfter: personsAfter,
+      accountOfKey: (k) => superseded.get(k) ?? accountIdB64OfKey(k),
+      isSuperseded: (k) => superseded.has(k),
+      awaited: awaitedSwaps(s.account.accountId, props.entry.groupIdB64),
+      nowMs: Date.now(),
+    });
+    setAwaitedSwaps(s.account.accountId, props.entry.groupIdB64, swap.awaited);
+    if (!swap.suppress) return;
+    const messageId =
+      commitMessageId ??
+      rows().reduce((max, r) => (r.kind === "incoming" ? Math.max(max, r.event.messageId) : max), 0);
+    setRows(
+      rows().filter(
         (r) =>
           !(
             r.kind === "incoming" &&
@@ -3511,65 +3279,9 @@ function ChatView(props: {
             r.event.systemKind === "commit" &&
             r.event.messageId === messageId
           ),
-      );
-      setRows([
-        ...without,
-        {
-          kind: "incoming",
-          event: {
-            kind: "system",
-            messageId,
-            systemKind: "keys-reset-removed",
-            contactAccountIdB64: accountIdB64,
-            createdAt,
-          },
-        },
-      ]);
-    }
-  }
-
-  /** UX 16.5 — the Recreate group sheet. */
-  const [recreateOpen, setRecreateOpen] = createSignal(false);
-  /** The flagged owner of this group, if any. */
-  const resetOwnerEntry = (): FlaggedEntry | undefined =>
-    resetMembers().find((m) => m.branch === "owned-by-reset")?.entry;
-  /** The roster as the sheet takes it: one row per person, with the account
-   *  id and the CURRENT key from the contact store where this device holds
-   *  one (an alias — a retired key — resolves to the row too). */
-  const recreateRoster = createMemo(() => {
-    acceptedVersion();
-    const accepted = loadAccepted();
-    const aliases = loadKeyAliases();
-    return members().map((m) => {
-      const keyB64 = base64Encode(m.sigPubkey);
-      const row = contactByAnyKey(keyB64, accepted, aliases);
-      return {
-        personKeyB64: keyB64,
-        label: memberName(keyB64),
-        accountIdHex: row?.accountIdHex,
-        signaturePubkeyB64: row === undefined ? undefined : row.signaturePubkeyB64,
-      };
-    });
-  });
-  /** The reset owner's NEW identity as a contact of this device, or `null`. */
-  const recreateResetContact = createMemo(() => {
-    const owner = resetOwnerEntry();
-    if (owner === undefined) return null;
-    acceptedVersion();
-    const row = loadAccepted().find(
-      (c) => accountIdB64OfHex(c.accountIdHex) === owner.accountIdB64,
+      ),
     );
-    if (row === undefined || row.accountIdHex === undefined) return null;
-    const unverified = flagged().some((f) => f.accountIdB64 === owner.accountIdB64);
-    return {
-      label: memberName(row.signaturePubkeyB64),
-      accountIdHex: row.accountIdHex,
-      // While unverified the row still holds the OLD key; the sheet never
-      // adds them then. Once verified the row holds the new one.
-      signaturePubkeyB64: unverified ? owner.reset.pendingKeyB64 : row.signaturePubkeyB64,
-      unverified,
-    };
-  });
+  }
 
   /** This device's own signature key, base64 — resolved through the roster
    *  rather than stored, so a leaf renumber cannot make it name someone else.
@@ -3935,6 +3647,15 @@ function ChatView(props: {
     let typingChanged = false;
     const nowMs = Date.now();
     for (const e of events) {
+      // ADR-0065 R.5 / R.8 — a row from a leaf bound to a key an accepted
+      // reset retired (a removed device still holding the old keys) is
+      // dropped before it is stored or shown.
+      if (
+        (e.kind === "application" || e.kind === "op") &&
+        dropsSupersededSender(e.senderKey, supersededKeys())
+      ) {
+        continue;
+      }
       if (e.kind === "op") {
         // ADR-0024 — typing / read-receipt are ephemeral status,
         // not message overlays: fold them into their own state.
@@ -4101,13 +3822,12 @@ function ChatView(props: {
         });
         continue;
       }
-      // ADR-0065 phase 2 (UX 16.5) — an admin closed this group after
-      // recreating it. Through the same gate shape under the same lock; on
-      // accept the conversation takes the closed shape. Never a timeline row.
+      // ADR-0065 R.6 — a successor claim. Judged by the claim rule under the
+      // per-group lock; never a timeline row, whatever the verdict.
       if (e.kind === "group-closed") {
         void groupClosed.receive(props.entry, e).catch((err) => {
           // eslint-disable-next-line no-console
-          console.warn("group-closed receive failed", err);
+          console.warn("successor claim receive failed", err);
         });
         continue;
       }
@@ -4170,13 +3890,6 @@ function ChatView(props: {
       if (e.kind === "registrarSeed") continue;
       // An unrecognised `lakko/…` service envelope: never a row.
       if (e.kind === "serviceEnvelope") continue;
-      // ADR-0065 phase 2 (UX 16.4) — a late message into a closed one-to-one
-      // (an old device that had not learned of the reset) is dropped BEFORE
-      // it is stored: the chat is closed, and rendering it would reopen the
-      // chat in the person's eyes with words from keys that are no longer
-      // the contact's. The receive loop is suspended on this state too;
-      // this is the gate for a batch already in hand.
-      if (dropsLateMessage(closeState().kind === "one-to-one-keys-reset", e.kind)) continue;
       if (incomingIds.has(e.messageId)) continue;
       fresh.push({ kind: "incoming", event: e });
     }
@@ -4202,7 +3915,7 @@ function ChatView(props: {
    * same poll silently.
    */
   async function refresh(): Promise<void> {
-    if (receiveSuspended()) return;
+    if (membershipEnded()) return;
     setError(null);
     setBusy(true);
     try {
@@ -4253,10 +3966,6 @@ function ChatView(props: {
     // (§6.2.13): it costs nothing, and whether a rejoin wants it reset is the
     // rejoin path's question, not this one's.
     if (membershipEnded()) return "membership-ended";
-    // ADR-0065 phase 2 (UX 16.4) — nothing arrives in a closed one-to-one:
-    // the rows the old devices may still post are left on the DS. The same
-    // gate shape as the ended one, for the same callers.
-    if (receiveSuspended()) return "membership-ended";
     {
       // ADR-0043 — baseline for the membership diff, captured BEFORE the poll
       // applies any commit. A Commit carries no membership delta out of the
@@ -4273,7 +3982,7 @@ function ChatView(props: {
       // for it a second time. The pre-fetch values stand only for the
       // `cursor-moved` path, which returns before reading them.
       let membersBeforePoll = memberSignatureKeys(props.entry.group);
-      // ADR-0065 phase 2 — the PERSON keys, for the eviction row.
+      // ADR-0065 R.7 case 2 — the PERSON keys, for the device-swap row.
       let personsBeforePoll: string[] | null = personKeysOrNull(props.entry.group);
       let epochBeforePoll = readEpoch();
       const result = await chat.pollMessages(
@@ -4306,8 +4015,27 @@ function ChatView(props: {
       // With the receive loop parked on a long poll, this is the COMMON outcome
       // of a user-initiated refresh racing it, not a corner case.
       if (result.outcome === "cursor-moved") return result.outcome;
+      // ADR-0065 R.7 case 1 — a re-sent message whose original this device
+      // already holds in an older segment is not a row here (the same rule
+      // the background receive applies, `resend-receive.ts`).
+      const resendAliases = loadKeyAliases();
+      const resendHeld = await heldResendPredicate(result.events, {
+        receivedGroupId: props.entry.group.groupId,
+        conversationHexOf: (id) => lineageView.conversationHexOf(id),
+        segmentIndexOf: (id) => lineageView.segmentIndexOf(id),
+        ownPersonKeyB64: ownPersonKeyB64(chats.identity()),
+        canonical: (k) => resendAliases.get(k) ?? k,
+        loadLog: async () => {
+          const account = accountIdB64ForLog();
+          if (account === null) return null;
+          const deviceKey = await getDeviceKey(account);
+          return deviceKey === null ? null : loadMessageLog(account, deviceKey);
+        },
+      });
       // ADR-0045 — the shared consumer; see `consumeEvents`.
-      consumeEvents(result.events);
+      consumeEvents(
+        result.events.filter((e) => !(e.kind === "application" && resendHeld(e))),
+      );
       // The component was torn down while this batch was being applied (a
       // route change during a long poll). The rows are decrypted and the
       // cursor has moved, but the debounced timeline persist died with the
@@ -4377,17 +4105,16 @@ function ChatView(props: {
             membersBeforePoll,
             currentMemberKeys,
           );
-          // ADR-0065 phase 2 (UX 16.3) — a flagged contact's old devices
-          // left in this batch: the row names the person on this device.
+          // ADR-0065 R.7 case 2 — a batch that only swapped the devices of
+          // people who stay leaves no `Members changed` row.
           {
             const commit = [...result.events]
               .reverse()
               .find((e) => e.kind === "system" && e.systemKind === "commit");
-            noteResetEvictionLanded(
+            suppressDeviceSwapRow(
               personsBeforePoll,
               personKeysOrNull(props.entry.group),
               commit?.messageId,
-              commit?.createdAt ?? new Date().toISOString(),
             );
           }
           // ADR-0045 UX §6.2.8 item 3 — and this is the site the finding was
@@ -4430,6 +4157,10 @@ function ChatView(props: {
         // eslint-disable-next-line no-console
         console.warn("ADR-0045 tail sweep failed", err);
       });
+      // ADR-0065 R.6 / R.7 — the conversation's continuity pass, at the tail
+      // of the open chat's own poll (the background sweep leaves this group
+      // to this view). Silent; a no-op unless a reset was accepted.
+      receive.continuityPass(props.entry.groupIdB64);
       return result.outcome;
     }
   }
@@ -4495,7 +4226,7 @@ function ChatView(props: {
   }
   function startReceiveLoop(): void {
     void runLongPollLoop(receiveLoopAbort.signal, {
-      shouldContinue: () => !receiveSuspended(),
+      shouldContinue: () => !membershipEnded(),
       isPaused: receiveLoopPaused,
       waitUntilResumed: (signal) => receiveLoopResume.wait(signal),
       tick: async (signal) => {
@@ -4594,17 +4325,50 @@ function ChatView(props: {
     /** ADR-0052 — the reply reference the row carries, re-sent verbatim on
      *  Retry. */
     reply: ReplyRef | undefined,
+    /** When a held message was first held, so the give-up counts from then. */
+    heldAtMs: number = Date.now(),
+    /** ADR-0052 — the forward attribution of a held forward into this
+     *  conversation; `undefined` for everything typed here. */
+    forward: ForwardRef | undefined = undefined,
   ): Promise<void> {
     setRows([...withSendAck(rows(), tempId, "pending")]);
+    // ADR-0065 R.2 / R.7 case 1 — a one-to-one: the peer's identity is
+    // checked when the last check is old (an accepted reset re-pins and the
+    // route below then holds), and a message is NEVER sent into a session
+    // only removed devices can read. It is held, in the ordinary sending
+    // state, until the conversation's successor exists on this device.
+    if (!isGroupChat()) {
+      await Promise.race([
+        checkPeerIdentity(false),
+        new Promise<void>((resolve) => setTimeout(resolve, SEND_IDENTITY_CHECK_WAIT_MS)),
+      ]);
+      const route = sendRoute({ kind: "chat", unrepairableKeyB64: unrepairableKeyNow() });
+      const verdict = heldVerdict({ route, heldAtMs, nowMs: Date.now() });
+      if (verdict === "give-up") {
+        setRows([...withSendAck(rows(), tempId, "failed")]);
+        setError(() => sendFailureNotice(null));
+        return;
+      }
+      if (verdict === "wait") {
+        holdOutgoing(
+          tempId,
+          { text, attached, reply, replyGroupIdB64: props.entry.groupIdB64, forward },
+          heldAtMs,
+        );
+        return;
+      }
+    }
     try {
       // 1.19c2: compose the JSON envelope from (text, refs).
       // Empty refs ⇒ pure-text envelope; non-empty ⇒ multi-
       // attachment envelope via the wasm EnvelopeBuilder. A reply is the
       // same envelope plus the reference (ADR-0052).
       const envelopeBytes =
-        reply === undefined
-          ? await composeEnvelope(text, attached)
-          : await composeReplyEnvelope(text, attached, reply);
+        forward !== undefined
+          ? await composeForwardEnvelope(text, attached, forward)
+          : reply === undefined
+            ? await composeEnvelope(text, attached)
+            : await composeReplyEnvelope(text, attached, reply);
       const result = await chat.sendMessage(
         props.requireIdentity(),
         props.entry.group,
@@ -4624,6 +4388,17 @@ function ChatView(props: {
         ),
       );
     } catch (err) {
+      // The publish itself refused the superseded session (a reset accepted
+      // between the route above and the send): held, exactly as if the
+      // route had said so.
+      if (err instanceof HeldForSuccessor) {
+        holdOutgoing(
+          tempId,
+          { text, attached, reply, replyGroupIdB64: props.entry.groupIdB64, forward },
+          heldAtMs,
+        );
+        return;
+      }
       setRows([...withSendAck(rows(), tempId, "failed")]);
       // ADR-0053 contract point 5 — a proof refused because this device's
       // clock is wrong says so; anything else keeps the ordinary copy.
@@ -4659,12 +4434,12 @@ function ChatView(props: {
     setEditingId(null);
     setError(null);
     try {
-      const envelopeBytes = await composeEditEnvelope(messageId, newText);
-      await chat.sendMessage(
-        props.requireIdentity(),
-        props.entry.group,
-        envelopeBytes,
-      );
+      // ADR-0065 R.7 case 1 — in a superseded one-to-one an op is applied
+      // here and never sent: its target exists only in the old session.
+      if (opRouteNow() === "send") {
+        const envelopeBytes = await composeEditEnvelope(messageId, newText);
+        await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+      }
       // Apply locally (no echo). Author == us, so the gate the
       // receive loop runs would accept it; we mirror that here.
       setMsgOps(applyOp(msgOps(), { op: "edit", target: messageId, text: newText }));
@@ -4677,12 +4452,10 @@ function ChatView(props: {
    *  locally, drop its pin records. The single delete and the bulk one both
    *  run this (section 8). A throw means this message was not deleted. */
   async function deleteOne(messageId: number): Promise<void> {
-    const envelopeBytes = await composeDeleteEnvelope(messageId);
-    await chat.sendMessage(
-      props.requireIdentity(),
-      props.entry.group,
-      envelopeBytes,
-    );
+    if (opRouteNow() === "send") {
+      const envelopeBytes = await composeDeleteEnvelope(messageId);
+      await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+    }
     setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId }));
     // Section 4.1 — a deleted message leaves the bar and its pin records
     // go with it.
@@ -4743,12 +4516,10 @@ function ChatView(props: {
       return;
     }
     try {
-      const envelopeBytes = await composeReactionEnvelope(messageId, emoji);
-      await chat.sendMessage(
-        props.requireIdentity(),
-        props.entry.group,
-        envelopeBytes,
-      );
+      if (opRouteNow() === "send") {
+        const envelopeBytes = await composeReactionEnvelope(messageId, emoji);
+        await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+      }
       // Our own identity, not our own leaf: the chip's "mine" test
       // and the peers' fold must agree on one value that survives a
       // renumber.
@@ -4782,6 +4553,9 @@ function ChatView(props: {
    *  (these signals are non-essential; the next one supersedes a
    *  dropped one). */
   async function publishEphemeral(envelopeBytes: Uint8Array): Promise<void> {
+    // ADR-0065 R.7 case 1 — a typing signal or a read receipt is not sent
+    // into a superseded one-to-one either (the publish would refuse it).
+    if (opRouteNow() !== "send") return;
     try {
       await chat.sendMessage(
         props.requireIdentity(),
@@ -5325,6 +5099,31 @@ function ChatView(props: {
       mediaJobs.delete(job.tempId);
       setMediaUpload(job.tempId, null);
     } catch (err) {
+      // ADR-0065 R.7 case 1 — the bytes are uploaded and the session is
+      // superseded: the message is held for the successor like a typed one,
+      // as its uploaded reference (the row stays in the sending state).
+      if (err instanceof HeldForSuccessor && job.uploaded !== undefined) {
+        const uploaded = job.uploaded;
+        mediaJobs.delete(job.tempId);
+        setMediaUpload(job.tempId, null);
+        setRows(
+          rows().map((r) =>
+            r.kind === "outgoing" && r.tempId === job.tempId
+              ? {
+                  kind: "outgoing" as const,
+                  tempId: r.tempId,
+                  plaintext: "",
+                  attachments: [uploaded],
+                  ack: "pending" as const,
+                  authorKey: r.authorKey,
+                  ...(job.reply === undefined ? {} : { reply: job.reply }),
+                }
+              : r,
+          ),
+        );
+        holdOutgoing(job.tempId, { text: "", attached: [uploaded], reply: job.reply }, Date.now());
+        return;
+      }
       setMediaUpload(job.tempId, "failed");
       setMediaRowAck(job.tempId, "failed");
       if (err instanceof AttachmentSizeError) {
@@ -5660,20 +5459,9 @@ function ChatView(props: {
       await sweepNow();
     } finally {
       setBusy(false);
-      // UX 16.5 — the Recreate group sheet is open over this chat and owns
-      // the outcome: it closes on full success and stays with the names
-      // otherwise. Reported here in `finally` so a failed sweep can never
-      // leave its `Creating...` state (not dismissible) up for good.
-      if (setup.reportTo === "recreate-sheet") {
-        dispatchRecreateProgress({
-          kind: "adds-finished",
-          groupIdB64: props.entry.groupIdB64,
-          failed,
-        });
-      }
     }
     void refresh();
-    if (failed.length > 0 && setup.reportTo === undefined) {
+    if (failed.length > 0) {
       setError(() => t("chat.members.add.error.some_failed", { names: joinList(failed) }));
     }
   }
@@ -5971,13 +5759,6 @@ function ChatView(props: {
   async function onApproveJoin(proposalRef: Uint8Array): Promise<void> {
     setError(null);
     setNotice(null);
-    // ADR-0065 phase 2 (UX 16.1) — the button is disabled for a flagged
-    // joiner; this is the same rule for a stale render.
-    const blocked = joinBlockedLine(proposalRef);
-    if (blocked !== null) {
-      setError(() => blocked);
-      return;
-    }
     setBusy(true);
     try {
       // ADR-0045 UX §7 — an approve refused by a full pending set now carries
@@ -6196,6 +5977,16 @@ function ChatView(props: {
   onMount(() => {
     void (async (): Promise<void> => {
       await hydrateFromLog();
+      // ADR-0065 R.7 case 1 — messages held for this conversation go out if
+      // this view opened its successor; R.2 — opening a one-to-one checks the
+      // peer's published identity.
+      // After a reload they are read back from the message log first.
+      const heldAccount = accountIdB64ForLog();
+      if (heldAccount !== null) await restoreHeldSends(heldAccount);
+      // What the background flush sent while this view was mounting.
+      showFlushedHeldSends();
+      resumeHeldSends();
+      void checkPeerIdentity(false);
       // Attached only once the timeline is seeded from the log: the consumer
       // de-duplicates against the rows it holds, and events drained into an
       // empty timeline would stop the seed from running.
@@ -6324,17 +6115,15 @@ function ChatView(props: {
     readCursorTimer = setTimeout(() => {
       readCursorTimer = null;
       lastBroadcastReadId = target;
-      const groupId = groupIdBytes();
-      // Encode the messageId as 8 big-endian bytes so the
-      // wire shape stays stable regardless of how JS strings
-      // serialise BigInt. Receivers compare the raw bytes
-      // against their own per-group highest-id.
-      const idBytes = new Uint8Array(8);
-      let v = target;
-      for (let i = 7; i >= 0; i -= 1) {
-        idBytes[i] = Number(v & 0xffn);
-        v >>= 8n;
-      }
+      // ADR-0065 R.5 — the read position is the CONVERSATION's: keyed on its
+      // id, and (past the first group) carrying which of its groups the
+      // message id belongs to. In the first group this is the 8 big-endian
+      // bytes every build has always written.
+      const groupId = conversationIdBytes();
+      const idBytes = encodeReadPosition({
+        segment: lineageView.segmentIndexOf(props.entry.group.groupId),
+        messageId: Number(target),
+      });
       void sync
         .setReadCursor(groupId, idBytes, BigInt(Date.now()))
         .catch((err: unknown) => {
@@ -6382,6 +6171,230 @@ function ChatView(props: {
     }
   });
 
+  /** ADR-0065 R.5 — fill `historyRows` from the logs of the conversation's
+   *  older groups. Pure display: nothing here writes anywhere. */
+  function seedHistoryRows(log: NonNullable<Awaited<ReturnType<typeof loadMessageLog>>>): void {
+    const segments = historySegments();
+    const history: TimelineRow[] = [];
+    const ops = new Map<number, MessageOpState>();
+    segments.forEach((segment, index) => {
+      const stored = log.groups[hexOf(segment.group.groupId)];
+      if (stored === undefined) return;
+      const distance = segments.length - index;
+      for (const m of stored.messages) {
+        history.push(asHistoryRow(persistedToTimelineRow(m), distance));
+      }
+      for (const [id, op] of opsFromPersisted(stored.messages)) {
+        ops.set(historyRowId(id, distance), op);
+      }
+    });
+    setHistoryRows(history);
+    setHistoryOps(ops);
+  }
+
+  function reloadHistoryRows(): void {
+    void (async () => {
+      const accountIdB64 = accountIdB64ForLog();
+      if (accountIdB64 === null) return;
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) return;
+      const log = await loadMessageLog(accountIdB64, deviceKey);
+      if (log !== null) seedHistoryRows(log);
+    })().catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("conversation history load failed", err);
+    });
+  }
+
+  // The lineage can arrive after this view mounted (the synced state loads
+  // on its own schedule, and a claim can land while the chat is open): the
+  // history follows the set of older groups this device holds.
+  createEffect(
+    on(
+      () => historySegments().map((g) => g.groupIdB64).join(","),
+      () => reloadHistoryRows(),
+      { defer: true },
+    ),
+  );
+  // R.7 case 3 — members who have not moved yet still write in the old
+  // group; the background receive files their rows into its log, and they
+  // appear here, above, as they arrive.
+  onMount(() => {
+    const unsubscribe = subscribeMessageLogChanged((account) => {
+      if (historySegments().length > 0 && account === accountIdB64ForLog()) reloadHistoryRows();
+    });
+    onCleanup(unsubscribe);
+  });
+
+  // -------------------------------------------------------------------------
+  // ADR-0065 R.2 / R.7 case 1 — the held send and the peer's identity check
+  // -------------------------------------------------------------------------
+
+  const conversationHex = (): string => hexOf(conversationIdBytes());
+
+  /** The superseded account that makes THIS group unrepairable, read off the
+   *  live group and store (never a memo: the send path asks right after a
+   *  check may have re-pinned). `null` once the view is on the successor. */
+  function unrepairableKeyNow(): string | null {
+    let owner: string | undefined;
+    try {
+      const o = props.entry.group.roleTableOwner() as Uint8Array | undefined;
+      owner = o === undefined ? undefined : base64Encode(o);
+    } catch {
+      owner = undefined;
+    }
+    return unrepairableBy({
+      kind: isGroupChat() ? "group" : "chat",
+      rosterPersonKeysB64: personKeysOf(props.entry.group),
+      ownPersonKeyB64: ownPersonKeyB64(chats.identity()),
+      ownerKeyB64: owner,
+      supersededKeys: loadSupersededKeys(),
+    });
+  }
+
+  /** What an edit, a delete, a reaction or an ephemeral signal does now
+   *  (`held-send.ts` `opRoute`). */
+  function opRouteNow(): OpRoute {
+    return opRoute({
+      kind: isGroupChat() ? "group" : "chat",
+      unrepairableKeyB64: isGroupChat() ? null : unrepairableKeyNow(),
+    });
+  }
+
+  /**
+   * R.2 "Triggers" — run the fail-closed identity check of the one-to-one's
+   * peer: at open, and before a send when the last check is older than the
+   * re-admission arm's interval. Silent whatever it answers: an accepted
+   * reset re-pins and starts the conversation's move; a refusal and "no
+   * verdict" change nothing here (the refusal copy belongs to actions that
+   * need the new key, and this is not one).
+   */
+  async function checkPeerIdentity(force: boolean): Promise<void> {
+    if (isGroupChat()) return;
+    const key = conversationHex();
+    const now = Date.now();
+    if (!force && !identityCheckDue(lastPeerIdentityCheckAtMs.get(key), now, READMISSION_INTERVAL_MS)) {
+      return;
+    }
+    const peer = peerKeyB64();
+    if (peer === null) return;
+    const accountIdB64 = accountIdB64OfKey(peer);
+    if (accountIdB64 === null) return;
+    lastPeerIdentityCheckAtMs.set(key, now);
+    try {
+      await contacts.checkContactIdentity(base64Decode(accountIdB64), peer);
+    } catch {
+      // Refused, inconclusive or offline: nothing changes, nothing is shown.
+    }
+  }
+
+  /** Give-up timers of the messages this view holds, by row. */
+  const heldGiveUpTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+  /** Hold one outgoing row until the successor exists (the row stays in the
+   *  ordinary sending state). The give-up puts it in the ordinary failed
+   *  state, whose Retry enters the same path again. */
+  function holdOutgoing(tempId: number, payload: HeldMessage, heldAtMs: number): void {
+    const key = conversationHex();
+    heldSends.hold(key, payload, heldAtMs);
+    // Mirrored into the message log, so a reload does not lose it.
+    void persistHeldSends(accountIdB64ForLog());
+    const wait = Math.max(0, heldAtMs + HELD_SEND_GIVE_UP_MS - Date.now());
+    const previous = heldGiveUpTimers.get(tempId);
+    if (previous !== undefined) clearTimeout(previous);
+    heldGiveUpTimers.set(
+      tempId,
+      setTimeout(() => {
+        heldGiveUpTimers.delete(tempId);
+        // Still held: take it back out of the store, leave the rest.
+        const all = heldSends.take(key);
+        let found = false;
+        for (const h of all) {
+          if (!found && h.payload === payload) found = true;
+          else heldSends.hold(key, h.payload, h.heldAtMs);
+        }
+        if (!found) return;
+        void persistHeldSends(accountIdB64ForLog());
+        setRows([...withSendAck(rows(), tempId, "failed")]);
+        setError(() => sendFailureNotice(null));
+      }, wait),
+    );
+  }
+
+  /** Bring the messages held for this conversation into this view: each is
+   *  an outgoing row in the sending state again, and goes out now if the
+   *  group this view opened can take it (the successor), else stays held. */
+  function resumeHeldSends(): void {
+    // Not mirrored to the log at the take: each message is either held again
+    // at once (the mirror is rewritten there) or sent (rewritten below), so a
+    // reload in between still finds it.
+    const taken = heldSends.take(conversationHex());
+    for (const held of taken) {
+      const tempId = nextTempId++;
+      // R.7 case 1 — a reply composed in another segment keeps its quote and
+      // loses its jump target: the id belongs to that segment's journal.
+      const reply = replyForSend(
+        held.payload.reply,
+        held.payload.replyGroupIdB64,
+        props.entry.groupIdB64,
+      );
+      setRows([
+        ...rows(),
+        {
+          kind: "outgoing",
+          tempId,
+          plaintext: held.payload.text,
+          attachments: held.payload.attached,
+          ack: "pending",
+          authorKey: ownSignatureKeyB64(),
+          ...(reply === undefined ? {} : { reply }),
+          ...(held.payload.forward === undefined ? {} : { forward: held.payload.forward }),
+        },
+      ]);
+      void publishOutgoing(
+        tempId,
+        held.payload.text,
+        held.payload.attached,
+        reply,
+        held.heldAtMs,
+        held.payload.forward,
+      ).finally(() => persistHeldSends(accountIdB64ForLog()));
+    }
+  }
+
+  /** What the background flush sent into THIS group while this view was
+   *  mounting (it flushes only while no view is attached): kept until the
+   *  rows are on screen. */
+  let flushedForThisGroup: PersistedMessage[] = [];
+  /** Show the flushed messages this view does not hold yet
+   *  (`held-send.ts` `flushedRowsToShow`). Run when a flush reports and
+   *  again once the log is read, whichever order they came in. */
+  function showFlushedHeldSends(): void {
+    if (flushedForThisGroup.length === 0) return;
+    const shown = new Set<number>();
+    for (const r of rows()) {
+      const id = rowMessageId(r);
+      if (id !== undefined) shown.add(id);
+    }
+    const missing = flushedRowsToShow(shown, flushedForThisGroup);
+    if (missing.length > 0) setRows([...rows(), ...missing.map(persistedToTimelineRow)]);
+  }
+  const unsubscribeHeldFlushed = subscribeHeldFlushed((report) => {
+    if (report.groupIdB64 !== props.entry.groupIdB64) return;
+    flushedForThisGroup = [...flushedForThisGroup, ...report.messages];
+    // Before the log is read the timeline is empty and the seed only fills
+    // an EMPTY timeline: the rows are added after it instead.
+    if (didHydrateFromLog) showFlushedHeldSends();
+  });
+  onCleanup(unsubscribeHeldFlushed);
+
+  onCleanup(() => {
+    // The messages stay in the store (the next mount of the conversation
+    // resumes them); only this view's timers go.
+    for (const timer of heldGiveUpTimers.values()) clearTimeout(timer);
+    heldGiveUpTimers.clear();
+  });
+
   async function hydrateFromLog(): Promise<void> {
     try {
       const accountIdB64 = accountIdB64ForLog();
@@ -6397,6 +6410,8 @@ function ChatView(props: {
       const log = await loadMessageLog(accountIdB64, deviceKey);
       didHydrateFromLog = true;
       if (log === null) return;
+      // ADR-0065 R.5 — the conversation's older groups, read-only, above.
+      seedHistoryRows(log);
       const slot = log.groups[groupIdHexForLog()];
       if (slot === undefined) return;
       const seeded = slot.messages.map(persistedToTimelineRow);
@@ -6509,6 +6524,9 @@ function ChatView(props: {
    *  exists. */
   let highlightTimer: ReturnType<typeof setTimeout> | null = null;
   function jumpToMessage(messageId: number): void {
+    // A reply whose original belongs to another segment carries no jump
+    // target (`held-send.ts` `replyForSend`): the quote is all there is.
+    if (messageId === REPLY_NO_JUMP_TARGET) return;
     const root = scrollEl;
     if (root === undefined) return;
     const target = root.querySelector<HTMLElement>(
@@ -6546,12 +6564,28 @@ function ChatView(props: {
    *  pin nobody agreed to. */
   const maySetSharedPin = (): boolean =>
     !membershipEnded() && (pinsOneToOne() || ownRole() !== "member");
-  const pinStateOf = (messageId: number): PinState => ({
-    pinnedShared: pins.shared(props.entry.groupIdB64).get(messageId)?.pinned === true,
-    pinnedPersonal: pins.personal(props.entry.groupIdB64).has(messageId),
-    maySetShared: maySetSharedPin(),
-    oneToOne: pinsOneToOne(),
-  });
+  /** The stored pin an on-screen row id stands for: the row itself in this
+   *  group, or `(older group, original id)` for a row of an older segment
+   *  (ADR-0065 R.5, `pin-bar.ts` `pinTargetOfRow`). */
+  const pinTargetOf = (rowId: number): PinTarget | null =>
+    pinTargetOfRow({
+      rowId,
+      headGroupIdB64: props.entry.groupIdB64,
+      olderGroupIdsB64: historySegments().map((g) => g.groupIdB64),
+      origin: historyRowOrigin,
+    });
+  const pinStateOf = (rowId: number): PinState => {
+    const target = pinTargetOf(rowId);
+    return {
+      pinnedShared:
+        target !== null && pins.shared(target.groupIdB64).get(target.messageId)?.pinned === true,
+      pinnedPersonal: target !== null && pins.personal(target.groupIdB64).has(target.messageId),
+      // An older segment's shared pin is cleared on this device alone, which
+      // every holder may do; a new shared pin there is refused below.
+      maySetShared: target !== null && target.older ? true : maySetSharedPin(),
+      oneToOne: pinsOneToOne(),
+    };
+  };
   /** Section 4.1 "The row" — `Pin` or `Unpin`, for the action card. */
   const pinLabelOf = (messageId: number): "Pin" | "Unpin" =>
     pinRowDecision(pinStateOf(messageId)).row;
@@ -6564,10 +6598,16 @@ function ChatView(props: {
   async function runPinOption(messageId: number, option: PinOption): Promise<void> {
     setError(null);
     try {
-      if (option.scope === "shared") {
-        await pins.setShared(props.entry, messageId, option.pinned);
+      const target = pinTargetOf(messageId);
+      if (target === null) return;
+      const route = pinRoute({ older: target.older, pinned: option.pinned, scope: option.scope });
+      if (route === "refused") return;
+      if (route === "local-only") {
+        await pins.clearSharedLocally(target.groupIdB64, target.messageId);
+      } else if (option.scope === "shared") {
+        await pins.setShared(props.entry, target.messageId, option.pinned);
       } else {
-        await pins.setPersonal(props.entry.groupIdB64, messageId, option.pinned);
+        await pins.setPersonal(target.groupIdB64, target.messageId, option.pinned);
       }
     } catch (err) {
       setError(errorText(err, "chat.error.pin"));
@@ -6585,23 +6625,41 @@ function ChatView(props: {
   /** What the bar needs about a held message, or `null` when this device
    *  does not hold it (not yet downloaded, older than what is loaded). */
   function heldForPin(messageId: number): HeldForPin | null {
-    const row = rows().find((r) => rowMessageId(r) === messageId);
+    const row = uniqueRows().find((r) => rowMessageId(r) === messageId);
     if (row === undefined) return null;
-    return { deleted: msgOps().get(messageId)?.deleted === true };
+    const op = msgOps().get(messageId) ?? historyOps().get(messageId);
+    return { deleted: op?.deleted === true };
   }
   /** Section 4 — the bar's entries, in its order, with the author and the
    *  excerpt resolved the way the reply quote resolves them (the edited
    *  text of an edited message, the one-word stand-in for a media message). */
   const pinEntries = createMemo((): PinBarEntry[] => {
-    const gid = props.entry.groupIdB64;
+    // ADR-0065 R.5 — the pins of the conversation's older groups stay in
+    // the bar, each under the id its row is drawn with.
+    const older = historySegments();
+    const spanned = pinsAcrossSegments(
+      [
+        ...older.map((segment, index) => ({
+          distanceFromHead: older.length - index,
+          shared: pins.shared(segment.groupIdB64),
+          personal: pins.personal(segment.groupIdB64),
+        })),
+        {
+          distanceFromHead: 0,
+          shared: pins.shared(props.entry.groupIdB64),
+          personal: pins.personal(props.entry.groupIdB64),
+        },
+      ],
+      historyRowId,
+    );
     const items = pinBarItems({
-      shared: pins.shared(gid),
-      personal: pins.personal(gid),
+      shared: spanned.shared,
+      personal: spanned.personal,
       held: heldForPin,
     });
     const out: PinBarEntry[] = [];
     for (const item of items) {
-      const row = rows().find((r) => rowMessageId(r) === item.messageId);
+      const row = uniqueRows().find((r) => rowMessageId(r) === item.messageId);
       if (row === undefined) continue;
       const original =
         row.kind === "outgoing" ? row.plaintext : row.event.kind === "application" ? row.event.text : "";
@@ -6611,7 +6669,8 @@ function ChatView(props: {
           : row.event.kind === "application"
             ? row.event.attachments
             : [];
-      const text = msgOps().get(item.messageId)?.editedText ?? original;
+      const text =
+        (msgOps().get(item.messageId) ?? historyOps().get(item.messageId))?.editedText ?? original;
       const snapshot = replySnapshotFor(
         { text, attachments },
         authorLabelOf(row),
@@ -7046,16 +7105,6 @@ function ChatView(props: {
             {(message) => (
               <div class="form-error">
                 {message()}
-                <Show when={errorOpenContactHref()}>
-              {(href) => (
-                <>
-                  {" "}
-                  <button type="button" class="ghost small" onClick={() => navigate(href())}>
-                    {KEYS_RESET_OPEN_CONTACT()}
-                  </button>
-                </>
-              )}
-            </Show>
               </div>
             )}
           </Show>
@@ -7158,70 +7207,6 @@ function ChatView(props: {
           <MembersCanFindMeSwitch kind="group" groupIdB64={props.entry.groupIdB64} />
           <section aria-label={t("chat.members.title")} class="lk-card" style={{ gap: "8px" }}>
             <h2>{t("chat.members.heading", { count: members().length })}</h2>
-            {/* ADR-0065 phase 2 (UX 16.5) — the owner of this group reset
-                their account keys. ABOVE the pending notice: the honest
-                statement that the group now permanently contains devices
-                nobody can remove, not a lock. An admin gets `Recreate group`;
-                a plain member is told an admin can. Security-critical copy,
-                carried by TEXT. */}
-            <Show when={ownedByResetNotice()}>
-              {(notice) => (
-                <div
-                  role="status"
-                  aria-live="polite"
-                  style={{
-                    margin: "0 0 0.6rem 0",
-                    padding: "0.5rem 0.6rem",
-                    border: "1px solid var(--surface-border)",
-                    "border-radius": "var(--radius-sm)",
-                    background: "var(--surface-bg)",
-                    display: "flex",
-                    "flex-direction": "column",
-                    gap: "0.4rem",
-                  }}
-                >
-                  <span style={{ "font-size": "0.8rem", color: "var(--surface-fg)" }}>
-                    {OWNED_NOTICE(notice().name)}
-                  </span>
-                  <Show
-                    when={notice().canRecreate}
-                    fallback={
-                      <span style={{ "font-size": "0.8rem", color: "var(--surface-muted)" }}>
-                        {OWNED_NOTICE_MEMBER()}
-                      </span>
-                    }
-                  >
-                    <button
-                      type="button"
-                      class="primary small"
-                      style={{ "align-self": "flex-start" }}
-                      disabled={busy()}
-                      onClick={() => setRecreateOpen(true)}
-                    >
-                      {t("group.recreate.action")}
-                    </button>
-                  </Show>
-                </div>
-              )}
-            </Show>
-            {/* UX 16.5 — the old group, closed: what replaces the owned-group
-                notice once the recreating admin's notice landed here. */}
-            <Show when={closeState().kind === "group-closed"}>
-              <div
-                role="status"
-                style={{
-                  margin: "0 0 0.6rem 0",
-                  padding: "0.4rem 0.5rem",
-                  border: "1px solid var(--surface-border)",
-                  "border-radius": "var(--radius-sm)",
-                  background: "var(--surface-bg)",
-                  "font-size": "0.8rem",
-                  color: "var(--surface-fg)",
-                }}
-              >
-                {t("group.closed.panel", { name: successorName() })}
-              </div>
-            </Show>
             {/* ADR-0045 UX §5.1 — the pending notice. TOP of the panel, above
                 everything, and rendered only once at least one request is past
                 the quiet window: the owner is rank 0 and sweeps its own request
@@ -7464,23 +7449,11 @@ function ChatView(props: {
                               </span>
                             );
                           })()}
-                          {/* ADR-0065 phase 2 (UX 16.1) — a request from the NEW
-                              keys of a contact this device has not verified:
-                              `Approve` is disabled with the sentence, `Reject`
-                              stays live, the request stays pending. */}
-                          <Show when={joinBlockedLine(ref)}>
-                            {(line) => (
-                              <span style={{ "font-size": "0.7rem", color: "var(--surface-muted)" }}>
-                                {line()}
-                              </span>
-                            )}
-                          </Show>
                         </div>
                         <span style={{ display: "flex", gap: "0.3rem" }}>
                           <button
                             type="button"
-                            disabled={busy() || joinBlockedLine(ref) !== null}
-                            title={joinBlockedLine(ref) ?? undefined}
+                            disabled={busy()}
                             onClick={() => void onApproveJoin(ref)}
                             style={{
                               "font-size": "0.78rem",
@@ -7724,17 +7697,10 @@ function ChatView(props: {
                   // every message until the commit lands. Dropping the row would
                   // be the membership equivalent of a green E2EE pill over an
                   // unencrypted call.
-                  // ADR-0065 phase 2 (UX 16.3 / 16.5) — a person whose keys were
-                  // reset carries the reset's own words in place of the generic
-                  // pending annotation: `Being removed.` where the eviction is
-                  // proposed, `Account keys reset.` where it cannot be. The
-                  // generic annotation still decides whether Remove is disabled.
                   const annotation = (): string | null =>
-                    memberResetLine(m.leafIndex) ??
                     rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf());
                   const removePending = (): boolean =>
-                    rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf()) !== null ||
-                    memberResetLine(m.leafIndex) === MEMBER_BEING_REMOVED();
+                    rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf()) !== null;
                   const label = (): string => memberListLabel(memberKeyB64);
                   return (
                     <li
@@ -7773,9 +7739,6 @@ function ChatView(props: {
                               gap: "0.25rem",
                             }}
                           >
-                            <Show when={memberResetLine(m.leafIndex) !== null}>
-                              <Icon name="shieldAlert" size={12} />
-                            </Show>
                             {annotation()}
                           </span>
                         </Show>
@@ -8246,44 +8209,12 @@ function ChatView(props: {
         onPick={(row) => (bulkForwardOpen() ? forwardSelectionTo(row) : forwardTo(row))}
       />
 
-      {/* ADR-0065 phase 2 (UX 16.5) — Recreate group: the new-group flow
-          pre-filled, as a layer over the old group. Mounted only while the
-          owned-group notice offers it, so a plain member never holds the
-          sheet. */}
-      <Show when={ownedByResetNotice()?.canRecreate === true || recreateOpen()}>
-        <RecreateGroupSheet
-          open={recreateOpen()}
-          onClose={() => setRecreateOpen(false)}
-          entry={props.entry}
-          currentName={groupNames.nameOf(props.entry.groupIdB64) ?? props.entry.label}
-          contacts={contacts}
-          roster={recreateRoster()}
-          ownPersonKeyB64={ownPersonKeyB64(chats.identity())}
-          oldOwnerKeyB64={resetOwnerEntry()?.reset.previousKeyB64 ?? ""}
-          resetContact={recreateResetContact()}
-        />
-      </Show>
-
-      {/* UX 16.5 — the same sheet, carried on over the NEW group while the
-          remaining members are invited; visible only over that group. */}
-      <RecreateProgressLayer groupIdB64={props.entry.groupIdB64} />
-
       {/* The layer carries its own copy of both while it is open, so an
           action refused there is readable rather than dimmed out behind it. */}
       <Show when={!infoOpen()}>
         {error() !== null && (
           <div class="form-error">
             {error()}
-            <Show when={errorOpenContactHref()}>
-              {(href) => (
-                <>
-                  {" "}
-                  <button type="button" class="ghost small" onClick={() => navigate(href())}>
-                    {KEYS_RESET_OPEN_CONTACT()}
-                  </button>
-                </>
-              )}
-            </Show>
           </div>
         )}
         {notice() !== null && <div class="form-notice">{notice()}</div>}
@@ -8343,7 +8274,7 @@ function ChatView(props: {
                 onHidePreview={onHideAttachmentPreview}
                 getCachedUrl={getCachedAttachmentUrl}
                 ownIdentity={ownSignatureKeyB64()}
-                opState={(id) => msgOps().get(id)}
+                opState={(id) => msgOps().get(id) ?? historyOps().get(id)}
                 readByOthers={(id) =>
                   isReadByEveryOther(readWatermarks(), id, ownSignatureKeyB64())
                 }
@@ -8375,10 +8306,17 @@ function ChatView(props: {
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
                 onReact={onReact}
-                actionsAvailable={messageActionsAvailable() && !conversationClosed()}
-                resetWarningOf={bubbleWarningOf}
-                onOpenResetContact={openResetContact}
-                resetRemovedLine={resetRemovedLine}
+                // ADR-0065 R.5 — a row of an older group of the conversation
+                // is read-only: no op can name it in this group's journal.
+                actionsAvailable={messageActionsAvailable() && !isHistoryRowId(rowMessageId(row()))}
+                // ...except that a pin of an older segment can be removed.
+                unpinOnly={((): boolean => {
+                  const id = rowMessageId(row());
+                  return (
+                    id !== undefined &&
+                    historyRowOffersUnpin({ isHistoryRow: isHistoryRowId(id), pinRow: pinLabelOf(id) })
+                  );
+                })()}
                 hub={hub}
                 mediaUpload={mediaUploadFor(row())}
                 onRetrySend={() => {
@@ -8423,31 +8361,6 @@ function ChatView(props: {
           group is the wrong register for a fact they cannot act on. Carried by
           TEXT, never by hue or an icon. */}
       <Show when={terminalRow(membership())}>
-        {(row) => (
-          <div
-            role="status"
-            aria-live="polite"
-            style={{
-              "font-size": "0.8rem",
-              color: "var(--surface-muted)",
-              "text-align": "center",
-              padding: "0.75rem 0.5rem 0.25rem 0.5rem",
-              display: "flex",
-              "flex-direction": "column",
-              gap: "0.2rem",
-            }}
-          >
-            <span>{row().headline}</span>
-            <span>{row().consequence}</span>
-          </div>
-        )}
-      </Show>
-      {/* ADR-0065 phase 2 (UX 16.4 / 16.5) — the terminal row of a CLOSED
-          conversation (the one-to-one with a contact's old keys; a group an
-          admin closed after recreating it): the ended row's shape with its
-          own words. The same place and the same register, for the same
-          reasons. */}
-      <Show when={closedTerminal()}>
         {(row) => (
           <div
             role="status"
@@ -8680,97 +8593,13 @@ function ChatView(props: {
           </div>
         )}
       </Show>
-      {/* ADR-0065 phase 2 (UX 16.4 / 16.5) — the composer slot of a CLOSED
-          conversation: the static bar and, beside it, the one button
-          (`Start a new chat`, disabled with its helper and `Open contact`
-          while the contact is unverified; `Open the new group`, only once this
-          device holds the successor). Replaced, not disabled, for the reason
-          the ended bar gives; the draft rule is the ended one. */}
-      <Show when={closedComposer()}>
-        {(bar) => (
-          <div
-            role="status"
-            style={{
-              display: "flex",
-              "flex-direction": "column",
-              gap: "0.4rem",
-              "padding-top": "0.5rem",
-              "border-top": "1px solid var(--surface-border)",
-            }}
-          >
-            <Show when={bar().draft !== null}>
-              <label style={{ display: "flex", "flex-direction": "column", gap: "0.2rem" }}>
-                <span
-                  style={{
-                    "font-size": "0.7rem",
-                    "text-transform": "uppercase",
-                    "letter-spacing": "0.04em",
-                    color: "var(--surface-muted)",
-                  }}
-                >
-                  {bar().draftLabel}
-                </span>
-                <input
-                  type="text"
-                  readonly
-                  value={bar().draft ?? ""}
-                  style={{ flex: 1, background: "transparent", color: "var(--surface-fg)" }}
-                />
-              </label>
-            </Show>
-            <div style={{ display: "flex", "align-items": "center", gap: "0.75rem", "flex-wrap": "wrap" }}>
-              <span style={{ "font-size": "0.8rem", color: "var(--surface-muted)", flex: 1 }}>
-                {bar().notice}
-              </span>
-              <Show when={bar().action}>
-                {(action) => (
-                  <button
-                    type="button"
-                    class="small"
-                    disabled={!action().enabled || busy()}
-                    onClick={() => {
-                      if (closeState().kind === "one-to-one-keys-reset") {
-                        void startNewChatAfterReset();
-                        return;
-                      }
-                      const href = successorHref();
-                      if (href !== null) navigate(href);
-                    }}
-                  >
-                    {action().label}
-                  </button>
-                )}
-              </Show>
-            </div>
-            <Show when={bar().action?.helper}>
-              {(helper) => (
-                <span style={{ "font-size": "0.8rem", color: "var(--surface-muted)" }}>
-                  {helper()}{" "}
-                  <Show when={closedContactHref()}>
-                    {(href) => (
-                      <button
-                        type="button"
-                        class="ghost small"
-                        onClick={() => navigate(href())}
-                      >
-                        {KEYS_RESET_OPEN_CONTACT()}
-                      </button>
-                    )}
-                  </Show>
-                </span>
-              )}
-            </Show>
-          </div>
-        )}
-      </Show>
-
       </div>
 
       {/* message-actions.md section 8 — while selecting, the action bar
           replaces the composer: Forward and Delete, each with its icon and
           label, and under the bar the one line that explains a disabled
           Delete. Sits in the composer's slot so the layout does not jump. */}
-      <Show when={selecting() && !conversationClosed()}>
+      <Show when={selecting()}>
         <div class="lk-select-actions" role="toolbar" aria-label={t("chat.select.toolbar")}>
           <div class="lk-select-actions-row">
             <button
@@ -8797,7 +8626,7 @@ function ChatView(props: {
           </Show>
         </div>
       </Show>
-      <Show when={!conversationClosed() && !selecting()}>
+      <Show when={!selecting()}>
       {/* ADR-0047 UX §6 — the permission-denied card and the short hints. */}
       <RecorderNotices recorder={recorder} />
       <VideoNoteOverlay recorder={recorder} />
@@ -9098,7 +8927,7 @@ function membershipRetryMaySucceed(reason: string): boolean {
  * Anything else is logged and shown as the action's own `fallbackKey`: core,
  * server and browser prose never reaches the person.
  */
-/** ADR-0065 phase 2 — the distinct PERSON keys of a roster (base64 account
+/** ADR-0065 R.7 case 2 — the distinct PERSON keys of a roster (base64 account
  *  keys), or `null` on a torn read, which decides nothing. */
 function personKeysOrNull(group: ActiveGroup["group"]): string[] | null {
   try {
@@ -9123,9 +8952,6 @@ function errorText(err: unknown, fallbackKey: string): () => string {
   const shown = shownErrorText(err);
   if (shown !== null) return shown;
   if (dsClockSkewNotice(err) !== null) return () => dsClockSkewNotice(err) ?? "";
-  // ADR-0065 phase 2 (UX 16.1): the contact's keys were reset and this device
-  // has not verified the new number — the line points at that state.
-  if (err instanceof KeysResetUnverified) return () => keysResetVerifyFirst();
   if (err instanceof SupersessionRefused) {
     const loggedReset = err.loggedReset;
     return () => supersessionRefusedMessage(loggedReset);
@@ -9299,8 +9125,8 @@ function timelineRowToPersisted(
     return null;
   }
   if (row.event.kind === "group-closed") {
-    // ADR-0065 phase 2 — consumed by the group-closed gate; the closed state
-    // lives in its own store, never in the transcript.
+    // ADR-0065 R.6 — a successor claim, consumed by the claim rule; never in
+    // the transcript.
     return null;
   }
   if (row.event.kind === "pin") {
@@ -9341,7 +9167,7 @@ function timelineRowToPersisted(
   return {
     messageId: String(row.event.messageId),
     direction: "system",
-    text: systemRowText(row.event.systemKind, row.event.contactAccountIdB64),
+    text: systemRowText(row.event.systemKind),
     attachments: [],
     createdAt: row.event.createdAt,
   };
@@ -9423,15 +9249,12 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
     };
   }
   // system
-  const reset = parseResetRemovedRow(m.text);
   return {
     kind: "incoming",
     event: {
       kind: "system",
       messageId: Number(m.messageId),
-      ...(reset === null
-        ? { systemKind: "commit" as const }
-        : { systemKind: "keys-reset-removed" as const, contactAccountIdB64: reset }),
+      systemKind: "commit" as const,
       createdAt: m.createdAt,
     },
   };

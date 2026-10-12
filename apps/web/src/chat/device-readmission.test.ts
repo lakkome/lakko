@@ -40,6 +40,53 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
     expect(plan.admit).toEqual([]);
   });
 
+  it("does not admit an own device whose KeyPackage names another own key (ADR-0066)", () => {
+    const plan = planReadmission({
+      roster: [{ leafKeyB64: "me-1", personKeyB64: "me" }],
+      ownPersonKeyB64: "me",
+      accounts: [
+        {
+          personKeyB64: "me",
+          devices: [kp("me-1"), { ...kp("me-2"), admissible: false }, { ...kp("me-3"), admissible: true }],
+        },
+      ],
+      removed: new Set(),
+      ownDeviceGroup: new Set(["me-1", "me-2", "me-3"]),
+    });
+    expect(plan.admit.map((d) => d.deviceKeyB64)).toEqual(["me-3"]);
+    expect(plan.retire).toEqual([]);
+  });
+
+  it("counts a stale own row as listed: its existing leaf is not retired (ADR-0066)", () => {
+    const plan = planReadmission({
+      roster: [
+        { leafKeyB64: "me-1", personKeyB64: "me" },
+        // In this chat already, under the same person key.
+        { leafKeyB64: "me-2", personKeyB64: "me" },
+      ],
+      ownPersonKeyB64: "me",
+      accounts: [{ personKeyB64: "me", devices: [kp("me-1"), { ...kp("me-2"), admissible: false }] }],
+      removed: new Set(),
+      ownDeviceGroup: new Set(["me-1", "me-2"]),
+    });
+    expect(plan.admit).toEqual([]);
+    expect(plan.retire).toEqual([]);
+  });
+
+  it("never applies the flag to a contact's device (ADR-0066)", () => {
+    const plan = planReadmission({
+      roster: [
+        { leafKeyB64: "me-1", personKeyB64: "me" },
+        { leafKeyB64: "bob-1", personKeyB64: "bob" },
+      ],
+      ownPersonKeyB64: "me",
+      accounts: [{ personKeyB64: "bob", devices: [kp("bob-1"), { ...kp("bob-2"), admissible: false }] }],
+      removed: new Set(),
+      ownDeviceGroup: new Set(["me-1"]),
+    });
+    expect(plan.admit.map((d) => d.deviceKeyB64)).toEqual(["bob-2"]);
+  });
+
   it("retires an own leaf whose directory row is gone, and nobody else's", () => {
     const plan = planReadmission({
       roster: [
@@ -146,5 +193,76 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
       });
       expect(plan).toEqual({ admit: [], retire: [] });
     });
+  });
+});
+
+// ---- ADR-0065 R.2: the wider lookup ----------------------------------------
+
+import { lookupStanding, readmissionCandidates } from "./device-readmission";
+
+describe("readmissionCandidates (ADR-0065 R.2)", () => {
+  const HEX_A = "0123456789abcdef0123456789abcdef";
+  const HEX_B = "fedcba9876543210fedcba9876543210";
+  it("looks up every roster person with a known account id, contact or not", () => {
+    expect(
+      readmissionCandidates({
+        rosterPersonKeysB64: ["me", "anna-old", "bob", "stranger", "anna-old"],
+        ownPersonKeyB64: "me",
+        contacts: [
+          { signaturePubkeyB64: "anna-new", previousSignaturePubkeysB64: ["anna-old"], accountIdHex: HEX_A },
+        ],
+        profileAccountIdHexOf: (k) => (k === "bob" ? HEX_B.toUpperCase() : null),
+      }),
+    ).toEqual([
+      { rosterKeyB64: "anna-old", accountIdHex: HEX_A },
+      { rosterKeyB64: "bob", accountIdHex: HEX_B },
+    ]);
+  });
+  it("the contact row wins over the profile's claim, and junk ids are skipped", () => {
+    expect(
+      readmissionCandidates({
+        rosterPersonKeysB64: ["anna", "bob"],
+        ownPersonKeyB64: "me",
+        contacts: [{ signaturePubkeyB64: "anna", accountIdHex: HEX_A }],
+        profileAccountIdHexOf: (k) => (k === "anna" ? HEX_B : "not-hex"),
+      }),
+    ).toEqual([{ rosterKeyB64: "anna", accountIdHex: HEX_A }]);
+  });
+});
+
+describe("lookupStanding (ADR-0065 R.2 / R.7 case 2)", () => {
+  it("the pin or a proven predecessor of it is the same person", () => {
+    expect(lookupStanding({ rosterKeyB64: "k", pin: { pinnedSignaturePubkeyB64: "k" } })).toBe("same-person");
+    expect(
+      lookupStanding({
+        rosterKeyB64: "k0",
+        pin: { pinnedSignaturePubkeyB64: "k1", provenPredecessorsB64: ["k0"] },
+      }),
+    ).toBe("same-person");
+  });
+  it("a key an accepted reset retired names the reset identity", () => {
+    expect(
+      lookupStanding({
+        rosterKeyB64: "old",
+        pin: { pinnedSignaturePubkeyB64: "new", supersededKeysB64: ["old"] },
+      }),
+    ).toBe("reset-identity");
+  });
+  it("an unrelated key, or no pin, attaches nobody's devices", () => {
+    expect(lookupStanding({ rosterKeyB64: "mallory", pin: { pinnedSignaturePubkeyB64: "victim" } })).toBe("skip");
+    expect(lookupStanding({ rosterKeyB64: "k", pin: undefined })).toBe("skip");
+  });
+  it("with no pin, only this device's verified binding of exactly that key is followed", () => {
+    expect(lookupStanding({ rosterKeyB64: "k", pin: undefined, binding: { keyB64: "k" } })).toBe("same-person");
+    // A member claiming the id of an account verified under another key.
+    expect(lookupStanding({ rosterKeyB64: "mallory", pin: undefined, binding: { keyB64: "victim" } })).toBe("skip");
+    // A pin always decides; a leftover binding cannot widen it.
+    expect(
+      lookupStanding({
+        rosterKeyB64: "mallory",
+        pin: { pinnedSignaturePubkeyB64: "victim" },
+        binding: { keyB64: "mallory" },
+      }),
+    ).toBe("skip");
   });
 });

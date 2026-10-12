@@ -310,7 +310,10 @@ public enum PinnedBar {
         held: [ChatMessage]
     ) -> [PinnedEntry] {
         var holdable: Set<Int64> = []
-        for message in held where isPinnable(message) {
+        // ADR-0065 R.5 — a row of an older segment is held under its history
+        // id and stays in the bar (it can be opened and unpinned, never
+        // pinned anew).
+        for message in held where isPinnable(message) || isHeldHistoryRow(message) {
             holdable.insert(message.messageId)
         }
         let sharedEntries = shared
@@ -326,6 +329,12 @@ public enum PinnedBar {
     }
 
     /// A message the bar may show: landed, not a system row, not a tombstone.
+    /// A row of an older segment of the conversation that a pin can still
+    /// point at.
+    static func isHeldHistoryRow(_ message: ChatMessage) -> Bool {
+        LineageRules.isHistoryRowId(message.messageId) && message.direction != .system && !message.deleted
+    }
+
     static func isPinnable(_ message: ChatMessage) -> Bool {
         message.messageId > 0 && message.direction != .system && !message.deleted && message.ack == .sent
     }

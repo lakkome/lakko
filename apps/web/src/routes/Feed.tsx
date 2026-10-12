@@ -48,7 +48,7 @@ import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { composeReadReceiptEnvelope } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
-import { ChatClient } from "../chat/client";
+import { ChatClient, HeldForSuccessor } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { conversationTitle } from "../chat/conversation-title";
@@ -66,9 +66,19 @@ import { channelsState } from "../state/channels-state";
 import type { ChannelPostSlot } from "../feed/channel-post-log";
 import { loadChannelPostLog, subscribeChannelPostLogChanged } from "../feed/channel-post-log-store";
 import { attachmentLine, FEED_PRESETS, repliesLabel, whyLine, type FeedPresetKey } from "../feed/feed-copy";
-import { buildFeedInput, reactionSummary, type FeedCandidateRef, type FeedSource } from "../feed/feed-model";
+import {
+  buildFeedInput,
+  feedSourceKey,
+  groupFeedSources,
+  reactionSummary,
+  type FeedCandidateRef,
+  type FeedSource,
+} from "../feed/feed-model";
+import { useLineage } from "../chat/use-lineage";
+import { heldSends, persistHeldSends } from "../chat/held-send-queue";
 import { rankFeedInput, type FeedCore, type RankedItem } from "../feed/feed-ranking";
-import { FEED_SEEN_DWELL_MS, isSeenInSlot, readCursorBytes } from "../feed/feed-seen";
+import { FEED_SEEN_DWELL_MS, isSeenInSlot } from "../feed/feed-seen";
+import { encodeReadPosition } from "../chat/lineage";
 import {
   blankDraft,
   decodeDraft,
@@ -176,6 +186,7 @@ function itemKey(item: RankedItem): string {
 export default function Feed(): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
+  const lineageView = useLineage();
   const profiles = useProfiles();
   const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
@@ -388,20 +399,22 @@ export default function Feed(): JSX.Element {
    *  editor's list, the empty state and the hidden list read these. */
   const allSources = createMemo((): FeedSource[] => {
     const flags = sync.flags();
-    const groups = chats
-      .groups()
-      .filter(isGroup)
-      .map((g): FeedSource => {
-        const hex = syncGroupIdHex(g.group.groupId);
-        return {
-          kind: "group",
-          idHex: hex,
-          slug: base64UrlEncodeNoPad(g.group.groupId),
-          title: titleOf(g),
-          muted: flags[hex]?.muted === true,
-          audience: peopleCountOf(g.group),
-        };
-      });
+    // ADR-0065 R.5 — one source per CONVERSATION, drawn from its current
+    // group; the mute flag (like "hide from feeds" and a feed rule's lists)
+    // is keyed on the conversation id, not on the group it lives in now.
+    const groups = groupFeedSources(
+      lineageView
+        .conversations()
+        .filter((c) => isGroup(c.head))
+        .map((c) => ({
+          conversationHex: c.conversationHex,
+          headHex: syncGroupIdHex(c.head.group.groupId),
+          slug: base64UrlEncodeNoPad(c.head.group.groupId),
+          title: titleOf(c.head),
+          audience: peopleCountOf(c.head.group),
+        })),
+      (conversationHex) => flags[conversationHex]?.muted === true,
+    );
     const shared = channelsState.metaByChannel();
     const channels = channelsState.channels().map(
       (c): FeedSource => ({
@@ -661,7 +674,18 @@ export default function Feed(): JSX.Element {
           });
       }
       void sync
-        .setReadCursor(entry.group.groupId, readCursorBytes(upTo), BigInt(Date.now()))
+        // ADR-0065 R.5 — the read position is the CONVERSATION's, exactly as
+        // the chat view writes it: keyed on the conversation id, carrying the
+        // segment past the first group (the 8 bytes every build writes
+        // otherwise).
+        .setReadCursor(
+          lineageView.conversationIdOf(entry.group.groupId),
+          encodeReadPosition({
+            segment: lineageView.segmentIndexOf(entry.group.groupId),
+            messageId: Number(upTo),
+          }),
+          BigInt(Date.now()),
+        )
         .catch((err: unknown) => {
           // eslint-disable-next-line no-console
           console.warn("[feed] read cursor failed", err);
@@ -822,7 +846,7 @@ export default function Feed(): JSX.Element {
     const all = allSources();
     return [...marks().hidden]
       .reverse()
-      .map((id) => all.find((s) => s.idHex === id))
+      .map((id) => all.find((s) => feedSourceKey(s) === id))
       .filter((s): s is FeedSource => s !== undefined);
   });
 
@@ -885,9 +909,27 @@ export default function Feed(): JSX.Element {
     for (const a of payload.attachments) fresh.push(await reencryptAttachmentRef(attachmentRefFromPersisted(a).ref));
     const bytes = await composeForwardEnvelope(payload.text, fresh, payload.forward);
     let result: Awaited<ReturnType<typeof forwardClient.sendMessage>>;
+    const openTarget = (): void => {
+      setForwarding(null);
+      const slug = base64UrlEncodeNoPad(entry.group.groupId);
+      navigate(conversationKindOf(entry.group) === "chat" ? paths.chat(slug) : paths.groupChat(slug));
+    };
     try {
       result = await forwardClient.sendMessage(auth.identitySecrets(), entry.group, bytes);
     } catch (err) {
+      // ADR-0065 R.7 case 1 — a forward into a superseded one-to-one is held
+      // for that conversation's successor (`chat/held-send-queue.ts`); the
+      // conversation opens with the message in the ordinary sending state.
+      if (err instanceof HeldForSuccessor) {
+        heldSends.hold(
+          lineageView.conversationHexOf(entry.group.groupId),
+          { text: payload.text, attached: fresh, reply: undefined, forward: payload.forward },
+          Date.now(),
+        );
+        void persistHeldSends(accountId());
+        openTarget();
+        return;
+      }
       throw new RenderedError(() => dsClockSkewNotice(err) ?? t("chat.forward.error.generic"));
     }
     // The sent row goes into the target's slot of the log, the only record
@@ -912,9 +954,7 @@ export default function Feed(): JSX.Element {
         };
       });
     }
-    setForwarding(null);
-    const slug = base64UrlEncodeNoPad(entry.group.groupId);
-    navigate(conversationKindOf(entry.group) === "chat" ? paths.chat(slug) : paths.groupChat(slug));
+    openTarget();
   }
 
   const bodyOf = (ref: FeedCandidateRef): string =>
@@ -1455,7 +1495,7 @@ export default function Feed(): JSX.Element {
                 role="menuitem"
                 title={t("feed.action.hide_hint")}
                 onClick={() => {
-                  const id = m().ref.source.idHex;
+                  const id = feedSourceKey(m().ref.source);
                   setMenu(null);
                   void hideFromFeeds(id);
                 }}
@@ -1486,7 +1526,7 @@ export default function Feed(): JSX.Element {
                   {(src) => (
                     <li>
                       <span class="lk-ellipsis">{src.title}</span>
-                      <button type="button" class="ghost" onClick={() => void showAgain(src.idHex)}>
+                      <button type="button" class="ghost" onClick={() => void showAgain(feedSourceKey(src))}>
                         {t("feed.hidden.show_again")}
                       </button>
                     </li>

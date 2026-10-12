@@ -765,6 +765,20 @@ function buildDecryptDeps(wasm, core) {
         return null;
       }
     },
+    // ADR-0065 R.5 — which conversation a group belongs to, from the same
+    // row. READ-ONLY; `null` on every miss (the notification is then grouped
+    // under the group id).
+    lookupConversation: async (accountId, deviceKey, groupHex) => {
+      const row = await idbGet("lakko-device-sync", "rows", accountId);
+      if (row === undefined || row.ciphertext === undefined) return null;
+      try {
+        const plain = await aesGcmUnwrap(deviceKey, row.ciphertext);
+        const payload = JSON.parse(new TextDecoder().decode(plain));
+        return core.conversationHexFromSyncStateRow(payload, groupHex, wasm);
+      } catch {
+        return null;
+      }
+    },
     // Non-extractable AES-GCM device root key (usable for decrypt).
     getDeviceKey: async (accountId) => {
       const row = await idbGet("lakko-auth", "device_keys", accountId);

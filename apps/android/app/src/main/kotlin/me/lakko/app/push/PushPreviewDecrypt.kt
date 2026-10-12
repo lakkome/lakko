@@ -268,11 +268,13 @@ public interface PushDecryptDeps {
     public fun isMuted(accountIdB64: String, groupHex: String): Boolean = false
 
     /**
-     * ADR-0065 phase 2 / UX 16.4 — is the conversation a closed one-to-one
-     * (the other person reset their account keys)? Such a chat is inert: a
-     * wake for it fetches nothing, rings for nothing and shows nothing.
+     * ADR-0065 R.5 — is the group the OLD segment of a one-to-one whose
+     * conversation moved to a successor (the other person reset their account
+     * keys and the reset was accepted)? Its only other senders are removed
+     * devices: a wake for it fetches nothing, rings for nothing and shows
+     * nothing. The successor's own wakes are ordinary.
      *
-     * A READ of the closed-state store. Defaulted to `false`, and a store that
+     * A READ of the continuity facts. Defaulted to `false`, and a store that
      * fails to open answers `false`: an unreadable flag must not silence a
      * live conversation.
      */
@@ -401,7 +403,7 @@ public suspend fun decryptPushWake(
         realGroupHex = groupHex
     }
 
-    // 2a. ADR-0065 phase 2 / UX 16.4 — a closed one-to-one is inert. Decided
+    // 2a. ADR-0065 R.5 — the old segment of a moved one-to-one. Decided
     //     BEFORE the seed is read or the journal fetched: nothing that arrives
     //     in it is shown, and a call offered from keys that are no longer the
     //     contact's never rings.
@@ -589,4 +591,44 @@ private fun isLowerHex(s: String): Boolean {
         if (!isDigit && !isLower) return false
     }
     return true
+}
+
+/**
+ * ADR-0065 R.5 — the conversation a woken group belongs to, for everything a
+ * notification takes from the CONVERSATION rather than from the MLS group:
+ * its mute, its grouping key and what a tap opens under. A successor group
+ * resolves to the root of its lineage; any other group is its own
+ * conversation. Pure: the registers are passed in (the background path reads
+ * them from their plain mirror and writes nothing).
+ */
+public fun conversationHexForWake(groupHex: String, lineage: List<me.lakko.app.chat.LineageEntry>): String =
+    try {
+        me.lakko.app.chat.buildLineage(lineage).conversationOf(groupHex.lowercase())
+    } catch (_: Throwable) {
+        groupHex.lowercase()
+    }
+
+/**
+ * The notification grouping key and stable id source of a wake.
+ *
+ * | the wake's `push_gid` resolves to a group | that group is a successor | key                      |
+ * |-------------------------------------------|---------------------------|--------------------------|
+ * | no                                        | -                         | the raw `push_gid`       |
+ * | yes                                       | no                        | the raw `push_gid`       |
+ * | yes                                       | yes                       | the conversation's root  |
+ *
+ * A conversation's first group keeps the key it always had; its successors
+ * join that conversation's stack only once this device knows the lineage, and
+ * a banner of the successor then replaces the conversation's banner instead
+ * of standing beside it.
+ */
+public fun notificationGroupKey(
+    rawPushGidHex: String?,
+    resolvedGroupHex: String?,
+    lineage: List<me.lakko.app.chat.LineageEntry>,
+): String? {
+    val raw = rawPushGidHex ?: return null
+    val resolved = resolvedGroupHex?.lowercase()?.takeIf { it != raw.lowercase() } ?: return raw
+    val conversation = conversationHexForWake(resolved, lineage)
+    return if (conversation == resolved) raw else conversation
 }

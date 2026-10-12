@@ -33,6 +33,15 @@
 export interface DirectoryDevice {
   readonly deviceKeyB64: string;
   readonly keyPackage: Uint8Array;
+  /**
+   * ADR-0066 (a device paired after a key rotation): `false` when the listed
+   * KeyPackage of an OWN device is bound to another account key than the one
+   * this device's leaves are bound to (`devices/own-conversation-key.ts`).
+   * The row still counts as listed (its leaf is not retired); it is not
+   * admitted until the device publishes one bound to the right key. Absent
+   * reads as admissible, and a contact's device is never affected.
+   */
+  readonly admissible?: boolean;
 }
 
 /** A roster leaf with the person it resolves to. */
@@ -85,6 +94,7 @@ export function planReadmission(input: {
       if (rosterKeys.has(d.deviceKeyB64)) continue;
       if (input.removed.has(d.deviceKeyB64)) continue;
       if (own && (input.ownDeviceGroup === null || !input.ownDeviceGroup.has(d.deviceKeyB64))) continue;
+      if (own && d.admissible === false) continue;
       if (seen.has(d.deviceKeyB64)) continue;
       seen.add(d.deviceKeyB64);
       admit.push(d);
@@ -168,4 +178,112 @@ export function clearRemovedDevicesForAccount(accountIdB64: string): void {
   } catch {
     /* nothing to clear */
   }
+}
+
+// ---- ADR-0065 R.2: the wider lookup ----------------------------------------
+
+/** A roster person this device can look up in the directory. */
+export interface LookupCandidate {
+  /** The PERSON key the roster names (the key the leaves are bound to). */
+  readonly rosterKeyB64: string;
+  /** The account id this device knows that person under, 32 hex chars. */
+  readonly accountIdHex: string;
+}
+
+/** The slice of a contact row the lookup reads. */
+export interface LookupContact {
+  readonly signaturePubkeyB64: string;
+  readonly previousSignaturePubkeysB64?: readonly string[];
+  readonly accountIdHex?: string;
+}
+
+/**
+ * ADR-0065 R.2 "Triggers" — every roster account whose account id this
+ * device knows, not only its accepted contacts: a contact row (found by its
+ * current key or any key it had), else the profile store (the profile
+ * envelope carries the account id, ADR-0048 v2). This is also what removes
+ * G-44's "no admin is the person's contact" case.
+ *
+ * The contact row wins over the profile's claim. The own account is not a
+ * candidate (the caller looks itself up with its own id).
+ */
+export function readmissionCandidates(input: {
+  readonly rosterPersonKeysB64: readonly string[];
+  readonly ownPersonKeyB64: string;
+  readonly contacts: readonly LookupContact[];
+  /** `profiles.accountIdHexOf`: the account id a member's own profile
+   *  claims, or `null`. */
+  readonly profileAccountIdHexOf: (personKeyB64: string) => string | null;
+}): LookupCandidate[] {
+  const out: LookupCandidate[] = [];
+  const seen = new Set<string>();
+  for (const rosterKeyB64 of input.rosterPersonKeysB64) {
+    if (rosterKeyB64 === input.ownPersonKeyB64 || seen.has(rosterKeyB64)) continue;
+    seen.add(rosterKeyB64);
+    const row = input.contacts.find(
+      (c) =>
+        c.signaturePubkeyB64 === rosterKeyB64 ||
+        (c.previousSignaturePubkeysB64 ?? []).includes(rosterKeyB64),
+    );
+    const accountIdHex = row?.accountIdHex ?? input.profileAccountIdHexOf(rosterKeyB64);
+    if (accountIdHex === null || accountIdHex === undefined) continue;
+    if (!/^[0-9a-f]{32}$/i.test(accountIdHex)) continue;
+    out.push({ rosterKeyB64, accountIdHex: accountIdHex.toLowerCase() });
+  }
+  return out;
+}
+
+/** How the roster's key for a person stands against what this device trusts
+ *  for the account AFTER the identity check ran. */
+export type LookupStanding =
+  /** The roster key is the account's current key or a PROVEN predecessor of
+   *  it: the ordinary ADR-0050 re-admission (a listed device with no leaf). */
+  | "same-person"
+  /** The roster key was retired by an ACCEPTED RESET of the account: the
+   *  directory now lists the new identity's devices (R.7 case 2). */
+  | "reset-identity"
+  /** Anything else (no pin, an unrelated key): the account's devices are
+   *  not admitted under this person. */
+  | "skip";
+
+/**
+ * | pinned | roster key is ...                               | standing         |
+ * |--------|-------------------------------------------------|------------------|
+ * | yes    | the pin, or a proven predecessor of the pin     | `same-person`    |
+ * | yes    | a key an accepted reset of this account retired | `reset-identity` |
+ * | yes    | anything else                                   | `skip`           |
+ * | no     | the key of this device's VERIFIED BINDING       | `same-person`    |
+ * | no     | anything else, or no binding                    | `skip`           |
+ *
+ * `skip` is what stops a member's own profile from attaching another
+ * account's devices to itself: an account id is only followed to devices
+ * when the roster's key is one this device TRUSTS for that account: the
+ * pin record, or the binding it verified itself against the directory
+ * (`contacts/verified-binding.ts`). A claimed id alone is never followed.
+ */
+export function lookupStanding(input: {
+  readonly rosterKeyB64: string;
+  readonly pin:
+    | {
+        readonly pinnedSignaturePubkeyB64: string;
+        readonly provenPredecessorsB64?: readonly string[];
+        readonly supersededKeysB64?: readonly string[];
+      }
+    | undefined;
+  /** The verified binding of the account when it is NOT pinned. */
+  readonly binding?: { readonly keyB64: string } | undefined;
+}): LookupStanding {
+  const pin = input.pin;
+  if (pin === undefined) {
+    return input.binding !== undefined && input.binding.keyB64 === input.rosterKeyB64
+      ? "same-person"
+      : "skip";
+  }
+  if (
+    pin.pinnedSignaturePubkeyB64 === input.rosterKeyB64 ||
+    (pin.provenPredecessorsB64 ?? []).includes(input.rosterKeyB64)
+  ) {
+    return "same-person";
+  }
+  return (pin.supersededKeysB64 ?? []).includes(input.rosterKeyB64) ? "reset-identity" : "skip";
 }

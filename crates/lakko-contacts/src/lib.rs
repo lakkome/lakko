@@ -237,7 +237,8 @@ pub use push_routing::{
     PUSH_ROUTING_SECRET_VERSION_V2,
 };
 pub use reach::{
-    reach_seed, reach_verifying_key, ReachClass, ReachError, ReachGrant, MAX_REACH_SCOPE_ID_LEN,
+    continuity_reach_seed, reach_seed, reach_verifying_key, ReachClass, ReachError, ReachGrant,
+    CONTINUITY_ACCOUNT_ID_LEN, CONTINUITY_REACH_SEED_DOMAIN, MAX_REACH_SCOPE_ID_LEN,
     REACH_GRANT_LEN, REACH_SEED_DOMAIN, REACH_SEED_LEN,
 };
 pub use registrar_seed::{

@@ -7,7 +7,15 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import type { PersistedMessage } from "../chat/message-log-store";
-import { buildFeedInput, FEED_MAX_WINDOW_MS, reactionSummary, type FeedSource } from "./feed-model";
+import {
+  buildFeedInput,
+  FEED_MAX_WINDOW_MS,
+  feedSourceKey,
+  groupFeedSources,
+  reactionSummary,
+  type FeedSource,
+} from "./feed-model";
+import { withoutHidden } from "./feed-marks";
 import { rankFeedInput } from "./feed-ranking";
 
 const NOW = Date.parse("2026-09-29T12:00:00Z");
@@ -212,5 +220,44 @@ describe("channels", () => {
     const rule = wasm.FeedRule.preset(wasm.FeedPreset.Latest);
     const kinds = rankFeedInput(wasm, rule, input, NOW).map((i) => i.ref.source.kind);
     expect(kinds).toEqual(["channel", "group"]);
+  });
+});
+
+describe("the feed's sources are conversations, not groups (ADR-0065 R.5)", () => {
+  const conv = (conversationHex: string, headHex: string) => ({
+    conversationHex,
+    headHex,
+    slug: `slug-${headHex}`,
+    title: `title-${conversationHex}`,
+    audience: 3,
+  });
+
+  it("a conversation that moved is one source: drawn from its current group, keyed on the conversation", () => {
+    const muted = new Set(["root"]);
+    const sources = groupFeedSources([conv("root", "successor"), conv("plain", "plain")], (c) => muted.has(c));
+    expect(sources).toEqual([
+      {
+        kind: "group",
+        idHex: "successor",
+        conversationHex: "root",
+        slug: "slug-successor",
+        title: "title-root",
+        muted: true,
+        audience: 3,
+      },
+      { kind: "group", idHex: "plain", slug: "slug-plain", title: "title-plain", muted: false, audience: 3 },
+    ]);
+    expect(sources.map(feedSourceKey)).toEqual(["root", "plain"]);
+  });
+
+  it("never lists one conversation twice", () => {
+    expect(groupFeedSources([conv("root", "a"), conv("root", "b")], () => false)).toHaveLength(1);
+  });
+
+  it("hidden before the move stays hidden after it", () => {
+    const sources = groupFeedSources([conv("root", "successor"), conv("plain", "plain")], () => false);
+    expect(withoutHidden(sources, ["root"]).map((s) => s.idHex)).toEqual(["plain"]);
+    // The successor's own id hides nothing: it is not what a person hid.
+    expect(withoutHidden(sources, ["successor"])).toHaveLength(2);
   });
 });

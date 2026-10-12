@@ -577,6 +577,14 @@ targets:
       - path: Lakko/Calls/ConversationMuteMirror.swift
         type: file
         buildPhase: sources
+      # ADR-0065 R.5 — `successor group -> conversation`, so a conversation
+      # that continued in a new group keeps its mute, its caller name and its
+      # notification grouping here. The lineage itself lives in the account's
+      # encrypted sync blob, which C-59 forbids this process from opening.
+      # Foundation only; read-only here.
+      - path: Lakko/Chat/ConversationLineageMirror.swift
+        type: file
+        buildPhase: sources
       # The DS row `created_at` parser, shared with the app so both processes
       # measure a call's age against the same clock the same way. Foundation
       # only.

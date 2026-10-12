@@ -2226,46 +2226,6 @@
       "text": "שיתוף",
       "status": "machine"
     },
-    "chat.keys_reset.bubble_warning": {
-      "text": "לא מאומת מאז ש{name} איפס/ה את מפתחות החשבון.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_being_removed": {
-      "text": "מפתחות החשבון אופסו. בתהליך הסרה.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_flag": {
-      "text": "מפתחות החשבון אופסו.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_closed": {
-      "text": "{name} איפס/ה את מפתחות החשבון. הצ'אט הזה סגור.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_composer": {
-      "text": "אי אפשר לשלוח יותר הודעות בצ'אט הזה.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_row": {
-      "text": "הצ'אט סגור. {name} איפס/ה את מפתחות החשבון.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice": {
-      "text": "{name}, הבעלים של הקבוצה הזו, איפס/ה את מפתחות החשבון. אי אפשר להסיר את המכשירים הישנים מהקבוצה, והקבוצה לא יכולה לקבל בעלים חדשים. כדי להמשיך לשוחח בבטחה, צרו את הקבוצה מחדש.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice_member": {
-      "text": "מנהל/ת יכול/ה ליצור אותה מחדש.",
-      "status": "machine"
-    },
-    "chat.keys_reset.start_new_chat": {
-      "text": "התחלת צ'אט חדש",
-      "status": "machine"
-    },
-    "chat.keys_reset.system_removed": {
-      "text": "{name} איפס/ה את מפתחות החשבון. המכשירים הישנים הוסרו מהקבוצה הזו.",
-      "status": "machine"
-    },
     "chat.leave.action": {
       "text": "יציאה מהקבוצה",
       "status": "machine"
@@ -3854,14 +3814,6 @@
       "text": "לא ניתן היה להתחיל את הצ׳אט. נסו שוב.",
       "status": "machine"
     },
-    "contacts.identity_changed.reset": {
-      "text": "{name} איפס את הזהות המאובטחת שלו (למשל אחרי שאיבד את המכשיר). יומן השקיפות מאשר שהאיפוס נעשה ביוזמת בעל החשבון. אם אתם בטוחים שזה באמת הוא, אמתו שוב את מספר הבטיחות שלו בדרך אחרת לפני שתמשיכו.",
-      "status": "machine"
-    },
-    "contacts.identity_changed.reset_unnamed": {
-      "text": "איש הקשר הזה איפס את הזהות המאובטחת שלו (למשל אחרי שאיבד את המכשיר). יומן השקיפות מאשר שהאיפוס נעשה ביוזמת בעל החשבון. אם אתם בטוחים שזה באמת הוא, אמתו שוב את מספר הבטיחות שלו בדרך אחרת לפני שתמשיכו.",
-      "status": "machine"
-    },
     "contacts.identity_changed.unconfirmed": {
       "text": "הזהות המאובטחת של {name} השתנתה ולא ניתן היה לאשר זאת מול יומן השקיפות. אמתו בדרך אחרת לפני שתסמכו.",
       "status": "machine"
@@ -3884,38 +3836,6 @@
     },
     "contacts.invite_links.title": {
       "text": "קישורי הזמנה",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner": {
-      "text": "{name} איפס/ה את מפתחות החשבון. אמתו את מספר הבטיחות החדש לפני שתכתבו שוב.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_action": {
-      "text": "אימות",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_unnamed": {
-      "text": "איש הקשר הזה איפס את מפתחות החשבון. אמתו את מספר הבטיחות החדש לפני שתכתבו שוב.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.open_contact": {
-      "text": "פתיחת איש הקשר",
-      "status": "machine"
-    },
-    "contacts.keys_reset.picker_sub": {
-      "text": "מפתחות החשבון אופסו. אמתו קודם את מספר הבטיחות החדש.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.row_sub": {
-      "text": "מפתחות החשבון אופסו. אמתו את מספר הבטיחות החדש.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first": {
-      "text": "אמתו קודם את מספר הבטיחות החדש של {name}.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first_short": {
-      "text": "אמתו קודם את מספר הבטיחות החדש.",
       "status": "machine"
     },
     "contacts.list.add": {
@@ -4056,54 +3976,6 @@
     },
     "contacts.safety.number": {
       "text": "מספר בטיחות",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body": {
-      "text": "מפתחות החשבון של {name} אופסו, ולכן מספר הבטיחות שאולי השוויתם בעבר כבר לא תקף. השוו את המספר החדש הזה עם {name} פנים אל פנים או בשיחה.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body_unnamed": {
-      "text": "מפתחות החשבון של איש הקשר הזה אופסו, ולכן מספר הבטיחות שאולי השוויתם בעבר כבר לא תקף. השוו את המספר החדש הזה עם איש הקשר שלכם פנים אל פנים או בשיחה.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox": {
-      "text": "השוויתי את מספר הבטיחות החדש עם {name} והוא תאם.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox_unnamed": {
-      "text": "השוויתי את מספר הבטיחות החדש עם איש הקשר הזה והוא תאם.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirm": {
-      "text": "אימתתי את מספר הבטיחות החדש",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirming": {
-      "text": "מאמת...",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done": {
-      "text": "{name} מאומת/ת שוב.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done_unnamed": {
-      "text": "איש הקשר הזה מאומת שוב.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.save_failed": {
-      "text": "לא ניתן היה לשמור. נסו שוב.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.title": {
-      "text": "אמתו את מספר הבטיחות החדש",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning": {
-      "text": "אם תאשרו בלי להשוות, מי שהשתלט על החשבון של {name} ייראה לכם כמו {name}.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning_unnamed": {
-      "text": "אם תאשרו בלי להשוות, מי שהשתלט על החשבון הזה ייראה לכם כמו איש הקשר שלכם.",
       "status": "machine"
     },
     "contacts.safety.row_sub": {
@@ -5778,26 +5650,6 @@
       "text": "{name}, {count, plural, one {צ׳אט אחד שלא נקרא} two {שני צ׳אטים שלא נקראו} other {# צ׳אטים שלא נקראו}}",
       "status": "machine"
     },
-    "group.closed.composer": {
-      "text": "הקבוצה הזו נסגרה.",
-      "status": "machine"
-    },
-    "group.closed.open_new": {
-      "text": "פתיחת הקבוצה החדשה",
-      "status": "machine"
-    },
-    "group.closed.panel": {
-      "text": "הקבוצה הזו נסגרה. המשיכו ב-{name}.",
-      "status": "machine"
-    },
-    "group.closed.row": {
-      "text": "הקבוצה נסגרה",
-      "status": "machine"
-    },
-    "group.closed.system": {
-      "text": "{name} סגר/ה את הקבוצה הזו אחרי שמפתחות החשבון של הבעלים אופסו.",
-      "status": "machine"
-    },
     "group.join.needs_account": {
       "text": "כדי לבקש להצטרף צריך חשבון. צרו חשבון או התחברו.",
       "status": "machine"
@@ -5844,38 +5696,6 @@
     },
     "group.join.wait_secondary": {
       "text": "לאף אחד משני השלבים אין מגבלת זמן. אם שום דבר לא קורה, אפשר לשלוח את הבקשה שוב.",
-      "status": "machine"
-    },
-    "group.recreate.action": {
-      "text": "יצירת הקבוצה מחדש",
-      "status": "machine"
-    },
-    "group.recreate.done": {
-      "text": "סיום",
-      "status": "machine"
-    },
-    "group.recreate.excluded_reset": {
-      "text": "מפתחות החשבון אופסו. אמתו את מספר הבטיחות החדש כדי לכלול אותו/ה.",
-      "status": "machine"
-    },
-    "group.recreate.members_heading": {
-      "text": "חברים ({count})",
-      "status": "machine"
-    },
-    "group.recreate.note": {
-      "text": "הקבוצה הישנה נשארת כפי שהיא לכולם עד שתסגרו אותה.",
-      "status": "machine"
-    },
-    "group.recreate.submit": {
-      "text": "יצירה וסגירת הקבוצה הישנה",
-      "status": "machine"
-    },
-    "group.recreate.title": {
-      "text": "יצירת הקבוצה מחדש",
-      "status": "machine"
-    },
-    "group.recreate.working": {
-      "text": "יוצר...",
       "status": "machine"
     },
     "invite.contact.accept_failed": {
@@ -6807,7 +6627,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "אנשי הקשר שלכם יראו שמספר הבטיחות שלכם השתנה, ויצטרכו לאמת אתכם שוב לפני שישלחו לכם הודעות באופן מאובטח.",
+      "text": "אנשי הקשר שלך שומרים על הצ׳אטים איתך. מספר הביטחון שלך משתנה.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -6935,7 +6755,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_contacts": {
-      "text": "אנשי הקשר שלכם יראו שמספר הבטיחות שלכם השתנה, ויהיה עליהם לאמת אתכם שוב לפני שישלחו לכם הודעות באופן מאובטח.",
+      "text": "אנשי הקשר שלך שומרים על הצ׳אטים איתך. מספר הביטחון שלך משתנה.",
       "status": "machine"
     },
     "restore_identity.reset.effect_devices": {

@@ -143,12 +143,15 @@ public enum SpentGrants {
             return sent.filter { $0.recipientAccountIdB64 != recipientAccountIdB64 }
         case .sent:
             guard let replacement else { return sent }
-            let username = sent.first { $0.recipientAccountIdB64 == recipientAccountIdB64 }?
-                .recipientUsername ?? replacement.recipientUsername
+            let old = sent.last { $0.recipientAccountIdB64 == recipientAccountIdB64 }
+            // The name and the intro are the original's: the re-send is the
+            // same request from the new key.
             return sent.filter { $0.recipientAccountIdB64 != recipientAccountIdB64 } + [
                 SentContactRequest(
-                    recipientUsername: username, recipientAccountIdB64: recipientAccountIdB64,
-                    messageId: replacement.messageId, createdAt: replacement.createdAt)
+                    recipientUsername: old?.recipientUsername ?? replacement.recipientUsername,
+                    recipientAccountIdB64: recipientAccountIdB64,
+                    messageId: replacement.messageId, createdAt: replacement.createdAt,
+                    intro: old?.intro ?? replacement.intro)
             ]
         }
     }

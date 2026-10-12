@@ -206,3 +206,48 @@ describe("an owed Welcome is retried when a grant arrives", () => {
     expect(owing).toEqual(["a"]);
   });
 });
+
+// ---- ADR-0065 R.4: the continuity key as a Welcome candidate ----------------
+
+import { planWriteToPerson } from "./mailbox-write";
+
+describe("the continuity key (ADR-0065 R.4)", () => {
+  let TARGET: Uint8Array;
+  beforeAll(() => {
+    const id = wasm.Identity.fromSeed(new Uint8Array(32).fill(0x42));
+    TARGET = id.signaturePublicKey;
+    id.free();
+  });
+  const CONTINUITY = { accountId: new Uint8Array(16).fill(7), keyGeneration: 2 };
+
+  it("is a candidate for a Welcome, signed by the key the owner registered", async () => {
+    const plan = await planWriteToPerson(TARGET, {
+      allowMember: true,
+      neverUnsigned: true,
+      continuity: CONTINUITY,
+    });
+    expect(plan.candidates.map((c) => c.kind)).toEqual(["continuity"]);
+    const resolved = await plan.candidates[0]!.resolve();
+    try {
+      const registered = wasm.reachVerifyingKey(wasm.continuityReachSeed(CONTINUITY.accountId, 2n));
+      expect(resolved.auth.delegation).toBeNull();
+      expect(Array.from((resolved.auth.signer as { verifyingKey(): Uint8Array }).verifyingKey())).toEqual(
+        Array.from(registered),
+      );
+    } finally {
+      resolved.release();
+    }
+  });
+
+  it("is never offered when the caller rules it out, and never for a non-Welcome write", async () => {
+    const ruledOut = await planWriteToPerson(TARGET, {
+      allowMember: true,
+      neverUnsigned: true,
+      continuity: null,
+    });
+    expect(ruledOut.candidates).toEqual([]);
+    // No pin names TARGET as a reset's new key, so nothing is resolved either.
+    const unresolved = await planWriteToPerson(TARGET, { allowMember: true, neverUnsigned: true });
+    expect(unresolved.candidates).toEqual([]);
+  });
+});

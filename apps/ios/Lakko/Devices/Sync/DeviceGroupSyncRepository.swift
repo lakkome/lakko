@@ -70,6 +70,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// whose name has arrived, never a deleted one (the fold decides both).
     @Published public private(set) var folders: [FolderView] = []
 
+    /// ADR-0065 R.5 — the conversation lineage registers: which group
+    /// continues which conversation. Read through ``ConversationLineage``.
+    @Published public private(set) var lineage: [LineageEntry] = []
+
     /// UX spec chat-folders section 6 — something folded here is still
     /// waiting to reach the other devices (this device is offline).
     @Published public private(set) var pendingSync: Bool = false
@@ -333,11 +337,18 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             OrderState(groupIds: $0.groupIds, updatedAtHlc: $0.hlc)
         }
         let folderList = (try? s.folders()) ?? []
+        let lineageList = ((try? s.allLineage()) ?? []).map {
+            LineageEntry(
+                successorHex: groupIdHex($0.successorGroupId),
+                rootHex: groupIdHex($0.rootConversationId),
+                hlc: $0.hlc)
+        }
         if d != drafts { drafts = d }
         if f != flags { flags = f }
         if c != readCursors { readCursors = c }
         if o != order { order = o }
         if folderList != folders { folders = folderList }
+        if lineageList != lineage { lineage = lineageList }
         let isPending = pending?.isPending ?? false
         if pendingSync != isPending { pendingSync = isPending }
     }
@@ -545,6 +556,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// The pending-send slot of `envelope`: its dispatched kind, so a newer
     /// envelope of the same kind replaces an older unsent one.
     static func serviceEnvelopeSlot(_ envelope: Data) -> String {
+        // ADR-0065 R.5 — every lineage register is its own slot: one never
+        // replaces another.
+        if isLineageEnvelope(bytes: envelope) { return "lineage:" + envelope.base64EncodedString() }
         guard let kind = try? dispatchIncomingEnvelope(plaintext: envelope).kind else {
             return envelope.base64EncodedString()
         }
@@ -707,6 +721,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     private func runPollLoop(accountIdB64: String, groupId: Data, startCursor: Int64 = 0) async {
         let ds = DsClient()
         var cursor: Int64 = startCursor
+        // ADR-0065 R.5 — a lineage register whose send was never confirmed.
+        await flushUnsentLineage()
         while !Task.isCancelled {
             if !pendingServiceEnvelopes.isEmpty {
                 await flushPendingServiceEnvelopes()
@@ -1017,6 +1033,20 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// nothing (older, or already held) is a no-op.
     func applyParsed(_ parsed: ParsedDeviceGroupPayload) {
         if case .serviceEnvelope(let envelope) = parsed.body {
+            // ADR-0065 R.5 / R.13a — a lineage envelope is routed BEFORE the
+            // lakko-contacts dispatcher: it is a `lakko-sync` register,
+            // folded by the one fold. A malformed register is dropped.
+            if isLineageEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyLineageEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("ADR-0065: lineage envelope refused: %@", error.localizedDescription)
+                }
+                return
+            }
             // ADR-0066 section 3.3 — the account's own `key-rotation`
             // envelope: meaningful here and nowhere else. It never reaches
             // the reach / profile adopters.
@@ -1116,6 +1146,89 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 pending?.markFailed()
             }
         }
+        // ADR-0065 R.13a — the lineage is not in `snapshotParts()`: a
+        // catch-up is the snapshot parts PLUS every lineage envelope, each
+        // with its original stamp.
+        for envelope in (try? syncedState.lineageEnvelopes()) ?? [] {
+            await sendServiceEnvelope(envelope)
+        }
+    }
+
+    // MARK: - ADR-0065 R.5: the lineage register
+
+    /// `UserDefaults` marker: a lineage register written here has not been
+    /// confirmed sent. Set before the publish and cleared after it, so a
+    /// device that was offline (or closed mid-send) sends every register
+    /// again at its next start. Re-sending is idempotent: the fold keeps the
+    /// first stamp.
+    static func lineageUnsentKey(accountIdB64: String) -> String {
+        "lakko.lineage.unsent.v1.\(accountIdB64)"
+    }
+
+    /// Publish each envelope as its own DeviceGroup service envelope. Throws
+    /// on the first failure (unlike ``sendServiceEnvelope(_:)``, the caller
+    /// needs to know whether the register left the device).
+    private func sendLineageEnvelopes(_ envelopes: [Data]) async throws {
+        for envelope in envelopes {
+            guard ready, group != nil, !deviceRemoved else {
+                throw DeviceGroupSyncError.notReady
+            }
+            try await publish { group, identity in
+                try group.createServiceEnvelopeMessage(
+                    identity: identity, envelope: envelope, hlc: Hlc.mint())
+            }
+        }
+    }
+
+    /// Send every register again when an earlier send was not confirmed.
+    func flushUnsentLineage() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.lineageUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            try await sendLineageEnvelopes(try syncedState.lineageEnvelopes())
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("ADR-0065: lineage register send failed; retried at the next start")
+        }
+    }
+
+    /// Write the register `successor -> root conversation` (write-once: the
+    /// first stamp is kept) and send it to the account's other devices.
+    /// Returns whether this call wrote it.
+    @discardableResult
+    public func setLineage(successorGroupId: Data, rootConversationId: Data) async -> Bool {
+        let written: Bool
+        do {
+            written = try syncedState.setLineage(
+                hlc: Hlc.mint(),
+                successorGroupId: successorGroupId,
+                rootConversationId: rootConversationId)
+        } catch {
+            // An id out of bounds, or a successor naming itself.
+            NSLog("ADR-0065: lineage register refused: %@", error.localizedDescription)
+            return false
+        }
+        guard written else { return false }
+        stateChanged()
+        // The register must survive a kill right after the write: the
+        // debounced persist would lose it.
+        persistSyncState()
+        let account = activeAccountIdB64
+        if let account {
+            UserDefaults.standard.set(true, forKey: Self.lineageUnsentKey(accountIdB64: account))
+        }
+        do {
+            if let envelope = try syncedState.lineageEnvelopeFor(successorGroupId: successorGroupId) {
+                try await sendLineageEnvelopes([envelope])
+            }
+            if let account {
+                UserDefaults.standard.removeObject(forKey: Self.lineageUnsentKey(accountIdB64: account))
+            }
+        } catch {
+            NSLog("ADR-0065: lineage register send failed; retried at the next start")
+        }
+        return true
     }
 
     /// This device changed the DeviceGroup through a handle of its own (the
@@ -1161,4 +1274,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             NSLog("DeviceGroupSync reload failed: %@", error.localizedDescription)
         }
     }
+}
+
+/// Why a DeviceGroup publish that must report its outcome could not run.
+enum DeviceGroupSyncError: Error {
+    /// No ready handle (not bootstrapped, reloading, or this device removed).
+    case notReady
 }

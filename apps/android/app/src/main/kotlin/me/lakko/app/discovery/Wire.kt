@@ -278,6 +278,12 @@ data class IdentityFetchResponse(
      *  never reset). A device compares it with the generation of its own
      *  session pair before it uploads anything. */
     val key_generation: Long = 1L,
+    /** ADR-0065 R.3: standard base64 of the latest key-reset attestation the
+     *  account published, absent when it never reset. Opaque to discovery;
+     *  verified locally under the trusted attest key before a proof-less key
+     *  change is accepted as a reset. After a later PROVEN rotation it no
+     *  longer binds the served key, and that path never reads it. */
+    val key_reset_attest: String? = null,
 )
 
 // ----------------------------------------------------------------------------

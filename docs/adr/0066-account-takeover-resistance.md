@@ -1921,8 +1921,8 @@ scheduled, not once they land.
 
 Not built on any client:
 
-- **A device paired after a rotation** binds under the new key and reads as another account to the
-  groups; the pairing bundle must carry the predecessor binding (a cross-client format change).
+- **A device paired after a rotation** bound under the new key and read as another account to the
+  groups (closed on 2026-10-11 by state bundle format 2, see "Third pass").
 - **The mailbox rule (decided 2026-10-11 as 3.5a; see "3.5a as built").** As first built: Leaves still name the old account key, so Welcomes go to the
   old mailbox for all of Stage A; nothing registers the new reach keys there or maps predecessor
   to current on the sender side. This is the open design decision.
@@ -1994,6 +1994,50 @@ Still different, or not built:
   path; to be looked at in the security pass.
 - A delegation naming the added person's old mailbox still leaves the Welcome owed until both sides
   observed the change. Spent `/g/` join reply scopes are dropped, not re-knocked (iOS).
+
+### Third pass (2026-10-11): the remaining differences, and a device paired after a rotation
+
+Unit-tested only (web vitest 4444, iOS `LakkoTests` 3049 with 0 failures, Android 3450 on the host
+JVM without the native core; one unrelated Android test failed once on a leaked exception and passed
+alone and on the re-run, unexplained). Nothing walked on a device or against a server. It supersedes
+the "Still different" list of the second pass where the two disagree.
+
+Now the same on all three: the spend round also runs, durably, on a kept device over that device's
+own links and requests; `/c/` call links minted from this build on are recorded and revoked (web
+signs and revokes them with the device identity, not the account key); unanswered sent requests are
+stored under the device key with their intro and re-sent with it; the address re-check is throttled
+to once per person per 5 minutes.
+
+**A device paired after a rotation.** The ADR-0050 pairing state bundle is format **2** (any other
+`v` refused): `ownPredecessors`, oldest first, at most 8, each `{seedB64 (64-byte phrase seed),
+adoptedAtMs}`, and on each pin `provenPredecessorsB64` (32-byte keys, oldest first, at most 8). The
+receiver stores the own predecessors where a kept device holds them (device-key protected, in the
+wipe), counts each predecessor mailbox's 30 days from `adoptedAtMs`, mints its conversation binding
+under the oldest own predecessor, and records a contact's predecessors as proven only when the pin
+it ends up holding is the carried one (a second writer to the proven-predecessor store outside the
+ADR-0016 gate, like iOS `proveRequesterRotations`).
+
+A device that was already signed in when it paired had minted under the current key. Two rules
+close that on all three: a sender does not admit an own-account device from a KeyPackage bound to
+another own key than its own leaves in that conversation use (the stale row still counts as listed,
+so no leaf is retired), and the receiver re-mints and re-publishes under the conversation key when
+the bundle arrives, but only while it holds no conversation.
+
+Left as it is:
+
+- The bundle is best effort (a 20 s poll). A device it never reaches stays bound under the current
+  key and out of the account's older chats until it is paired again while holding no conversation;
+  once it holds conversations it keeps the current-key binding for good.
+- Web's live re-mint starts a fresh identity object: a Welcome built on the stale KeyPackage by a
+  sender without the guard cannot be opened, and pending state held only in the old provider (a
+  `/g/` join request) is lost.
+- iOS accepts an integer time written in exponent form (`1e3`); web and Android refuse it. No
+  client writes that form.
+- Web's sent-request recipient list stays in plaintext `localStorage` (only the intro is sealed); a
+  request sent by accepting an `/i/` link was never in the sent list and is not re-sent. No client
+  has a withdraw action for a sent request.
+- Web fixed on the way: the restore prompt without a device key dropped the state bundle and the
+  joined DeviceGroup leaf.
 
 Consequences of the rule as first built (1 decided as rule 5, 2 and 3 closed by the second pass):
 

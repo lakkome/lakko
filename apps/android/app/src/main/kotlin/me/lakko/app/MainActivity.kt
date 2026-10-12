@@ -232,6 +232,9 @@ class MainActivity : ComponentActivity() {
         // gets cleared.
         val deviceGroupSync = me.lakko.app.devices.sync
             .DeviceGroupSyncRepository(applicationContext)
+        // ADR-0065 R.5 — a conversation that continues in a new group keeps
+        // its row through the lineage register of the synced state.
+        chatRepository.lineageRecorder = { successor, root -> deviceGroupSync.recordLineage(successor, root) }
 
         // ADR-0026 Phase 4 — the anti-censorship arming controller.
         // Apply the persisted preference at boot: when on, fetch +
@@ -1904,14 +1907,7 @@ private fun SessionRoot(
                         // ADR-0045 UX 6.2 — the core's own predicate, read the
                         // way the chat screen reads it: an unreadable handle
                         // is not evidence of an eviction.
-                        // ADR-0065 phase 2 / UX 16.4 — a one-to-one closed by
-                        // the peer's key reset takes the same ended layout:
-                        // Call and Video gone, Delete this chat in their place.
-                        chatMembershipEnded = { hex ->
-                            chatRepository.isGroupActive(hex) == false ||
-                                chatRepository.conversationClosed(hex)?.reason ==
-                                me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET
-                        },
+                        chatMembershipEnded = { hex -> chatRepository.isGroupActive(hex) == false },
                         resolveChat = { linked, key -> chatRepository.chatGroupIdHexFor(linked, key) },
                         // UX 6.2.4 — after the delete, land wherever the chat
                         // was opened from: pop the deleted chat off the stack
@@ -1937,18 +1933,10 @@ private fun SessionRoot(
                 }
                 composable(Routes.SAFETY_NUMBER) { entry ->
                     val key = entry.arguments?.getString("key") ?: return@composable
-                    // ADR-0065 phase 2 / UX 16.2 — the confirmation runs through
-                    // the contacts view model (the same singleton the list uses).
-                    val contactsVm: ContactsViewModel = viewModel(
-                        factory = singletonViewModelFactory {
-                            ContactsViewModel(repo = contactsRepository, chatRepo = chatRepository)
-                        },
-                    )
                     me.lakko.app.ui.contacts.SafetyNumberScreen(
                         contactKey = key,
                         contactsRepository = contactsRepository,
                         onBack = { navController.popBackStack() },
-                        viewModel = contactsVm,
                     )
                 }
                 composable(Routes.SETTINGS) {
@@ -2046,7 +2034,17 @@ private fun SessionRoot(
                 }
 
                 composable(Routes.CHAT) { entry ->
-                    val groupIdHex = entry.arguments?.getString("groupIdHex") ?: return@composable
+                    val routeGroupIdHex = entry.arguments?.getString("groupIdHex") ?: return@composable
+                    // ADR-0065 R.5 — the route may name ANY segment of a
+                    // conversation (the list's conversation id, an older
+                    // group a notification or a forward names, the group
+                    // this screen was opened on before the conversation
+                    // moved): the screen is the conversation's CURRENT group.
+                    val routeConversations by chatRepository.state.collectAsStateWithLifecycle()
+                    val groupIdHex = remember(routeGroupIdHex, routeConversations.conversations) {
+                        me.lakko.app.chat.conversationThreadOf(routeConversations.conversations, routeGroupIdHex)
+                            ?.groupIdHex ?: routeGroupIdHex
+                    }
                     // Key the ChatViewModel by groupIdHex so navigating
                     // to a different thread rebuilds the VM with the
                     // right per-thread state binding.
@@ -2303,6 +2301,11 @@ private fun SessionRoot(
                         onDone = { navController.popBackStack() },
                         onOpenChat = { hex ->
                             navController.navigate(Routes.chat(hex)) {
+                                popUpTo(Routes.INVITE) { inclusive = true }
+                            }
+                        },
+                        onOpenContact = { key ->
+                            navController.navigate(Routes.contact(key)) {
                                 popUpTo(Routes.INVITE) { inclusive = true }
                             }
                         },

@@ -2226,46 +2226,6 @@
       "text": "Paylaş",
       "status": "machine"
     },
-    "chat.keys_reset.bubble_warning": {
-      "text": "{name} hesap anahtarlarını sıfırladığından beri doğrulanmadı.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_being_removed": {
-      "text": "Hesap anahtarları sıfırlandı. Kaldırılıyor.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_flag": {
-      "text": "Hesap anahtarları sıfırlandı.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_closed": {
-      "text": "{name} hesap anahtarlarını sıfırladı. Bu sohbet kapatıldı.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_composer": {
-      "text": "Bu sohbette artık mesaj gönderemezsiniz.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_row": {
-      "text": "Sohbet kapatıldı. {name} hesap anahtarlarını sıfırladı.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice": {
-      "text": "Bu grubun sahibi {name} hesap anahtarlarını sıfırladı. Eski cihazları gruptan kaldırılamaz ve grup yeni bir sahip alamaz. Güvenle sohbete devam etmek için grubu yeniden oluşturun.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice_member": {
-      "text": "Bir yönetici grubu yeniden oluşturabilir.",
-      "status": "machine"
-    },
-    "chat.keys_reset.start_new_chat": {
-      "text": "Yeni sohbet başlat",
-      "status": "machine"
-    },
-    "chat.keys_reset.system_removed": {
-      "text": "{name} hesap anahtarlarını sıfırladı. Eski cihazları bu gruptan kaldırıldı.",
-      "status": "machine"
-    },
     "chat.leave.action": {
       "text": "Gruptan ayrıl",
       "status": "machine"
@@ -3854,14 +3814,6 @@
       "text": "Sohbet başlatılamadı. Tekrar deneyin.",
       "status": "machine"
     },
-    "contacts.identity_changed.reset": {
-      "text": "{name} güvenli kimliğini sıfırladı (örneğin cihazını kaybetti). Şeffaflık kaydı, sıfırlamanın hesap sahibi tarafından yapıldığını doğruluyor. Bunun gerçekten o kişi olduğuna güveniyorsanız devam etmeden önce güvenlik numarasını başka bir kanaldan yeniden doğrulayın.",
-      "status": "machine"
-    },
-    "contacts.identity_changed.reset_unnamed": {
-      "text": "Bu kişi güvenli kimliğini sıfırladı (örneğin cihazını kaybetti). Şeffaflık kaydı, sıfırlamanın hesap sahibi tarafından yapıldığını doğruluyor. Bunun gerçekten o kişi olduğuna güveniyorsanız devam etmeden önce güvenlik numarasını başka bir kanaldan yeniden doğrulayın.",
-      "status": "machine"
-    },
     "contacts.identity_changed.unconfirmed": {
       "text": "Güvenli kimlik değişti ve şeffaflık kaydından doğrulanamadı: {name}. Güvenmeden önce başka bir kanaldan doğrulayın.",
       "status": "machine"
@@ -3884,38 +3836,6 @@
     },
     "contacts.invite_links.title": {
       "text": "Davet bağlantıları",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner": {
-      "text": "{name} hesap anahtarlarını sıfırladı. Tekrar mesaj yazmadan önce yeni güvenlik numarasını doğrulayın.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_action": {
-      "text": "Doğrula",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_unnamed": {
-      "text": "Bu kişi hesap anahtarlarını sıfırladı. Tekrar mesaj yazmadan önce yeni güvenlik numarasını doğrulayın.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.open_contact": {
-      "text": "Kişiyi aç",
-      "status": "machine"
-    },
-    "contacts.keys_reset.picker_sub": {
-      "text": "Hesap anahtarları sıfırlandı. Önce yeni güvenlik numarasını doğrulayın.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.row_sub": {
-      "text": "Hesap anahtarları sıfırlandı. Yeni güvenlik numarasını doğrulayın.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first": {
-      "text": "Önce {name} adlı kişinin yeni güvenlik numarasını doğrulayın.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first_short": {
-      "text": "Önce yeni güvenlik numarasını doğrulayın.",
       "status": "machine"
     },
     "contacts.list.add": {
@@ -4056,54 +3976,6 @@
     },
     "contacts.safety.number": {
       "text": "Güvenlik numarası",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body": {
-      "text": "{name} adlı kişinin hesap anahtarları sıfırlandı, bu yüzden daha önce karşılaştırmış olabileceğiniz güvenlik numarası artık geçerli değil. Bu yeni numarayı {name} ile yüz yüze veya bir aramada karşılaştırın.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body_unnamed": {
-      "text": "Bu kişinin hesap anahtarları sıfırlandı, bu yüzden daha önce karşılaştırmış olabileceğiniz güvenlik numarası artık geçerli değil. Bu yeni numarayı kişinizle yüz yüze veya bir aramada karşılaştırın.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox": {
-      "text": "Yeni güvenlik numarasını {name} ile karşılaştırdım ve eşleşti.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox_unnamed": {
-      "text": "Yeni güvenlik numarasını bu kişiyle karşılaştırdım ve eşleşti.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirm": {
-      "text": "Yeni güvenlik numarasını doğruladım",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirming": {
-      "text": "Doğrulanıyor...",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done": {
-      "text": "{name} yeniden doğrulandı.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done_unnamed": {
-      "text": "Bu kişi yeniden doğrulandı.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.save_failed": {
-      "text": "Kaydedilemedi. Tekrar deneyin.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.title": {
-      "text": "Yeni güvenlik numarasını doğrulayın",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning": {
-      "text": "Karşılaştırmadan onaylarsanız, {name} adlı kişinin hesabını ele geçiren biri size {name} gibi görünür.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning_unnamed": {
-      "text": "Karşılaştırmadan onaylarsanız, bu hesabı ele geçiren biri size kişiniz gibi görünür.",
       "status": "machine"
     },
     "contacts.safety.row_sub": {
@@ -5778,26 +5650,6 @@
       "text": "{name}, {count, plural, one {# okunmamış sohbet} other {# okunmamış sohbet}}",
       "status": "machine"
     },
-    "group.closed.composer": {
-      "text": "Bu grup kapatıldı.",
-      "status": "machine"
-    },
-    "group.closed.open_new": {
-      "text": "Yeni grubu aç",
-      "status": "machine"
-    },
-    "group.closed.panel": {
-      "text": "Bu grup kapatıldı. {name} grubunda devam edin.",
-      "status": "machine"
-    },
-    "group.closed.row": {
-      "text": "Grup kapatıldı",
-      "status": "machine"
-    },
-    "group.closed.system": {
-      "text": "{name}, sahibin hesap anahtarları sıfırlandıktan sonra bu grubu kapattı.",
-      "status": "machine"
-    },
     "group.join.needs_account": {
       "text": "Katılmak istemek için bir hesabınız olmalı. Hesap oluşturun veya giriş yapın.",
       "status": "machine"
@@ -5844,38 +5696,6 @@
     },
     "group.join.wait_secondary": {
       "text": "İki adımın da süre sınırı yok. Bir şey olmazsa isteği yeniden gönderebilirsiniz.",
-      "status": "machine"
-    },
-    "group.recreate.action": {
-      "text": "Grubu yeniden oluştur",
-      "status": "machine"
-    },
-    "group.recreate.done": {
-      "text": "Bitti",
-      "status": "machine"
-    },
-    "group.recreate.excluded_reset": {
-      "text": "Hesap anahtarları sıfırlandı. Bu kişiyi dahil etmek için yeni güvenlik numarasını doğrulayın.",
-      "status": "machine"
-    },
-    "group.recreate.members_heading": {
-      "text": "Üyeler ({count})",
-      "status": "machine"
-    },
-    "group.recreate.note": {
-      "text": "Siz kapatana kadar eski grup herkes için olduğu gibi kalır.",
-      "status": "machine"
-    },
-    "group.recreate.submit": {
-      "text": "Oluştur ve eski grubu kapat",
-      "status": "machine"
-    },
-    "group.recreate.title": {
-      "text": "Grubu yeniden oluştur",
-      "status": "machine"
-    },
-    "group.recreate.working": {
-      "text": "Oluşturuluyor...",
       "status": "machine"
     },
     "invite.contact.accept_failed": {
@@ -6807,7 +6627,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "Kişileriniz güvenlik numaranızın değiştiğini görecek ve size güvenli şekilde mesaj göndermeden önce sizi yeniden doğrulamaları gerekecek.",
+      "text": "Kişileriniz sizinle olan sohbetlerini korur. Güvenlik numaranız değişir.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -6935,7 +6755,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_contacts": {
-      "text": "Kişileriniz güvenlik numaranızın değiştiğini görecek ve size güvenli şekilde mesaj göndermeden önce sizi yeniden doğrulamak zorunda kalacak.",
+      "text": "Kişileriniz sizinle olan sohbetlerini korur. Güvenlik numaranız değişir.",
       "status": "machine"
     },
     "restore_identity.reset.effect_devices": {

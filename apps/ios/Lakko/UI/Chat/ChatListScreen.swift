@@ -283,9 +283,14 @@ public struct ChatListScreen: View {
     ) -> [ConversationListRow] {
         viewModel.threads.map { thread -> ConversationListRow in
             let kind = viewModel.kind(of: thread.groupIdHex)
-            let flags = flagsMap[thread.groupIdHex]
+            // ADR-0065 R.5 — the row IS the conversation: its identity and
+            // every person-facing key (pin / mute / archive, folders, the
+            // read position, the route) is the conversation id, which stays
+            // what it was when the conversation continues in a successor
+            // group. `thread.groupIdHex` is the group it currently is.
+            let flags = flagsMap[thread.conversationIdHex]
             return ConversationListRow(
-                id: thread.groupIdHex,
+                id: thread.conversationIdHex,
                 kind: kind == .group ? .group : .chat,
                 title: viewModel.title(groupIdHex: thread.groupIdHex),
                 preview: viewModel.preview(thread: thread, isGroup: kind == .group),
@@ -294,7 +299,7 @@ public struct ChatListScreen: View {
                     local: thread.unread,
                     cursorDerived: Self.unreadCount(
                         thread: thread,
-                        cursor: readCursors[thread.groupIdHex])),
+                        cursor: readCursors[thread.conversationIdHex])),
                 pinned: flags?.pinned == true,
                 muted: flags?.muted == true,
                 archived: flags?.archived == true,
@@ -302,12 +307,9 @@ public struct ChatListScreen: View {
                 // muted line in the slot the preview occupies. Removing it
                 // would delete a transcript the user still has as a side effect
                 // of something somebody else did.
-                // ADR-0065 phase 2 (UX 16.4 / 16.5) — a conversation this
-                // device CLOSED takes the same slot with its own line.
-                endedLine: thread.closed.map { viewModel.closedLine($0) }
-                    ?? chatListLine(
-                        membershipState(
-                            isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)),
+                endedLine: chatListLine(
+                    membershipState(
+                        isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)),
                 markedUnread: flags?.unreadOverride == true)
         }
     }
@@ -412,7 +414,9 @@ public struct ChatListScreen: View {
                         // label does not reliably receive the tap, and opening
                         // the chat has to keep working while the offer stands.
                         if let quietCall, QuietIncomingCallPresentation.showsOnListRow(
-                            quietCall, rowId: row.id) {
+                            // The offer names a GROUP; the row is a
+                            // conversation (ADR-0065 R.5).
+                            quietCall, rowId: viewModel.headGroupIdHex(ofRow: row.id)) {
                             QuietIncomingCallRowActions(
                                 call: quietCall,
                                 onAccept: {
@@ -591,7 +595,7 @@ public struct ChatListScreen: View {
             guard let groupId = Self.hexToBytes(row.id) else { continue }
             if let upTo = viewModel.markReadLocally(groupIdHex: row.id) {
                 try? await deviceGroupSync.setReadCursor(
-                    groupId: groupId, upToMessageId: UnreadCounting.cursorBytes(upTo),
+                    groupId: groupId, upToMessageId: upTo,
                     readAtMs: now)
             }
             if let flags = deviceGroupSync.flags[row.id], flags.unreadOverride {
@@ -705,9 +709,20 @@ public struct ChatListScreen: View {
         cursor: ReadCursorState?
     ) -> Int? {
         guard let cursor else { return nil }
-        let cursorId = Self.decodeBeI64(cursor.upToMessageId)
+        // ADR-0065 R.5 — the position is `(segment, message id)`; what it
+        // means for the rows of the conversation's CURRENT group is decided
+        // by `readUpToInSegment`. Rows of older segments are behind the
+        // position or were read where they were.
+        let cursorId: Int64
+        switch LineageRules.readUpToInSegment(
+            LineageRules.decodeReadPosition(cursor.upToMessageId), segment: thread.segmentIndex) {
+        case .all: return 0
+        case .nothing: cursorId = 0
+        case .upTo(let id): cursorId = id
+        }
         return thread.messages.reduce(0) { acc, msg in
             if msg.direction == .outgoing { return acc }
+            if msg.messageId <= 0 { return acc }
             // ADR-0063 section 5 — a message the feed showed is seen, even
             // when it sits above messages that are not.
             if thread.feedSeen.contains(msg.messageId) { return acc }
@@ -990,19 +1005,12 @@ public final class ChatListViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
-        // ADR-0065 phase 2 — a conversation closed or an eviction applied
-        // changes a row's second line in place.
-        repository.$keyResetRevision
-            .dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cancellables)
     }
 
     /// ADR-0050 section 2.9 — whether groups the pairing bundle named are not
     /// yet all joined here. Drives the single "Synchronizing..." label.
     var synchronizing: Bool {
-        StateBundle.pendingKnownGroups(joinedGroupIdHexes: threads.map { $0.groupIdHex }) > 0
+        StateBundle.pendingKnownGroups(joinedGroupIdHexes: repository.knownGroupIdHexes) > 0
     }
 
     /// The conversation's kind (ADR-0062, read from the group's own
@@ -1062,22 +1070,7 @@ public final class ChatListViewModel: ObservableObject {
             deleted: last.deleted,
             unsupported: last.unsupportedVersion != nil,
             isGroup: isGroup,
-            senderName: senderName,
-            keyResetName: { [repository] accountIdB64 in
-                repository.contactFacts(accountIdB64: accountIdB64)
-                    .flatMap { ProfileDirectory.shared.resolve(signatureKeyB64: $0.currentKeyB64)?.name }
-            })
-    }
-
-    /// ADR-0065 phase 2 — the second line of a closed conversation's row
-    /// (16.4 names the contact, 16.5 says `Group closed`).
-    func closedLine(_ reason: ConversationClosedReason) -> String {
-        var name: String?
-        if case .contactKeysReset(let accountIdB64, _) = reason {
-            name = repository.contactFacts(accountIdB64: accountIdB64)
-                .flatMap { ProfileDirectory.shared.resolve(signatureKeyB64: $0.currentKeyB64)?.name }
-        }
-        return closedListLine(reason, contactName: name)
+            senderName: senderName)
     }
 
     /// The server time of the last drawn message, for the row's time and the
@@ -1092,12 +1085,26 @@ public final class ChatListViewModel: ObservableObject {
     /// Chat folders' Mark all as read: clear the local badge and return the
     /// newest server message id, for the read cursor the caller broadcasts.
     /// `nil` when the chat holds no acknowledged message.
-    func markReadLocally(groupIdHex: String) -> Int64? {
-        repository.clearUnread(groupIdHex: groupIdHex)
-        guard let thread = threads.first(where: { $0.groupIdHex == groupIdHex }) else {
+    func markReadLocally(groupIdHex: String) -> Data? {
+        // The id is the row's: the CONVERSATION (ADR-0065 R.5).
+        guard let thread = threads.first(where: { $0.conversationIdHex == groupIdHex }) else {
+            repository.clearUnread(groupIdHex: groupIdHex)
             return nil
         }
-        return thread.messages.map(\.messageId).filter { $0 > 0 }.max()
+        for hex in thread.historyGroupIdHexes + [thread.groupIdHex] {
+            repository.clearUnread(groupIdHex: hex)
+        }
+        guard let highest = thread.messages.map(\.messageId).filter({ $0 > 0 }).max() else {
+            return nil
+        }
+        return LineageRules.encodeReadPosition(
+            LineageRules.TimelinePosition(segment: thread.segmentIndex, messageId: highest))
+    }
+
+    /// The group a list row's conversation currently is (ADR-0065 R.5), for
+    /// the few things on a row that name a group rather than a conversation.
+    func headGroupIdHex(ofRow id: String) -> String {
+        threads.first(where: { $0.conversationIdHex == id })?.groupIdHex ?? id
     }
 
     /// The pull-to-refresh action: the same poll the app already runs, once,

@@ -136,7 +136,8 @@ public object AppCallHost {
         IncomingCallRinger.attach(applicationContext)
         instance.attachRinger(IncomingCallRinger)
         repository.oneToOneCallInbound = instance::deliver
-        repository.oneToOneClosedSink = instance::conversationClosed
+        repository.oneToOneMovedSink = instance::conversationMoved
+        instance.callTarget = repository::oneToOneCallTargetFor
         group.attach(ChatRepositoryGroupCallPort(applicationContext, repository, scope, sessionTokenProvider))
         link.attach(MultiJoinerLinkCallPort(applicationContext, scope))
         idleSubscription?.invoke()

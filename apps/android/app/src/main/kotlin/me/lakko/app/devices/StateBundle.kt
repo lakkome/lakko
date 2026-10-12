@@ -66,20 +66,51 @@ public object StateBundle {
         val accountIdB64: String,
         val pinnedSignaturePubkeyB64: String,
         val rotationMarker: Long,
+        /** ADR-0066: the contact's proven predecessors as the sending device
+         *  holds them, oldest first (standard base64 of 32-byte signature
+         *  keys); empty when it knows of none. At most [MAX_PREDECESSORS]. */
+        val provenPredecessorsB64: List<String> = emptyList(),
     )
 
-    /** The bundle; `v` is always 1. */
+    /**
+     * ADR-0066: one earlier account key of THIS account. [seedB64] is the
+     * 64-byte account phrase seed of that key (key material: it travels only
+     * inside the sealed bundle and is never logged); [adoptedAtMs] is when the
+     * sending device adopted the key that replaced it.
+     */
+    public data class CarriedOwnPredecessor(
+        val seedB64: String,
+        val adoptedAtMs: Long,
+    ) {
+        override fun toString(): String = "CarriedOwnPredecessor(<redacted>)"
+    }
+
+    /** The bundle; `v` is always [VERSION]. */
     public data class Bundle(
         val contacts: List<CarriedContact>,
         val pins: List<CarriedPin>,
         val knownGroupIdsB64: List<String>,
+        /** This account's earlier keys, OLDEST FIRST; empty when the account
+         *  never rotated. At most [MAX_PREDECESSORS]. */
+        val ownPredecessors: List<CarriedOwnPredecessor> = emptyList(),
     )
+
+    /** The one bundle version this build writes and reads (ADR-0066: flag
+     *  day, a bundle of any other version is refused). */
+    public const val VERSION: Long = 2L
+
+    /** The bound on `ownPredecessors` and on each pin's
+     *  `provenPredecessorsB64`. */
+    public const val MAX_PREDECESSORS: Int = 8
+
+    private const val SEED_LEN: Int = 64
+    private const val KEY_LEN: Int = 32
 
     // ---- codec -------------------------------------------------------------
 
     public fun encode(bundle: Bundle): ByteArray {
         val obj = buildJsonObject {
-            put("v", 1)
+            put("v", VERSION)
             put(
                 "contacts",
                 buildJsonArray {
@@ -106,12 +137,29 @@ public object StateBundle {
                                 put("accountIdB64", p.accountIdB64)
                                 put("pinnedSignaturePubkeyB64", p.pinnedSignaturePubkeyB64)
                                 put("rotationMarker", p.rotationMarker)
+                                put(
+                                    "provenPredecessorsB64",
+                                    buildJsonArray { p.provenPredecessorsB64.forEach { add(JsonPrimitive(it)) } },
+                                )
                             },
                         )
                     }
                 },
             )
             put("knownGroupIdsB64", buildJsonArray { bundle.knownGroupIdsB64.forEach { add(JsonPrimitive(it)) } })
+            put(
+                "ownPredecessors",
+                buildJsonArray {
+                    for (o in bundle.ownPredecessors) {
+                        add(
+                            buildJsonObject {
+                                put("seedB64", o.seedB64)
+                                put("adoptedAtMs", o.adoptedAtMs)
+                            },
+                        )
+                    }
+                },
+            )
         }
         return obj.toString().toByteArray(Charsets.UTF_8)
     }
@@ -125,7 +173,7 @@ public object StateBundle {
         } catch (_: Throwable) {
             null
         } ?: return null
-        if (root.number("v") != 1L) return null
+        if (root.integer("v") != VERSION) return null
         val contactsArr = root["contacts"] as? JsonArray ?: return null
         val pinsArr = root["pins"] as? JsonArray ?: return null
         val groupsArr = root["knownGroupIdsB64"] as? JsonArray ?: return null
@@ -147,11 +195,29 @@ public object StateBundle {
         val pins = mutableListOf<CarriedPin>()
         for (el in pinsArr) {
             val r = el as? JsonObject ?: return null
+            val provenArr = r["provenPredecessorsB64"] as? JsonArray ?: return null
+            if (provenArr.size > MAX_PREDECESSORS) return null
+            val proven = mutableListOf<String>()
+            for (k in provenArr) {
+                val p = k as? JsonPrimitive ?: return null
+                if (!p.isString || standardBase64OfLength(p.content, KEY_LEN) == null) return null
+                proven += p.content
+            }
             pins += CarriedPin(
                 accountIdB64 = r.string("accountIdB64") ?: return null,
                 pinnedSignaturePubkeyB64 = r.string("pinnedSignaturePubkeyB64") ?: return null,
                 rotationMarker = r.number("rotationMarker") ?: return null,
+                provenPredecessorsB64 = proven,
             )
+        }
+        val ownArr = root["ownPredecessors"] as? JsonArray ?: return null
+        if (ownArr.size > MAX_PREDECESSORS) return null
+        val own = mutableListOf<CarriedOwnPredecessor>()
+        for (el in ownArr) {
+            val r = el as? JsonObject ?: return null
+            val seedB64 = r.string("seedB64") ?: return null
+            standardBase64OfLength(seedB64, SEED_LEN)?.fill(0) ?: return null
+            own += CarriedOwnPredecessor(seedB64 = seedB64, adoptedAtMs = r.integer("adoptedAtMs") ?: return null)
         }
         val groups = mutableListOf<String>()
         for (el in groupsArr) {
@@ -159,7 +225,30 @@ public object StateBundle {
             if (!p.isString) return null
             groups += p.content
         }
-        return Bundle(contacts, pins, groups)
+        return Bundle(contacts, pins, groups, own)
+    }
+
+    /** [b64] decoded as STANDARD base64 when it is exactly [length] bytes,
+     *  else `null`. */
+    private fun standardBase64OfLength(b64: String, length: Int): ByteArray? {
+        val bytes = try {
+            Base64.getDecoder().decode(b64)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        if (bytes.size != length) {
+            bytes.fill(0)
+            return null
+        }
+        return bytes
+    }
+
+    /** A JSON number that is an integer; a fraction, an exponent form, a
+     *  string or a boolean is `null`. */
+    private fun JsonObject.integer(key: String): Long? {
+        val p = this[key] as? JsonPrimitive ?: return null
+        if (p.isString || p.booleanOrNull != null) return null
+        return p.longOrNull
     }
 
     private fun JsonObject.string(key: String): String? {
@@ -179,6 +268,30 @@ public object StateBundle {
      *  into a bundle. Only that account's list is read: a bundle never
      *  carries another account's contacts to a new device. */
     public fun build(context: Context, accountIdB64: String, knownGroupIdsHex: Collection<String>): Bundle {
+        val owner = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        val links = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context).load(owner)
+        val ownRows = try {
+            me.lakko.app.auth.OwnPredecessorStore.onDevice(context).load(owner)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        val own = try {
+            carriedOwnPredecessors(ownRows)
+        } finally {
+            ownRows.forEach { it.zero() }
+        }
+        return build(context, accountIdB64, knownGroupIdsHex, own, links)
+    }
+
+    /** [build] over the own predecessors and proven steps already read (the
+     *  seam a host test drives: the predecessor store needs the Keystore). */
+    internal fun build(
+        context: Context,
+        accountIdB64: String,
+        knownGroupIdsHex: Collection<String>,
+        ownPredecessors: List<CarriedOwnPredecessor>,
+        links: List<me.lakko.app.contacts.ProvenLink>,
+    ): Bundle {
         val accepted = me.lakko.app.contacts.AcceptedContactsStore.load(context, accountIdB64)
         val pinStore = me.lakko.app.contacts.PeerPinStore(
             context,
@@ -201,10 +314,164 @@ public object StateBundle {
             } catch (_: Throwable) {
                 null
             } ?: return@mapNotNull null
-            CarriedPin(accountIdB64, pin.pinnedSignaturePubkeyB64, pin.rotationMarker)
+            CarriedPin(
+                accountIdB64,
+                pin.pinnedSignaturePubkeyB64,
+                pin.rotationMarker,
+                provenPredecessorsOf(pin.pinnedSignaturePubkeyB64, links),
+            )
         }
         val groups = knownGroupIdsHex.mapNotNull { bytesOfHex(it)?.let { b -> enc.encodeToString(b) } }
-        return Bundle(contacts, pins, groups)
+        return Bundle(contacts, pins, groups, ownPredecessors)
+    }
+
+    // ---- ADR-0066: predecessors (pure) ---------------------------------------
+
+    /** The sending half: this device's own previous identities as the bundle
+     *  carries them, oldest first. The caller zeroes [rows]. */
+    internal fun carriedOwnPredecessors(rows: List<me.lakko.app.auth.OwnPredecessor>): List<CarriedOwnPredecessor> =
+        rows.take(MAX_PREDECESSORS).map {
+            CarriedOwnPredecessor(Base64.getEncoder().encodeToString(it.phraseSeed), it.supersededAtMs)
+        }
+
+    /** The sending half: the proven predecessors of [pinnedKeyB64], oldest
+     *  first. A chain longer than the bound keeps its LATEST steps, so what
+     *  is carried still ends at the pinned key. */
+    internal fun provenPredecessorsOf(
+        pinnedKeyB64: String,
+        links: List<me.lakko.app.contacts.ProvenLink>,
+    ): List<String> =
+        me.lakko.app.contacts.keysOfPerson(pinnedKeyB64, links)
+            .takeWhile { it != pinnedKeyB64 }
+            .takeLast(MAX_PREDECESSORS)
+
+    /** What [receiveOwnPredecessors] did. */
+    public class OwnPredecessorReceipt(
+        /** How many of this account's earlier keys are held after it. */
+        public val held: Int,
+        /** Whether the key this account's conversation leaves are bound to
+         *  (the EARLIEST own predecessor) is another one than before. */
+        public val conversationKeyChanged: Boolean,
+    )
+
+    /**
+     * The predecessor rows a device holds after a bundle: the carried ones,
+     * oldest first, then any row this device already held that the bundle
+     * does not name (a key it adopted itself after the sender built the
+     * bundle). A row this device already holds for a carried key is kept as
+     * it is (its own adoption time and mailbox cursor).
+     */
+    internal fun mergedOwnPredecessors(
+        held: List<me.lakko.app.auth.OwnPredecessor>,
+        carried: List<me.lakko.app.auth.OwnPredecessor>,
+    ): List<me.lakko.app.auth.OwnPredecessor> {
+        val out = ArrayList<me.lakko.app.auth.OwnPredecessor>()
+        for (row in carried) {
+            if (out.any { it.signaturePubkey.contentEquals(row.signaturePubkey) }) continue
+            out += held.firstOrNull { it.signaturePubkey.contentEquals(row.signaturePubkey) } ?: row
+        }
+        for (row in held) {
+            if (out.none { it.signaturePubkey.contentEquals(row.signaturePubkey) }) out += row
+        }
+        if (out.size <= me.lakko.app.auth.MAX_OWN_PREDECESSORS) return out
+        // The earliest is the one the conversation leaves name; the oldest
+        // of the rest go.
+        return listOf(out.first()) + out.takeLast(me.lakko.app.auth.MAX_OWN_PREDECESSORS - 1)
+    }
+
+    /**
+     * The receiving half of `ownPredecessors`: store this account's earlier
+     * keys exactly as a kept device that adopted each rotation holds them
+     * (public key, seed, the SENDER's adoption time as the start of that
+     * mailbox's 30-day read window, cursor 0), and record the proven steps
+     * between them. The step from the latest predecessor to the current key
+     * is recorded when [currentAccountKey] is known; a device that does not
+     * hold its seed yet records it when the chat layer first loads
+     * ([ownChainLinks]).
+     *
+     * [pubkeyOfSeed] is `Identity.fromSeed(seed).signaturePublicKey()`.
+     * Returns `null` when the rows could not be stored (nothing is recorded).
+     */
+    internal fun receiveOwnPredecessors(
+        store: me.lakko.app.auth.OwnPredecessorStore,
+        links: me.lakko.app.contacts.ProvenLinkStore,
+        accountIdB64: String,
+        carried: List<CarriedOwnPredecessor>,
+        currentAccountKey: ByteArray?,
+        pubkeyOfSeed: (ByteArray) -> ByteArray,
+        nowMs: Long = System.currentTimeMillis(),
+    ): OwnPredecessorReceipt? {
+        val held = store.load(accountIdB64)
+        if (carried.isEmpty()) {
+            held.forEach { it.zero() }
+            return OwnPredecessorReceipt(held.size, conversationKeyChanged = false)
+        }
+        val rows = ArrayList<me.lakko.app.auth.OwnPredecessor>()
+        try {
+            for (c in carried.take(MAX_PREDECESSORS)) {
+                val seed = standardBase64OfLength(c.seedB64, SEED_LEN) ?: return null
+                rows += me.lakko.app.auth.OwnPredecessor(pubkeyOfSeed(seed), seed, c.adoptedAtMs)
+            }
+            val merged = mergedOwnPredecessors(held, rows)
+            if (!store.save(accountIdB64, merged)) return null
+            val keys = ownChainLinks(
+                predecessorKeysB64 = rows.map { Base64.getEncoder().encodeToString(it.signaturePubkey) },
+                currentKeyB64 = currentAccountKey?.let { Base64.getEncoder().encodeToString(it) },
+            )
+            for ((older, newer) in keys) {
+                me.lakko.app.contacts.ProvenPredecessors.recordProven(
+                    store = links,
+                    ownerAccountIdB64 = accountIdB64,
+                    accountIdB64 = accountIdB64,
+                    oldKeyB64 = older,
+                    newKeyB64 = newer,
+                    nowMs = nowMs,
+                )
+            }
+            val before = held.firstOrNull()?.signaturePubkey
+            val after = merged.first().signaturePubkey
+            return OwnPredecessorReceipt(
+                held = merged.size,
+                conversationKeyChanged = before == null || !before.contentEquals(after),
+            )
+        } catch (_: Throwable) {
+            return null
+        } finally {
+            rows.forEach { it.zero() }
+            held.forEach { it.zero() }
+        }
+    }
+
+    /** The proven steps of this account's own key history: each predecessor
+     *  to the next, and the latest to [currentKeyB64] when it is known and is
+     *  not itself the latest. Oldest first. */
+    internal fun ownChainLinks(predecessorKeysB64: List<String>, currentKeyB64: String?): List<Pair<String, String>> {
+        val chain = predecessorKeysB64 + listOfNotNull(currentKeyB64?.takeIf { it != predecessorKeysB64.lastOrNull() })
+        return chain.zipWithNext().filter { (a, b) -> a != b }
+    }
+
+    /**
+     * The receiving half of a pin's `provenPredecessorsB64`: each carried key
+     * is a proven predecessor of the next, and the last of the pinned key.
+     * Recorded only when the pin this device now holds for the account IS the
+     * carried one ([heldPinnedKeyB64]): a pin the monotone setter refused
+     * names another key, and the sender's history is not this device's then.
+     * Returns how many steps were recorded.
+     */
+    internal fun receiveContactPredecessors(
+        links: me.lakko.app.contacts.ProvenLinkStore,
+        ownerAccountIdB64: String,
+        pin: CarriedPin,
+        heldPinnedKeyB64: String?,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Int {
+        if (pin.provenPredecessorsB64.isEmpty() || heldPinnedKeyB64 != pin.pinnedSignaturePubkeyB64) return 0
+        val account = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(pin.accountIdB64)
+        val before = links.load(ownerAccountIdB64).size
+        for ((older, newer) in (pin.provenPredecessorsB64 + pin.pinnedSignaturePubkeyB64).zipWithNext()) {
+            me.lakko.app.contacts.ProvenPredecessors.recordProven(links, ownerAccountIdB64, account, older, newer, nowMs)
+        }
+        return links.load(ownerAccountIdB64).size - before
     }
 
     /**
@@ -218,10 +485,73 @@ public object StateBundle {
     @Volatile
     public var contactsSink: ((String, List<me.lakko.app.contacts.AcceptedContact>) -> Int?)? = null
 
+    /** What [apply] did. Destructures as `(contacts, pins)`. */
+    public data class Applied(
+        val contacts: Int,
+        val pins: Int,
+        /** ADR-0066: this account's earlier keys held after the bundle. */
+        val ownPredecessors: Int = 0,
+        /** ADR-0066: the key the conversation leaves are bound to changed;
+         *  a chat layer already loaded must be rebuilt under it. */
+        val conversationKeyChanged: Boolean = false,
+    )
+
+    /**
+     * ADR-0066: run after a bundle moved the account's conversation key on a
+     * device whose chat layer may already be loaded under the current key,
+     * with the account the bundle was for. Set by the process-lived contacts
+     * repository, which rebuilds the chat layer's identity under the
+     * conversation key and republishes the KeyPackage.
+     */
+    @Volatile
+    public var conversationKeySink: (suspend (String) -> Unit)? = null
+
+    /** Tell [conversationKeySink] when [applied] moved the conversation key.
+     *  Best-effort: a device whose chat layer is not loaded reads the
+     *  predecessor store when it loads. */
+    public suspend fun afterApply(accountIdB64: String, applied: Applied) {
+        if (!applied.conversationKeyChanged) return
+        try {
+            conversationKeySink?.invoke(accountIdB64)
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("StateBundle", "conversation identity not rebuilt: ${cause.javaClass.simpleName}")
+        }
+    }
+
     /** Merge [bundle] into [accountIdB64]'s state on this device: contacts
      *  not here yet, pins through the monotone setter, the known group ids
-     *  for the chat list. Returns the number of contacts and pins applied. */
-    public fun apply(context: Context, accountIdB64: String, bundle: Bundle): Pair<Int, Int> {
+     *  for the chat list, and (ADR-0066) this account's earlier keys and each
+     *  contact's proven predecessors. */
+    public fun apply(context: Context, accountIdB64: String, bundle: Bundle): Applied {
+        val owner = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        val linkStore = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context)
+        // The own predecessors FIRST: nothing below may leave the device
+        // bound under the current key because a later step threw.
+        val receipt = if (bundle.ownPredecessors.isEmpty()) {
+            null
+        } else {
+            try {
+                val current = me.lakko.app.auth.AccountIdentitySeedStore.getAccountIdentitySeed(context, owner)
+                val currentKey = try {
+                    current?.let { seed -> uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.signaturePublicKey() } }
+                } finally {
+                    current?.fill(0)
+                }
+                receiveOwnPredecessors(
+                    store = me.lakko.app.auth.OwnPredecessorStore.onDevice(context),
+                    links = linkStore,
+                    accountIdB64 = owner,
+                    carried = bundle.ownPredecessors,
+                    currentAccountKey = currentKey,
+                    pubkeyOfSeed = { seed -> uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.signaturePublicKey() } },
+                )
+            } catch (cause: Throwable) {
+                android.util.Log.w("StateBundle", "own predecessors not stored: ${cause.javaClass.simpleName}")
+                null
+            }
+        }
         val dec = Base64.getDecoder()
         val incoming = bundle.contacts.mapIndexedNotNull { idx, c ->
             val pubkey = try {
@@ -272,6 +602,16 @@ public object StateBundle {
             } catch (_: Throwable) {
                 // A pin the setter refuses is not ours to force.
             }
+            try {
+                receiveContactPredecessors(
+                    links = linkStore,
+                    ownerAccountIdB64 = owner,
+                    pin = p,
+                    heldPinnedKeyB64 = pinStore.readPin(p.accountIdB64)?.pinnedSignaturePubkeyB64,
+                )
+            } catch (_: Throwable) {
+                // The step is then learned from the contact's own proof.
+            }
         }
         saveKnownGroupIds(
             context,
@@ -284,7 +624,12 @@ public object StateBundle {
                 }
             },
         )
-        return contactsApplied to pins
+        return Applied(
+            contacts = contactsApplied,
+            pins = pins,
+            ownPredecessors = receipt?.held ?: 0,
+            conversationKeyChanged = receipt?.conversationKeyChanged == true,
+        )
     }
 
     private const val BUNDLE_ID_BASE: Long = 1L shl 40

@@ -167,9 +167,13 @@ public fun forwardJumpTarget(
     val groupIdHex = forward.originGroupIdHex ?: return null
     val messageId = forward.originMessageId ?: return null
     if (messageId == 0L) return null
-    val thread = threads.firstOrNull { it.groupIdHex == groupIdHex } ?: return null
-    val held = thread.messages.any { it.messageId == messageId && it.direction != Direction.System }
-    return if (held) groupIdHex to messageId else null
+    // ADR-0065 R.5 — the origin may be an OLDER segment of a conversation:
+    // the jump opens the conversation's current group and lands on the
+    // history row ([forwardJumpRow]).
+    val thread = conversationThreadOf(threads, groupIdHex) ?: return null
+    val row = forwardJumpRow(thread, groupIdHex, messageId) ?: return null
+    val held = thread.messages.any { it.messageId == row && it.direction != Direction.System }
+    return if (held) thread.groupIdHex to row else null
 }
 
 private const val HEX_DIGITS: String = "0123456789abcdef"

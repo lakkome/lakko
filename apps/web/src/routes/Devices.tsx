@@ -842,6 +842,7 @@ function PairView(props: {
     | { kind: "joining" }
     | { kind: "done" }
     | { kind: "error"; message: () => string };
+  const auth = useAuth();
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(null);
 
@@ -858,6 +859,7 @@ function PairView(props: {
         accountIdB64: props.accountIdB64,
         deviceKey,
         loginHandle: await ownPairingHandle(props.username),
+        onOwnPredecessorsStored: () => auth.rebindAfterStateBundle(props.accountIdB64),
       });
       // Encode the wire bytes as a base64url string and feed
       // into `qrcode`. The library accepts arbitrary strings;

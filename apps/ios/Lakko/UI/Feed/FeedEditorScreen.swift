@@ -233,7 +233,7 @@ struct FeedEditorScreen: View {
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
                 ForEach(model.sources, id: \.idHex) { source in
-                    Picker(source.title, selection: membership(source.idHex)) {
+                    Picker(source.title, selection: membership(source.key)) {
                         ForEach(Membership.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
                     .accessibilityLabel(l10n.t("feed.editor.membership.a11y", texts: ["name": source.title]))

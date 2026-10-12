@@ -133,24 +133,23 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             Log.i(TAG, "wake dropped: not addressed to the signed-in account")
             return
         }
-        // ADR-0065 phase 2 / UX 16.4 — a wake for a closed one-to-one posts
+        // ADR-0065 R.5 — a wake for the old segment of a moved one-to-one posts
         // nothing at all, in the FOREGROUND too. The background pass below
         // already answers this, but a foregrounded app runs no background
         // pass and would fall through to the generic banner until the push
         // teardown lands. Two plain-preferences reads (the local
-        // `push_gid -> group` index, then the closed-state store); no seed,
+        // `push_gid -> group` index, then the continuity facts); no seed,
         // no snapshot, no network.
         val closed = wakeNamesClosedOneToOne(
             wakeGroupHex = wake.groupHex,
             lookupGroupIdHex = { hex -> PushRouteStore(applicationContext).lookup(accountIdB64, hex) },
             isClosedOneToOne = { hex ->
-                me.lakko.app.chat.conversationInert(
-                    me.lakko.app.chat.ConversationClosedStore.load(applicationContext, accountIdB64, hex),
-                )
+                hex.lowercase() in
+                    me.lakko.app.chat.SharedPrefsContinuityBackend(applicationContext).load(accountIdB64).movedOneToOne
             },
         )
         if (closed) {
-            Log.i(TAG, "wake dropped: the conversation is closed")
+            Log.i(TAG, "wake dropped: the conversation moved")
             return
         }
         // Silent-push background decrypt (mirror of web sw.js):
@@ -173,7 +172,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         // ADR-0065 phase 2 / UX 16.4 — a wake for a closed one-to-one posts
         // nothing at all: no banner, no ring.
         if (outcome?.suppressed == true) {
-            Log.i(TAG, "wake dropped: the conversation is closed")
+            Log.i(TAG, "wake dropped: the conversation moved")
             return
         }
         if (outcome != null && handledAsCall(outcome)) return
@@ -284,6 +283,20 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             }
         }
 
+        // ADR-0065 R.5 — a successor group's banner belongs to its
+        // conversation: same stack, same id (a new banner replaces the
+        // conversation's), one row. Read from the lineage mirror; nothing is
+        // written.
+        val groupKey = notificationGroupKey(
+            rawPushGidHex = wake.groupHex,
+            resolvedGroupHex = tapGroupHex,
+            lineage = try {
+                me.lakko.app.chat.LineageMirror.load(applicationContext, accountIdB64)
+            } catch (_: Throwable) {
+                emptyList()
+            },
+        )
+
         val clickIntent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             if (tapGroupHex != null) {
@@ -295,7 +308,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         }
         val pendingIntent = PendingIntent.getActivity(
             applicationContext,
-            wake.groupHex?.hashCode() ?: 0,
+            groupKey?.hashCode() ?: 0,
             clickIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -317,7 +330,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             // Tag-replace by group so a burst within the same
             // chat collapses into one OS notification — matches
             // the Web + iOS posture.
-            .setGroup(wake.groupHex ?: "lakko-default")
+            .setGroup(groupKey ?: "lakko-default")
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
 
@@ -325,7 +338,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         // Per-group notification id — same hash trick as the
         // PendingIntent request code. Stable id means a fresh
         // wake on the same thread replaces the prior banner.
-        val id = wake.groupHex?.hashCode() ?: 0
+        val id = groupKey?.hashCode() ?: 0
         try {
             manager.notify(id, builder.build())
         } catch (cause: SecurityException) {
@@ -398,7 +411,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
 }
 
 /**
- * ADR-0065 phase 2 / UX 16.4 — does this wake name a closed one-to-one?
+ * ADR-0065 R.5 — does this wake name the old segment of a moved one-to-one?
  *
  * The wake's `g` is the opaque `push_gid` (ADR-0042); it is resolved to the
  * real group through the same local route index the tap deep link uses

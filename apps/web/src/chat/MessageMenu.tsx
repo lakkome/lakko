@@ -156,6 +156,10 @@ export interface MessageMenuProps {
   onEdit: () => void;
   onDelete: () => void;
   onClose: () => void;
+  /** ADR-0065 R.5 — a row of an OLDER segment of the conversation: the menu
+   *  is the pin row alone (`pin-bar.ts` `historyRowOffersUnpin`). No
+   *  reaction row and no other action: nothing else can name that row. */
+  pinOnly?: boolean;
 }
 
 export function MessageMenu(props: MessageMenuProps): JSX.Element {
@@ -266,6 +270,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
               };
         })()}
       >
+        <Show when={props.pinOnly !== true}>
         <div
           ref={row}
           class="lk-msg-menu-surface lk-msg-menu-reactions"
@@ -299,26 +304,34 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
             <Icon name="plus" size={16} />
           </button>
         </div>
+        </Show>
         {/* The second surface. It always has at least the Reply row now
             (section 2's first band), so it is always rendered; the `Show`s
             inside still keep Copy off a message with no text and Edit /
             Delete off somebody else's message. */}
+        {/* With `pinOnly` this card is the ONLY surface: it takes the
+            placement's single-surface slot (measured and placed as `row`). */}
         <div
-          ref={card}
+          ref={(el) => {
+            if (props.pinOnly === true) row = el;
+            else card = el;
+          }}
           class="lk-msg-menu-surface lk-msg-menu-card lk-msg-menu-items"
-          style={offset((l) => l.card)}
+          style={offset((l) => (props.pinOnly === true ? l.row : l.card))}
         >
+            <Show when={props.pinOnly !== true}>
             <button type="button" role="menuitem" onClick={() => run(() => props.onReply())}>
               <Icon name="reply" size={16} />
               <span>{t("chat.message.reply")}</span>
             </button>
-            <Show when={props.canForward}>
+            </Show>
+            <Show when={props.pinOnly !== true && props.canForward}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onForward())}>
                 <Icon name="forward" size={16} />
                 <span>{t("chat.message.forward")}</span>
               </button>
             </Show>
-            <Show when={copyable()}>
+            <Show when={props.pinOnly === true ? null : copyable()}>
               {(text) => (
                 <button
                   type="button"
@@ -330,7 +343,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 </button>
               )}
             </Show>
-            <Show when={props.canSelect}>
+            <Show when={props.pinOnly !== true && props.canSelect}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onSelect())}>
                 <Icon name="select" size={16} />
                 <span>{t("chat.message.select")}</span>
@@ -338,13 +351,20 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
             </Show>
             <Show when={props.pinLabel}>
               {(label) => (
-                <button type="button" role="menuitem" onClick={() => run(() => props.onPin())}>
+                <button
+                  ref={(el) => {
+                    if (props.pinOnly === true) firstItem = el;
+                  }}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => run(() => props.onPin())}
+                >
                   <Icon name="pin" size={16} />
                   <span>{label() === "Pin" ? t("chat.message.pin") : t("chat.message.unpin")}</span>
                 </button>
               )}
             </Show>
-            <Show when={props.canEditDelete}>
+            <Show when={props.pinOnly !== true && props.canEditDelete}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onEdit())}>
                 <Icon name="pencil" size={16} />
                 <span>{t("chat.message.edit")}</span>

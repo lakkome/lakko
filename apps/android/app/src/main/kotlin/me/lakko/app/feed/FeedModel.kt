@@ -32,7 +32,53 @@ public data class FeedSource(
     /** People in a group, for weighing reactions against its size; 0 for a
      *  channel, whose posts carry no reactions. */
     val audience: Int,
+    /** ADR-0065 R.5 — for a group whose conversation continues in a
+     *  successor, the hex of the conversation id (the lineage's first
+     *  group); `null` when [idHex] is the conversation id itself. */
+    val conversationHex: String? = null,
 )
+
+/**
+ * The key of everything a PERSON attaches to a feed source: the mute flag,
+ * "hide from feeds", a feed rule's include / exclude lists. The conversation
+ * id, never the group a moved conversation currently lives in (ADR-0065 R.5),
+ * so none of it is lost or duplicated when the conversation moves.
+ */
+public fun feedSourceKey(source: FeedSource): String = source.conversationHex ?: source.idHex
+
+/** One group conversation as the feed's source list reads it. */
+public data class GroupConversationForFeed(
+    /** Hex of the conversation id (the lineage root). */
+    val conversationHex: String,
+    /** Hex of the group it currently lives in (the lineage head). */
+    val headHex: String,
+    val title: String,
+    val audience: Int,
+)
+
+/**
+ * The group sources of the feed: ONE per conversation, drawn from its
+ * current group, with the mute flag read under the conversation id.
+ */
+public fun groupFeedSources(
+    conversations: List<GroupConversationForFeed>,
+    mutedOf: (conversationHex: String) -> Boolean,
+): List<FeedSource> {
+    val seen = HashSet<String>()
+    val out = ArrayList<FeedSource>()
+    for (c in conversations) {
+        if (!seen.add(c.conversationHex)) continue
+        out += FeedSource(
+            kind = FeedSourceKind.GROUP,
+            idHex = c.headHex,
+            title = c.title,
+            muted = mutedOf(c.conversationHex),
+            audience = c.audience,
+            conversationHex = c.conversationHex.takeIf { it != c.headHex },
+        )
+    }
+    return out
+}
 
 /** One attachment as the feed draws it. */
 public data class FeedAttachment(val kind: String?, val mime: String?)

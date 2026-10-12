@@ -77,24 +77,14 @@ struct ContactDetailScreen: View {
     @ViewBuilder
     private func detail(contact: AcceptedContact, resolved: ResolvedDisplayName) -> some View {
         let chat = viewModel.chatGroupIdHex(for: contact)
-        // ADR-0065 phase 2 (UX 16.1 / 16.4) — while the contact's reset is
-        // unverified, Call and Video are disabled with the helper line (the
-        // call keys would come from a chat that is closed), and Message opens
-        // the CLOSED old chat when one exists. A one-to-one the reset closed
-        // takes the membership-ended layout here: Call and Video gone,
-        // `Delete this chat` in their place.
-        let resetUnverified = KeyResetBlocking.blocksActions(contact.keyState)
-        let chatClosed = chat.map { viewModel.chatClosed(groupIdHex: $0) } ?? false
-        let callable = !resetUnverified && !chatClosed
-            && (chat.map { viewModel.canCall(groupIdHex: $0) } ?? false)
+        let callable = chat.map { viewModel.canCall(groupIdHex: $0) } ?? false
         // Section 2.1, decided once in `crates/lakko-ui-rules` where the host
         // test suite can run it, never by a flag read down in the layout. The
         // contact is in the list by construction — this branch only draws when
         // `viewModel.contact(messageId:)` found one.
         let sections = personInfoSections(
             caps: PersonInfoCapabilities(
-                membershipEnded: chatClosed
-                    || (chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false)))
+                membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false))
         List {
             Section {
                 VStack(spacing: 8) {
@@ -123,7 +113,7 @@ struct ContactDetailScreen: View {
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    if chat == nil, !resetUnverified {
+                    if chat == nil {
                         Text(l10n.t("chats.new_chat.not_available"))
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
@@ -132,35 +122,6 @@ struct ContactDetailScreen: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
                 .listRowBackground(Color.clear)
-            }
-
-            // UX 16.1 — the banner, directly under the header and above the
-            // action row: sunken surface, the shield, one sentence, one
-            // action. No dismiss: it is the state, and it goes when the state
-            // does. `Verify` opens the safety-number section (16.2).
-            if resetUnverified {
-                Section {
-                    HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: "exclamationmark.shield.fill")
-                            .foregroundStyle(Color.lakkoTextMuted)
-                            .accessibilityHidden(true)
-                        Text(resolved.isPlaceholder
-                            ? l10n.t("contacts.keys_reset.banner_unnamed")
-                            : l10n.t("contacts.keys_reset.banner", texts: ["name": resolved.name]))
-                            .font(.footnote)
-                            .foregroundStyle(Color.lakkoText)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        NavigationLink(value: TabRoute.safetyNumber(messageId: messageId)) {
-                            Text(l10n.t("contacts.keys_reset.banner_action"))
-                                .font(.footnote.weight(.semibold))
-                        }
-                        .fixedSize()
-                    }
-                    .padding(.vertical, 4)
-                    .listRowBackground(Color.lakkoSurfaceSunken)
-                    .accessibilityElement(children: .combine)
-                    .accessibilitySortPriority(1)
-                }
             }
 
             // The tiles go entirely when the rule offers neither, rather than
@@ -195,25 +156,13 @@ struct ContactDetailScreen: View {
                     }
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets())
-                    // UX 16.1 — the helper under the disabled actions.
-                    if resetUnverified, chat == nil || sections.contains(.call) {
-                        Text(l10n.t("contacts.keys_reset.verify_first_short"))
-                            .font(.footnote)
-                            .foregroundStyle(Color.lakkoTextMuted)
-                            .listRowBackground(Color.clear)
-                    }
                 }
             }
 
             Section {
                 if sections.contains(.safetyNumber) {
                     NavigationLink(value: TabRoute.safetyNumber(messageId: messageId)) {
-                        // UX 16.2 — the section is the one verification
-                        // surface; in the reset state it reads as the new
-                        // number's.
-                        Label(
-                            l10n.t(resetUnverified ? "contacts.safety.reset.title" : "contacts.safety.title"),
-                            systemImage: resetUnverified ? "exclamationmark.shield" : "checkmark.shield")
+                        Label(l10n.t("contacts.safety.title"), systemImage: "checkmark.shield")
                             .foregroundStyle(Color.lakkoText)
                     }
                 }
@@ -228,13 +177,7 @@ struct ContactDetailScreen: View {
                 }
             } footer: {
                 if sections.contains(.safetyNumber) {
-                    if resetUnverified {
-                        Text(resolved.isPlaceholder
-                            ? l10n.t("contacts.safety.reset.body_unnamed")
-                            : l10n.t("contacts.safety.reset.body", texts: ["name": resolved.name]))
-                    } else {
-                        Text(l10n.t("contacts.safety.row_sub"))
-                    }
+                    Text(l10n.t("contacts.safety.row_sub"))
                 }
             }
 
@@ -265,25 +208,6 @@ struct ContactDetailScreen: View {
         .listStyle(.insetGrouped)
         .navigationTitle(resolved.name)
         .navigationBarTitleDisplayMode(.inline)
-        // UX 16.2 — the one-line toast after a confirmation, at the bottom,
-        // gone on its own.
-        .overlay(alignment: .bottom) {
-            if let toast = viewModel.keyResetVerifiedToast {
-                Text(toast)
-                    .font(.footnote)
-                    .foregroundStyle(Color.lakkoText)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.lakkoSurface)
-                    .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
-                    .padding(.bottom, 24)
-                    .transition(.opacity)
-                    .task {
-                        try? await Task.sleep(for: .seconds(2.5))
-                        viewModel.keyResetVerifiedToast = nil
-                    }
-            }
-        }
         .alert(l10n.t("contacts.rename.action"), isPresented: $renaming) {
             TextField(l10n.t("contacts.rename.placeholder"), text: $draftName)
             Button(l10n.t("common.save")) {
@@ -375,42 +299,19 @@ struct SafetyNumberScreen: View {
     let messageId: Int64
 
     @State private var copied = false
-    /// ADR-0065 phase 2 (UX 16.2) — the deliberate step: the checkbox and its
-    /// warning sentence, then the button.
-    @State private var compared = false
-    @State private var confirming = false
-    @State private var saveFailed = false
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if let contact = viewModel.contact(messageId: messageId) {
-                    // UX 16.2 — over the PENDING key after a reset, never the
-                    // previous one; the old number is never shown beside it.
-                    let resetUnverified = contact.keyState == .resetUnverified
-                    if let number = viewModel.safetyNumberToVerify(for: contact) {
+                    if let number = viewModel.safetyNumber(for: contact) {
                         ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
-                            if resetUnverified {
-                                Label {
-                                    Text(l10n.t("contacts.safety.reset.title"))
-                                        .font(.headline)
-                                } icon: {
-                                    Image(systemName: "exclamationmark.shield")
-                                }
-                                .foregroundStyle(Color.lakkoText)
-                                Text(resolved.isPlaceholder
-                                    ? l10n.t("contacts.safety.reset.body_unnamed")
-                                    : l10n.t("contacts.safety.reset.body", texts: ["name": resolved.name]))
-                                .font(.body)
-                                .foregroundStyle(Color.lakkoTextMuted)
-                            } else {
-                                Text(resolved.isPlaceholder
-                                    ? l10n.t("contacts.safety.body_unnamed")
-                                    : l10n.t("contacts.safety.body", texts: ["name": resolved.name]))
-                                .font(.body)
-                                .foregroundStyle(Color.lakkoTextMuted)
-                            }
+                            Text(resolved.isPlaceholder
+                                ? l10n.t("contacts.safety.body_unnamed")
+                                : l10n.t("contacts.safety.body", texts: ["name": resolved.name]))
+                            .font(.body)
+                            .foregroundStyle(Color.lakkoTextMuted)
                         }
                         SafetyNumberGrid(number: number)
                         Button {
@@ -424,11 +325,6 @@ struct SafetyNumberScreen: View {
                             Label(l10n.t(copied ? "common.copied" : "common.copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
                         }
                         .buttonStyle(.bordered)
-                        if resetUnverified {
-                            ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
-                                resetConfirmation(resolved: resolved)
-                            }
-                        }
                     } else {
                         Text(l10n.t("contacts.safety.sign_in"))
                             .foregroundStyle(Color.lakkoDanger)
@@ -445,63 +341,6 @@ struct SafetyNumberScreen: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    /// UX 16.2 — the checkbox with its sentence, the always-visible warning,
-    /// the button. The checkbox is the deliberate step; there is no second
-    /// dialog. The checkbox and its warning are one announcement.
-    @ViewBuilder
-    private func resetConfirmation(resolved: ResolvedDisplayName) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Toggle(isOn: $compared) {
-                Text(resolved.isPlaceholder
-                    ? l10n.t("contacts.safety.reset.checkbox_unnamed")
-                    : l10n.t("contacts.safety.reset.checkbox", texts: ["name": resolved.name]))
-                    .font(.footnote)
-            }
-            .toggleStyle(CheckboxToggleStyle())
-            .disabled(confirming)
-            Text(resolved.isPlaceholder
-                ? l10n.t("contacts.safety.reset.warning_unnamed")
-                : l10n.t("contacts.safety.reset.warning", texts: ["name": resolved.name]))
-                .font(.footnote)
-                .foregroundStyle(Color.lakkoTextMuted)
-            Button {
-                confirming = true
-                saveFailed = !viewModel.onConfirmKeyReset(messageId: messageId)
-                confirming = false
-            } label: {
-                Text(l10n.t(confirming ? "contacts.safety.reset.confirming" : "contacts.safety.reset.confirm"))
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!compared || confirming)
-            if saveFailed {
-                Text(l10n.t("contacts.safety.reset.save_failed"))
-                    .font(.footnote)
-                    .foregroundStyle(Color.lakkoDanger)
-            }
-        }
-        .accessibilityElement(children: .contain)
-    }
-}
-
-/// A checkbox-shaped toggle: the square, ticked or not, before its label.
-private struct CheckboxToggleStyle: ToggleStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        Button {
-            configuration.isOn.toggle()
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: configuration.isOn ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(configuration.isOn ? Color.lakkoAccent : Color.lakkoTextMuted)
-                    .accessibilityHidden(true)
-                configuration.label
-                    .foregroundStyle(Color.lakkoText)
-                    .multilineTextAlignment(.leading)
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
-    }
 }
 
 /// The digits laid out by ``SafetyNumberFormat``.

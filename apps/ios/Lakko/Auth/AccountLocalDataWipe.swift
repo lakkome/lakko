@@ -222,13 +222,27 @@ enum AccountLocalDataWipe {
             removeKeys(in: standard, withPrefix: knockCursorPrefix + accountIdB64 + ".")
         }
         step("message-log") { MessageLogStore().deleteLog(accountIdB64: accountIdB64) }
-        step("recreate-pending") { RecreatePendingStore().clear(accountIdB64: accountIdB64) }
-        step("conversation-closed") { ConversationClosedStore().clear(accountIdB64: accountIdB64) }
-        step("key-reset-evictions") { KeyResetEvictionStore().clear(accountIdB64: accountIdB64) }
 
         // 5. Contacts and profiles.
+        step("verified-bindings") { VerifiedBindingStore.clear(ownerAccountIdB64: accountIdB64) }
+        step("reset-continuity") { Continuity.clearMarker(accountIdB64: accountIdB64) }
+        // ADR-0065 R.5-R.7 — the successor-claim state, the continuity
+        // bookkeeping, the held messages and the unsent-lineage marker.
+        step("lineage-mirror") { ConversationLineageMirror.clear(accountIdB64: accountIdB64) }
+        step("group-closed") { GroupClosedStore.clear(ownerAccountIdB64: accountIdB64) }
+        step("continuity-store") { ContinuityStore.clear(ownerAccountIdB64: accountIdB64) }
+        step("held-sends") { HeldSendQueue.clearAccount(ownerAccountId: accountIdB64) }
+        step("lineage-unsent") {
+            standard.removeObject(
+                forKey: DeviceGroupSyncRepository.lineageUnsentKey(accountIdB64: accountIdB64))
+        }
         step("profiles") { ProfileDirectory.shared.forget(accountIdB64: accountIdB64) }
         step("contacts-inbox") { ContactsInboxStore().clear(accountIdB64: accountIdB64) }
+        // ADR-0065 R.3 — the requests kept waiting for an identity verdict.
+        step("contacts-inbox-waiting") { KnownRequestWaitingStore().clear(accountIdB64: accountIdB64) }
+        // ADR-0066 section 3.5a rule 5 — the unanswered outgoing requests
+        // (recipients and the intro text), a Keychain item.
+        step("contacts-sent-requests") { KeychainSentRequestsStore().clear(accountIdB64: accountIdB64) }
         step("accepted-contacts") { AcceptedContactsStore.clear(accountIdB64: accountIdB64) }
         step("peer-pins") { PeerPinStore.clear(ownerAccountIdB64: accountIdB64) }
         step("proven-predecessors") { ProvenPredecessorStore.clear(ownerAccountIdB64: accountIdB64) }

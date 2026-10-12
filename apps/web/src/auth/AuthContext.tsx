@@ -227,6 +227,7 @@ import {
   ThreeWordsSuspendedError,
   storedPhraseVerdict,
 } from "./recover/stale-phrase";
+import { writeContinuityMarker } from "../reach/continuity";
 import {
   attestationGate,
   clearKeyResetOwed,
@@ -252,7 +253,10 @@ import {
   type KeyRotationState,
   type PreparedRotation,
 } from "./key-rotation-store";
+import { bindingVerdict, rebindsAfterStateBundle } from "../devices/own-conversation-key";
+import { loadMlsSnapshot } from "../chat/mls-store";
 import { stampPredecessorAdoption } from "../contacts/address-resolver";
+import { markSpendOwed } from "../contacts/rotation-spent";
 import {
   SUPERSESSION_WINDOW_SECS,
   clearRotatedNotice,
@@ -619,6 +623,12 @@ export interface AuthApi {
    *  `chat/keypackage-publisher.ts`). Rejects when there is no session or any
    *  step fails. */
   republishKeyPackage(): Promise<void>;
+  /** ADR-0066 (a device paired after a key rotation): after a pairing state
+   *  bundle stored the account's earlier keys on a signed-in device, mint
+   *  the device binding again under the conversation key and publish the
+   *  KeyPackage again, but only while this device holds no conversation.
+   *  Resolves whether the binding changed; never rejects. */
+  rebindAfterStateBundle(accountIdB64: string): Promise<boolean>;
   /** Run the OPAQUE-PAKE registration flow.
    *
    *  Throws on network / server errors (the form surfaces them).
@@ -882,6 +892,12 @@ export interface AuthApi {
   completeFromPairing(
     phraseEntropy: Uint8Array,
     session?: SessionPair,
+    /** The pairing's own state to land under the device key BEFORE the
+     *  session's identities are installed: the in-memory DeviceGroup leaf of
+     *  an anonymous join, and the state bundle (ADR-0066: the account's
+     *  earlier keys must be stored before the conversation identity is
+     *  minted). Best effort. */
+    persistJoinState?: (deviceKey: CryptoKey) => Promise<void>,
   ): Promise<void>;
   /** ADR-0018 factor (a), path (b) — the NO-PASSWORD entry of the
    *  recovery cascade. The fresh device ran the pairing
@@ -1714,77 +1730,70 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     wasm: Wasm,
     canonical: WasmIdentity,
     accountIdB64: string,
+    /** ADR-0066 — `true` when the session is already running (a pairing
+     *  state bundle just stored the account's earlier keys). The device
+     *  identity the conversations use is then replaced only when the
+     *  binding is minted again, which happens only while this device holds
+     *  no conversation; `null` is returned when nothing was re-minted. */
+    live = false,
   ): Promise<Uint8Array | null> {
-    chats.setAccountIdentity(canonical);
+    // A live session that already answers to an earlier key learns nothing
+    // here, and its predecessor identity may hold state (the account's
+    // PublisherGroups after an in-session rotation): left untouched.
+    if (live && chats.predecessorAccountIdentity() !== null) return null;
+    if (!live) chats.setAccountIdentity(canonical);
     let device: WasmIdentity | null = null;
+    // In a live session: whether the device identity is left as it is.
+    let keepLiveDevice = live;
     // ADR-0066 section 3.5 (Stage A): after a proven key rotation the
     // conversation leaves stay bound to the account key of before it, and a
     // re-bound device would misjudge its own standing in every group it is
-    // in (fact 14). So the binding this device holds, and any it mints, is
-    // under the OLDEST proven predecessor it holds the seed of; `canonical`
-    // (the new key) is the directory identity.
+    // in (fact 14). So the binding this device mints is under the OLDEST
+    // proven predecessor it holds the seed of; `canonical` (the new key) is
+    // the directory identity. A binding it already holds is kept when it
+    // names any of the account's own keys, with one exception: a binding
+    // under the CURRENT key although predecessors are held (minted before a
+    // pairing state bundle brought them) is minted again while this device
+    // holds no conversation (`devices/own-conversation-key.ts`).
     let conversationSeedBytes: Uint8Array | null = null;
-    // ADR-0066 section 3.5a - own predecessors are a chain: the seeds of the
-    // keys held between the conversation key and the current one.
-    let intermediateSeeds: Uint8Array[] = [];
     let bindingAccount: WasmIdentity = canonical;
     try {
       const deviceKey = await getDeviceKey(accountIdB64);
       if (deviceKey !== null) {
+        // ADR-0066 section 3.5a - own predecessors are a chain, oldest
+        // first: the conversation key, then the keys held between it and
+        // the current one.
+        let seeds: Uint8Array[] = [];
         try {
-          const rotationState = await getKeyRotationState(accountIdB64, deviceKey);
-          conversationSeedBytes = conversationSeed(rotationState);
-          intermediateSeeds = predecessorSeeds(rotationState).slice(1);
+          seeds = predecessorSeeds(await getKeyRotationState(accountIdB64, deviceKey));
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("key-rotation state unreadable; treating the account as never rotated", err);
         }
-        if (conversationSeedBytes !== null) {
-          const predecessor = wasm.Identity.fromSeed(conversationSeedBytes);
-          if (bytesEqual(predecessor.signaturePublicKey, canonical.signaturePublicKey)) {
-            // The "predecessor" is the key this session holds: nothing rotated.
-            predecessor.free();
-            conversationSeedBytes = null;
-          } else {
-            chats.setPredecessorAccountIdentity(predecessor);
-            bindingAccount = predecessor;
-            const intermediates: WasmIdentity[] = [];
-            const seen = new Set<string>([
-              base64Encode(predecessor.signaturePublicKey),
-              base64Encode(canonical.signaturePublicKey),
-            ]);
-            for (const seed of intermediateSeeds) {
-              const between = wasm.Identity.fromSeed(seed);
-              const keyB64 = base64Encode(between.signaturePublicKey);
-              if (seen.has(keyB64)) {
-                between.free();
-                continue;
-              }
-              seen.add(keyB64);
-              intermediates.push(between);
-            }
-            chats.setIntermediatePredecessorIdentities(intermediates);
+        const predecessors: { identity: WasmIdentity; seed: Uint8Array; keyB64: string }[] = [];
+        const currentKeyB64 = base64Encode(canonical.signaturePublicKey);
+        for (const [index, seed] of seeds.entries()) {
+          const identity = wasm.Identity.fromSeed(seed);
+          const keyB64 = base64Encode(identity.signaturePublicKey);
+          // The "predecessor" is the key this session holds: nothing rotated.
+          if (index === 0 && keyB64 === currentKeyB64) {
+            identity.free();
+            break;
           }
+          if (keyB64 === currentKeyB64 || predecessors.some((p) => p.keyB64 === keyB64)) {
+            identity.free();
+            continue;
+          }
+          predecessors.push({ identity, seed, keyB64 });
         }
-        for (const seed of intermediateSeeds) seed.fill(0);
-        if (conversationSeedBytes === null) chats.setPredecessorAccountIdentity(null);
         const seed = await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
         const stored = await getDeviceBinding(accountIdB64);
+        let boundKeyB64: string | null = null;
         if (stored !== null) {
           try {
             device = wasm.Identity.fromSeedWithBinding(seed, stored);
-            // ADR-0065 section 2.3 step 5: a binding is signed by the
-            // account key, so a cached one minted before a key reset names
-            // the OLD key and would publish a KeyPackage nobody can resolve
-            // to this account. Re-mint whenever the bound key is not the
-            // session's canonical key.
             const bound = device.accountPublicKey;
-            if (bound === undefined || !bytesEqual(bound, bindingAccount.signaturePublicKey)) {
-              // eslint-disable-next-line no-console
-              console.warn("stored device binding names another account key, re-minting");
-              device.free();
-              device = null;
-            }
+            boundKeyB64 = bound === undefined ? null : base64Encode(bound);
           } catch (err) {
             // A binding that no longer verifies: re-mint below.
             // eslint-disable-next-line no-console
@@ -1792,7 +1801,61 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             device = null;
           }
         }
-        if (device === null) {
+        let holdsConversations = chats.groups().length > 0;
+        if (!holdsConversations) {
+          try {
+            const snapshot = await loadMlsSnapshot(accountIdB64, deviceKey);
+            holdsConversations = (snapshot?.knownGroupIds.length ?? 0) > 0;
+          } catch {
+            // Unreadable: the cautious answer keeps the binding.
+            holdsConversations = true;
+          }
+        }
+        const verdict = bindingVerdict({
+          boundKeyB64,
+          currentKeyB64,
+          predecessorKeysB64: predecessors.map((p) => p.keyB64),
+          holdsConversations,
+        });
+        // The own key the conversation leaves are bound to: the one a kept
+        // binding names, else the oldest predecessor; `-1` is the current key.
+        let conversationIndex = predecessors.length > 0 ? 0 : -1;
+        if (verdict === "keep") {
+          conversationIndex = predecessors.findIndex((p) => p.keyB64 === boundKeyB64);
+        } else if (verdict === "keep-under-current-key") {
+          conversationIndex = -1;
+          // eslint-disable-next-line no-console
+          console.warn(
+            "the device binding names the current account key and this device holds conversations; kept",
+          );
+        }
+        const remint = live ? rebindsAfterStateBundle(verdict) : verdict === "mint" || verdict === "remint";
+        if (remint || live) {
+          // ADR-0065 section 2.3 step 5 covers `mint`: a binding minted
+          // before a key reset names the OLD key (a reset keeps no
+          // predecessor) and would publish a KeyPackage nobody can resolve
+          // to this account. In a live session the parsed copy is dropped
+          // either way: the running identity is kept or replaced below.
+          if (device !== null && remint && !live) {
+            // eslint-disable-next-line no-console
+            console.warn("stored device binding names another account key, re-minting");
+          }
+          device?.free();
+          device = null;
+        }
+        const conversation = conversationIndex >= 0 ? predecessors[conversationIndex] : undefined;
+        if (conversation !== undefined) {
+          bindingAccount = conversation.identity;
+          conversationSeedBytes = conversation.seed.slice();
+        }
+        // The predecessor slot first: clearing it clears the chain too.
+        chats.setPredecessorAccountIdentity(conversation?.identity ?? null);
+        chats.setIntermediatePredecessorIdentities(
+          predecessors.filter((p) => p !== conversation).map((p) => p.identity),
+        );
+        for (const s of seeds) s.fill(0);
+        if (remint) {
+          keepLiveDevice = false;
           device = wasm.Identity.fromSeedBound(
             seed,
             bindingAccount.ed25519Seed,
@@ -1807,6 +1870,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       console.warn("device identity install failed; chats fall back to the account identity", err);
       device = null;
     }
+    if (live && (keepLiveDevice || device === null)) return null;
     if (device === null) {
       // The canonical identity now serves both roles; `setIdentity` would
       // free the instance `setAccountIdentity` holds, so hand the chats a
@@ -3301,6 +3365,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       done: { directory: false, deviceGroup: false },
     };
     writeKeyResetOwed(plainStorage(), ctx.accountIdB64, record);
+    // ADR-0065 R.4 - part of the reset's client order: from now until the
+    // expiry this account's reach sync keeps the continuity key registered
+    // on the NEW mailbox (`reach/reach-service.ts`), so a former contact
+    // whose device accepted the reset can deliver a Welcome. The marker
+    // outlives the owed record above; the registration itself rides the
+    // reach sync, which is retried until it lands.
+    writeContinuityMarker(plainStorage(), ctx.accountIdB64, {
+      keyGeneration: Number(ctx.reset.session.keyGeneration),
+      signedAtMs: record.signedAtMs,
+    });
     // ADR-0066 section 3.5: a reset makes every predecessor, proven or not,
     // a superseded key, and ends a rotation this device was finishing.
     clearRotation(plainStorage(), ctx.accountIdB64);
@@ -3456,6 +3530,41 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       Date.now(),
     );
     return { phrase, seed, conversationSeed: conversationSeed(next) ?? ctx.oldSeed };
+  }
+
+  /**
+   * ADR-0066 (a device paired after a key rotation) — a pairing state bundle
+   * just stored the account's earlier keys on a device whose session is
+   * already running (it was signed in, then paired by showing its code).
+   * While it holds no conversation its binding is minted again under the
+   * conversation key and its KeyPackage published again, in this session,
+   * so no conversation admits it under the current key. A device that
+   * already holds conversations keeps its binding. Resolves whether the
+   * binding changed; never rejects.
+   */
+  async function rebindAfterStateBundle(accountIdB64: string): Promise<boolean> {
+    try {
+      const account = keyPackageAccount;
+      const canonical = chats.accountIdentity();
+      if (account === null || account.accountIdB64 !== accountIdB64 || canonical === null) {
+        return false;
+      }
+      const wasm = await loadWasm();
+      const conversationSeedBytes = await installSessionIdentities(wasm, canonical, accountIdB64, true);
+      if (conversationSeedBytes === null) return false;
+      const secrets = identitySecrets();
+      if (secrets !== null && base64Encode(secrets.accountId) === accountIdB64) {
+        setIdentitySecrets({ ...secrets, conversationIdentitySeed: conversationSeedBytes });
+      }
+      // eslint-disable-next-line no-console
+      console.info("the device binding was minted again under the account's earlier key");
+      await publishKeyPackageBestEffort("state bundle");
+      return true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("re-binding after the state bundle failed", err instanceof Error ? err.name : "unknown");
+      return false;
+    }
   }
 
   /** Put adopted keys into the live session without a reload (the rotating
@@ -3656,6 +3765,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             newPubkeyB64: keyB64,
           });
           markRotatedNotice(plainStorage(), accountIdB64);
+          // ADR-0066 section 3.5a rule 5: this KEPT device's own links and
+          // unanswered requests were granted under the key just left. The
+          // marker keeps their revoke and re-send owed across reloads.
+          markSpendOwed(accountIdB64, Date.now(), plainStorage());
         }
         await persistSessionPair(accountIdB64, upgraded.pair, "key-rotation");
         installSession(accountIdB64, upgraded.pair);
@@ -4167,6 +4280,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     keyResetNote,
     dismissKeyResetNote: () => setKeyResetNote(false),
     republishKeyPackage: () => keyPackagePublisher.publish(),
+    rebindAfterStateBundle,
     async signup(username, password, options) {
       const trimmed = username.trim();
       if (trimmed.length === 0) {
@@ -4903,7 +5017,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         username: pending.username,
       });
     },
-    async completeFromPairing(phraseEntropy, session) {
+    async completeFromPairing(phraseEntropy, session, persistJoinState) {
       markRestored("device");
       // ADR-0018 factor (a), path (a) — same precondition as
       // `provideRecoveryPhrase`: only valid while a login/passkey
@@ -4987,6 +5101,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           console.warn(
             "session-pair persist (completeFromPairing) failed",
             err,
+          );
+        }
+      }
+
+      if (persistJoinState !== undefined) {
+        try {
+          await persistJoinState(deviceKey);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "join-state persist (completeFromPairing) failed",
+            err instanceof Error ? err.name : "unknown",
           );
         }
       }

@@ -355,12 +355,12 @@ public final class ProfileDirectory: ObservableObject {
         var next: [String: String] = [:]
         var nextAliases: [String: String] = [:]
         for contact in accepted {
-            // ADR-0065 phase 2 (UX 16.8) — a flagged contact's pending key
-            // names the same person: the resolver falls through to the record
-            // by the previous key, so a bubble from the new keys carries the
-            // contact's name rather than "Member" with a warning under it.
-            if let reset = contact.keyReset {
-                nextAliases[reset.pendingKeyB64] = base64Encode(contact.request.fromPubkey)
+            // ADR-0065 R.2 "the re-pin" — the keys an accepted reset retired
+            // are DISPLAY aliases for stored history only (C-68: an author is
+            // a key resolved at receipt, so an old bubble is attributed
+            // through the alias). Never accepted for new traffic.
+            for previous in contact.previousKeysB64 ?? [] {
+                nextAliases[previous] = base64Encode(contact.request.fromPubkey)
             }
             guard let name = contact.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !name.isEmpty else { continue }
@@ -372,8 +372,8 @@ public final class ProfileDirectory: ObservableObject {
         bump()
     }
 
-    /// ADR-0065 phase 2 — `pending key -> previous key` for every contact in
-    /// the `reset-unverified` state; see ``setRenames(from:)``.
+    /// ADR-0065 R.2 — `retired key -> current key` for every contact whose
+    /// reset this device accepted; see ``setRenames(from:)``.
     private var aliases: [String: String] = [:]
 
     // MARK: - Resolving
@@ -382,12 +382,11 @@ public final class ProfileDirectory: ObservableObject {
     /// username verification when the stored claim has no verdict yet.
     public func resolve(signatureKey: Data) -> ResolvedDisplayName {
         let keyB64 = base64Encode(signatureKey)
-        // A key nothing is known under that is a flagged contact's pending
-        // key resolves as the contact (UX 16.1, "resolved through the account
-        // id"); a profile the new keys later publish wins over the alias.
-        if renames[keyB64] == nil, received.profile(signatureKeyB64: keyB64) == nil,
-           let previous = aliases[keyB64], let previousKey = Data(base64Encoded: previous) {
-            return resolve(signatureKey: previousKey)
+        // A key an accepted reset retired resolves as the contact it
+        // belonged to, under the contact's CURRENT key: the same person, the
+        // same name, for the history written under the old key.
+        if let current = aliases[keyB64], current != keyB64, let currentKey = Data(base64Encoded: current) {
+            return resolve(signatureKey: currentKey)
         }
         // ADR-0066 section 3.5 — a key nothing is known under that is the
         // same person as a known key across a PROVEN rotation resolves as

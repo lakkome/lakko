@@ -32,7 +32,6 @@ import init, { verifyWitnessQuorum } from "../../wasm/lakko_ffi_wasm";
 import {
   verifyIdentityInLog,
   verifyRotationChain,
-  lookupServedKeyReset,
   type LogVerifyResult,
   type LogVerifyStatus,
   type RotationChainResult,
@@ -364,58 +363,6 @@ describe("verifyIdentityInLog — KT-log S4 isReset capture", () => {
     });
     expect(result.status).toBe("off");
     expect(result.isReset).toBeNull();
-  });
-});
-
-describe("lookupServedKeyReset — KT-log S4 best-effort enrichment", () => {
-  it("returns true when the log's latest matches the served key AND is a reset", async () => {
-    const client = mockClient({
-      fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY, true)),
-    });
-    expect(await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client })).toBe(
-      true,
-    );
-  });
-
-  it("returns false when the log's latest matches the served key but is NOT a reset", async () => {
-    const client = mockClient({
-      fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY, false)),
-    });
-    expect(await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client })).toBe(
-      false,
-    );
-  });
-
-  it("returns null when the log's latest pubkey does NOT match the served key", async () => {
-    // The marker then describes a different key — unknown for the served one.
-    const client = mockClient({
-      fetchLatest: vi.fn(async () => latestWith(OTHER_PUBKEY, true)),
-    });
-    expect(
-      await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client }),
-    ).toBeNull();
-  });
-
-  it("returns null when the account is absent from the log", async () => {
-    const client = mockClient({ fetchLatest: vi.fn(async () => null) });
-    expect(
-      await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client }),
-    ).toBeNull();
-  });
-
-  it("returns null when the integration is off (client null)", async () => {
-    expect(await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client: null })).toBeNull();
-  });
-
-  it("returns null on a network fault (best-effort, never throws)", async () => {
-    const client = mockClient({
-      fetchLatest: vi.fn(async () => {
-        throw new TransparencyNetworkError("/transparency/latest", "down");
-      }),
-    });
-    expect(
-      await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client }),
-    ).toBeNull();
   });
 });
 

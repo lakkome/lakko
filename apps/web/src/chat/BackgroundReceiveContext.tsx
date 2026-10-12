@@ -69,7 +69,9 @@ import {
   readPushRotationRole,
   receivePushRoutingSecretGated,
   rotatePushRoutingSecretIfMembershipShrank,
+  retireOldPushGid,
 } from "../push/group-routing";
+import { getGroupRoutingSecret } from "../push/group-routing-store";
 import { createPushWakeReach } from "../push/wake-reach";
 import { backgroundReceiveIsActive } from "./receive-activity";
 import { base64Decode, base64Encode } from "../auth/account-id";
@@ -112,10 +114,14 @@ import {
   loadMessageLog,
   MESSAGE_LOG_VERSION,
   updateMessageLog,
+  type PersistedMessage,
 } from "./message-log-store";
 import {
   clearReadmissionSlots,
+  lookupStanding,
+  type LookupStanding,
   planReadmission,
+  readmissionCandidates,
   recordRemovedDevices,
   removedDevices,
   takeReadmissionSlot,
@@ -124,22 +130,66 @@ import {
 } from "./device-readmission";
 import { markOwnPublished } from "./own-published";
 import { hexOfKey, ownDeviceAdmissible, ownDeviceRoster } from "../devices/own-device-roster";
+import { ownDeviceKeyPackageUsable } from "../devices/own-conversation-key";
 import { ownPersonKeyB64, personKeyOf, personKeysOf, type RosterLeaf } from "./person-key";
-import { accountIdB64OfHex, loadAccepted, loadFlaggedContacts, readKeyReset } from "../contacts/local-store";
 import {
-  evictionApplied,
-  leavesOfPreviousKey,
-  readmissionAddEligible,
-  resetGroupBranch,
-  shouldProposeEviction,
-} from "./keys-reset";
+  accountIdB64OfKey,
+  loadAccepted,
+  loadKeyAliases,
+  loadSupersededKeys,
+  readPin,
+} from "../contacts/local-store";
+import { readVerifiedBinding } from "../contacts/verified-binding";
+import { subscribeResetAccepted } from "../contacts/reset-events";
+import { installScopeLineage } from "../reach/mailbox-write";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { useLineage } from "./use-lineage";
+import { oldSegmentPolled, retiresOldSegmentPush } from "./lineage";
+import {
+  awaitedSwaps,
+  conversationMovedAt,
+  markPushRetired,
+  markResent,
+  noteConversationMoved,
+  setAwaitedSwaps,
+  wasPushRetired,
+  wasResent,
+} from "./continuity-store";
+import {
+  continueConversation,
+  type ContinuityFacts,
+  type ContinuityPort,
+} from "./continuity-runtime";
+import { NO_CLAIMS } from "./group-closed-store";
+import { messagesToResend } from "./reset-repair";
+import {
+  composeEnvelope,
+  composeForwardEnvelope,
+  composeReplyEnvelope,
+  composeResendEnvelope,
+} from "./attachments";
+import { heldResendPredicate } from "./resend-receive";
+import { flushVerdict, isDeadSession, replyForSend, sendRoute } from "./held-send";
+import {
+  heldSends,
+  notifyHeldFlushed,
+  persistHeldSends,
+  resetHeldSends,
+  restoreHeldSends,
+} from "./held-send-queue";
+import { persistedFromForwardRef } from "./forward";
+import { persistedFromReplyRef } from "./reply-snapshot";
+import { unrepairableBy } from "./successor-claim";
+import { installDeadSessionGuard } from "./client";
+import { attachmentRefFromPersisted, persistedFromAttachmentRef } from "./persisted-attachment";
+import {
+  adminRestoreStep,
+  deviceSwapAcrossCommits,
+  mayAddResetIdentity,
+  repairPlan,
+  resetCase,
+} from "./reset-repair";
 import { conversationKindOf } from "./conversation-kind";
-import {
-  loadConversationClosed,
-  oneToOneClosesForReset,
-  recordConversationClosed,
-} from "./conversation-closed";
-import type { ContactIdentityCheck } from "../contacts/client";
 import type { ProposalRecordView } from "./pending-requests";
 import type { PushRotationRole } from "../push/group-routing";
 import { proposalKey, recordObservation } from "./pending-requests";
@@ -183,6 +233,14 @@ export interface BackgroundReceiveApi {
    * retries this fan-out from its owed record while `failed` is not 0.
    */
   retireDevice(deviceKey: Uint8Array): Promise<DeviceFanOut>;
+  /**
+   * ADR-0065 R.6 / R.7 — offer `groupIdB64` (and, throttled, every other
+   * held group) a continuity pass now. The chat view calls it at the tail
+   * of its own poll: the background sweep does not poll the group a view
+   * has open, so without this a claim posted for the open chat would never
+   * be decided while it stays open. Fire-and-forget; never throws.
+   */
+  continuityPass(groupIdB64: string): void;
 }
 
 /** What a device fan-out did, per chat. */
@@ -233,6 +291,8 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const sharedChannels = useSharedChannels();
   const readWatermarks = useReadWatermarks();
   const callHost = useCallHost();
+  const sync = useDeviceGroupSync();
+  const lineageView = useLineage();
 
   const coordinator = new ReceiveCoordinator<IncomingChatEvent>();
   const backoff = new GroupBackoff();
@@ -365,13 +425,18 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // ADR-0045 UX §6.2.8 — a group this device is no longer in is never polled:
     // every row would be refused and logged, forever.
     if (entry === undefined || readIsActive(entry.group) === false) return true;
-    // ADR-0065 phase 2 (UX 16.4) — a closed one-to-one: nothing is sent into
-    // it and nothing arrives from it; a late row is left on the DS.
-    const s = auth.state();
-    return (
-      s.kind === "session" &&
-      loadConversationClosed(s.account.accountId, groupIdB64) !== undefined
-    );
+    // ADR-0065 R.5 — an older group of a conversation that moved: a
+    // one-to-one's old journal is not read at all (its only other sender is
+    // the superseded identity); a group's is read for the retention window,
+    // for the members who have not moved yet.
+    const view = lineageView.resolve(groupIdB64);
+    if (view === undefined || view.head.groupIdB64 === groupIdB64) return false;
+    return !oldSegmentPolled({
+      isHead: false,
+      oneToOne: conversationKindOf(entry.group) === "chat",
+      movedAtMs: activeAccount === null ? null : conversationMovedAt(activeAccount, groupIdB64),
+      nowMs: Date.now(),
+    });
   }
 
   /**
@@ -392,6 +457,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     const account = s.account.accountId;
     const start = await startCursor(account, entry);
     let membersBefore = memberSignatureKeys(entry.group);
+    let peopleBefore: string[] | null = personKeysOrNull(entry);
     const result = await chat.pollMessages(
       secrets,
       entry.group,
@@ -404,13 +470,14 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         },
         beforeApply: () => {
           membersBefore = memberSignatureKeys(entry.group);
+          peopleBefore = personKeysOrNull(entry);
         },
       },
       signal,
     );
     if (result.outcome === "cursor-moved") return { yieldedRows: false };
     const end = coordinator.cursor(groupIdB64) ?? start;
-    await settle(account, entry, result.events, end > start, membersBefore);
+    await settle(account, entry, result.events, end > start, membersBefore, peopleBefore);
     // ADR-0050 section 2.5a point 4 — re-request an own membership request
     // a commit this batch applied dropped, BEFORE the sweep so a committer
     // running here carries the re-request in the same breath. Decides nothing
@@ -434,63 +501,76 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       // eslint-disable-next-line no-console
       console.warn("ADR-0050 re-admission check failed", err);
     });
-    // ADR-0065 phase 2 (UX 16.3 / 16.4) — a contact's reset noticed anywhere
-    // reaches every shared group here, chat open or not: the one-to-one with
-    // the old keys closes, and where this account administers the group the
-    // eviction of the old devices is proposed. The chat view runs the same
-    // pass for the group it has open.
-    void evictResetFor(entry).catch((err: unknown) => {
+    // ADR-0065 R.7 case 2 — an accepted reset reaches every shared group
+    // here, chat open or not: where this account administers the group the
+    // removal of the superseded leaves is proposed. Silent (R.0). The chat
+    // view runs the same pass for the group it has open.
+    void repairResetFor(entry).catch((err: unknown) => {
       // eslint-disable-next-line no-console
-      console.warn("ADR-0065 reset eviction pass failed", err);
+      console.warn("ADR-0065 reset repair pass failed", err);
     });
+    // ADR-0065 R.6 / R.7 cases 1 and 3 — a conversation that cannot be
+    // repaired in place continues in a successor: this group's own pass, and
+    // (throttled) every other held group's, since an old one-to-one is no
+    // longer polled once it moved.
+    void continueFor(entry).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("[continuity] pass failed", err);
+    });
+    continueAll(false);
     return { yieldedRows: result.outcome === "applied" && end > start };
   }
 
-  /** In-flight eviction proposals, keyed on `(group, previousKey)`. */
+  /** In-flight removals, keyed on `(group, superseded key)`. */
   const evictionInFlight = new Set<string>();
 
+  /** This device's ADR-0022 role in `entry`, read off the live group. */
+  async function ownRoleIn(entry: ActiveGroup): Promise<PushRotationRole> {
+    const secrets = auth.identitySecrets();
+    if (secrets === null) return null;
+    const wasm = await loadWasm();
+    const identity = wasm.Identity.fromSeed(conversationSeedOf(secrets));
+    try {
+      return await readPushRotationRole(entry.group, identity);
+    } finally {
+      identity.free();
+    }
+  }
+
   /**
-   * ADR-0065 phase 2 — the background half of the three branches
-   * (`chat/keys-reset.ts`): close a one-to-one with a flagged contact's old
-   * keys (16.4); propose the removal of the old devices in a role-table group
-   * this account administers and the old identity does not own (16.3). The
-   * owned group (16.5) and the plain-member case need no action here.
+   * ADR-0065 R.7 case 2 — the background half of the in-place repair
+   * (`chat/reset-repair.ts`): in a role-table group this account
+   * administers and the superseded identity does not own, propose the
+   * removal of a leaf still bound to a superseded key. The new identity's
+   * devices are added by the re-admission arm below. The one-to-one and the
+   * owned group are continued in a successor (`continueFor`).
    */
-  async function evictResetFor(entry: ActiveGroup): Promise<void> {
+  async function repairResetFor(entry: ActiveGroup, fromView = false): Promise<void> {
     const s = auth.state();
     const secrets = auth.identitySecrets();
     if (s.kind !== "session" || secrets === null) return;
-    if (coordinator.isForeground(entry.groupIdB64)) return;
+    // The open chat proposes the removals for its own group (it holds the
+    // pending-request state they are shown from). The owner's admin restore
+    // has no home in the view, so it runs from here for an open chat too:
+    // it must not wait for the owner to close the conversation.
+    const foreground = coordinator.isForeground(entry.groupIdB64);
+    if (foreground && !fromView) return;
     if (readIsActive(entry.group) === false) return;
-    const flagged = loadFlaggedContacts();
-    if (flagged.length === 0) return;
+    const superseded = loadSupersededKeys();
+    if (superseded.size === 0) return;
     let leaves: RosterLeaf[];
     try {
       leaves = entry.group.members() as unknown as RosterLeaf[];
     } catch {
       return;
     }
+    const roster = leaves.map((l) => ({
+      leafIndex: l.leafIndex,
+      personKeyB64: base64Encode(personKeyOf(l)),
+    }));
+    const present = [...superseded.keys()].filter((k) => roster.some((l) => l.personKeyB64 === k));
     const kind = conversationKindOf(entry.group);
     const accountIdB64 = s.account.accountId;
-    if (kind === "chat") {
-      const close = oneToOneClosesForReset({
-        kind,
-        personKeysB64: leaves.map((l) => base64Encode(personKeyOf(l))),
-        ownPersonKeyB64: ownPersonKeyB64(chats.identity()),
-        flaggedPreviousKeys: new Map(
-          flagged.map((f) => [f.reset.previousKeyB64, f.accountIdB64] as const),
-        ),
-      });
-      if (close !== null && loadConversationClosed(accountIdB64, entry.groupIdB64) === undefined) {
-        recordConversationClosed(accountIdB64, entry.groupIdB64, {
-          reason: "one-to-one-keys-reset",
-          contactAccountIdB64: close.contactAccountIdB64,
-          previousKeyB64: close.previousKeyB64,
-          closedAtMs: Date.now(),
-        });
-      }
-      return;
-    }
     let ownerKeyB64: string | undefined;
     try {
       const o = entry.group.roleTableOwner() as Uint8Array | undefined;
@@ -498,16 +578,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     } catch {
       return;
     }
-    let ownRole: PushRotationRole = null;
-    {
-      const wasm = await loadWasm();
-      const identity = wasm.Identity.fromSeed(conversationSeedOf(secrets));
-      try {
-        ownRole = await readPushRotationRole(entry.group, identity);
-      } finally {
-        identity.free();
-      }
-    }
+    const ownRole = await ownRoleIn(entry);
     let pendingRemoveLeaves: number[] = [];
     try {
       pendingRemoveLeaves = (entry.group.pendingProposals() as ProposalRecordView[])
@@ -517,26 +588,19 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       return;
     }
     let proposed = 0;
-    for (const f of flagged) {
-      const previousKeyB64 = f.reset.previousKeyB64;
-      const targetLeaves = leavesOfPreviousKey(leaves, previousKeyB64);
-      if (targetLeaves.length === 0) continue;
-      const branch = resetGroupBranch({ kind, ownerKeyB64, previousKeyB64, ownRole });
-      const key = `${entry.groupIdB64}:${previousKeyB64}`;
-      const alreadyPending =
-        targetLeaves.some((l) => pendingRemoveLeaves.includes(l)) || evictionInFlight.has(key);
-      if (
-        !shouldProposeEviction({
-          branch,
-          applied: evictionApplied(leaves, previousKeyB64),
-          alreadyPending,
-          membershipEnded: false,
-        })
-      ) {
-        continue;
-      }
-      const leafIndex = targetLeaves[0];
-      if (leafIndex === undefined) continue;
+    for (const supersededKeyB64 of foreground ? [] : present) {
+      if (resetCase({ kind, ownerKeyB64, supersededKeyB64 }) !== "repair") continue;
+      const key = `${entry.groupIdB64}:${supersededKeyB64}`;
+      const plan = repairPlan({
+        ownRole,
+        roster,
+        supersededKeyB64,
+        pendingRemoveLeaves,
+        removeInFlight: evictionInFlight.has(key),
+        membershipEnded: false,
+      });
+      const leafIndex = plan.removeLeaf;
+      if (leafIndex === null) continue;
       evictionInFlight.add(key);
       try {
         const outcome = await contacts.removeMemberFromGroup(secrets, entry.group, leafIndex);
@@ -548,15 +612,652 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           markOwnPublished(entry.groupIdB64, outcome.commitMessageId);
         }
       } catch (err) {
-        // Silent by design (UX 16.3): the next open or pass tries again.
+        // Silent by design: the next pass tries again.
         // eslint-disable-next-line no-console
-        console.warn("ADR-0065 reset eviction: remove not proposed", err);
+        console.warn("ADR-0065 reset repair: remove not proposed", err);
       } finally {
         evictionInFlight.delete(key);
       }
     }
+    // R.7 case 2 — if the superseded key was an admin, the OWNER's device
+    // puts the new key in its place: one role change per pass (C-65), the
+    // new key first. Silent like the rest.
+    if (kind === "group" && proposed === 0 && ownRole === "owner") {
+      let adminKeysB64: string[] = [];
+      let roleChangePending = false;
+      try {
+        const flat = entry.group.roleTableAdmins() as Uint8Array;
+        for (let i = 0; i + 32 <= flat.length; i += 32) adminKeysB64.push(base64Encode(flat.slice(i, i + 32)));
+        roleChangePending = (entry.group.pendingProposals() as ProposalRecordView[]).some(
+          (r) => r.kind === "role-change",
+        );
+      } catch {
+        adminKeysB64 = [];
+        roleChangePending = true;
+      }
+      for (const [supersededKeyB64, accountOfKey] of superseded) {
+        const newKeyB64 = readPin(accountOfKey)?.pinnedSignaturePubkeyB64;
+        if (newKeyB64 === undefined) continue;
+        const step = adminRestoreStep({
+          ownRole,
+          adminKeysB64,
+          supersededKeyB64,
+          newKeyB64,
+          rosterPersonKeysB64: roster.map((l) => l.personKeyB64),
+          roleChangePending,
+        });
+        if (step === null) continue;
+        try {
+          const outcome = await contacts.setMemberAdmin(
+            secrets,
+            entry.group,
+            base64Decode(step.keyB64),
+            step.kind === "promote",
+          );
+          const id = outcome.kind === "proposed" ? outcome.proposalMessageId : outcome.commitMessageId;
+          markOwnPublished(entry.groupIdB64, id);
+          proposed += 1;
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("ADR-0065 reset repair: admin not restored yet", err);
+        }
+        break;
+      }
+    }
     if (proposed > 0) await sweepGroup(entry);
   }
+
+  // ---------------------------------------------------------------------
+  // ADR-0065 R.5 to R.7 — a conversation that continues in a successor
+  // ---------------------------------------------------------------------
+  //
+  // The rules are `successor-claim.ts` / `reset-repair.ts`, the order is
+  // `continuity-runtime.ts`; what follows is the port that order drives.
+  // None of it has a surface (R.0).
+
+  /** Successors this device created and has not made a held conversation
+   *  yet, by base64 id. In memory: a restart finds the group in the MLS
+   *  snapshot instead (`Group.load`). */
+  const preparedGroups = new Map<string, ActiveGroup["group"]>();
+  /** One pass per old group at a time. */
+  const continuityInFlight = new Set<string>();
+
+  function continuityFacts(groupIdB64: string): ContinuityFacts | undefined {
+    const entry = chats.get(groupIdB64);
+    if (entry === undefined) return undefined;
+    try {
+      const owner = entry.group.roleTableOwner() as Uint8Array | undefined;
+      const flat = entry.group.roleTableAdmins() as Uint8Array;
+      const adminKeysB64: string[] = [];
+      for (let i = 0; i + 32 <= flat.length; i += 32) adminKeysB64.push(base64Encode(flat.slice(i, i + 32)));
+      return {
+        kind: conversationKindOf(entry.group),
+        rosterPersonKeysB64: personKeysOf(entry.group),
+        ownerKeyB64: owner === undefined ? undefined : base64Encode(owner),
+        adminKeysB64,
+        active: readIsActive(entry.group) !== false,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The account id a person's CURRENT devices may be fetched under, or
+   * `null`. An id is followed only when this device trusts the roster key
+   * for it: the pin record, or a binding it verified itself against the
+   * directory (`contacts/verified-binding.ts`). A claimed id (a profile's,
+   * or a contact row adopted from one) is first put through the identity
+   * check, which records a binding when the directory serves exactly this
+   * key; when it does not, nobody is added under that id.
+   */
+  async function verifiedAccountIdOf(personKeyB64: string): Promise<Uint8Array | null> {
+    const accountId = accountIdOfPerson(personKeyB64);
+    if (accountId === null) return null;
+    const idB64 = base64Encode(accountId);
+    const standing = (): LookupStanding =>
+      lookupStanding({
+        rosterKeyB64: personKeyB64,
+        pin: readPin(idB64),
+        binding: readVerifiedBinding(idB64),
+      });
+    if (standing() === "same-person") return accountId;
+    try {
+      await contacts.checkContactIdentity(accountId, personKeyB64);
+    } catch {
+      return null;
+    }
+    return standing() === "same-person" ? accountId : null;
+  }
+
+  /** The account id (16 bytes) a person's key is CLAIMED or known under: a
+   *  local record first, else the id their own profile carries. Not a
+   *  statement of trust: see {@link verifiedAccountIdOf}. */
+  function accountIdOfPerson(personKeyB64: string): Uint8Array | null {
+    const trusted = accountIdB64OfKey(personKeyB64);
+    if (trusted !== null) {
+      try {
+        return base64Decode(trusted);
+      } catch {
+        return null;
+      }
+    }
+    const claimed = profiles.accountIdHexOf(personKeyB64);
+    return claimed === null ? null : hexToBytes(claimed);
+  }
+
+  /** Publish what a membership call returned and sweep, as the chat view does. */
+  async function settleMembership(
+    entry: ActiveGroup,
+    outcome: { kind: string; proposalMessageId?: number; commitMessageId?: number },
+  ): Promise<void> {
+    const id = outcome.kind === "proposed" ? outcome.proposalMessageId : outcome.commitMessageId;
+    if (id !== undefined) markOwnPublished(entry.groupIdB64, id);
+    await sweepGroup(entry);
+  }
+
+  const continuityPort: ContinuityPort = {
+    ownPersonKeyB64: () => ownPersonKeyB64(chats.identity()),
+    supersededKeys: () => loadSupersededKeys(),
+    currentKeyOf: (accountIdB64) => readPin(accountIdB64)?.pinnedSignaturePubkeyB64 ?? null,
+    facts: continuityFacts,
+    claimState: (oldGroupIdB64) => groupClosed.stateOf(oldGroupIdB64) ?? NO_CLAIMS,
+    cursorOf: (oldGroupIdB64) => coordinator.cursor(oldGroupIdB64),
+    async newIdentityHasDevices(accountIdB64) {
+      const wanted = readPin(accountIdB64)?.pinnedSignaturePubkeyB64;
+      if (wanted === undefined) return false;
+      try {
+        const wasm = await loadWasm();
+        const list = await discovery.fetchKeyPackages(base64Decode(accountIdB64));
+        // Only a device bound to the key this device ACCEPTED counts: the
+        // directory is not trusted to say whose devices these are.
+        return (list ?? []).some((d) => {
+          try {
+            const bound = wasm.keyPackageAccountKey(d.keyPackage);
+            return bound !== undefined && base64Encode(bound) === wanted;
+          } catch {
+            return false;
+          }
+        });
+      } catch {
+        return false;
+      }
+    },
+    async prepareSuccessor(oldGroupIdB64, newIdentityAccountIdB64) {
+      const secrets = auth.identitySecrets();
+      const old = chats.get(oldGroupIdB64);
+      if (secrets === null || old === undefined) throw new Error("no session");
+      const prepared = await contacts.prepareGroupWith(
+        secrets,
+        base64Decode(newIdentityAccountIdB64),
+        conversationKindOf(old.group),
+      );
+      const successorGroupIdB64 = base64Encode(prepared.group.groupId);
+      preparedGroups.set(successorGroupIdB64, prepared.group);
+      await groupClosed.setPrepared(oldGroupIdB64, {
+        successorGroupIdB64,
+        welcomeB64: base64Encode(prepared.welcome),
+        targetKeysB64: prepared.targets.map((t) => base64Encode(t.accountKey)),
+        delivered: false,
+      });
+      return successorGroupIdB64;
+    },
+    async postClaim(oldGroupIdB64, successorGroupIdB64) {
+      const old = chats.get(oldGroupIdB64);
+      if (old === undefined) throw new Error("the old group is not held");
+      const published = await groupClosed.postClaim(old, base64Decode(successorGroupIdB64));
+      return published.messageId;
+    },
+    abandonOwnClaim: (oldGroupIdB64) => groupClosed.abandonOwn(oldGroupIdB64),
+    async discardSuccessor(successorGroupIdB64) {
+      const group = preparedGroups.get(successorGroupIdB64);
+      preparedGroups.delete(successorGroupIdB64);
+      try {
+        group?.free();
+      } catch {
+        /* already freed */
+      }
+      // The prepared record names a successor nobody will ever join.
+      for (const g of chats.groups()) {
+        const state = groupClosed.stateOf(g.groupIdB64);
+        if (state?.prepared?.successorGroupIdB64 === successorGroupIdB64 && !state.prepared.delivered) {
+          await groupClosed.setPrepared(g.groupIdB64, null);
+        }
+      }
+    },
+    async settle(oldGroupIdB64, winner) {
+      const old = chats.get(oldGroupIdB64);
+      if (old !== undefined) await groupClosed.settle(old, winner);
+    },
+    async recordLineage(oldGroupIdB64, successorGroupIdB64) {
+      const old = chats.get(oldGroupIdB64);
+      const account = activeAccount;
+      if (old === undefined || account === null) return;
+      noteConversationMoved(account, oldGroupIdB64, Date.now());
+      await sync.setLineage(
+        base64Decode(successorGroupIdB64),
+        lineageView.conversationIdOf(old.group.groupId),
+      );
+    },
+    async deliverSuccessor(oldGroupIdB64, successorGroupIdB64) {
+      const s = auth.state();
+      const secrets = auth.identitySecrets();
+      const old = chats.get(oldGroupIdB64);
+      if (s.kind !== "session" || secrets === null || old === undefined) return false;
+      const prepared = groupClosed.stateOf(oldGroupIdB64)?.prepared ?? null;
+      const founder = prepared !== null && prepared.successorGroupIdB64 === successorGroupIdB64;
+      let held = chats.get(successorGroupIdB64);
+      // A device of this account that did not create the successor joins it
+      // from the Welcome the founder sent to the account's own mailbox.
+      if (!founder) return held !== undefined;
+      if (held === undefined) {
+        let group = preparedGroups.get(successorGroupIdB64);
+        if (group === undefined) {
+          const identity = chats.identity();
+          if (identity === null) return false;
+          const wasm = await loadWasm();
+          // A restart between the claim and the delivery: the successor is
+          // in the MLS snapshot the creation persisted.
+          const loaded = wasm.Group.load(identity, base64Decode(successorGroupIdB64));
+          if (loaded === undefined) return false;
+          group = loaded;
+        }
+        preparedGroups.delete(successorGroupIdB64);
+        held = chats.add({ label: old.label, group });
+        profiles.groupJoined(held.groupIdB64);
+        await chats.persistSnapshot(s.account.accountId);
+      }
+      if (!prepared.delivered) {
+        if (prepared.welcomeB64 === null) return false;
+        await contacts.deliverPreparedWelcomes(
+          held.group.groupId,
+          base64Decode(prepared.welcomeB64),
+          prepared.targetKeysB64.map((k) => ({ accountKey: base64Decode(k), isRecipient: false })),
+        );
+        // Kept as the mark "this device founded it"; the Welcome is dropped.
+        await groupClosed.setPrepared(oldGroupIdB64, {
+          successorGroupIdB64,
+          welcomeB64: null,
+          targetKeysB64: [],
+          delivered: true,
+        });
+      }
+      return true;
+    },
+    async carryName(oldGroupIdB64, successorGroupIdB64) {
+      const old = chats.get(oldGroupIdB64);
+      const successor = chats.get(successorGroupIdB64);
+      if (old !== undefined && successor !== undefined) await groupNames.carryOver(old, successor);
+    },
+    async addPerson(successorGroupIdB64, personKeyB64) {
+      const secrets = auth.identitySecrets();
+      const successor = chats.get(successorGroupIdB64);
+      const accountId = await verifiedAccountIdOf(personKeyB64);
+      if (secrets === null || successor === undefined || accountId === null) return false;
+      try {
+        const outcome = await contacts.addMemberToGroup(
+          secrets,
+          successor.group,
+          accountId,
+          base64Decode(personKeyB64),
+        );
+        await settleMembership(successor, outcome);
+        return true;
+      } catch (err) {
+        // Not resolvable or not reachable now: they keep writing in the old
+        // group and the completeness re-check tries again (R.7 case 3).
+        // eslint-disable-next-line no-console
+        console.info("[continuity] a member was not added to the successor yet", err instanceof Error ? err.name : "");
+        return false;
+      }
+    },
+    // Its own slot name, so the re-check and the ADR-0050 arm of the same
+    // group do not consume each other's interval.
+    recheckDue: (successorGroupIdB64) =>
+      takeReadmissionSlot(`completeness:${successorGroupIdB64}`, Date.now()),
+    async setAdmins(successorGroupIdB64, adminKeysB64) {
+      const secrets = auth.identitySecrets();
+      const successor = chats.get(successorGroupIdB64);
+      if (secrets === null || successor === undefined) return;
+      const have = continuityFacts(successorGroupIdB64)?.adminKeysB64 ?? [];
+      // One role change per sweep (C-65): one admin per pass.
+      const next = adminKeysB64.find((k) => !have.includes(k));
+      if (next === undefined) return;
+      try {
+        const outcome = await contacts.setMemberAdmin(secrets, successor.group, base64Decode(next), true);
+        await settleMembership(successor, outcome);
+      } catch (err) {
+        // A pending role change refuses a second one; the next pass tries.
+        // eslint-disable-next-line no-console
+        console.info("[continuity] an admin was not restored yet", err instanceof Error ? err.name : "");
+      }
+    },
+    async transferOwnership(successorGroupIdB64, newOwnerKeyB64, stayAdmin) {
+      const secrets = auth.identitySecrets();
+      const successor = chats.get(successorGroupIdB64);
+      if (secrets === null || successor === undefined) return;
+      try {
+        const outcome = await contacts.transferGroupOwnership(
+          secrets,
+          successor.group,
+          base64Decode(newOwnerKeyB64),
+          stayAdmin ? "admin" : "member",
+        );
+        await settleMembership(successor, outcome);
+      } catch (err) {
+        // Already pending, or a role change is in the way: the next pass.
+        // eslint-disable-next-line no-console
+        console.info("[continuity] the owner was not restored yet", err instanceof Error ? err.name : "");
+      }
+    },
+    async resendOwnMessages(oldGroupIdB64, successorGroupIdB64, accountIdB64) {
+      const s = auth.state();
+      const secrets = auth.identitySecrets();
+      const successor = chats.get(successorGroupIdB64);
+      const old = chats.get(oldGroupIdB64);
+      if (s.kind !== "session" || secrets === null || successor === undefined || old === undefined) return;
+      const account = s.account.accountId;
+      // The founder alone re-sends, once: another device of this account
+      // that joined the successor holds no prepared record for it.
+      const prepared = groupClosed.stateOf(oldGroupIdB64)?.prepared ?? null;
+      if (prepared === null || prepared.successorGroupIdB64 !== successorGroupIdB64) return;
+      if (wasResent(account, oldGroupIdB64)) return;
+      const signedAtMs = readPin(accountIdB64)?.resetSignedAtMs;
+      if (signedAtMs === undefined) return;
+      const deviceKey = await getDeviceKey(account);
+      if (deviceKey === null) return;
+      const log = await loadMessageLog(account, deviceKey);
+      const stored = log?.groups[hexOf(old)]?.messages ?? [];
+      const byId = new Map(stored.map((m) => [Number(m.messageId), m]));
+      const ids = messagesToResend(
+        stored.map((m) => ({
+          messageId: Number(m.messageId),
+          own: m.direction === "outgoing",
+          sentAtMs: Number.isNaN(Date.parse(m.createdAt)) ? null : Date.parse(m.createdAt),
+          resendable: m.deleted !== true && (m.text.length > 0 || m.attachments.length > 0),
+        })),
+        signedAtMs,
+      );
+      for (const id of ids) {
+        const m = byId.get(id);
+        if (m === undefined) continue;
+        // The same content, sealed again for the new session. The stored
+        // attachment references are reused: it is the same conversation.
+        // The marker names the ORIGINAL group and message id: a device of
+        // this account that holds the original shows the message once
+        // (`resend-marker.ts`). Never drawn.
+        const envelope = await composeResendEnvelope(
+          m.text,
+          m.attachments.map((a) => attachmentRefFromPersisted(a).ref),
+          { groupIdB64: oldGroupIdB64, messageId: id },
+        );
+        await chat.sendMessage(secrets, successor.group, envelope);
+      }
+      markResent(account, oldGroupIdB64);
+    },
+  };
+
+  /** One continuity pass over one group this device holds. */
+  async function continueFor(entry: ActiveGroup): Promise<void> {
+    if (activeAccount === null || continuityInFlight.has(entry.groupIdB64)) return;
+    if (loadSupersededKeys().size === 0) return;
+    continuityInFlight.add(entry.groupIdB64);
+    try {
+      const step = await continueConversation(continuityPort, entry.groupIdB64);
+      if (step !== "nothing" && step !== "adopted") {
+        // eslint-disable-next-line no-console
+        console.info(`[continuity] ${step}`);
+      }
+    } finally {
+      continuityInFlight.delete(entry.groupIdB64);
+    }
+  }
+
+  /** How often every held group is offered a continuity pass from the tail
+   *  of ANY poll: an old one-to-one is no longer polled once it moved, so
+   *  its own poll cannot be what resumes an interrupted build. Chosen. */
+  const CONTINUITY_SWEEP_INTERVAL_MS = 30_000;
+  let lastContinuitySweepAtMs = 0;
+  /**
+   * ADR-0065 R.5 — once this device is in the group that continues a
+   * conversation, its push subscription for the OLDER group is retired: the
+   * conversation's wakes come through the successor's own routing id. Once
+   * per old group; best-effort like every push teardown (a failed
+   * unsubscribe leaves a row nothing useful notifies).
+   */
+  async function retireMovedPush(entry: ActiveGroup): Promise<void> {
+    const account = activeAccount;
+    if (account === null) return;
+    const view = lineageView.resolve(entry.groupIdB64);
+    if (
+      !retiresOldSegmentPush({
+        groupHex: hexOf(entry),
+        headHex: view === undefined ? null : hexOf(view.head),
+        headActive: view !== undefined && readIsActive(view.head.group) !== false,
+        alreadyRetired: wasPushRetired(account, entry.groupIdB64),
+      })
+    ) {
+      return;
+    }
+    const deviceKey = await getDeviceKey(account);
+    if (deviceKey === null) return;
+    const secret = await getGroupRoutingSecret(account, entry.groupIdB64, deviceKey);
+    if (secret !== null) await retireOldPushGid(account, secret);
+    markPushRetired(account, entry.groupIdB64);
+  }
+
+  /** The key that makes `group` unrepairable for an accepted reset, or
+   *  `null` (`successor-claim.ts` `unrepairableBy`, over the live group). */
+  function unrepairableKeyOf(group: ActiveGroup["group"]): string | null {
+    const superseded = loadSupersededKeys();
+    if (superseded.size === 0) return null;
+    let owner: string | undefined;
+    try {
+      const o = group.roleTableOwner() as Uint8Array | undefined;
+      owner = o === undefined ? undefined : base64Encode(o);
+    } catch {
+      owner = undefined;
+    }
+    return unrepairableBy({
+      kind: conversationKindOf(group),
+      rosterPersonKeysB64: personKeysOf(group),
+      ownPersonKeyB64: ownPersonKeyB64(chats.identity()),
+      ownerKeyB64: owner,
+      supersededKeys: superseded,
+    });
+  }
+
+  // ADR-0065 R.7 case 1 — nothing is published into a one-to-one whose other
+  // person's reset this device accepted, by ANY client in the tab; the
+  // successor claim alone goes there.
+  installDeadSessionGuard((group) =>
+    isDeadSession({
+      kind: conversationKindOf(group),
+      unrepairableKeyB64: unrepairableKeyOf(group),
+    }),
+  );
+
+  /** One flush of the held messages at a time. */
+  let heldFlushRunning = false;
+
+  /**
+   * ADR-0065 R.7 case 1 — send the messages held for conversations whose
+   * successor now exists on this device, when no view of the conversation is
+   * mounted to do it (`held-send.ts` `flushVerdict`). Each goes into the
+   * conversation's current group and into that group's slot of the message
+   * log (the only record of an own message). A send that fails puts the rest
+   * back, in order, for the next pass.
+   */
+  async function flushHeldSends(): Promise<void> {
+    const account = activeAccount;
+    const secrets = auth.identitySecrets();
+    if (account === null || secrets === null || heldFlushRunning) return;
+    heldFlushRunning = true;
+    try {
+      await restoreHeldSends(account);
+      for (const [conversationHex, items] of heldSends.all()) {
+        const view = lineageView.conversations().find((c) => c.conversationHex === conversationHex);
+        if (view === undefined) continue;
+        const verdict = flushVerdict({
+          held: items.length,
+          viewMounted: view.held.some((g) => coordinator.isForeground(g.groupIdB64)),
+          headActive: readIsActive(view.head.group) !== false,
+          headRoute: sendRoute({
+            kind: conversationKindOf(view.head.group),
+            unrepairableKeyB64: unrepairableKeyOf(view.head.group),
+          }),
+        });
+        if (verdict !== "flush") continue;
+        const taken = heldSends.take(conversationHex);
+        const sent: PersistedMessage[] = [];
+        for (let i = 0; i < taken.length; i += 1) {
+          const held = taken[i] as (typeof taken)[number];
+          const m = held.payload;
+          // A reply composed in the old segment keeps its quote and loses
+          // its jump target: the id belongs to the old journal.
+          const reply = replyForSend(m.reply, m.replyGroupIdB64, view.head.groupIdB64);
+          try {
+            const envelope =
+              m.forward !== undefined
+                ? await composeForwardEnvelope(m.text, m.attached, m.forward)
+                : reply === undefined
+                  ? await composeEnvelope(m.text, m.attached)
+                  : await composeReplyEnvelope(m.text, m.attached, reply);
+            const result = await chat.sendMessage(secrets, view.head.group, envelope);
+            sent.push({
+              messageId: String(result.messageId),
+              direction: "outgoing",
+              text: m.text,
+              attachments: m.attached.map((a) => persistedFromAttachmentRef(a)),
+              createdAt: result.createdAt,
+              ...(reply === undefined ? {} : { reply: persistedFromReplyRef(reply) }),
+              ...(m.forward === undefined ? {} : { forward: persistedFromForwardRef(m.forward) }),
+            });
+          } catch (err) {
+            // Not sent: this one and everything after it stay held, in order.
+            heldSends.putBack(conversationHex, taken.slice(i));
+            // eslint-disable-next-line no-console
+            console.info("[held-send] a held message was not sent yet", err instanceof Error ? err.name : "");
+            break;
+          }
+        }
+        if (sent.length > 0) {
+          const deviceKey = await getDeviceKey(account);
+          if (deviceKey !== null) {
+            const hex = hexOf(view.head);
+            await updateMessageLog(account, deviceKey, (current) => {
+              const groups = current?.groups ?? {};
+              return {
+                version: MESSAGE_LOG_VERSION,
+                groups: { ...groups, [hex]: appendToGroupSlot(groups[hex], sent, 0) },
+              };
+            });
+          }
+          // A view of the conversation that was mounting while this ran
+          // read the log before the write above and found the queue empty:
+          // it is told what went out and shows it now.
+          notifyHeldFlushed({ groupIdB64: view.head.groupIdB64, messages: sent });
+        }
+        await persistHeldSends(account);
+      }
+    } finally {
+      heldFlushRunning = false;
+    }
+  }
+
+  function continueAll(force: boolean): void {
+    const now = Date.now();
+    if (!force && now - lastContinuitySweepAtMs < CONTINUITY_SWEEP_INTERVAL_MS) return;
+    lastContinuitySweepAtMs = now;
+    void flushHeldSends().catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("[held-send] flush failed", err);
+    });
+    // Not gated on a superseded key: a device that learned the lineage from
+    // another device of the account retires the old subscription too.
+    for (const entry of chats.groups()) {
+      void retireMovedPush(entry).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("[continuity] old push subscription not retired", err);
+      });
+    }
+    if (loadSupersededKeys().size === 0) return;
+    for (const entry of chats.groups()) {
+      void groupClosed
+        .rejudge(entry)
+        .then(() => continueFor(entry))
+        .catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("[continuity] pass failed", err);
+        });
+    }
+  }
+
+  function continuityPass(groupIdB64: string): void {
+    const entry = chats.get(groupIdB64);
+    if (entry !== undefined && loadSupersededKeys().size > 0) {
+      // R.7 case 2 — the owner's admin restore for the OPEN chat.
+      void repairResetFor(entry, true).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("ADR-0065 reset repair pass failed", err);
+      });
+    }
+    if (entry !== undefined && loadSupersededKeys().size > 0) {
+      void groupClosed
+        .rejudge(entry)
+        .then(() => continueFor(entry))
+        .catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("[continuity] pass failed", err);
+        });
+    }
+    continueAll(false);
+  }
+
+  // An accepted reset (wherever the identity gate met it) starts the work at
+  // once, for every conversation shared with that account.
+  const unsubscribeResetAccepted = subscribeResetAccepted(() => continueAll(true));
+  // A claim kept for a later verdict triggers the identity check of the
+  // account that would make the group unrepairable, then is judged again.
+  groupClosed.onPendingClaim((entry) => {
+    void (async () => {
+      const facts = continuityFacts(entry.groupIdB64);
+      const own = ownPersonKeyB64(chats.identity());
+      if (facts === undefined) return;
+      const candidates =
+        facts.kind === "chat"
+          ? facts.rosterPersonKeysB64.filter((k) => k !== own)
+          : facts.ownerKeyB64 === undefined
+            ? []
+            : [facts.ownerKeyB64];
+      for (const personKeyB64 of candidates) {
+        const accountId = accountIdOfPerson(personKeyB64);
+        if (accountId === null) continue;
+        try {
+          await contacts.checkContactIdentity(accountId, personKeyB64);
+        } catch {
+          // Refused or no verdict: the claim stays pending.
+        }
+      }
+      await groupClosed.rejudge(entry);
+      await continueFor(entry);
+    })().catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("[continuity] pending-claim check failed", err);
+    });
+  });
+  // An accepted claim is what tells a device that was in the old group which
+  // group continues the conversation (R.5 (a)).
+  groupClosed.onAcceptedClaim((entry, claim) => {
+    void continuityPort
+      .recordLineage(entry.groupIdB64, claim.successorGroupIdB64)
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("[continuity] lineage not recorded", err);
+      });
+  });
+  // A Welcome's grant scope is widened through the lineage (R.7 case 3).
+  installScopeLineage((scopeHex) => lineageView.lineage().segmentsOf(lineageView.lineage().conversationOf(scopeHex)));
 
   /**
    * ADR-0050 section 2.5a point 4 — the background half of the superseded
@@ -617,8 +1318,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
    * leaf (a restored phone, a pairing whose fan-out was cut short), and — for
    * this account only — a Remove for a leaf whose directory row is gone
    * (`forgetDevice`). Accounts are resolved to directory ids through this
-   * device's own account and its accepted contacts; a member that is neither
-   * is left as is. Each chat is checked at most once per
+   * device's own account, its accepted contacts and the account id a
+   * member's profile carries (ADR-0065 R.2); a member with none is left as
+   * is. Each chat is checked at most once per
    * `READMISSION_INTERVAL_MS`.
    */
   async function readmitFor(entry: ActiveGroup): Promise<void> {
@@ -641,35 +1343,57 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       leafKeyB64: base64Encode(m.signaturePublicKey),
       personKeyB64: base64Encode(personKeyOf(m)),
     }));
-    const people = new Set(roster.map((l) => l.personKeyB64));
-    // The accounts we can look up: ours, and every accepted contact in the
-    // chat whose account id was captured at accept.
+    // The accounts we can look up: ours, and every OTHER person of the roster
+    // whose account id this device knows: a contact row, else the id the
+    // person's own profile carries (ADR-0065 R.2 "Triggers").
     const lookups: { personKeyB64: string; accountId: Uint8Array }[] = [
       { personKeyB64: own, accountId: secrets.accountId },
     ];
-    for (const c of loadAccepted()) {
-      if (c.accountIdHex === undefined || !people.has(c.signaturePubkeyB64)) continue;
+    const kind = conversationKindOf(entry.group);
+    let ownerKeyB64: string | undefined;
+    try {
+      const o = entry.group.roleTableOwner() as Uint8Array | undefined;
+      ownerKeyB64 = o === undefined ? undefined : base64Encode(o);
+    } catch {
+      ownerKeyB64 = undefined;
+    }
+    let ownRole: PushRotationRole | undefined;
+    const candidates = readmissionCandidates({
+      rosterPersonKeysB64: roster.map((l) => l.personKeyB64),
+      ownPersonKeyB64: own,
+      contacts: loadAccepted(),
+      profileAccountIdHexOf: (k) => profiles.accountIdHexOf(k),
+    });
+    for (const c of candidates) {
       const id = hexToBytes(c.accountIdHex);
       if (id === null) continue;
-      // ADR-0065 phase 2 (UX 16.1 point 2 / 16.8) — the arm now also checks
-      // the account's published identity, so a plain member who never starts
-      // anything with the contact still learns of a reset; and its ADD branch
-      // is suppressed unless the published key IS the pin, else every member
-      // would propose adding the new identity's devices ahead of any
-      // verification. The check records the state itself when it finds one.
-      const contactAccountIdB64 = accountIdB64OfHex(c.accountIdHex);
-      let check: ContactIdentityCheck | null = null;
+      // The scheduled identity check (R.2): a proven rotation re-pins, an
+      // attested reset is accepted and re-pinned, silently; an unproven
+      // change and "no verdict" leave the account alone. For a member this
+      // device never pinned, the roster's key is what it holds.
       try {
-        check = await contacts.checkContactIdentity(id);
+        await contacts.checkContactIdentity(id, c.rosterKeyB64);
       } catch {
-        check = null;
+        continue;
       }
-      const flaggedNow =
-        contactAccountIdB64 !== null && readKeyReset(contactAccountIdB64) !== undefined;
-      if (!readmissionAddEligible(flaggedNow, check)) continue;
-      lookups.push({ personKeyB64: c.signaturePubkeyB64, accountId: id });
+      const standing = lookupStanding({
+        rosterKeyB64: c.rosterKeyB64,
+        pin: readPin(base64Encode(id)),
+        binding: readVerifiedBinding(base64Encode(id)),
+      });
+      if (standing === "skip") continue;
+      if (standing === "reset-identity") {
+        // R.7 case 2: the new identity's devices are proposed by an owner or
+        // an admin of a group that can be repaired in place. The one-to-one
+        // and the owned group continue in a successor instead.
+        if (resetCase({ kind, ownerKeyB64, supersededKeyB64: c.rosterKeyB64 }) !== "repair") continue;
+        ownRole ??= await ownRoleIn(entry);
+        if (!mayAddResetIdentity(ownRole)) continue;
+      }
+      lookups.push({ personKeyB64: c.rosterKeyB64, accountId: id });
     }
     const accounts: AccountDevices[] = [];
+    const wasm = await loadWasm();
     // Which account each listed device belongs to, so an admission records
     // the account it can later re-fetch a KeyPackage from (ADR-0050 2.5a
     // point 4).
@@ -678,12 +1402,22 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       try {
         const list = await discovery.fetchKeyPackages(l.accountId);
         for (const d of list ?? []) accountOfDevice.set(base64Encode(d.deviceId), l.accountId);
+        // ADR-0066 — an own device's KeyPackage bound to another of the
+        // account's keys than this device's leaves is not admitted; its row
+        // still counts as listed, so its existing leaf is not retired.
+        const ownRow = l.personKeyB64 === own;
         accounts.push({
           personKeyB64: l.personKeyB64,
           devices:
             list === null
               ? []
-              : list.map((d) => ({ deviceKeyB64: base64Encode(d.deviceId), keyPackage: d.keyPackage })),
+              : list.map((d) => ({
+                  deviceKeyB64: base64Encode(d.deviceId),
+                  keyPackage: d.keyPackage,
+                  ...(ownRow
+                    ? { admissible: ownDeviceKeyPackageUsable(wasm, d.keyPackage, own) }
+                    : {}),
+                })),
         });
       } catch {
         accounts.push({ personKeyB64: l.personKeyB64, devices: null });
@@ -837,13 +1571,24 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     deviceKey: Uint8Array,
   ): Promise<Uint8Array> {
     const deadline = Date.now() + ADMIT_DEVICE_WAIT_MS;
+    const wasm = await loadWasm();
     for (;;) {
       const list = await discovery.fetchKeyPackages(accountId);
       const hit = list?.find((d) => bytesEqual(d.deviceId, deviceKey));
-      if (hit !== undefined) return hit.keyPackage;
+      // ADR-0066 — a KeyPackage the device published before the pairing
+      // state bundle reached it names another of the account's keys; wait
+      // for the one it publishes after it re-minted its binding.
+      if (
+        hit !== undefined &&
+        ownDeviceKeyPackageUsable(wasm, hit.keyPackage, ownPersonKeyB64(chats.identity()))
+      ) {
+        return hit.keyPackage;
+      }
       if (Date.now() >= deadline) {
         throw new Error(
-          "the new device has not published a KeyPackage yet; it will be admitted to your chats later",
+          hit === undefined
+            ? "the new device has not published a KeyPackage yet; it will be admitted to your chats later"
+            : "the new device's KeyPackage is bound to another of the account's keys; it is admitted once it publishes again",
         );
       }
       await sleepCancellable(ADMIT_DEVICE_POLL_MS, new AbortController().signal);
@@ -950,9 +1695,52 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     events: readonly IncomingChatEvent[],
     cursorMoved: boolean,
     membersBefore: string[] | null,
+    /** The PERSON keys of the roster before the batch applied; `undefined`
+     *  from a caller that did not capture them (nothing is suppressed). */
+    peopleBefore?: string[] | null,
   ): Promise<void> {
     const groupIdB64 = entry.groupIdB64;
-    const plan = planBackgroundEvents(events);
+    const superseded = loadSupersededKeys();
+    // ADR-0065 R.7 case 1 — a re-sent message whose original this device
+    // already holds in an older segment is dropped before it is stored.
+    const aliases = loadKeyAliases();
+    const resendHeld = await heldResendPredicate(events, {
+      receivedGroupId: entry.group.groupId,
+      conversationHexOf: (id) => lineageView.conversationHexOf(id),
+      segmentIndexOf: (id) => lineageView.segmentIndexOf(id),
+      ownPersonKeyB64: ownPersonKeyB64(chats.identity()),
+      canonical: (k) => aliases.get(k) ?? k,
+      loadLog: async () => {
+        const deviceKey = await getDeviceKey(account);
+        return deviceKey === null ? null : loadMessageLog(account, deviceKey);
+      },
+    });
+    const planned = planBackgroundEvents(events, (k) => superseded.has(k), resendHeld);
+    // ADR-0065 R.7 case 2 / UX 16.5 — a batch that only swapped the devices
+    // of people who stay leaves no `Members changed` row, in the log or in
+    // the view.
+    let swapOnly = false;
+    if (planned.sawCommit) {
+      const swap = deviceSwapAcrossCommits({
+        personKeysBefore: peopleBefore ?? null,
+        personKeysAfter: personKeysOrNull(entry),
+        accountOfKey: (k) => superseded.get(k) ?? accountIdB64OfKey(k),
+        isSuperseded: (k) => superseded.has(k),
+        awaited: awaitedSwaps(account, groupIdB64),
+        nowMs: Date.now(),
+      });
+      swapOnly = swap.suppress;
+      setAwaitedSwaps(account, groupIdB64, swap.awaited);
+    }
+    const isCommitRow = (e: IncomingChatEvent): boolean =>
+      e.kind === "system" && e.systemKind === "commit";
+    const plan = swapOnly
+      ? {
+          ...planned,
+          timeline: planned.timeline.filter((e) => !isCommitRow(e)),
+          toView: planned.toView.filter((e) => !isCommitRow(e)),
+        }
+      : planned;
 
     // Call signaling first: an offer should start ringing before the log
     // write below spends its round trip.
@@ -998,13 +1786,12 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         console.warn("background receive: group name receive failed", err);
       });
     }
-    // ADR-0065 phase 2 — a group-closed notice, through the same gate shape
-    // and lock; the conversation takes the closed shape when next opened
-    // and the list row says so from the store.
+    // ADR-0065 R.6 — a successor claim, through the claim rule under the
+    // per-group lock. Never a row, whatever the verdict.
     for (const c of plan.groupClosed) {
       void groupClosed.receive(entry, c).catch((err) => {
         // eslint-disable-next-line no-console
-        console.warn("background receive: group-closed receive failed", err);
+        console.warn("background receive: successor claim receive failed", err);
       });
     }
     // ADR-0052 decision 3 — a shared pin, through the same gate and lock;
@@ -1203,6 +1990,8 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     if (activeAccount === accountIdB64 && loopAbort !== null) return;
     stop();
     activeAccount = accountIdB64;
+    // ADR-0065 R.7 case 1 — messages held before a reload are read back.
+    void restoreHeldSends(accountIdB64);
     const controller = new AbortController();
     loopAbort = controller;
     const sweepDeps: SweepDeps = {
@@ -1268,6 +2057,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     unregisterGroupCheck = null;
     resetFeedRefresh();
     stopCallLane();
+    resetHeldSends();
     activeAccount = null;
     logCursors = null;
     backoff.clear();
@@ -1404,6 +2194,11 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   });
 
   onCleanup(() => {
+    unsubscribeResetAccepted();
+    groupClosed.onPendingClaim(null);
+    groupClosed.onAcceptedClaim(null);
+    installScopeLineage(null);
+    installDeadSessionGuard(null);
     unsubscribeGrants();
     unregisterHeadPoller();
     globalThis.document?.removeEventListener("visibilitychange", onVisibility);
@@ -1413,7 +2208,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
 
   return (
     <BackgroundReceiveContext.Provider
-      value={{ coordinator, syncGroupNow, admitDevice, retireDevice }}
+      value={{ coordinator, syncGroupNow, admitDevice, retireDevice, continuityPass }}
     >
       {props.children}
     </BackgroundReceiveContext.Provider>
@@ -1429,6 +2224,16 @@ export function useBackgroundReceive(): BackgroundReceiveApi {
 }
 
 /** Lowercase hex of a group id — the message log's slot key. */
+/** The distinct PERSON keys of a group's roster, or `null` on a torn read. */
+function personKeysOrNull(entry: ActiveGroup): string[] | null {
+  try {
+    entry.group.members();
+  } catch {
+    return null;
+  }
+  return personKeysOf(entry.group);
+}
+
 function hexOf(entry: ActiveGroup): string {
   let out = "";
   for (const b of entry.group.groupId) out += b.toString(16).padStart(2, "0");

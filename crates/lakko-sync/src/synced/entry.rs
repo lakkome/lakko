@@ -34,6 +34,9 @@ pub const FOLDER_ORDER_MAX: usize = 256;
 pub const FOLDER_CHANGES_MAX_REGISTERS: usize = 1024;
 /// The most parts a [`StateSnapshot`] may be split into.
 pub const SNAPSHOT_MAX_PARTS: u32 = 64;
+/// A lineage register's group id maximum length in bytes (each of the two
+/// ids; an MLS group id is 32 bytes today and travels as opaque bytes).
+pub const LINEAGE_GROUP_ID_MAX_LEN: usize = 64;
 
 /// `include_kinds` bit: one-to-one conversations.
 pub const INCLUDE_ONE_TO_ONE: u32 = 1 << 0;
@@ -100,6 +103,14 @@ pub enum BoundsError {
     /// A required sub-message was absent.
     #[error("a required field is missing")]
     Missing,
+    /// A lineage register's successor or root id was empty or longer than
+    /// 64 bytes.
+    #[error("lineage group id length is out of bounds")]
+    LineageIdLength,
+    /// A lineage register named a group as its own root. The root of a
+    /// lineage has no register: it is the conversation id itself.
+    #[error("lineage register names a group as its own successor")]
+    LineageSelfReference,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.
@@ -338,6 +349,46 @@ pub struct ConversationOrderEntry {
     pub group_ids: Vec<Vec<u8>>,
 }
 
+/// One conversation-lineage register (ADR-0065 R.5): the group
+/// `successor_group_id` continues the conversation whose id is
+/// `root_conversation_id` (the group id of the FIRST group of the lineage).
+///
+/// A device that was in the old group learns the lineage from the claim
+/// posted there; a device added later, and a restore, cannot read the old
+/// group and learn it from this register instead. Without it such a device
+/// shows the conversation under the successor's id and the person's folder,
+/// pin and mute for it do not apply.
+///
+/// The register is keyed on the successor, so one conversation may have
+/// several successors over time and every one of them names the same root.
+/// A root has no register of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineageEntry {
+    /// The MLS group id of the group that continues the conversation.
+    pub successor_group_id: Vec<u8>,
+    /// The conversation id: the group id of the lineage's first group.
+    pub root_conversation_id: Vec<u8>,
+}
+
+impl LineageEntry {
+    /// Check both ids are 1..=[`LINEAGE_GROUP_ID_MAX_LEN`] bytes and differ.
+    ///
+    /// # Errors
+    ///
+    /// [`BoundsError::LineageIdLength`] or
+    /// [`BoundsError::LineageSelfReference`].
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        let ok = |id: &[u8]| !id.is_empty() && id.len() <= LINEAGE_GROUP_ID_MAX_LEN;
+        if !ok(&self.successor_group_id) || !ok(&self.root_conversation_id) {
+            return Err(BoundsError::LineageIdLength);
+        }
+        if self.successor_group_id == self.root_conversation_id {
+            return Err(BoundsError::LineageSelfReference);
+        }
+        Ok(())
+    }
+}
+
 /// One register value of any kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncEntry {
@@ -359,6 +410,8 @@ pub enum SyncEntry {
     Draft(DraftEntry),
     /// The explicit conversation order.
     ConversationOrder(ConversationOrderEntry),
+    /// A conversation-lineage register (ADR-0065 R.5). Appended last.
+    Lineage(LineageEntry),
 }
 
 /// Which register an entry writes.
@@ -382,6 +435,9 @@ pub enum RegisterKey {
     Draft(Vec<u8>),
     /// The explicit conversation order.
     ConversationOrder,
+    /// The lineage register of this successor group. Appended last, so the
+    /// register order of every older kind is unchanged.
+    Lineage(Vec<u8>),
 }
 
 impl RegisterKey {
@@ -407,6 +463,7 @@ const TAG_FLAGS: u8 = 6;
 const TAG_CURSOR: u8 = 7;
 const TAG_DRAFT: u8 = 8;
 const TAG_CONV_ORDER: u8 = 9;
+const TAG_LINEAGE: u8 = 10;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -422,11 +479,12 @@ impl SyncEntry {
             Self::ReadCursor(c) => RegisterKey::ReadCursor(c.group_id.clone()),
             Self::Draft(d) => RegisterKey::Draft(d.group_id.clone()),
             Self::ConversationOrder(_) => RegisterKey::ConversationOrder,
+            Self::Lineage(l) => RegisterKey::Lineage(l.successor_group_id.clone()),
         }
     }
 
     /// Check the ADR-0058 section 4 bounds that apply to this one entry.
-    /// The existing four kinds carry no bounds of their own.
+    /// The four older conversation kinds carry no bounds of their own.
     ///
     /// # Errors
     ///
@@ -443,6 +501,7 @@ impl SyncEntry {
                     Ok(())
                 }
             },
+            Self::Lineage(l) => l.validate(),
             Self::FolderRemoved(_)
             | Self::Flags(_)
             | Self::ReadCursor(_)
@@ -519,6 +578,11 @@ impl SyncEntry {
                 for g in &o.group_ids {
                     put_bytes32(&mut out, g);
                 }
+            },
+            Self::Lineage(l) => {
+                out.push(TAG_LINEAGE);
+                put_bytes32(&mut out, &l.successor_group_id);
+                put_bytes32(&mut out, &l.root_conversation_id);
             },
         }
         out
@@ -624,6 +688,7 @@ impl SyncEntry {
                 }
                 Self::ConversationOrder(ConversationOrderEntry { group_ids })
             },
+            TAG_LINEAGE => Self::Lineage(take_lineage(&mut cur)?),
             _ => return Err(CodecError::UnknownTag),
         };
         if !cur.is_empty() {
@@ -903,6 +968,25 @@ pub(crate) fn take_bytes32(cur: &mut &[u8]) -> Result<Vec<u8>, CodecError> {
     Ok(take_n(cur, n)?.to_vec())
 }
 
+/// A lineage id: the length is checked against the bound BEFORE the bytes
+/// are taken, so a hostile length never sizes a copy.
+fn take_lineage_id(cur: &mut &[u8]) -> Result<Vec<u8>, CodecError> {
+    let n = take_u32(cur)? as usize;
+    if n == 0 || n > LINEAGE_GROUP_ID_MAX_LEN {
+        return Err(BoundsError::LineageIdLength.into());
+    }
+    Ok(take_n(cur, n)?.to_vec())
+}
+
+fn take_lineage(cur: &mut &[u8]) -> Result<LineageEntry, CodecError> {
+    let successor_group_id = take_lineage_id(cur)?;
+    let root_conversation_id = take_lineage_id(cur)?;
+    Ok(LineageEntry {
+        successor_group_id,
+        root_conversation_id,
+    })
+}
+
 fn take_string(cur: &mut &[u8]) -> Result<String, CodecError> {
     String::from_utf8(take_bytes32(cur)?).map_err(|_| CodecError::NotUtf8)
 }
@@ -1000,6 +1084,10 @@ mod tests {
             SyncEntry::ConversationOrder(ConversationOrderEntry {
                 group_ids: vec![vec![1], vec![2, 2]],
             }),
+            SyncEntry::Lineage(LineageEntry {
+                successor_group_id: vec![7; 32],
+                root_conversation_id: vec![8; 32],
+            }),
         ];
         for e in entries {
             let bytes = e.canonical_bytes();
@@ -1023,6 +1111,62 @@ mod tests {
             SyncEntry::from_canonical_bytes(&b),
             Err(CodecError::Trailing)
         );
+    }
+
+    #[test]
+    fn a_lineage_register_follows_its_bounds_and_its_layout_is_pinned() {
+        let l = |s: Vec<u8>, r: Vec<u8>| LineageEntry {
+            successor_group_id: s,
+            root_conversation_id: r,
+        };
+        assert_eq!(l(vec![1], vec![2]).validate(), Ok(()));
+        assert_eq!(l(vec![1; 64], vec![2; 64]).validate(), Ok(()));
+        for (s, r) in [
+            (vec![], vec![2]),
+            (vec![1], vec![]),
+            (vec![1; 65], vec![2]),
+            (vec![1], vec![2; 65]),
+        ] {
+            assert_eq!(l(s, r).validate(), Err(BoundsError::LineageIdLength));
+        }
+        assert_eq!(
+            l(vec![1, 2], vec![1, 2]).validate(),
+            Err(BoundsError::LineageSelfReference)
+        );
+
+        let bytes = SyncEntry::Lineage(l(vec![0xAA, 0xBB], vec![0xCC])).canonical_bytes();
+        assert_eq!(bytes, [10, 0, 0, 0, 2, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC]);
+
+        // Decode refuses what validate refuses, and a hostile length.
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[10, 0, 0, 0, 1, 5, 0, 0, 0, 1, 5]),
+            Err(CodecError::Bounds(BoundsError::LineageSelfReference))
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[10, 0, 0, 0, 0, 0, 0, 0, 1, 5]),
+            Err(CodecError::Bounds(BoundsError::LineageIdLength))
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[10, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
+            Err(CodecError::Bounds(BoundsError::LineageIdLength))
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[10, 0, 0, 0, 4, 1]),
+            Err(CodecError::Truncated)
+        );
+    }
+
+    #[test]
+    fn a_lineage_register_never_enters_a_folder_change_set() {
+        let mut c = FolderChanges::default();
+        assert!(!c.push(
+            1,
+            SyncEntry::Lineage(LineageEntry {
+                successor_group_id: vec![1],
+                root_conversation_id: vec![2],
+            })
+        ));
+        assert!(c.is_empty());
     }
 
     #[test]

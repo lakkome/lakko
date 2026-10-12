@@ -64,6 +64,29 @@ export interface StoredMailboxRow {
 export interface PersistedInbox {
   readonly cursor: number;
   readonly pending: readonly StoredMailboxRow[];
+  /** ADR-0065 R.7 case 1 / UX 16.6 — requests from accounts that are
+   *  ALREADY contacts whose identity check had no verdict yet. Never listed;
+   *  kept as raw rows like `pending`, because the mailbox cursor has moved
+   *  past them and nothing else would bring them back after a reload. */
+  readonly waiting?: readonly StoredMailboxRow[];
+}
+
+/** How many unshown waiting requests are kept. Chosen: a bound, not a
+ *  measurement; past it a new one is not kept (the scheduled identity check
+ *  still finds the person). */
+export const MAX_WAITING_REQUESTS = 32;
+
+/**
+ * The waiting list after one more request is held: appended once (by
+ * `messageId`), never past {@link MAX_WAITING_REQUESTS}. Pure.
+ */
+export function withWaiting(
+  waiting: readonly StoredMailboxRow[],
+  row: StoredMailboxRow,
+): { readonly waiting: readonly StoredMailboxRow[]; readonly kept: boolean } {
+  if (waiting.some((r) => r.messageId === row.messageId)) return { waiting, kept: true };
+  if (waiting.length >= MAX_WAITING_REQUESTS) return { waiting, kept: false };
+  return { waiting: [...waiting, row], kept: true };
 }
 
 export const EMPTY_INBOX: PersistedInbox = { cursor: 0, pending: [] };
@@ -116,7 +139,15 @@ export function loadInbox(
       parsed.cursor >= 0 &&
       Array.isArray(parsed.pending)
     ) {
-      return { cursor: parsed.cursor, pending: parsed.pending.filter(isStoredRow) };
+      const rawWaiting = (parsed as { waiting?: unknown }).waiting;
+      const waiting = Array.isArray(rawWaiting)
+        ? rawWaiting.filter(isStoredRow).slice(0, MAX_WAITING_REQUESTS)
+        : [];
+      return {
+        cursor: parsed.cursor,
+        pending: parsed.pending.filter(isStoredRow),
+        ...(waiting.length > 0 ? { waiting } : {}),
+      };
     }
   } catch {
     // malformed: fall through
@@ -134,7 +165,12 @@ export function saveInbox(
   if (storage === null) throw new Error("contacts inbox: no storage");
   storage.setItem(
     storageKey(accountIdB64),
-    JSON.stringify({ v: 1, cursor: inbox.cursor, pending: inbox.pending }),
+    JSON.stringify({
+      v: 1,
+      cursor: inbox.cursor,
+      pending: inbox.pending,
+      ...(inbox.waiting !== undefined && inbox.waiting.length > 0 ? { waiting: inbox.waiting } : {}),
+    }),
   );
 }
 
@@ -251,6 +287,14 @@ export interface PendingInbox {
   restore(
     decode: (rows: readonly MailboxRow[]) => Promise<readonly (IncomingContactRequest | null)[]>,
   ): Promise<void>;
+  /** Keep an UNSHOWN request of an existing contact that has no verdict yet
+   *  (UX 16.6), persisted with the current cursor. Returns whether it is
+   *  kept (`false` past the bound, or when the write failed). */
+  holdWaiting(row: MailboxRow): boolean;
+  /** The waiting rows kept on disk, in arrival order. */
+  waitingRows(): readonly MailboxRow[];
+  /** A waiting request got its verdict (answered, dropped, or shown). */
+  dropWaiting(messageId: number): void;
   /** Stop writing: a disposed inbox (signed out, account switched) must not
    *  overwrite what a newer one for the same account wrote. */
   dispose(): void;
@@ -261,12 +305,13 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
   const loaded = loadInbox(deps.accountIdB64, storage);
   let cursor = loaded.cursor;
   let rows: StoredMailboxRow[] = [...loaded.pending];
+  let waiting: readonly StoredMailboxRow[] = [...(loaded.waiting ?? [])];
   const decoded = new Map<number, IncomingContactRequest>();
   let disposed = false;
 
   function write(nextCursor: number, nextRows: readonly StoredMailboxRow[]): void {
     if (disposed) throw new Error("contacts inbox: disposed");
-    saveInbox(deps.accountIdB64, { cursor: nextCursor, pending: nextRows }, storage);
+    saveInbox(deps.accountIdB64, { cursor: nextCursor, pending: nextRows, waiting }, storage);
   }
 
   function pending(): readonly IncomingContactRequest[] {
@@ -352,6 +397,33 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
         }
       }
       deps.onChange();
+    },
+    holdWaiting(row) {
+      const next = withWaiting(waiting, toStoredRow(row));
+      if (!next.kept || next.waiting === waiting) return next.kept;
+      const before = waiting;
+      waiting = next.waiting;
+      try {
+        write(cursor, rows);
+      } catch (err) {
+        waiting = before;
+        // eslint-disable-next-line no-console
+        console.warn("contacts inbox: could not persist a waiting request", err);
+        return false;
+      }
+      return true;
+    },
+    waitingRows: () => waiting.map(fromStoredRow),
+    dropWaiting(messageId) {
+      if (!waiting.some((r) => r.messageId === messageId)) return;
+      waiting = waiting.filter((r) => r.messageId !== messageId);
+      try {
+        write(cursor, rows);
+      } catch (err) {
+        // It is judged again after a reload, and reaches the same verdict.
+        // eslint-disable-next-line no-console
+        console.warn("contacts inbox: could not persist a waiting removal", messageId, err);
+      }
     },
     dispose() {
       disposed = true;

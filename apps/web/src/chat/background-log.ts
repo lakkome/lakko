@@ -274,26 +274,15 @@ export function eventToPersistedMessage(
   return {
     messageId: String(e.messageId),
     direction: "system",
-    text: systemRowText(e.systemKind, e.contactAccountIdB64),
+    text: systemRowText(e.systemKind),
     attachments: [],
     createdAt: e.createdAt,
   };
 }
 
-/** The persisted text of a system row: `[mls <kind>]`, and for the ADR-0065
- *  phase-2 eviction row the contact's account id after the kind, so the row
- *  can name the person again after a reload. */
-export function systemRowText(systemKind: string, contactAccountIdB64: string | undefined): string {
-  return contactAccountIdB64 === undefined
-    ? `[mls ${systemKind}]`
-    : `[mls ${systemKind} ${contactAccountIdB64}]`;
-}
-
-/** The account id a persisted `keys-reset-removed` row names, or `null` for
- *  any other system row. */
-export function parseResetRemovedRow(text: string): string | null {
-  const m = /^\[mls keys-reset-removed ([A-Za-z0-9+/=]+)\]$/.exec(text);
-  return m === null ? null : (m[1] ?? null);
+/** The persisted text of a system row: `[mls <kind>]`. */
+export function systemRowText(systemKind: string): string {
+  return `[mls ${systemKind}]`;
 }
 
 /**

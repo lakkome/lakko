@@ -583,63 +583,6 @@ export async function verifyRotationChain(
 }
 
 /**
- * KT-log S4 — a LIGHTER, best-effort lookup of the `is_reset` marker
- * for a SERVED key, used to ENRICH a fail-closed `SupersessionRefused`
- * (an unproven changed key — the moment the reset/compromise
- * distinction matters most).
- *
- * Unlike `verifyIdentityInLog`, this does NOT run the inclusion proof
- * or the no-rollback gate: it is a context-only enrichment that can
- * never change a trust decision (gate 1 throws regardless). It only
- * answers: "for this account, does the log's latest entry COMMIT TO
- * EXACTLY the served key, and was that entry an owner reset?"
- *
- * Returns:
- *   * `true`  — the log's latest pubkey matches `servedPubkey` AND its
- *     `is_reset` marker is set (owner-initiated fresh-start).
- *   * `false` — the log's latest pubkey matches `servedPubkey` AND its
- *     `is_reset` marker is NOT set (an unexplained change — possible
- *     compromise).
- *   * `null`  — the integration is off, the log is unreachable, the
- *     account is absent from the log, OR the log's latest pubkey does
- *     NOT match the served key (the marker is then about a different
- *     key and tells us nothing about the served one).
- *
- * Best-effort: ANY fault maps to `null`. This helper NEVER throws.
- */
-export async function lookupServedKeyReset(
-  accountId: Uint8Array,
-  servedSignaturePubkey: Uint8Array,
-  deps: Pick<VerifyDeps, "client"> = {},
-): Promise<boolean | null> {
-  const client =
-    deps.client !== undefined
-      ? deps.client
-      : TransparencyClient.forOptionalConfig();
-  if (client === null) {
-    return null;
-  }
-  try {
-    const ak = await accountKey(accountId);
-    const latest = await client.fetchLatest(ak);
-    if (latest === null) {
-      // Account not yet logged — no marker to read.
-      return null;
-    }
-    // The marker is only meaningful for the served key if the log's
-    // latest entry actually commits to it. A divergence means the
-    // marker describes some other key — return null (unknown).
-    if (!bytesEqual(latest.identityPubkey, servedSignaturePubkey)) {
-      return null;
-    }
-    return latest.isReset;
-  } catch {
-    // Best-effort enrichment — any fault is "unknown".
-    return null;
-  }
-}
-
-/**
  * ADR-0036 — resolve the pinned auth-attest verifying key best-effort for
  * the genesis-attestation gate. Returns the build-time pin (no network)
  * when `VITE_LAKKO_DEVICE_ATTEST_KEY` is set, else the cached JWKS key,

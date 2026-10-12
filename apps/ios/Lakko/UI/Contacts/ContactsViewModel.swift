@@ -34,15 +34,7 @@ public final class ContactsViewModel: ObservableObject {
     // MARK: - Ephemeral status
 
     @Published public private(set) var sending: Bool = false
-    @Published public private(set) var sendError: UiText? {
-        // The `Open contact` target belongs to one error; any other write
-        // of the line withdraws it. The reset branch sets it afterwards.
-        didSet { sendErrorContactMessageId = nil }
-    }
-    /// UX 16.1 — the contact the refusal line (`Verify {name}'s new safety
-    /// number first.`) is about, so the sheet can offer `Open contact` beside
-    /// it; `nil` for every other error.
-    @Published public private(set) var sendErrorContactMessageId: Int64?
+    @Published public private(set) var sendError: UiText?
     @Published public private(set) var generatingInvite: Bool = false
     @Published public private(set) var inviteError: UiText?
     /// The last invite link the user generated this session.
@@ -125,7 +117,7 @@ public final class ContactsViewModel: ObservableObject {
         }
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         let createdAt = ISO8601DateFormatter().string(from: Date())
-        for groupIdHex in chatRepository.knownGroupIdHexes {
+        for groupIdHex in chatRepository.conversationHeadIdHexes {
             guard let peer = chatRepository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { continue }
             repository.adoptOneToOnePeer(
                 signatureKey: peer,
@@ -176,32 +168,16 @@ public final class ContactsViewModel: ObservableObject {
                 introInput = ""
                 sendSucceededCount += 1
             } catch let refused as SupersessionRefused {
-                // KT-log S4 — the peer's AccountIdentity key changed and
-                // could not be authorised by a supersession proof
-                // (fail-closed, ADR-0016). Surface a RESET-AWARE message
-                // so the user can distinguish an owner-initiated identity
-                // reset (ADR-0017 lost-everything fresh-start) from a
-                // possible compromise, using the best-effort
-                // transparency-log marker the refusal carries. The gate
-                // already refused regardless of the log — this only
-                // colours the prompt.
+                // The peer's AccountIdentity key changed and the change is
+                // neither a proven rotation (ADR-0016) nor an attested reset
+                // (ADR-0065 R.2, accepted silently before this point is ever
+                // reached): the fail-closed refusal, with the copy the
+                // verdict names.
                 sending = false
                 let loggedReset = refused.loggedReset
-                // UX 16.1 — a flagged contact's error names the state; the
-                // label is the contact's name where one is known.
-                let flagged = flaggedContactExists(accountIdB64: refused.accountIdB64)
-                let label = flagged
-                    ? repository.contact(accountIdB64: refused.accountIdB64).map {
-                        ProfileDirectory.shared.resolve(signatureKey: $0.request.fromPubkey).name
-                    } ?? peerLabel
-                    : peerLabel
                 sendError = UiText {
-                    Self.supersessionRefusedMessage(
-                        loggedReset: loggedReset, peerLabel: label, contactFlagged: flagged)
+                    Self.supersessionRefusedMessage(loggedReset: loggedReset, peerLabel: peerLabel)
                 }
-                sendErrorContactMessageId = Self.refusalOpenContactTarget(
-                    loggedReset: loggedReset, contactFlagged: flagged,
-                    contactMessageId: repository.contact(accountIdB64: refused.accountIdB64)?.request.messageId)
             } catch {
                 sending = false
                 sendError = Self.contactsErrorText(
@@ -353,16 +329,8 @@ public final class ContactsViewModel: ObservableObject {
         // chat: a link whose chat is gone (deleted here, or never present on
         // this device) opened a dead chat - seen live on web 2026-09-26, and
         // the same trust existed here.
-        let known = chatRepository.knownGroupIdHexes
+        let known = chatRepository.conversationHeadIdHexes
         let key = contact.request.fromPubkey
-        // ADR-0065 phase 2 (UX 16.4) — once a new chat exists with the
-        // verified keys, Message opens it; the closed old chat stays a row
-        // of its own until deleted from here.
-        if let fresh = known.first(where: {
-            !chatClosed(groupIdHex: $0) && chatRepository.oneToOnePeerSignatureKey(groupIdHex: $0) == key
-        }), contact.groupIdHex.map({ chatClosed(groupIdHex: $0) }) ?? true {
-            return fresh
-        }
         if let linked = contact.groupIdHex, known.contains(linked) { return linked }
         return known.first {
             chatRepository.oneToOnePeerSignatureKey(groupIdHex: $0) == key
@@ -422,52 +390,6 @@ public final class ContactsViewModel: ObservableObject {
         guard let chatRepository else { return false }
         return chatRepository.state.threads
             .first { $0.groupIdHex == groupIdHex }?.membershipEnded ?? false
-    }
-
-    // MARK: - ADR-0065 phase 2 — a contact reset their account keys (UX 16.1 / 16.2)
-
-    /// UX 16.4 — whether the contact's one-to-one is CLOSED on this device
-    /// (the contact reset their keys). The contact screen reached from it
-    /// takes the membership-ended layout: Call and Video gone, `Delete this
-    /// chat` in their place.
-    public func chatClosed(groupIdHex: String) -> Bool {
-        guard let chatRepository else { return false }
-        if case .contactKeysReset? = chatRepository.closedReason(groupIdHex: groupIdHex) { return true }
-        return false
-    }
-
-    /// UX 16.2 — the safety number computed over the PENDING key of a flagged
-    /// contact (never the previous one), or the ordinary number otherwise;
-    /// `nil` when the session cannot compute it.
-    public func safetyNumberToVerify(for contact: AcceptedContact) -> String? {
-        guard let reset = contact.keyReset, let pending = base64Decode(reset.pendingKeyB64) else {
-            return safetyNumber(for: contact)
-        }
-        return try? repository.safetyNumber(against: pending)
-    }
-
-    /// UX 16.2 — the one-line toast after a confirmation, cleared by the
-    /// screen once shown.
-    @Published public var keyResetVerifiedToast: String?
-
-    /// UX 16.2 — `I verified the new safety number`. Returns `false` when the
-    /// store refused the write (the screen shows `Could not save. Try again.`).
-    @discardableResult
-    public func onConfirmKeyReset(messageId: Int64) -> Bool {
-        guard let contact = contact(messageId: messageId) else { return false }
-        let name = ProfileDirectory.shared.resolve(signatureKey: contact.request.fromPubkey)
-        guard repository.confirmKeyReset(messageId: messageId) else { return false }
-        keyResetVerifiedToast = name.isPlaceholder
-            ? Localization.text("contacts.safety.reset.done_unnamed")
-            : Localization.text("contacts.safety.reset.done", texts: ["name": name.name])
-        return true
-    }
-
-    /// UX 16.1 — whether the person named by the refusal has a flagged contact
-    /// row here, so the action's error can point at the state instead of
-    /// repeating the generic identity-changed copy.
-    private func flaggedContactExists(accountIdB64: String) -> Bool {
-        repository.contact(accountIdB64: accountIdB64)?.keyReset != nil
     }
 
     /// ADR-0045 UX 6.2.4 — forget a conversation this device is out of.
@@ -656,18 +578,6 @@ public final class ContactsViewModel: ObservableObject {
         return false
     }
 
-    /// UX 16.1 — whether the refusal line carries `Open contact`, and where
-    /// it leads. Exactly the case ``supersessionRefusedMessage`` words as
-    /// `Verify ... first.`: a confirmed reset of a contact this device holds.
-    nonisolated static func refusalOpenContactTarget(
-        loggedReset: Bool?,
-        contactFlagged: Bool,
-        contactMessageId: Int64?
-    ) -> Int64? {
-        guard loggedReset == true, contactFlagged else { return nil }
-        return contactMessageId
-    }
-
     /// KT-log S4 — render the reset-aware copy for a fail-closed
     /// ``SupersessionRefused``. The PURE `(loggedReset, peerLabel)` → copy
     /// mapping (mirror of the web `supersessionRefusedMessage`); kept a
@@ -677,35 +587,21 @@ public final class ContactsViewModel: ObservableObject {
     /// regardless of `loggedReset`; this only colours the message.
     ///
     /// - Parameters:
-    ///   - loggedReset: the best-effort transparency-log reset marker the
-    ///     refusal carries (`true` = confirmed owner reset, `false` = no
-    ///     owner reset shown, `nil` = off / unreachable / inconclusive).
+    ///   - loggedReset: the log marker the refusal carries: `false` = the
+    ///     log shows the key WITHOUT an owner reset; `nil` = off /
+    ///     unreachable / inconclusive. `true` is never passed any more (an
+    ///     attested reset is accepted silently and reaches no refusal) and
+    ///     renders as `unconfirmed` if it ever arrives.
     ///   - peerLabel: the handle the user typed (e.g. `@alice`), rendered
     ///     verbatim as the subject; `nil` / empty picks the unnamed message.
     nonisolated static func supersessionRefusedMessage(
         loggedReset: Bool?,
-        peerLabel: String?,
-        contactFlagged: Bool = false
+        peerLabel: String?
     ) -> String {
-        // ADR-0065 phase 2 (UX 16.1) — a confirmed reset of a CONTACT is a
-        // state, and the action's error line points at it: `Verify {name}'s
-        // new safety number first.` A reset of an account this device holds
-        // no contact for keeps the identity-changed copy below.
-        if loggedReset == true, contactFlagged {
-            if let label = peerLabel, !label.isEmpty {
-                return Localization.text("contacts.keys_reset.verify_first", texts: ["name": label])
-            }
-            return Localization.text("contacts.keys_reset.verify_first_short")
-        }
         // One catalog message per verdict, and an unnamed twin of each
         // rather than "This contact" as an argument (ADR-0061 batch 4). All
         // `security_critical`.
-        let verdict: String
-        switch loggedReset {
-        case .some(true): verdict = "reset"
-        case .some(false): verdict = "unexplained"
-        case .none: verdict = "unconfirmed"
-        }
+        let verdict = loggedReset == false ? "unexplained" : "unconfirmed"
         if let label = peerLabel, !label.isEmpty {
             return Localization.text("contacts.identity_changed.\(verdict)", texts: ["name": label])
         }

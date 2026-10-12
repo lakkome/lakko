@@ -2226,46 +2226,6 @@
       "text": "Поділитися",
       "status": "machine"
     },
-    "chat.keys_reset.bubble_warning": {
-      "text": "Не підтверджено відтоді, як {name} скинув(ла) ключі облікового запису.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_being_removed": {
-      "text": "Ключі облікового запису скинуто. Видаляється.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_flag": {
-      "text": "Ключі облікового запису скинуто.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_closed": {
-      "text": "{name} скинув(ла) ключі облікового запису. Цей чат закрито.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_composer": {
-      "text": "Ви більше не можете надсилати повідомлення в цей чат.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_row": {
-      "text": "Чат закрито. {name} скинув(ла) ключі облікового запису.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice": {
-      "text": "{name}, власник цієї групи, скинув(ла) ключі облікового запису. Старі пристрої власника не можна видалити з групи, і група не може отримати нового власника. Щоб і далі спілкуватися безпечно, створіть групу заново.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice_member": {
-      "text": "Адміністратор може створити її заново.",
-      "status": "machine"
-    },
-    "chat.keys_reset.start_new_chat": {
-      "text": "Почати новий чат",
-      "status": "machine"
-    },
-    "chat.keys_reset.system_removed": {
-      "text": "{name} скинув(ла) ключі облікового запису. Старі пристрої цього учасника видалено з групи.",
-      "status": "machine"
-    },
     "chat.leave.action": {
       "text": "Вийти з групи",
       "status": "machine"
@@ -3854,14 +3814,6 @@
       "text": "Не вдалося почати чат. Спробуйте ще раз.",
       "status": "machine"
     },
-    "contacts.identity_changed.reset": {
-      "text": "Ідентичність {name} скинуто (наприклад, після втрати пристрою). Журнал прозорості підтверджує, що скидання виконав власник облікового запису. Якщо ви впевнені, що це справді ця людина, перед продовженням знову звірте код безпеки іншим каналом зв’язку.",
-      "status": "machine"
-    },
-    "contacts.identity_changed.reset_unnamed": {
-      "text": "Ідентичність цього контакту скинуто (наприклад, після втрати пристрою). Журнал прозорості підтверджує, що скидання виконав власник облікового запису. Якщо ви впевнені, що це справді ця людина, перед продовженням знову звірте код безпеки іншим каналом зв’язку.",
-      "status": "machine"
-    },
     "contacts.identity_changed.unconfirmed": {
       "text": "Ідентичність {name} змінилася, і це не вдалося підтвердити за журналом прозорості. Перш ніж довіряти, перевірте іншим каналом зв’язку.",
       "status": "machine"
@@ -3884,38 +3836,6 @@
     },
     "contacts.invite_links.title": {
       "text": "Посилання-запрошення",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner": {
-      "text": "{name} скинув(ла) ключі облікового запису. Звірте новий код безпеки, перш ніж знову писати цьому контакту.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_action": {
-      "text": "Звірити",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_unnamed": {
-      "text": "Цей контакт скинув ключі облікового запису. Звірте новий код безпеки, перш ніж знову йому писати.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.open_contact": {
-      "text": "Відкрити контакт",
-      "status": "machine"
-    },
-    "contacts.keys_reset.picker_sub": {
-      "text": "Ключі облікового запису скинуто. Спочатку звірте новий код безпеки.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.row_sub": {
-      "text": "Ключі облікового запису скинуто. Звірте новий код безпеки.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first": {
-      "text": "Спочатку звірте новий код безпеки контакту {name}.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first_short": {
-      "text": "Спочатку звірте новий код безпеки.",
       "status": "machine"
     },
     "contacts.list.add": {
@@ -4056,54 +3976,6 @@
     },
     "contacts.safety.number": {
       "text": "Код безпеки",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body": {
-      "text": "Ключі облікового запису контакту {name} було скинуто, тому код безпеки, який ви, можливо, звіряли раніше, більше не дійсний. Звірте цей новий код із {name} під час зустрічі або дзвінка.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body_unnamed": {
-      "text": "Ключі облікового запису цього контакту було скинуто, тому код безпеки, який ви, можливо, звіряли раніше, більше не дійсний. Звірте цей новий код із контактом під час зустрічі або дзвінка.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox": {
-      "text": "Я звірив(ла) новий код безпеки з {name}, і він збігся.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox_unnamed": {
-      "text": "Я звірив(ла) новий код безпеки з цим контактом, і він збігся.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirm": {
-      "text": "Я звірив(ла) новий код безпеки",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirming": {
-      "text": "Перевірка...",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done": {
-      "text": "{name} знову підтверджено.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done_unnamed": {
-      "text": "Цей контакт знову підтверджено.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.save_failed": {
-      "text": "Не вдалося зберегти. Спробуйте ще раз.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.title": {
-      "text": "Звірте новий код безпеки",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning": {
-      "text": "Якщо ви підтвердите без звірки, той, хто заволодів обліковим записом {name}, виглядатиме для вас як {name}.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning_unnamed": {
-      "text": "Якщо ви підтвердите без звірки, той, хто заволодів цим обліковим записом, виглядатиме для вас як ваш контакт.",
       "status": "machine"
     },
     "contacts.safety.row_sub": {
@@ -5778,26 +5650,6 @@
       "text": "{name}, {count, plural, one {# непрочитаний чат} few {# непрочитані чати} many {# непрочитаних чатів} other {# непрочитаного чату}}",
       "status": "machine"
     },
-    "group.closed.composer": {
-      "text": "Цю групу закрито.",
-      "status": "machine"
-    },
-    "group.closed.open_new": {
-      "text": "Відкрити нову групу",
-      "status": "machine"
-    },
-    "group.closed.panel": {
-      "text": "Цю групу закрито. Продовжуйте в групі «{name}».",
-      "status": "machine"
-    },
-    "group.closed.row": {
-      "text": "Групу закрито",
-      "status": "machine"
-    },
-    "group.closed.system": {
-      "text": "{name} закрив(ла) цю групу після скидання ключів облікового запису власника.",
-      "status": "machine"
-    },
     "group.join.needs_account": {
       "text": "Щоб надіслати запит на приєднання, потрібен обліковий запис. Створіть його або увійдіть.",
       "status": "machine"
@@ -5844,38 +5696,6 @@
     },
     "group.join.wait_secondary": {
       "text": "Жоден із кроків не має обмеження в часі. Якщо нічого не відбувається, запит можна надіслати знову.",
-      "status": "machine"
-    },
-    "group.recreate.action": {
-      "text": "Створити групу заново",
-      "status": "machine"
-    },
-    "group.recreate.done": {
-      "text": "Готово",
-      "status": "machine"
-    },
-    "group.recreate.excluded_reset": {
-      "text": "Ключі облікового запису скинуто. Звірте новий код безпеки, щоб додати цього учасника.",
-      "status": "machine"
-    },
-    "group.recreate.members_heading": {
-      "text": "Учасники ({count})",
-      "status": "machine"
-    },
-    "group.recreate.note": {
-      "text": "Стара група залишається як є для всіх, доки ви її не закриєте.",
-      "status": "machine"
-    },
-    "group.recreate.submit": {
-      "text": "Створити й закрити стару групу",
-      "status": "machine"
-    },
-    "group.recreate.title": {
-      "text": "Створити групу заново",
-      "status": "machine"
-    },
-    "group.recreate.working": {
-      "text": "Створення...",
       "status": "machine"
     },
     "invite.contact.accept_failed": {
@@ -6807,7 +6627,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "Ваші контакти побачать, що ваш код безпеки змінився, і їм потрібно буде знову вас перевірити, перш ніж безпечно писати вам.",
+      "text": "Ваші контакти збережуть чати з вами. Ваш код безпеки зміниться.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -6935,7 +6755,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_contacts": {
-      "text": "Ваші контакти побачать, що ваш код безпеки змінився, і мусять знову вас перевірити, перш ніж безпечно писати вам.",
+      "text": "Ваші контакти збережуть чати з вами. Ваш код безпеки зміниться.",
       "status": "machine"
     },
     "restore_identity.reset.effect_devices": {

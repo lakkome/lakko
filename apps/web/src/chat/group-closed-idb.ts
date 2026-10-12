@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 phase 2 — IndexedDB backend for the closed-group store
+ * ADR-0065 R.6 — IndexedDB backend for the successor-claim store
  * (`group-closed-store.ts`), encrypted under the device root key. The
  * twin of `group-name-idb.ts`, in its own database: which groups this
  * account was told are closed, and where they continued, is content.

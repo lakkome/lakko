@@ -8,7 +8,9 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { historyRowId } from "./lineage";
 import {
+  forwardJumpRow,
   forwardJumpTarget,
   forwardLineLabel,
   forwardPayloadOf,
@@ -173,5 +175,24 @@ describe("the persisted round trip", () => {
     expect(
       forwardRefFromPersisted({ author: "A", origin: { groupIdB64: ORIGIN, messageId: "nope" } }),
     ).toEqual({ author: "A" });
+  });
+});
+
+describe("forwardJumpRow: the jump into a conversation that moved (ADR-0065 R.5)", () => {
+  const args = { messageId: 12, headGroupIdB64: "S2", heldHistory: ["G", "S1"], rowId: historyRowId };
+  it("the current group: the message id itself", () => {
+    expect(forwardJumpRow({ ...args, originGroupIdB64: "S2" })).toBe(12);
+  });
+  it("an older segment: the id its row is drawn under, by distance from the head", () => {
+    expect(forwardJumpRow({ ...args, originGroupIdB64: "S1" })).toBe(historyRowId(12, 1));
+    expect(forwardJumpRow({ ...args, originGroupIdB64: "G" })).toBe(historyRowId(12, 2));
+  });
+  it("a segment this device does not hold: nowhere", () => {
+    expect(forwardJumpRow({ ...args, originGroupIdB64: "other" })).toBeNull();
+  });
+  it("a conversation that never moved is unchanged", () => {
+    expect(
+      forwardJumpRow({ originGroupIdB64: "G", messageId: 5, headGroupIdB64: "G", heldHistory: [], rowId: historyRowId }),
+    ).toBe(5);
   });
 });

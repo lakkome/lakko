@@ -29,7 +29,9 @@ import { t } from "../l10n";
 
 /** The best-effort transparency-log reset marker for the refused key
  *  (the shape `SupersessionRefused.loggedReset` carries):
- *   * `true`  — the log confirms an owner-initiated reset.
+ *   * `true`  — never passed any more: a change that IS an attested reset
+ *     is accepted silently (ADR-0065 R.2) and reaches no refusal. Rendered
+ *     as `unconfirmed` if it ever arrives.
  *   * `false` — the log does NOT show an owner reset.
  *   * `null`  — the log is off / unreachable / absent / inconclusive. */
 export type LoggedReset = boolean | null;
@@ -46,25 +48,9 @@ export function supersessionRefusedMessage(
   loggedReset: LoggedReset,
   peerLabel?: string,
 ): string {
-  // ADR-0065 phase 2 (UX 16.1): a change the log confirms as a reset is a
-  // STATE of the contact (recorded beside the pin by the gate), so the
-  // action's line points at that state rather than explaining the log.
-  if (loggedReset === true) return keysResetVerifyFirst(peerLabel);
   const named = peerLabel !== undefined && peerLabel.length > 0;
   const verdict = loggedReset === false ? "unexplained" : "unconfirmed";
   return named
     ? t(`contacts.identity_changed.${verdict}`, { name: peerLabel })
     : t(`contacts.identity_changed.${verdict}_unnamed`);
-}
-
-/**
- * ADR-0065 phase 2 (UX 16.1 "what is blocked") — `Verify {name}'s new
- * safety number first.`, or the subject-less form when the person has no
- * label here.
- */
-export function keysResetVerifyFirst(peerLabel?: string): string {
-  const named = peerLabel !== undefined && peerLabel.length > 0;
-  return named
-    ? t("contacts.keys_reset.verify_first", { name: peerLabel })
-    : t("contacts.keys_reset.verify_first_short");
 }

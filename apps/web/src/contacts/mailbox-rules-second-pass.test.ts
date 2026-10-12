@@ -19,7 +19,7 @@ import {
 } from "./address-resolver";
 import { afterProvenRotation, type AccountKeys } from "./predecessor";
 import { pendingAfterArrival, createPendingInbox } from "./inbox-store";
-import { requestTargetAfterFetch } from "./keys-reset-send-gate";
+import { requestTargetAfterFetch } from "./request-target";
 import { isProvenSuccessor } from "./proven-successor";
 import {
   linkRevokeOutcome,

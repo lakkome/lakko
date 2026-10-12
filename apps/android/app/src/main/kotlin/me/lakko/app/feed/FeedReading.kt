@@ -126,13 +126,13 @@ public fun showInFeedsAgain(r: FeedReading, idHex: String): FeedReading = r.copy
  * preview.
  */
 public fun withoutHidden(sources: List<FeedSource>, hidden: Set<String>): List<FeedSource> =
-    if (hidden.isEmpty()) sources else sources.filter { it.idHex !in hidden }
+    if (hidden.isEmpty()) sources else sources.filter { feedSourceKey(it) !in hidden }
 
 /** The hidden conversations this device still holds, the most recently
  *  hidden first (the "Hidden from feeds" list). [hidden] iterates in the
  *  order the conversations were hidden. */
 public fun hiddenSources(sources: List<FeedSource>, hidden: Set<String>): List<FeedSource> {
-    val byId = sources.associateBy { it.idHex }
+    val byId = sources.associateBy(::feedSourceKey)
     return hidden.toList().asReversed().mapNotNull { byId[it] }
 }
 

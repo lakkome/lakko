@@ -47,6 +47,10 @@ vi.mock("../wasm", () => ({
   loadWasm: async () => ({
     // ADR-0050: the Welcome is addressed to the added leaf's own key.
     keyPackageSignatureKey: (_kp: Uint8Array) => new Uint8Array(32).fill(9),
+    // ADR-0065 R.2: `addMemberToGroup` adds only a device whose binding names
+    // the expected account key. The first byte of the fake KeyPackage is the
+    // account key's fill, so a test can serve another account's device.
+    keyPackageAccountKey: (kp: Uint8Array) => new Uint8Array(32).fill(kp[0] ?? 0),
     IdentityPseudonym: {
       fromIdentity: (_pk: Uint8Array) => ({
         asBytes: (): Uint8Array => {
@@ -567,7 +571,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       {
         identityFetch: async () => null,
         fetchKeyPackages: async () => [
-          { deviceId: new Uint8Array(32).fill(9), keyPackage: new Uint8Array([9, 9, 9]) },
+          { deviceId: new Uint8Array(32).fill(9), keyPackage: new Uint8Array([2, 9, 9]) },
         ],
       } as unknown as DiscoveryClient,
       { publishGroup, publishMailbox, registerGroupEpoch: async () => {} } as unknown as DsClient,
@@ -600,6 +604,44 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     expect(persistCalled).toBe(false);
     expect(abortHookGids).toEqual([GID_B64]);
     expect(epoch).toBe(N);
+    expect(publishGroup).not.toHaveBeenCalled();
+    expect(publishMailbox).not.toHaveBeenCalled();
+  });
+  it("addMemberToGroup refuses a device whose binding names another account key: nothing is merged or published (ADR-0065 R.2)", async () => {
+    let epoch = 5n;
+    const addMember = vi.fn(() => {
+      epoch += 1n;
+      return { commit: new Uint8Array([1]), welcome: new Uint8Array([2]) };
+    });
+    const group = {
+      get groupId(): Uint8Array {
+        return GID;
+      },
+      get epoch(): bigint {
+        return epoch;
+      },
+      dsAccessSigner: fakeAccessSigner(() => epoch),
+      addMember,
+    } as unknown as WasmGroup;
+    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
+    const publishMailbox = vi.fn(async () => ({ id: 2, createdAt: "t" }));
+    const client = new ContactsClient(
+      {
+        identityFetch: async () => null,
+        // The directory serves, under the asked account id, a device bound to
+        // account key 0x07..., not to the expected 0x02...
+        fetchKeyPackages: async () => [
+          { deviceId: new Uint8Array(32).fill(9), keyPackage: new Uint8Array([7, 9, 9]) },
+        ],
+      } as unknown as DiscoveryClient,
+      { publishGroup, publishMailbox, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      { identityProvider: () => IDENTITY_TOKEN },
+    );
+    await expect(
+      client.addMemberToGroup(null, group, new Uint8Array(16).fill(1), new Uint8Array(32).fill(2)),
+    ).rejects.toBeInstanceOf(ContactsError);
+    expect(addMember).not.toHaveBeenCalled();
+    expect(epoch).toBe(5n);
     expect(publishGroup).not.toHaveBeenCalled();
     expect(publishMailbox).not.toHaveBeenCalled();
   });

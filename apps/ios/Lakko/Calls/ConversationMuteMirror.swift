@@ -85,7 +85,13 @@ public enum ConversationMuteMirror {
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) -> Bool {
         guard let defaults, let accountIdB64 else { return false }
-        return defaults.bool(forKey: key(accountIdB64, groupIdHex))
+        if defaults.bool(forKey: key(accountIdB64, groupIdHex)) { return true }
+        // ADR-0065 R.5 — mute belongs to the CONVERSATION: a group that
+        // continues a muted conversation is muted, for the app and for the
+        // notification extension alike (`ConversationLineageMirror`).
+        let conversation = ConversationLineageMirror.conversationHex(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex, defaults: defaults)
+        return conversation != groupIdHex && defaults.bool(forKey: key(accountIdB64, conversation))
     }
 
     /// Replace one account's whole mirrored set. App-side only.

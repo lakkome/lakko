@@ -84,12 +84,12 @@ public final class PeerPinStore {
         /// The currently-trusted AccountIdentity Ed25519 pubkey for
         /// this account, base64-encoded. Advanced only via a
         /// verified supersession proof on the fetch path.
-        public let pinnedSignaturePubkeyB64: String
+        public var pinnedSignaturePubkeyB64: String
         /// Monotonic rotation marker (ADR-0016 rule #4): the
         /// `expires_at` unix-seconds of the last-accepted proof, or
         /// `0` for a plain TOFU-pin. A re-pin that would lower this
         /// is refused.
-        public let rotationMarker: Int64
+        public var rotationMarker: Int64
         /// KT-log S3d: the last transparency-log inclusion verdict
         /// observed for this account on the identity-fetch path (the
         /// raw-value string of a ``LogVerifyStatus``). The log check is
@@ -98,7 +98,7 @@ public final class PeerPinStore {
         /// best-effort outcome so the UI can surface it. `nil` on a pin
         /// written before S3d (or by a path that did not run the
         /// check). Mirror of the web pin-record `logStatus`.
-        public let logStatus: String?
+        public var logStatus: String?
         /// KT-log S4: the `is_reset` marker the transparency log's
         /// `/latest` entry carried for the CURRENTLY-PINNED key, when a
         /// latest entry was read (`confirmed` / `mismatch`). `true`
@@ -108,7 +108,7 @@ public final class PeerPinStore {
         /// pin predates S4). Stored next to ``logStatus`` so the UI can
         /// surface the reset-vs-compromise distinction. Mirror of the
         /// web pin-record `isReset`.
-        public let isReset: Bool?
+        public var isReset: Bool?
         /// G-30 #2 (ADR-0019): the transparency-log VERSION at which the
         /// currently-pinned key was chain-confirmed (the `/latest` entry's
         /// per-account-key `version`). Written ONLY on a `confirmed`
@@ -121,21 +121,48 @@ public final class PeerPinStore {
         /// before G-30 #2 — synthesized `Codable` decodes an absent key
         /// to `nil`, so old blobs migrate transparently). Mirror of the
         /// web pin-record `pinnedLogVersion`.
-        public let pinnedLogVersion: UInt64?
+        public var pinnedLogVersion: UInt64?
 
         public init(
             pinnedSignaturePubkeyB64: String,
             rotationMarker: Int64,
             logStatus: String? = nil,
             isReset: Bool? = nil,
-            pinnedLogVersion: UInt64? = nil
+            pinnedLogVersion: UInt64? = nil,
+            acceptedKeyGeneration: UInt64? = nil,
+            previousKeysB64: [String]? = nil,
+            supersededKeysB64: [String]? = nil,
+            resetSignedAtMs: Int64? = nil
         ) {
             self.pinnedSignaturePubkeyB64 = pinnedSignaturePubkeyB64
             self.rotationMarker = rotationMarker
             self.logStatus = logStatus
             self.isReset = isReset
             self.pinnedLogVersion = pinnedLogVersion
+            self.acceptedKeyGeneration = acceptedKeyGeneration
+            self.previousKeysB64 = previousKeysB64
+            self.supersededKeysB64 = supersededKeysB64
+            self.resetSignedAtMs = resetSignedAtMs
         }
+
+        /// ADR-0065 R.2 rule 2 - the key generation this device last
+        /// ACCEPTED for the account: the bundle's generation at the first
+        /// pin, then the generation of each accepted reset. A reset is
+        /// accepted only strictly above it, so an old attestation cannot roll
+        /// a contact back. `nil` for a pin written before this was recorded
+        /// (its baseline is taken at the next unchanged fetch).
+        public var acceptedKeyGeneration: UInt64?
+        /// R.2 "the re-pin" - every key this account held before a reset
+        /// this device accepted, oldest first. Display aliases for stored
+        /// history only.
+        public var previousKeysB64: [String]?
+        /// The keys an ACCEPTED RESET retired (never a proven predecessor,
+        /// which is the same person's key): a row or a claim from one of
+        /// these is dropped, and no successor is ever built with one.
+        public var supersededKeysB64: [String]?
+        /// The `signed_at` of the latest accepted reset, UNIX milliseconds:
+        /// what "sent after the reset" is measured against (R.7 case 1).
+        public var resetSignedAtMs: Int64?
     }
 
     /// Outcome of a ``setPin(accountIdB64:pinnedSignaturePubkeyB64:rotationMarker:)``
@@ -239,7 +266,8 @@ public final class PeerPinStore {
     public func setPin(
         accountIdB64: String,
         pinnedSignaturePubkeyB64: String,
-        rotationMarker: Int64
+        rotationMarker: Int64,
+        keyGeneration: UInt64? = nil
     ) -> SetPinResult {
         var map = loadMap()
         let existing = map[accountIdB64]
@@ -260,7 +288,13 @@ public final class PeerPinStore {
             rotationMarker: rotationMarker,
             logStatus: existing?.logStatus,
             isReset: existing?.isReset,
-            pinnedLogVersion: existing?.pinnedLogVersion
+            pinnedLogVersion: existing?.pinnedLogVersion,
+            // ADR-0065 R.2 - the accepted-generation baseline: the caller's
+            // (a first pin records the bundle's generation) or the one held.
+            acceptedKeyGeneration: keyGeneration ?? existing?.acceptedKeyGeneration,
+            previousKeysB64: existing?.previousKeysB64,
+            supersededKeysB64: existing?.supersededKeysB64,
+            resetSignedAtMs: existing?.resetSignedAtMs
         )
         saveMap(map)
         return .set
@@ -282,13 +316,9 @@ public final class PeerPinStore {
         var map = loadMap()
         guard let existing = map[accountIdB64] else { return false }
         if existing.logStatus == logStatus { return true } // idempotent
-        map[accountIdB64] = AccountPubkeyPin(
-            pinnedSignaturePubkeyB64: existing.pinnedSignaturePubkeyB64,
-            rotationMarker: existing.rotationMarker,
-            logStatus: logStatus,
-            isReset: existing.isReset,
-            pinnedLogVersion: existing.pinnedLogVersion
-        )
+        var updated = existing
+        updated.logStatus = logStatus
+        map[accountIdB64] = updated
         saveMap(map)
         return true
     }
@@ -318,13 +348,9 @@ public final class PeerPinStore {
         var map = loadMap()
         guard let existing = map[accountIdB64] else { return false }
         if existing.isReset == isReset { return true } // idempotent (incl. nil==nil)
-        map[accountIdB64] = AccountPubkeyPin(
-            pinnedSignaturePubkeyB64: existing.pinnedSignaturePubkeyB64,
-            rotationMarker: existing.rotationMarker,
-            logStatus: existing.logStatus,
-            isReset: isReset,
-            pinnedLogVersion: existing.pinnedLogVersion
-        )
+        var updated = existing
+        updated.isReset = isReset
+        map[accountIdB64] = updated
         saveMap(map)
         return true
     }
@@ -358,13 +384,9 @@ public final class PeerPinStore {
         var map = loadMap()
         guard let existing = map[accountIdB64] else { return false }
         if existing.pinnedLogVersion == version { return true } // idempotent (incl. nil==nil)
-        map[accountIdB64] = AccountPubkeyPin(
-            pinnedSignaturePubkeyB64: existing.pinnedSignaturePubkeyB64,
-            rotationMarker: existing.rotationMarker,
-            logStatus: existing.logStatus,
-            isReset: existing.isReset,
-            pinnedLogVersion: version
-        )
+        var updated = existing
+        updated.pinnedLogVersion = version
+        map[accountIdB64] = updated
         saveMap(map)
         return true
     }
@@ -380,6 +402,108 @@ public final class PeerPinStore {
 
     /// Remove the pin for `accountIdB64`. No-op when absent. Exposed
     /// for the "forget contact" / re-verify-from-scratch flows.
+    // MARK: - ADR-0065 R.2 - an accepted reset
+
+    /// One accepted reset, as ``acceptReset(_:retiredPredecessorsB64:)`` reads it.
+    public struct AcceptedReset: Equatable {
+        public let accountIdB64: String
+        /// The key this device held for the account (the pin, or a verified
+        /// binding's key for a member it never pinned).
+        public let heldKeyB64: String
+        public let newKeyB64: String
+        public let keyGeneration: UInt64
+        public let signedAtMs: Int64
+        public let nowMs: Int64
+
+        public init(
+            accountIdB64: String, heldKeyB64: String, newKeyB64: String,
+            keyGeneration: UInt64, signedAtMs: Int64, nowMs: Int64
+        ) {
+            self.accountIdB64 = accountIdB64
+            self.heldKeyB64 = heldKeyB64
+            self.newKeyB64 = newKeyB64
+            self.keyGeneration = keyGeneration
+            self.signedAtMs = signedAtMs
+            self.nowMs = nowMs
+        }
+    }
+
+    public enum AcceptResetResult: Equatable {
+        /// The re-pin was written.
+        case accepted
+        /// The pin already names the new key at this generation or above.
+        case already
+        /// The generation is not above the accepted one: nothing written.
+        case stale
+        /// No signed-in account to write under.
+        case noAccount
+    }
+
+    /// The re-pin of an accepted reset (R.2 "The re-pin"): `pin = new key`,
+    /// the marker never backwards, the accepted generation, and the held key
+    /// (with every proven predecessor of it, which a reset supersedes too)
+    /// appended to the previous and superseded keys. The log verdict and the
+    /// chain floor described the old key and are cleared. Mirror of the web
+    /// `acceptReset`, minus the contact row, which ``ContactsRepository``
+    /// re-keys on the accepted-reset event.
+    @discardableResult
+    public func acceptReset(_ reset: AcceptedReset, retiredPredecessorsB64: [String] = []) -> AcceptResetResult {
+        guard storageKey != nil else { return .noAccount }
+        var map = loadMap()
+        let existing = map[reset.accountIdB64]
+        let acceptedGeneration = existing?.acceptedKeyGeneration ?? 0
+        if let existing, existing.pinnedSignaturePubkeyB64 == reset.newKeyB64 {
+            if acceptedGeneration >= reset.keyGeneration { return .already }
+        } else if reset.keyGeneration <= acceptedGeneration {
+            return .stale
+        }
+        var retired: [String] = []
+        func retire(_ key: String) {
+            if key != reset.newKeyB64, !retired.contains(key) { retired.append(key) }
+        }
+        retiredPredecessorsB64.forEach(retire)
+        if let existing { retire(existing.pinnedSignaturePubkeyB64) }
+        retire(reset.heldKeyB64)
+        var previous = existing?.previousKeysB64 ?? []
+        var superseded = existing?.supersededKeysB64 ?? []
+        for key in retired {
+            if !previous.contains(key) { previous.append(key) }
+            if !superseded.contains(key) { superseded.append(key) }
+        }
+        map[reset.accountIdB64] = AccountPubkeyPin(
+            pinnedSignaturePubkeyB64: reset.newKeyB64,
+            rotationMarker: resetRepinMarker(heldMarker: existing?.rotationMarker ?? 0, nowMs: reset.nowMs),
+            logStatus: nil,
+            isReset: nil,
+            pinnedLogVersion: nil,
+            acceptedKeyGeneration: reset.keyGeneration,
+            previousKeysB64: previous,
+            supersededKeysB64: superseded,
+            resetSignedAtMs: reset.signedAtMs)
+        saveMap(map)
+        return .accepted
+    }
+
+    /// Every pin of the signed-in account, by account id.
+    public func allPins() -> [String: AccountPubkeyPin] {
+        loadMap()
+    }
+
+    /// The generation last accepted for the account; 0 when none.
+    public func acceptedGeneration(accountIdB64: String) -> UInt64 {
+        loadMap()[accountIdB64]?.acceptedKeyGeneration ?? 0
+    }
+
+    /// `superseded key -> account id` over every pin: the keys accepted
+    /// resets retired. Mirror of the web `loadSupersededKeys`.
+    public func loadSupersededKeys() -> [String: String] {
+        var out: [String: String] = [:]
+        for (accountIdB64, pin) in loadMap() {
+            for key in pin.supersededKeysB64 ?? [] { out[key] = accountIdB64 }
+        }
+        return out
+    }
+
     public func removePin(accountIdB64: String) {
         var map = loadMap()
         guard map[accountIdB64] != nil else { return }

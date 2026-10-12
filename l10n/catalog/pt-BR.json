@@ -2226,46 +2226,6 @@
       "text": "Compartilhar",
       "status": "machine"
     },
-    "chat.keys_reset.bubble_warning": {
-      "text": "Não verificado desde que {name} redefiniu as chaves da conta.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_being_removed": {
-      "text": "Chaves da conta redefinidas. Sendo removido.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_flag": {
-      "text": "Chaves da conta redefinidas.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_closed": {
-      "text": "{name} redefiniu as chaves da conta. Esta conversa está fechada.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_composer": {
-      "text": "Você não pode mais enviar mensagens nesta conversa.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_row": {
-      "text": "Conversa fechada. {name} redefiniu as chaves da conta.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice": {
-      "text": "{name}, dono deste grupo, redefiniu as chaves da conta. Os dispositivos antigos dessa pessoa não podem ser removidos do grupo, e o grupo não pode ter um novo dono. Para continuar conversando com segurança, recrie o grupo.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice_member": {
-      "text": "Um administrador pode recriá-lo.",
-      "status": "machine"
-    },
-    "chat.keys_reset.start_new_chat": {
-      "text": "Iniciar uma nova conversa",
-      "status": "machine"
-    },
-    "chat.keys_reset.system_removed": {
-      "text": "{name} redefiniu as chaves da conta. Os dispositivos antigos dessa pessoa foram removidos deste grupo.",
-      "status": "machine"
-    },
     "chat.leave.action": {
       "text": "Sair do grupo",
       "status": "machine"
@@ -3854,14 +3814,6 @@
       "text": "Não foi possível iniciar a conversa. Tente novamente.",
       "status": "machine"
     },
-    "contacts.identity_changed.reset": {
-      "text": "{name} redefiniu a identidade segura (por exemplo, perdeu o dispositivo). O registro de transparência confirma que a redefinição foi feita pelo dono da conta. Se você confia que é mesmo essa pessoa, verifique de novo o número de segurança por outro canal antes de continuar.",
-      "status": "machine"
-    },
-    "contacts.identity_changed.reset_unnamed": {
-      "text": "Este contato redefiniu a identidade segura (por exemplo, perdeu o dispositivo). O registro de transparência confirma que a redefinição foi feita pelo dono da conta. Se você confia que é mesmo essa pessoa, verifique de novo o número de segurança por outro canal antes de continuar.",
-      "status": "machine"
-    },
     "contacts.identity_changed.unconfirmed": {
       "text": "A identidade segura de {name} mudou e não pôde ser confirmada no registro de transparência. Verifique por outro canal antes de confiar.",
       "status": "machine"
@@ -3884,38 +3836,6 @@
     },
     "contacts.invite_links.title": {
       "text": "Links de convite",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner": {
-      "text": "{name} redefiniu as chaves da conta. Verifique o novo número de segurança antes de voltar a escrever para essa pessoa.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_action": {
-      "text": "Verificar",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_unnamed": {
-      "text": "Este contato redefiniu as chaves da conta. Verifique o novo número de segurança antes de voltar a escrever para ele.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.open_contact": {
-      "text": "Abrir contato",
-      "status": "machine"
-    },
-    "contacts.keys_reset.picker_sub": {
-      "text": "Chaves da conta redefinidas. Verifique primeiro o novo número de segurança.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.row_sub": {
-      "text": "Chaves da conta redefinidas. Verifique o novo número de segurança.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first": {
-      "text": "Verifique primeiro o novo número de segurança de {name}.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first_short": {
-      "text": "Verifique primeiro o novo número de segurança.",
       "status": "machine"
     },
     "contacts.list.add": {
@@ -4056,54 +3976,6 @@
     },
     "contacts.safety.number": {
       "text": "Número de segurança",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body": {
-      "text": "As chaves da conta de {name} foram redefinidas, então o número de segurança que você talvez tenha comparado antes não vale mais. Compare este novo com {name} pessoalmente ou em uma chamada.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body_unnamed": {
-      "text": "As chaves da conta deste contato foram redefinidas, então o número de segurança que você talvez tenha comparado antes não vale mais. Compare este novo com seu contato pessoalmente ou em uma chamada.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox": {
-      "text": "Comparei o novo número de segurança com {name} e ele coincidiu.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox_unnamed": {
-      "text": "Comparei o novo número de segurança com este contato e ele coincidiu.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirm": {
-      "text": "Verifiquei o novo número de segurança",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirming": {
-      "text": "Verificando...",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done": {
-      "text": "{name} está verificado novamente.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done_unnamed": {
-      "text": "Este contato está verificado novamente.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.save_failed": {
-      "text": "Não foi possível salvar. Tente novamente.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.title": {
-      "text": "Verifique o novo número de segurança",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning": {
-      "text": "Se você confirmar sem comparar, alguém que tenha tomado a conta de {name} pareceria {name} para você.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning_unnamed": {
-      "text": "Se você confirmar sem comparar, alguém que tenha tomado esta conta pareceria seu contato para você.",
       "status": "machine"
     },
     "contacts.safety.row_sub": {
@@ -5778,26 +5650,6 @@
       "text": "{name}, {count, plural, one {# conversa não lida} other {# conversas não lidas}}",
       "status": "machine"
     },
-    "group.closed.composer": {
-      "text": "Este grupo foi fechado.",
-      "status": "machine"
-    },
-    "group.closed.open_new": {
-      "text": "Abrir o novo grupo",
-      "status": "machine"
-    },
-    "group.closed.panel": {
-      "text": "Este grupo foi fechado. Continue em {name}.",
-      "status": "machine"
-    },
-    "group.closed.row": {
-      "text": "Grupo fechado",
-      "status": "machine"
-    },
-    "group.closed.system": {
-      "text": "{name} fechou este grupo depois que as chaves da conta do dono foram redefinidas.",
-      "status": "machine"
-    },
     "group.join.needs_account": {
       "text": "Você precisa de uma conta para pedir para entrar. Crie uma ou entre.",
       "status": "machine"
@@ -5844,38 +5696,6 @@
     },
     "group.join.wait_secondary": {
       "text": "Nenhuma das etapas tem prazo. Se nada acontecer, você pode enviar o pedido de novo.",
-      "status": "machine"
-    },
-    "group.recreate.action": {
-      "text": "Recriar grupo",
-      "status": "machine"
-    },
-    "group.recreate.done": {
-      "text": "Concluído",
-      "status": "machine"
-    },
-    "group.recreate.excluded_reset": {
-      "text": "Chaves da conta redefinidas. Verifique o novo número de segurança para incluir essa pessoa.",
-      "status": "machine"
-    },
-    "group.recreate.members_heading": {
-      "text": "Membros ({count})",
-      "status": "machine"
-    },
-    "group.recreate.note": {
-      "text": "O grupo antigo continua como está para todos até você fechá-lo.",
-      "status": "machine"
-    },
-    "group.recreate.submit": {
-      "text": "Criar e fechar o grupo antigo",
-      "status": "machine"
-    },
-    "group.recreate.title": {
-      "text": "Recriar grupo",
-      "status": "machine"
-    },
-    "group.recreate.working": {
-      "text": "Criando...",
       "status": "machine"
     },
     "invite.contact.accept_failed": {
@@ -6807,7 +6627,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "Seus contatos vão ver que seu número de segurança mudou e precisarão verificar você novamente antes de trocar mensagens com segurança.",
+      "text": "Seus contatos mantêm as conversas com você. Seu número de segurança muda.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -6935,7 +6755,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_contacts": {
-      "text": "Seus contatos vão ver que seu número de segurança mudou e precisam verificar você novamente antes de trocar mensagens com segurança.",
+      "text": "Seus contatos mantêm as conversas com você. Seu número de segurança muda.",
       "status": "machine"
     },
     "restore_identity.reset.effect_devices": {

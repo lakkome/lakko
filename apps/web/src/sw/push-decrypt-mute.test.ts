@@ -27,7 +27,7 @@ import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { encodeSyncState } from "../devices/sync/sync-state-store";
 import type { FlagsState } from "../devices/sync/state";
 // @ts-expect-error — plain JS ESM in public/, no .d.ts; typed via JSDoc.
-import { mutedFromSyncStateRow } from "../../public/sw-push-decrypt.js";
+import { conversationHexFromSyncStateRow, mutedFromSyncStateRow } from "../../public/sw-push-decrypt.js";
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -129,5 +129,39 @@ describe("what the worker refuses to read as muted", () => {
     );
     expect(mutedFromSyncStateRow(json, "zz", wasm)).toBe(false);
     expect(mutedFromSyncStateRow(json, GROUP_HEX, null)).toBe(false);
+  });
+});
+
+describe("a successor group is its conversation (ADR-0065 R.5)", () => {
+  const SUCCESSOR_HEX = "ef".repeat(32);
+
+  /** The app's row: the conversation `GROUP_HEX` muted (or not), and
+   *  `SUCCESSOR_HEX` registered as continuing it. */
+  function row(muted: boolean): unknown {
+    const s = new wasm.SyncedState();
+    s.applyFlags(7n, hexBytes(GROUP_HEX), false, muted, false, false);
+    expect(s.setLineage(9n, hexBytes(SUCCESSOR_HEX), hexBytes(GROUP_HEX))).toBe(true);
+    return JSON.parse(encodeSyncState({ synced: s.toBytes(), pending: [] }));
+  }
+
+  it("a wake for the successor reads the mute its conversation carries", () => {
+    expect(mutedFromSyncStateRow(row(true), SUCCESSOR_HEX, wasm)).toBe(true);
+    expect(mutedFromSyncStateRow(row(false), SUCCESSOR_HEX, wasm)).toBe(false);
+    // The first group still answers for itself.
+    expect(mutedFromSyncStateRow(row(true), GROUP_HEX, wasm)).toBe(true);
+  });
+
+  it("the successor's notification is grouped under the conversation id", () => {
+    expect(conversationHexFromSyncStateRow(row(false), SUCCESSOR_HEX, wasm)).toBe(GROUP_HEX);
+    expect(conversationHexFromSyncStateRow(row(false), GROUP_HEX, wasm)).toBe(GROUP_HEX);
+    // A group no register names is its own conversation.
+    expect(conversationHexFromSyncStateRow(row(false), OTHER_HEX, wasm)).toBe(OTHER_HEX);
+  });
+
+  it("an unreadable row names no conversation", () => {
+    for (const bad of [null, { v: 1 }, { v: 2, s: "" }, { v: 2, s: btoa("not a fold") }]) {
+      expect(conversationHexFromSyncStateRow(bad, SUCCESSOR_HEX, wasm)).toBeNull();
+    }
+    expect(conversationHexFromSyncStateRow(row(false), "zz", wasm)).toBeNull();
   });
 });

@@ -166,11 +166,9 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   // provider has run. `ownProfileTick` re-reads it after a save.
   const [ownProfileTick, setOwnProfileTick] = createSignal(0);
   const [renames, setRenames] = createSignal<Map<string, string>>(loadRenames());
-  // ADR-0065 phase 2 (UX 16.1 / 16.8): a flagged contact's PENDING key and
-  // every retired key name the same person as the contact row, through the
-  // account id. What lets a bubble from the new keys say "Anna" (with the
-  // warning under it) instead of a fingerprint, and the closed one-to-one
-  // keep its name after the row was re-keyed.
+  // ADR-0065 R.2: every retired key names the same person as the contact
+  // row (display aliases for stored history only), so old bubbles keep the
+  // person's name after the row was re-keyed.
   const [aliases, setAliases] = createSignal<Map<string, string>>(loadKeyAliases());
   let wasm: Wasm | null = null;
   void loadWasm().then((w) => {
@@ -582,9 +580,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
           verification: "verified",
         });
       }
-      // ADR-0065 phase 2: an alias (a flagged contact's pending key, a retired
-      // key) resolves through the contact's row key — its rename, and its
-      // profile when the alias key sent none.
+      // ADR-0065 R.2: an alias (a retired key) resolves through the contact's
+      // row key: its rename, and its profile when the alias key sent none.
       const canonical = aliases().get(keyB64) ?? keyB64;
       const profile = store.get(keyB64) ?? (canonical === keyB64 ? undefined : store.get(canonical));
       const profileKeyB64 = store.get(keyB64) !== undefined ? keyB64 : canonical;

@@ -383,6 +383,31 @@ pub struct ConversationOrderRegister {
     pub group_ids: Vec<Vec<u8>>,
 }
 
+/// One conversation-lineage register (ADR-0065 R.5): the group
+/// `successor_group_id` continues the conversation `root_conversation_id`
+/// (the group id of the first group of the lineage).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LineageRegister {
+    /// HLC stamp the register was written at.
+    pub hlc: u64,
+    /// MLS group id of the group that continues the conversation.
+    pub successor_group_id: Vec<u8>,
+    /// The conversation id every person-facing store is keyed on.
+    pub root_conversation_id: Vec<u8>,
+}
+
+fn lineage_register(s: Stamped<core::LineageEntry>) -> LineageRegister {
+    LineageRegister {
+        hlc: s.hlc,
+        successor_group_id: s.value.successor_group_id,
+        root_conversation_id: s.value.root_conversation_id,
+    }
+}
+
+fn lineage_refusal(e: core::LineageEnvelopeError) -> FfiError {
+    FfiError::SyncedState(format!("{}: {e}", e.code()))
+}
+
 fn flags_register(s: Stamped<core::FlagsEntry>) -> FlagsRegister {
     FlagsRegister {
         hlc: s.hlc,
@@ -597,6 +622,120 @@ impl SyncedState {
         })
     }
 
+    /// Record that `successor_group_id` continues the conversation
+    /// `root_conversation_id` (ADR-0065 R.5), stamped `hlc`. **Write-once**:
+    /// when a register is already held for this successor nothing is
+    /// written and `false` is returned, whatever root it names (read it with
+    /// [`Self::lineage_root`]). On `true`, send
+    /// [`Self::lineage_envelope_for`] to the account's other devices in a
+    /// DeviceGroup service envelope.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] when either id is empty or longer than
+    /// [`lineage_group_id_max_len`], or the two are equal.
+    pub fn set_lineage(
+        &self,
+        hlc: u64,
+        successor_group_id: Vec<u8>,
+        root_conversation_id: Vec<u8>,
+    ) -> Result<bool, FfiError> {
+        self.with(|s| s.set_lineage(hlc, &successor_group_id, &root_conversation_id))?
+            .map_err(|e| FfiError::SyncedState(e.to_string()))
+    }
+
+    /// The lineage register held for a successor group, or `None` (the
+    /// group is a root, or this device knows no lineage for it).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn lineage_root(
+        &self,
+        successor_group_id: Vec<u8>,
+    ) -> Result<Option<LineageRegister>, FfiError> {
+        self.with(|s| s.lineage_root(&successor_group_id).map(lineage_register))
+    }
+
+    /// The conversation id a group belongs to: the root its lineage register
+    /// names, or `group_id` itself when it holds none.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn conversation_id_of(&self, group_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+        self.with(|s| s.conversation_id_of(&group_id))
+    }
+
+    /// Every successor recorded for one conversation, ordered by `(stamp,
+    /// successor id)`. The root itself is not listed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn lineage_successors(
+        &self,
+        root_conversation_id: Vec<u8>,
+    ) -> Result<Vec<LineageRegister>, FfiError> {
+        self.with(|s| {
+            s.lineage_successors(&root_conversation_id)
+                .into_iter()
+                .map(lineage_register)
+                .collect()
+        })
+    }
+
+    /// Every lineage register, ascending by successor id.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn all_lineage(&self) -> Result<Vec<LineageRegister>, FfiError> {
+        self.with(|s| s.all_lineage().into_iter().map(lineage_register).collect())
+    }
+
+    /// The envelope carrying the one register held for `successor_group_id`
+    /// with its original stamp, or `None` when none is held: the live send
+    /// after [`Self::set_lineage`] returned `true`
+    /// (`DeviceGroup.createServiceEnvelopeMessage`).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn lineage_envelope_for(
+        &self,
+        successor_group_id: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        self.with(|s| s.lineage_envelope_for(&successor_group_id))
+    }
+
+    /// Every held lineage register with its original stamp, as service
+    /// envelopes: the catch-up re-send beside [`Self::snapshot_parts`]
+    /// (lineage registers are NOT in the snapshot parts). Empty when none
+    /// is held.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn lineage_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.lineage_envelopes())
+    }
+
+    /// Decode a lineage envelope received in a DeviceGroup service envelope
+    /// (route on [`is_lineage_envelope`]) and fold every register in with
+    /// its original stamp. Fail closed: a malformed envelope changes
+    /// nothing. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"` with code
+    /// `wrongDomain` / `unknownVersion` / `truncated` / `trailing` / `count`
+    /// / `notCanonical` / `bounds`.
+    pub fn apply_lineage_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_lineage_envelope(&envelope))?
+            .map_err(lineage_refusal)
+    }
+
     /// The greatest stamp held, or 0. Seed the HLC above it after a restore.
     ///
     /// # Errors
@@ -633,6 +772,31 @@ impl SyncedState {
 #[uniffi::export]
 pub fn should_send_snapshot(own_leaf: u32, prior_member_leaves: Vec<u32>) -> bool {
     core::should_send_snapshot(own_leaf, &prior_member_leaves)
+}
+
+/// `true` when `bytes` open with the lineage envelope domain
+/// (`lakko/sync/lineage/v1`): the routing question for a DeviceGroup service
+/// envelope, asked before the `lakko-contacts` dispatcher. Says nothing
+/// about validity; [`SyncedState::apply_lineage_envelope`] decides that.
+#[uniffi::export]
+#[must_use]
+pub fn is_lineage_envelope(bytes: Vec<u8>) -> bool {
+    core::is_lineage_envelope(&bytes)
+}
+
+/// Longest lineage envelope [`SyncedState::lineage_envelopes`] produces;
+/// below `deviceGroupServiceEnvelopeMaxLen()`.
+#[uniffi::export]
+#[must_use]
+pub fn lineage_envelope_max_len() -> u32 {
+    u32::try_from(core::LINEAGE_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
+}
+
+/// Longest group id a lineage register accepts (each of the two): 64.
+#[uniffi::export]
+#[must_use]
+pub fn lineage_group_id_max_len() -> u32 {
+    u32::try_from(core::LINEAGE_GROUP_ID_MAX_LEN).unwrap_or(u32::MAX)
 }
 
 /// Whether `name` is an acceptable folder name as it stands: 1..=24
@@ -676,6 +840,81 @@ mod tests {
             }],
             ..FolderChangeSet::default()
         }
+    }
+
+    #[test]
+    fn lineage_is_write_once_travels_by_envelope_and_persists() {
+        let a = SyncedState::new();
+        assert!(a.set_lineage(5, vec![1; 32], vec![9; 32]).unwrap());
+        assert!(!a.set_lineage(8, vec![1; 32], vec![7; 32]).unwrap());
+        assert!(a.set_lineage(6, vec![2; 32], vec![9; 32]).unwrap());
+        let held = a.lineage_root(vec![1; 32]).unwrap().unwrap();
+        assert_eq!(
+            (held.hlc, held.root_conversation_id.clone()),
+            (5, vec![9; 32])
+        );
+        assert_eq!(a.conversation_id_of(vec![2; 32]).unwrap(), vec![9; 32]);
+        assert_eq!(a.conversation_id_of(vec![9; 32]).unwrap(), vec![9; 32]);
+        assert!(a.lineage_root(vec![9; 32]).unwrap().is_none());
+        assert_eq!(a.lineage_successors(vec![9; 32]).unwrap().len(), 2);
+        assert_eq!(a.all_lineage().unwrap().len(), 2);
+
+        // Live send of one register, then the catch-up of all of them.
+        let b = SyncedState::new();
+        let live = a.lineage_envelope_for(vec![1; 32]).unwrap().unwrap();
+        assert!(is_lineage_envelope(live.clone()));
+        assert!(b.apply_lineage_envelope(live.clone()).unwrap());
+        assert!(!b.apply_lineage_envelope(live).unwrap());
+        for envelope in a.lineage_envelopes().unwrap() {
+            b.apply_lineage_envelope(envelope).unwrap();
+        }
+        assert_eq!(b.all_lineage().unwrap(), a.all_lineage().unwrap());
+        assert!(a.lineage_envelope_for(vec![9; 32]).unwrap().is_none());
+
+        // The snapshot parts do not carry it; persistence and merge do.
+        assert_eq!(a.snapshot_parts().unwrap()[0].entry_count(), 0);
+        let restored = SyncedState::from_bytes(a.to_bytes().unwrap()).unwrap();
+        assert_eq!(restored.all_lineage().unwrap(), a.all_lineage().unwrap());
+        let merged = SyncedState::new();
+        assert!(merged.merge_from(restored).unwrap());
+        assert_eq!(merged.to_bytes().unwrap(), a.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn lineage_refusals_carry_their_code_and_change_nothing() {
+        let s = SyncedState::new();
+        for (succ, root) in [
+            (vec![], vec![1]),
+            (vec![1; 65], vec![1]),
+            (vec![1], vec![1]),
+        ] {
+            assert!(matches!(
+                s.set_lineage(1, succ, root),
+                Err(FfiError::SyncedState(_))
+            ));
+        }
+        s.set_lineage(1, vec![1], vec![2]).unwrap();
+        let mut bad = s.lineage_envelope_for(vec![1]).unwrap().unwrap();
+        bad.push(0);
+        match SyncedState::new().apply_lineage_envelope(bad) {
+            Err(FfiError::SyncedState(m)) => assert!(m.starts_with("trailing: "), "{m}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        match s.apply_lineage_envelope(b"lakko/visibility/v1\0".to_vec()) {
+            Err(FfiError::SyncedState(m)) => assert!(m.starts_with("wrongDomain: "), "{m}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(!is_lineage_envelope(b"lakko/visibility/v1\0".to_vec()));
+        assert_eq!(s.all_lineage().unwrap().len(), 1);
+    }
+
+    /// The largest lineage envelope fits the DeviceGroup carrier it rides
+    /// (`lakko-sync` does not depend on `lakko-mls`, so the pin lives here).
+    #[test]
+    fn the_largest_lineage_envelope_fits_a_service_envelope() {
+        const { assert!(core::LINEAGE_ENVELOPE_MAX_LEN <= lakko_mls::MAX_SERVICE_ENVELOPE_LEN) };
+        assert!(lineage_envelope_max_len() <= crate::device_group_service_envelope_max_len());
+        assert_eq!(lineage_group_id_max_len(), 64);
     }
 
     #[test]

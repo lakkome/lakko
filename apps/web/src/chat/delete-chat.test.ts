@@ -132,3 +132,57 @@ describe("deleteChat", () => {
     expect(calls[calls.length - 1]).toBe(`chats.remove ${GROUP_B64}`);
   });
 });
+
+describe("deleting a whole conversation (ADR-0065 R.5)", () => {
+  const seg = (id: string) => ({ groupIdB64: id, groupIdHex: `hex-${id}` });
+
+  it("orders every held segment before the head, each once", async () => {
+    const { conversationDeleteOrder } = await import("./delete-chat");
+    expect(
+      conversationDeleteOrder([seg("old"), seg("head"), seg("beyond"), seg("old")], "head").map(
+        (s) => s.groupIdB64,
+      ),
+    ).toEqual(["old", "beyond", "head"]);
+    // A head the device does not hold: whatever is held still goes.
+    expect(conversationDeleteOrder([seg("old")], "head").map((s) => s.groupIdB64)).toEqual(["old"]);
+  });
+
+  it("removes every segment's log and registry row, the head's row last", async () => {
+    const { deleteConversation } = await import("./delete-chat");
+    calls.length = 0;
+    state.logFails = false;
+    const removed: string[] = [];
+    const after: string[] = [];
+    await deleteConversation({
+      accountIdB64: "acct",
+      segments: [seg("old"), seg("head")],
+      headGroupIdB64: "head",
+      chats: { remove: (g) => removed.push(g) },
+      afterSegment: (s) => {
+        after.push(s.groupIdB64);
+      },
+    });
+    expect(removed).toEqual(["old", "head"]);
+    expect(after).toEqual(["old", "head"]);
+    expect(calls.filter((c) => c.startsWith("deleteGroupFromMessageLog"))).toEqual([
+      "deleteGroupFromMessageLog acct hex-old",
+      "deleteGroupFromMessageLog acct hex-head",
+    ]);
+  });
+
+  it("a failure leaves the head (the conversation's row) in place", async () => {
+    const { deleteConversation } = await import("./delete-chat");
+    state.logFails = true;
+    const removed: string[] = [];
+    await expect(
+      deleteConversation({
+        accountIdB64: "acct",
+        segments: [seg("old"), seg("head")],
+        headGroupIdB64: "head",
+        chats: { remove: (g) => removed.push(g) },
+      }),
+    ).rejects.toThrow();
+    expect(removed).toEqual([]);
+    state.logFails = false;
+  });
+});

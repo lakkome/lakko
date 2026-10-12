@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.chat
+
+/*
+ * ADR-0065 R.7 case 1 - the RE-SEND MARKER.
+ *
+ * The founder of a successor one-to-one sends again, into it, its own
+ * account's messages that reached only removed devices ([messagesToResend]).
+ * Each re-sent message carries, inside the sealed envelope, where it was
+ * originally sent: the ORIGINAL group id and the original DS message id there
+ * (`composeChatEnvelope` with `resendOriginGroupB64` / `resendOriginMessageId`).
+ *
+ * The person who reset holds no history, so for them the re-sent message is
+ * simply a message. A device that DOES hold the original (another device of
+ * the founder's own account) would otherwise show it twice. This rule makes
+ * it show once: the successor row is not drawn, not stored, not counted and
+ * not notified, and the history row stays where it is and is not replaced.
+ *
+ * The marker is a claim by the sender, so it is believed only against what
+ * this device already holds: the named row must exist, in an OLDER segment of
+ * the SAME conversation, and be by the SAME author account as the sender the
+ * MLS layer authenticated. A marker that matches nothing is ignored and the
+ * message renders as any other. Nothing is ever drawn for the marker itself.
+ * Mirror of `apps/web/src/chat/resend-marker.ts`.
+ */
+
+/** Where a re-sent message was originally sent. */
+public data class ResendOrigin(
+    /** The original conversation group's id, standard base64. */
+    val groupIdB64: String,
+    /** The original's DS `messageId` in that group. */
+    val messageId: Long,
+)
+
+public enum class ResendVerdict {
+    /** An ordinary message: stored, shown, counted. */
+    DRAW,
+
+    /** This device already holds the original: the successor row is dropped
+     *  before storage. */
+    SKIP,
+}
+
+/**
+ * | marker | origin group is an older segment of the receiving group's conversation | this device holds the named row | its author is the sender's account | verdict |
+ * |--------|-------------------------------------------------------------------------|---------------------------------|------------------------------------|---------|
+ * | none   | -                                                                       | -                               | -                                  | `DRAW`  |
+ * | set    | no (another conversation, an unknown group, the same or a later group)  | -                               | -                                  | `DRAW`  |
+ * | set    | yes                                                                     | no                              | -                                  | `DRAW`  |
+ * | set    | yes                                                                     | yes                             | no                                 | `DRAW`  |
+ * | set    | yes                                                                     | yes                             | yes                                | `SKIP`  |
+ */
+public fun resendVerdict(
+    marker: ResendOrigin?,
+    /** The conversation the message was RECEIVED in. */
+    receivedConversation: String,
+    /** The conversation the marker's group belongs to, or `null` when this
+     *  device holds no such group. */
+    originConversation: String?,
+    /** Whether the marker's group comes BEFORE the receiving group in that
+     *  conversation's segments. */
+    originIsOlderSegment: Boolean,
+    /** The author account of the row the marker names, or `null` when this
+     *  device does not hold that row. */
+    heldAuthor: String?,
+    /** The account of the MLS-authenticated sender of the received message. */
+    senderAuthor: String?,
+): ResendVerdict {
+    if (marker == null) return ResendVerdict.DRAW
+    if (originConversation == null || originConversation != receivedConversation) return ResendVerdict.DRAW
+    if (!originIsOlderSegment) return ResendVerdict.DRAW
+    if (heldAuthor == null || senderAuthor == null) return ResendVerdict.DRAW
+    return if (heldAuthor == senderAuthor) ResendVerdict.SKIP else ResendVerdict.DRAW
+}
+
+/** How a stored row was produced, as the marker rule reads it. */
+public enum class HeldRowDirection { OUTGOING, INCOMING, SYSTEM }
+
+/**
+ * The author account token of a stored row: this account's own key for a row
+ * this device sent, the stored author key (through [canonical]) for a
+ * received one, `null` for a system row, a row with no author, or no row.
+ */
+public fun heldRowAuthor(
+    direction: HeldRowDirection?,
+    authorKeyB64: String?,
+    ownPersonKeyB64: String?,
+    canonical: (String) -> String,
+): String? = when (direction) {
+    null, HeldRowDirection.SYSTEM -> null
+    HeldRowDirection.OUTGOING -> ownPersonKeyB64?.let(canonical)
+    HeldRowDirection.INCOMING -> authorKeyB64?.takeIf { it.isNotEmpty() }?.let(canonical)
+}
+
+/** The marker a parsed body carries: both fields or nothing. */
+public fun resendOriginFrom(groupIdB64: String?, messageId: Long?): ResendOrigin? =
+    if (groupIdB64.isNullOrEmpty() || messageId == null) null else ResendOrigin(groupIdB64, messageId)

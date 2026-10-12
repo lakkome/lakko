@@ -131,7 +131,7 @@ public fun ForwardPickerScreen(
                 // Live memberships only: a forward is a send, and the core
                 // refuses one into a group this device has left or been
                 // removed from.
-                threads = state.threads.filter { !it.membershipEnded },
+                threads = state.conversations.filter { !it.membershipEnded },
                 flagsMap = flagsMap,
                 readCursorMap = readCursorMap,
                 nowMs = System.currentTimeMillis(),
@@ -208,8 +208,8 @@ public fun ForwardPickerScreen(
                             row = row,
                             modifier = Modifier.clickable(enabled = pickable) {
                                 viewModel.forward(
-                                    targetGroupIdHex = row.id,
-                                    onDone = { onForwarded(row.id) },
+                                    targetGroupIdHex = row.headId,
+                                    onDone = { onForwarded(row.headId) },
                                     onReturnToSource = onReturnToSource,
                                 )
                             },

@@ -302,10 +302,19 @@ internal fun spentLinksAfterMove(spent: List<StoredLink>, live: List<StoredLink>
 /** Chosen, not measured: far past the links one device has live at once. */
 internal const val MAX_SPENT_LINKS: Int = 256
 
+/**
+ * Rule 5 - whether the spend round (revoke this device's own links, re-send
+ * its own unanswered contact requests) is owed: the marker the key move left
+ * names the key the session is bound under now. A marker for another key is
+ * a move that a later one replaced; the later move left its own.
+ */
+public fun spendRoundOwed(owedForKeyHex: String?, boundKeyHex: String): Boolean =
+    owedForKeyHex != null && owedForKeyHex == boundKeyHex
+
 /** How often a refused write to one person re-checks their address through
  *  the gate (chosen, not measured): an owed Welcome is retried at every
  *  poll, and the bundle is not fetched at every poll. */
-public const val ADDRESS_RECHECK_INTERVAL_MS: Long = 10L * 60 * 1000
+public const val ADDRESS_RECHECK_INTERVAL_MS: Long = 5L * 60 * 1000
 
 /** Rule 6 - whether the address last re-checked at [lastMs] (`null`: never)
  *  is re-checked again at [nowMs]. A clock that went backwards re-checks. */

@@ -25,7 +25,7 @@ import {
   type SuggestionsKey,
 } from "./feed-draft";
 import { FEED_ICONS, feedIconName } from "./feed-icons";
-import type { FeedSource } from "./feed-model";
+import { feedSourceKey, type FeedSource } from "./feed-model";
 import { Icon } from "../ui/icons";
 import { t } from "../l10n";
 
@@ -248,8 +248,8 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
                       <span class="lk-feed-conv-name">{s.title}</span>
                       <select
                         aria-label={t("feed.editor.membership.a11y", { name: s.title })}
-                        value={membership(s.idHex)}
-                        onChange={(e) => setMembership(s.idHex, e.currentTarget.value as Membership)}
+                        value={membership(feedSourceKey(s))}
+                        onChange={(e) => setMembership(feedSourceKey(s), e.currentTarget.value as Membership)}
                       >
                         <option value="any">—</option>
                         <option value="only">{t("feed.editor.membership.only")}</option>

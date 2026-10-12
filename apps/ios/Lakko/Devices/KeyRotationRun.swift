@@ -1070,7 +1070,7 @@ extension KeyRotationRunner.Ports {
                 try await KeyRotationBackup.reseal(
                     chatBootstrapped: chat?.state.bootstrapped ?? false,
                     snapshot: { chat?.currentStorageSnapshot() },
-                    knownGroupIdsHex: { chat?.state.threads.map(\.groupIdHex) ?? [] },
+                    knownGroupIdsHex: { chat?.knownGroupIdHexes ?? [] },
                     upload: { snapshot, groupIds in
                         try await auth.resealBackupAfterKeyRotation(
                             wholeStorageSnapshot: snapshot,

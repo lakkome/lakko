@@ -572,13 +572,16 @@ mod tests {
                 }),
             )
             .unwrap();
+        // The conversation-lineage register (ADR-0065 R.5) rides the same
+        // bytes, so a restore learns which conversation a successor group
+        // continues.
+        assert!(state.set_lineage(8, &[1; 32], &[2; 32]).unwrap());
         let mut payload = sample_payload();
         payload.synced_state = state.to_bytes();
         let decoded = BackupPayload::decode(&payload.encode().unwrap()).unwrap();
-        assert_eq!(
-            SyncedState::from_bytes(&decoded.synced_state).unwrap(),
-            state
-        );
+        let restored = SyncedState::from_bytes(&decoded.synced_state).unwrap();
+        assert_eq!(restored, state);
+        assert_eq!(restored.conversation_id_of(&[1; 32]), vec![2; 32]);
 
         payload.synced_state = vec![9, 9, 9];
         assert!(payload.encode().is_err());

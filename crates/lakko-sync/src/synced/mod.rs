@@ -18,20 +18,29 @@
 //!
 //! - [`entry`] — the register types, their bounds and their canonical
 //!   encoding (the tie-break and the persistence element).
+//! - [`lineage`] — the envelope the conversation-lineage register
+//!   (ADR-0065 R.5) travels in between the account's devices.
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 
 pub mod entry;
+pub mod lineage;
 pub mod state;
 
 pub use entry::{
     check_folder_name, folder_id_from_slice, BoundsError, CodecError, ConversationEntry,
     ConversationOrderEntry, ConversationRef, ConversationRefKind, DraftEntry, FlagsEntry,
-    FolderChanges, FolderId, FolderMember, FolderMeta, FolderOrder, FolderPins, MemberState,
-    ReadCursorEntry, RegisterKey, Stamped, StateSnapshot, SyncEntry, CONVERSATION_REF_ID_MAX_LEN,
-    EXCLUDE_ARCHIVED, EXCLUDE_MUTED, EXCLUDE_READ, FOLDER_CHANGES_MAX_REGISTERS, FOLDER_ID_LEN,
-    FOLDER_NAME_MAX_BYTES, FOLDER_NAME_MAX_CHARS, FOLDER_ORDER_MAX, FOLDER_PINS_MAX,
-    INCLUDE_CHANNELS, INCLUDE_GROUPS, INCLUDE_ONE_TO_ONE, KNOWN_BITS, SNAPSHOT_MAX_PARTS,
+    FolderChanges, FolderId, FolderMember, FolderMeta, FolderOrder, FolderPins, LineageEntry,
+    MemberState, ReadCursorEntry, RegisterKey, Stamped, StateSnapshot, SyncEntry,
+    CONVERSATION_REF_ID_MAX_LEN, EXCLUDE_ARCHIVED, EXCLUDE_MUTED, EXCLUDE_READ,
+    FOLDER_CHANGES_MAX_REGISTERS, FOLDER_ID_LEN, FOLDER_NAME_MAX_BYTES, FOLDER_NAME_MAX_CHARS,
+    FOLDER_ORDER_MAX, FOLDER_PINS_MAX, INCLUDE_CHANNELS, INCLUDE_GROUPS, INCLUDE_ONE_TO_ONE,
+    KNOWN_BITS, LINEAGE_GROUP_ID_MAX_LEN, SNAPSHOT_MAX_PARTS,
+};
+pub use lineage::{
+    compose_lineage_envelope, decode_lineage_envelope, is_lineage_envelope, LineageEnvelopeError,
+    LINEAGE_ENVELOPE_DOMAIN_V1, LINEAGE_ENVELOPE_MAX_ENTRIES, LINEAGE_ENVELOPE_MAX_LEN,
+    LINEAGE_ENVELOPE_MIN_LEN, LINEAGE_ENVELOPE_VERSION_V1,
 };
 pub use state::{should_send_snapshot, ApplyOutcome, FolderView, SyncedState};
 

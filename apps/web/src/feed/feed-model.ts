@@ -27,6 +27,13 @@ export interface FeedSource {
   /** The log key: the message-log key of a group, the 32-char hex id of a
    *  channel. */
   readonly idHex: string;
+  /** ADR-0065 R.5 — the CONVERSATION a group source belongs to (the hex of
+   *  its lineage root), when that differs from `idHex`: a conversation that
+   *  continued in a successor group is still ONE source, drawn from its
+   *  current group (`idHex`) and named, muted, hidden and listed in feed
+   *  rules under the conversation id. Absent = `idHex` (a conversation that
+   *  never moved, and every channel). */
+  readonly conversationHex?: string;
   /** The route segment that opens it: base64url of a group id
    *  (`/groups/<slug>`), the hex id of a channel (`/channels/<id>`). */
   readonly slug: string;
@@ -147,6 +154,53 @@ function addChannelPosts(
     };
     refs.push({ source, message, mentionsMe, repliesToMe: false });
   }
+}
+
+/**
+ * The key of everything a PERSON attaches to a feed source: the mute flag,
+ * "hide from feeds", a feed rule's include / exclude lists. The conversation
+ * id, never the group a moved conversation currently lives in (ADR-0065 R.5),
+ * so none of it is lost or duplicated when the conversation moves.
+ */
+export function feedSourceKey(source: Pick<FeedSource, "idHex" | "conversationHex">): string {
+  return source.conversationHex ?? source.idHex;
+}
+
+/** One group conversation as the feed's source list reads it. */
+export interface GroupConversationForFeed {
+  /** Hex of the conversation id (the lineage root). */
+  readonly conversationHex: string;
+  /** Hex of the group it currently lives in (the lineage head). */
+  readonly headHex: string;
+  readonly slug: string;
+  readonly title: string;
+  readonly audience: number;
+}
+
+/**
+ * The group sources of the feed: ONE per conversation, drawn from its
+ * current group, with the mute flag read under the conversation id.
+ */
+export function groupFeedSources(
+  conversations: readonly GroupConversationForFeed[],
+  mutedOf: (conversationHex: string) => boolean,
+): FeedSource[] {
+  const seen = new Set<string>();
+  const out: FeedSource[] = [];
+  for (const c of conversations) {
+    if (seen.has(c.conversationHex)) continue;
+    seen.add(c.conversationHex);
+    out.push({
+      kind: "group",
+      idHex: c.headHex,
+      ...(c.conversationHex === c.headHex ? {} : { conversationHex: c.conversationHex }),
+      slug: c.slug,
+      title: c.title,
+      muted: mutedOf(c.conversationHex),
+      audience: c.audience,
+    });
+  }
+  return out;
 }
 
 /** Turn the logs into the ranking's input. Rows that cannot be placed (a

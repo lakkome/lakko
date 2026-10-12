@@ -2,165 +2,169 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 phase 2 (UX 16.5 / 16.8) — the per-`(account, group)` CLOSED
- * state a received group-closed envelope sets on this device, and the
- * RECEIVE-SIDE decision that guards it.
+ * ADR-0065 "Phase 2 revised", R.6 - the per-`(account, group)` CLAIM state
+ * a received `group_closed` envelope leaves on this device.
  *
- * The twin of `group-name-store.ts`, and deliberately the same shape (the
- * brief: "the group-closed envelope follows the group-name gate EXACTLY"):
+ * Since the visible flow was removed, a `group_closed` envelope has one
+ * producer: a device founding the successor of a conversation that cannot
+ * be repaired in place (a one-to-one whose other person reset their keys, a
+ * group whose owner did). The decision that guards it is
+ * `successor-claim.ts` (`claimVerdict`): the FIRST eligible claim in the
+ * old journal's order wins, for good. This file is what is kept between
+ * sessions:
  *
- *   * {@link groupClosedVerdict} — the pure gate an incoming envelope passes
- *     before it may set or replace what is stored: identical first, then
- *     authority read off the LIVE role table (owner or admin resolved at
- *     receipt, C-68; a notice from a plain member is dropped), then the
- *     order (a strictly greater stamp, `groupClosedIsNewer` from the core);
- *   * the row codec — the JSON inside the encrypted IndexedDB row
- *     `group-closed-idb.ts` writes;
- *   * {@link GroupClosedStore} — the in-memory map + persistence.
+ *   * `accepted` - the winning claim: the conversation's successor;
+ *   * `pending`  - claims that arrived before this device had its own
+ *     verdict on the reset, kept in journal order and judged again after
+ *     the identity check the claim itself triggers;
+ *   * `own`      - this device's own claim, from the moment it is posted
+ *     until step 3 decided it (so a restart between the post and the read
+ *     neither founds a second successor nor forgets the local one).
  *
- * ## Why the second notice wins
- *
- * Two admins may each recreate the same group (UX 16.10): both post a
- * notice, and the later stamp wins the `Open the new group` target. There
- * is no "reopen": a group is closed once any authorised notice landed, and
- * only the successor id moves with a newer one.
- *
- * ## What is NOT here
- *
- * The one-to-one close (16.4) is this device's own decision, recorded in
- * `conversation-closed.ts`; it never rides the journal. And a one-to-one
- * cannot be closed by an envelope at all: it has no admin.
+ * Nothing here is shown: the store has no reader in any view (R.0).
  */
-import type { ConversationKind } from "./conversation-kind";
+import type { SuccessorClaim } from "./successor-claim";
 
-/** A stored or incoming closed notice. */
-export interface StoredGroupClosed {
-  /** Closer-clock UNIX milliseconds, as stamped in the envelope. */
-  readonly closedAtMs: bigint;
-  /** base64 of the successor group's id, or `null` when the group was
-   *  closed without one. The id is the admin's CLAIM: `Open the new group`
-   *  only once this device has joined it through the ordinary path. */
-  readonly successorGroupIdB64: string | null;
-  /** base64 of the closer's ACCOUNT key, resolved at receipt from the
-   *  MLS-authenticated sender (C-68) — never read from the envelope, which
-   *  carries no author. Kept so the terminal row can name the closer after a
-   *  reload; the name itself is resolved at render time. Absent on a value
-   *  straight off the wire (the sniff) and when the sender did not resolve. */
-  readonly closedByKeyB64?: string;
-}
-
-/** Outcome of {@link groupClosedVerdict}. Mirrors the group-name shape. */
-export type GroupClosedVerdict =
-  | "accept-identical"
-  | "accept-owner"
-  | "accept-admin"
-  /** The group carries no role table (legacy / open group): any member,
-   *  when newer. Such a group has no admin to recreate it, so this arm is
-   *  reachable only by a notice posted by hand; kept for the gate's
-   *  symmetry with the name. */
-  | "accept-no-owner"
-  | "reject-not-authorized"
-  | "reject-unverifiable"
-  | "reject-stale"
-  /** A one-to-one has no admin and cannot be closed by anyone's notice. */
-  | "reject-one-to-one";
-
-/** `true` for every `accept-*` verdict. */
-export function groupClosedVerdictAccepts(v: GroupClosedVerdict): boolean {
-  return v.startsWith("accept-");
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
-  return true;
-}
-
-function containsKey(keys: readonly Uint8Array[], key: Uint8Array): boolean {
-  return keys.some((k) => bytesEqual(k, key));
-}
-
-function sameNotice(a: StoredGroupClosed, b: StoredGroupClosed): boolean {
-  return a.closedAtMs === b.closedAtMs && a.successorGroupIdB64 === b.successorGroupIdB64;
+/** This device's own claim, posted and not yet decided. */
+export interface OwnClaim {
+  /** base64 of the successor this device created locally. */
+  readonly successorGroupIdB64: string;
+  /** The DS message id the publish returned; `null` while the publish is
+   *  in flight (a restart then re-reads the journal for its own row). */
+  readonly messageId: number | null;
 }
 
 /**
- * The pure receive-side decision — the group-name table verbatim:
- *
- * | role table | sender            | stored          | verdict                 |
- * |------------|-------------------|-----------------|-------------------------|
- * | any        | anyone            | identical       | `accept-identical`      |
- * | unreadable | anyone            | any             | `reject-unverifiable`   |
- * | present    | owner             | none / older    | `accept-owner`          |
- * | present    | admin             | none / older    | `accept-admin`          |
- * | present    | plain member      | any             | `reject-not-authorized` |
- * | present    | unresolvable      | any             | `reject-unverifiable`   |
- * | absent     | anyone            | none / older    | `accept-no-owner`       |
- * | any        | authorised        | newer or equal  | `reject-stale`          |
- *
- * Ahead of the whole table: in a one-to-one every envelope is
- * `reject-one-to-one`.
- *
- * @param isNewer MUST be the wasm `groupClosedIsNewer` export (strictly
- *   greater; equal is not newer).
+ * The successor THIS device created for the old group (R.6 step 1), kept
+ * from the moment it exists until its Welcome was delivered, and after that
+ * as the mark "this device founded it" (the founder alone re-sends, R.7
+ * case 1). The Welcome is a public MLS artefact sealed to its recipients;
+ * it is kept so a restart between winning the claim and delivering it does
+ * not leave a successor nobody can join.
  */
-export function groupClosedVerdict(args: {
-  kind: ConversationKind;
-  ownerKey: Uint8Array | undefined;
-  adminKeys: readonly Uint8Array[];
-  /** The sender's ACCOUNT key resolved at receipt (C-68). */
-  senderKey: Uint8Array | undefined;
-  stored: StoredGroupClosed | null;
-  storedUnreadable: boolean;
-  incoming: StoredGroupClosed;
-  verifyFailed: boolean;
-  isNewer: (incomingClosedAtMs: bigint, storedClosedAtMs: bigint) => boolean;
-}): GroupClosedVerdict {
-  if (args.kind !== "group") return "reject-one-to-one";
-  if (args.stored !== null && sameNotice(args.stored, args.incoming)) return "accept-identical";
-  if (args.verifyFailed) return "reject-unverifiable";
-  if (args.storedUnreadable) return "reject-unverifiable";
-  const authorised = ((): GroupClosedVerdict => {
-    if (args.ownerKey === undefined) return "accept-no-owner";
-    if (args.senderKey === undefined) return "reject-unverifiable";
-    if (bytesEqual(args.senderKey, args.ownerKey)) return "accept-owner";
-    if (containsKey(args.adminKeys, args.senderKey)) return "accept-admin";
-    return "reject-not-authorized";
-  })();
-  if (!groupClosedVerdictAccepts(authorised)) return authorised;
-  if (args.stored === null) return authorised;
-  return args.isNewer(args.incoming.closedAtMs, args.stored.closedAtMs)
-    ? authorised
-    : "reject-stale";
+export interface PreparedSuccessor {
+  readonly successorGroupIdB64: string;
+  /** base64 of the Welcome of the founding commit; `null` once delivered. */
+  readonly welcomeB64: string | null;
+  /** base64 account keys of the people the Welcome goes to, one each. */
+  readonly targetKeysB64: readonly string[];
+  readonly delivered: boolean;
+}
+
+/** What is stored for one old group. */
+export interface StoredGroupClosed {
+  readonly accepted: SuccessorClaim | null;
+  readonly pending: readonly SuccessorClaim[];
+  readonly own: OwnClaim | null;
+  readonly prepared?: PreparedSuccessor | null;
+}
+
+/** The empty state. */
+export const NO_CLAIMS: StoredGroupClosed = { accepted: null, pending: [], own: null };
+
+/** At most this many undecided claims are kept per group: the journal's
+ *  claims arrive from members, and an unbounded list would be a way to grow
+ *  this device's storage. Chosen, not measured. */
+export const MAX_PENDING_CLAIMS = 16;
+
+/** `state` with `claim` kept for a later verdict, in journal order, once. */
+export function withPendingClaim(state: StoredGroupClosed, claim: SuccessorClaim): StoredGroupClosed {
+  if (state.pending.some((c) => c.messageId === claim.messageId)) return state;
+  const pending = [...state.pending, claim]
+    .sort((a, b) => a.messageId - b.messageId)
+    .slice(0, MAX_PENDING_CLAIMS);
+  return { ...state, pending };
+}
+
+/** `state` with `claim` as the conversation's successor; the pending list
+ *  is spent. */
+export function withAcceptedClaim(state: StoredGroupClosed, claim: SuccessorClaim): StoredGroupClosed {
+  return {
+    accepted: claim,
+    pending: [],
+    own: state.own,
+    ...(state.prepared === undefined ? {} : { prepared: state.prepared }),
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Row codec
 // ---------------------------------------------------------------------------
 
-/** Schema version of the JSON payload inside the encrypted row. Version 2
- *  added the closer's account key (`b`); version 1 rows are not read. */
-export const GROUP_CLOSED_ROW_VERSION = 2;
+/** Schema version of the JSON payload inside the encrypted row. Version 3 is
+ *  the claim state; rows of the visible flow (1, 2) are not read. */
+export const GROUP_CLOSED_ROW_VERSION = 3;
+
+interface ClaimJson {
+  readonly m: number;
+  readonly s: string;
+  readonly k: string;
+  readonly a: boolean;
+  readonly t: readonly string[];
+}
 
 /** The JSON shape inside the ciphertext. */
 export interface GroupClosedRowPayload {
-  readonly v: 2;
-  /** base64 group id -> `{ t: decimal closed_at_ms, s: base64 successor | null,
-   *  b: base64 closer account key | null }`. */
+  readonly v: 3;
   readonly g: Record<
     string,
-    { readonly t: string; readonly s: string | null; readonly b: string | null }
+    {
+      readonly a: ClaimJson | null;
+      readonly p: readonly ClaimJson[];
+      readonly o: { readonly s: string; readonly m: number | null } | null;
+      readonly r?: {
+        readonly s: string;
+        readonly w: string | null;
+        readonly t: readonly string[];
+        readonly d: boolean;
+      } | null;
+    }
   >;
+}
+
+function claimToJson(c: SuccessorClaim): ClaimJson {
+  return {
+    m: c.messageId,
+    s: c.successorGroupIdB64,
+    k: c.senderKeyB64,
+    a: c.senderWasAdmin,
+    t: [...c.adminKeysAtReceiptB64],
+  };
+}
+
+function claimFromJson(raw: unknown): SuccessorClaim | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Partial<ClaimJson>;
+  if (typeof r.m !== "number" || !Number.isSafeInteger(r.m) || r.m < 0) return null;
+  if (typeof r.s !== "string" || typeof r.k !== "string" || typeof r.a !== "boolean") return null;
+  if (!Array.isArray(r.t) || !r.t.every((x) => typeof x === "string")) return null;
+  return {
+    messageId: r.m,
+    successorGroupIdB64: r.s,
+    senderKeyB64: r.k,
+    senderWasAdmin: r.a,
+    adminKeysAtReceiptB64: [...r.t],
+  };
 }
 
 /** Encode the rows to the payload JSON. */
 export function encodeGroupClosedRow(rows: ReadonlyMap<string, StoredGroupClosed>): string {
-  const g: Record<string, { t: string; s: string | null; b: string | null }> = {};
+  const g: GroupClosedRowPayload["g"] = {};
   for (const [groupIdB64, v] of rows) {
     g[groupIdB64] = {
-      t: v.closedAtMs.toString(),
-      s: v.successorGroupIdB64,
-      b: v.closedByKeyB64 ?? null,
+      a: v.accepted === null ? null : claimToJson(v.accepted),
+      p: v.pending.map(claimToJson),
+      o: v.own === null ? null : { s: v.own.successorGroupIdB64, m: v.own.messageId },
+      ...(v.prepared === undefined || v.prepared === null
+        ? {}
+        : {
+            r: {
+              s: v.prepared.successorGroupIdB64,
+              w: v.prepared.welcomeB64,
+              t: [...v.prepared.targetKeysB64],
+              d: v.prepared.delivered,
+            },
+          }),
     };
   }
   const payload: GroupClosedRowPayload = { v: GROUP_CLOSED_ROW_VERSION, g };
@@ -183,16 +187,48 @@ export function decodeGroupClosedRow(json: string): Map<string, StoredGroupClose
   if (typeof obj.g === "object" && obj.g !== null) {
     for (const [groupIdB64, raw] of Object.entries(obj.g)) {
       if (typeof raw !== "object" || raw === null) continue;
-      const t = (raw as { t?: unknown }).t;
-      const s = (raw as { s?: unknown }).s;
-      if (typeof t !== "string" || !/^\d+$/.test(t)) continue;
-      const b = (raw as { b?: unknown }).b;
-      if (s !== null && typeof s !== "string") continue;
-      if (b !== null && typeof b !== "string") continue;
+      const a = (raw as { a?: unknown }).a;
+      const p = (raw as { p?: unknown }).p;
+      const o = (raw as { o?: unknown }).o;
+      const accepted = a === null || a === undefined ? null : claimFromJson(a);
+      if (a !== null && a !== undefined && accepted === null) continue;
+      const pending: SuccessorClaim[] = [];
+      if (Array.isArray(p)) {
+        for (const item of p) {
+          const claim = claimFromJson(item);
+          if (claim !== null) pending.push(claim);
+        }
+      }
+      let own: OwnClaim | null = null;
+      if (typeof o === "object" && o !== null) {
+        const os = (o as { s?: unknown }).s;
+        const om = (o as { m?: unknown }).m;
+        if (typeof os === "string" && (om === null || (typeof om === "number" && Number.isSafeInteger(om)))) {
+          own = { successorGroupIdB64: os, messageId: om };
+        }
+      }
+      const r = (raw as { r?: unknown }).r;
+      let prepared: PreparedSuccessor | null = null;
+      if (typeof r === "object" && r !== null) {
+        const rs = (r as { s?: unknown }).s;
+        const rw = (r as { w?: unknown }).w;
+        const rt = (r as { t?: unknown }).t;
+        const rd = (r as { d?: unknown }).d;
+        if (
+          typeof rs === "string" &&
+          (rw === null || typeof rw === "string") &&
+          Array.isArray(rt) &&
+          rt.every((x) => typeof x === "string") &&
+          typeof rd === "boolean"
+        ) {
+          prepared = { successorGroupIdB64: rs, welcomeB64: rw, targetKeysB64: [...rt], delivered: rd };
+        }
+      }
       rows.set(groupIdB64, {
-        closedAtMs: BigInt(t),
-        successorGroupIdB64: s,
-        ...(b !== null && b.length > 0 ? { closedByKeyB64: b } : {}),
+        accepted,
+        pending: pending.sort((x, y) => x.messageId - y.messageId).slice(0, MAX_PENDING_CLAIMS),
+        own,
+        ...(prepared === null ? {} : { prepared }),
       });
     }
   }
@@ -216,9 +252,9 @@ export const MEMORY_GROUP_CLOSED_BACKEND: GroupClosedBackend = {
 };
 
 /**
- * The in-memory view of one account's closed groups, written through to
- * the backend. Decisions are the caller's ({@link groupClosedVerdict});
- * this only stores what it is told to.
+ * The in-memory view of one account's claim states, written through to the
+ * backend. Decisions are the caller's (`successor-claim.ts`); this only
+ * stores what it is told to.
  */
 export class GroupClosedStore {
   private rows = new Map<string, StoredGroupClosed>();
@@ -257,7 +293,7 @@ export class GroupClosedStore {
     this.notify();
   }
 
-  /** The stored notice for a group, or `undefined` when it is not closed. */
+  /** The claim state of an old group, or `undefined` when it has none. */
   get(groupIdB64: string): StoredGroupClosed | undefined {
     return this.rows.get(groupIdB64);
   }
@@ -281,7 +317,7 @@ export class GroupClosedStore {
     return this.chain;
   }
 
-  /** Forget a group's notice (the `Delete this chat` path). */
+  /** Forget a group's claim state (the `Delete this chat` path). */
   remove(accountId: string, groupIdB64: string): Promise<void> {
     if (!this.rows.has(groupIdB64)) return Promise.resolve();
     const next = new Map(this.rows);

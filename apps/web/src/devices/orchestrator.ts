@@ -23,7 +23,7 @@
  */
 import { announceDeviceGroupChangedHere } from "./sync/growth";
 import { resendServiceEnvelopes } from "../reach/service-envelope-outbox";
-import { loadWasm } from "../wasm";
+import { loadWasm, type Wasm } from "../wasm";
 import { KeyedError } from "../l10n/keyed-error";
 import type {
   DeviceGroup as WasmDeviceGroup,
@@ -76,13 +76,16 @@ import {
 import {
   STATE_EXPORTER_KEY_LENGTH,
   STATE_EXPORTER_LABEL,
+  applyOwnPredecessors,
   applyStateBundle,
   buildStateBundle,
+  collectOwnPredecessors,
   decodeStateBundle,
   encodeStateBundle,
   pollForStateBundle,
   publishStateBundle,
-  type StateBundleV1,
+  type CarriedOwnPredecessor,
+  type StateBundleV2,
 } from "./state-bundle";
 import { loadMlsSnapshot } from "../chat/mls-store";
 
@@ -208,6 +211,11 @@ export async function prepareJoinFlow(args: {
   /** ADR-0056 — the 32-byte login handle of this account's username; the
    *  payload names the account by it, never by the id. */
   readonly loginHandle: Uint8Array;
+  /** ADR-0066 — called after a state bundle stored the account's earlier
+   *  keys on this (signed-in) device, before the rest of the bundle is
+   *  applied. The session re-mints its conversation binding there
+   *  (`AuthApi.rebindAfterStateBundle`). Must not throw. */
+  readonly onOwnPredecessorsStored?: () => Promise<unknown>;
 }): Promise<JoinSession> {
   const wasm = await loadWasm();
   const seed = await ensureDeviceIdentitySeed(args.accountIdB64, args.deviceKey);
@@ -304,6 +312,17 @@ export async function prepareJoinFlow(args: {
               opts.welcomeCursor,
             );
             if (bundle !== null) {
+              // ADR-0066: the own predecessors first, under the device key.
+              // On the restore route this runs before the session's
+              // identities exist, so the conversation identity is minted
+              // under the same account key the sending device's leaves use.
+              await storeOwnPredecessors(bundle, args.accountIdB64, args.deviceKey);
+              // A device that was already signed in minted its conversation
+              // binding before these keys arrived: the session mints it again
+              // (only while it holds no conversation) and publishes again.
+              if (bundle.ownPredecessors.length > 0 && args.onOwnPredecessorsStored !== undefined) {
+                await args.onOwnPredecessorsStored();
+              }
               const applied = applyStateBundle(bundle, args.accountIdB64);
               // eslint-disable-next-line no-console
               console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
@@ -341,6 +360,43 @@ export async function prepareJoinFlow(args: {
   };
 }
 
+/** The lower-case hex account signature key of a 64-byte account seed. */
+function accountKeyHexOfSeed(wasm: Wasm, seed: Uint8Array): string {
+  const identity = wasm.Identity.fromSeed(seed);
+  try {
+    let out = "";
+    for (const byte of identity.signaturePublicKey) out += byte.toString(16).padStart(2, "0");
+    return out;
+  } finally {
+    identity.free();
+  }
+}
+
+/** ADR-0066 — store a bundle's own predecessors under the device key. Best
+ *  effort and never throws: a failure leaves the device as one that knows
+ *  only the current key (logged without any key material). */
+async function storeOwnPredecessors(
+  bundle: StateBundleV2,
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+): Promise<void> {
+  if (bundle.ownPredecessors.length === 0) return;
+  try {
+    const wasm = await loadWasm();
+    const added = await applyOwnPredecessors(bundle, accountIdB64, deviceKey, (seed) =>
+      accountKeyHexOfSeed(wasm, seed),
+    );
+    // eslint-disable-next-line no-console
+    console.info(`state bundle: ${added} earlier account keys stored`);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "state bundle: the earlier account keys were not stored",
+      err instanceof Error ? err.name : "unknown",
+    );
+  }
+}
+
 /** Joiner side of the ADR-0050 state bundle: poll the tagged row, open it
  *  under the per-pairing exporter key, decode. `null` when the scanner sent
  *  none within the window or the bytes did not decode. */
@@ -349,7 +405,7 @@ async function receiveStateBundle(
   identity: WasmIdentity,
   rendezvous: Uint8Array,
   welcomeCursor: number,
-): Promise<StateBundleV1 | null> {
+): Promise<StateBundleV2 | null> {
   const outcome = await pollForStateBundle(rendezvous, welcomeCursor);
   if (outcome.kind !== "received") return null;
   const wasm = await loadWasm();
@@ -560,7 +616,7 @@ export async function prepareAnonymousJoinFlow(args: {
   // scanner published was never read on this route, and a confirmed device
   // opened every chat empty.
   let pendingHistory: { secret: Uint8Array; sealedBytes: Uint8Array } | null = null;
-  let pendingState: StateBundleV1 | null = null;
+  let pendingState: StateBundleV2 | null = null;
 
   return {
     qrPayload,
@@ -682,6 +738,10 @@ export async function prepareAnonymousJoinFlow(args: {
         }
       }
       if (pendingState !== null) {
+        // ADR-0066: before `finishCanonicalSession` installs the session's
+        // identities (the caller's next step), so the conversation identity
+        // is minted under the account key the sending device's leaves use.
+        await storeOwnPredecessors(pendingState, account.b64, deviceKey);
         const applied = applyStateBundle(pendingState, account.b64);
         pendingState = null;
         // eslint-disable-next-line no-console
@@ -953,7 +1013,26 @@ export async function runScanFlow(args: {
       try {
         const wasm = await loadWasm();
         const snapshot = await loadMlsSnapshot(args.accountIdB64, args.deviceKey);
-        const bundle = buildStateBundle(snapshot?.knownGroupIds ?? [], args.accountIdB64);
+        // ADR-0066: the account's earlier keys, so a device paired after a
+        // rotation binds its conversation leaves under the same account key
+        // as this device and reads the predecessor mailboxes.
+        let ownPredecessors: CarriedOwnPredecessor[] = [];
+        try {
+          ownPredecessors = await collectOwnPredecessors(args.accountIdB64, args.deviceKey, (seed) =>
+            accountKeyHexOfSeed(wasm, seed),
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "state bundle: the earlier account keys could not be read",
+            err instanceof Error ? err.name : "unknown",
+          );
+        }
+        const bundle = buildStateBundle(
+          snapshot?.knownGroupIds ?? [],
+          args.accountIdB64,
+          ownPredecessors,
+        );
         key = ensured.group.exportSecret(
           ensured.identity,
           STATE_EXPORTER_LABEL,

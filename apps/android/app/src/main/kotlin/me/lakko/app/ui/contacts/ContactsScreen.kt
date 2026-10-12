@@ -36,7 +36,6 @@ import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.GppMaybe
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -164,12 +163,6 @@ public fun ContactsScreen(
             onUsernameChange = viewModel::onUsernameChange,
             onIntroChange = viewModel::onIntroChange,
             onSend = viewModel::onSendClicked,
-            onOpenContact = onOpenContact?.let { open ->
-                { key ->
-                    addSheetOpen = false
-                    open(key)
-                }
-            },
             onSent = {
                 viewModel.consumeSendSuccess()
                 addSheetOpen = false
@@ -207,7 +200,7 @@ public fun ContactsScreen(
     // Defensive: rows persisted before the accept path deduplicated by key
     // may still hold one person twice, and LazyColumn keys must be unique.
     val accepted = state.accepted.distinctBy { contactRouteKey(it.request.fromPubkey) }
-    val sections = remember(accepted, nameVersion, query, state.resetRecords) {
+    val sections = remember(accepted, nameVersion, query) {
         val rows = accepted.map { c ->
             val resolved = directory.resolve(c.request.fromPubkey)
             ContactRowModel(
@@ -215,11 +208,6 @@ public fun ContactsScreen(
                 name = resolved.primary,
                 username = resolved.verifiedUsername,
                 placeholder = resolved.isPlaceholder,
-                // ADR-0065 phase 2 / UX 16.1 — flagged by account id: the
-                // list is not re-sorted and no section is added.
-                keysReset = c.request.fromAccountId
-                    ?.let { state.resetRecords[java.util.Base64.getEncoder().encodeToString(it)] }
-                    ?.unverified == true,
             )
         }
         contactSections(filterContacts(rows, query))
@@ -443,33 +431,13 @@ private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(row.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-            // ADR-0065 phase 2 / UX 16.1 — the reset line replaces the
-            // username line: the words carry the signal, the glyph is never
-            // the only one.
-            if (row.keysReset) {
+            row.username?.takeIf { row.name != "@$it" }?.let { user ->
                 Text(
-                    me.lakko.app.contacts.KeysResetCopy.ROW_SUB.text(),
+                    "@$user",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            } else {
-                row.username?.takeIf { row.name != "@$it" }?.let { user ->
-                    Text(
-                        "@$user",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
             }
-        }
-        if (row.keysReset) {
-            // UX 16.1 — the shield-with-exclamation glyph in the trailing
-            // column (the slot the muted glyph uses).
-            Icon(
-                Icons.Filled.GppMaybe,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }
@@ -623,8 +591,6 @@ private fun AddByUsernameSheet(
     onUsernameChange: (String) -> Unit,
     onIntroChange: (String) -> Unit,
     onSend: () -> Unit,
-    /** UX 16.1 — `Open contact` beside a keys-reset refusal line. */
-    onOpenContact: ((key: String) -> Unit)?,
     onSent: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -673,14 +639,6 @@ private fun AddByUsernameSheet(
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                // UX 16.1 — the refusal points at the contact's state, and
-                // the action beside it opens the surface that lifts it.
-                val contactKey = state.sendErrorContactKey
-                if (contactKey != null && onOpenContact != null) {
-                    TextButton(onClick = { onOpenContact(contactKey) }) {
-                        Text(me.lakko.app.contacts.KeysResetCopy.OPEN_CONTACT.text())
-                    }
-                }
             }
             Button(
                 onClick = onSend,

@@ -137,7 +137,10 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
     match inner::parse_body(&bytes) {
         // ADR-0052: a reply's quote is not previewed by a notification, and
         // this surface stays the smallest that decrypts (C-59), so the reply
-        // is matched away rather than carried.
+        // is matched away rather than carried. The same goes for the forward
+        // attribution and the ADR-0065 re-send marker: a notification needs
+        // neither, and deduplicating a re-sent row is the foreground app's
+        // job.
         inner::MessageBody::Chat {
             text, attachments, ..
         } => ParsedBody {

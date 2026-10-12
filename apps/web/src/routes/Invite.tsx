@@ -55,8 +55,11 @@ import { useAuth } from "../auth/AuthContext";
 import { buildAuthUrlWithReturn } from "../auth/return-url";
 import { ContactsClient } from "../contacts/client";
 import { contactsErrorText } from "../contacts/errors";
-import { keysResetOpenContactHref, openContactFor } from "../contacts/keys-reset-open-contact";
-import { loadAccepted } from "../contacts/local-store";
+import { establishedContactOfAccount, pinKeysOf } from "../contacts/known-contact-request";
+import { accountKeysOf, loadAccepted } from "../contacts/local-store";
+import { readVerifiedBinding } from "../contacts/verified-binding";
+import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
+import { groupIdHex } from "../devices/sync/state";
 import { t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
 import { createLiveText } from "../l10n/live-text";
@@ -287,15 +290,11 @@ function ConnectPanel(props: {
   onDone: () => void;
 }): JSX.Element {
   const auth = useAuth();
+  const navigate = useNavigate();
   const cap = props.invite.cap;
   const [intro, setIntro] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createLiveText();
-  // ADR-0065 phase 2 (UX 16.1) — `Open contact` beside a keys-reset refusal.
-  const [errorOpenContact, setErrorOpenContact] = createSignal<{
-    text: () => string;
-    href: string;
-  } | null>(null);
   const [notice, setNotice] = createLiveText();
   // 1.18d2a-web: when the server reports 410 Gone (or 404 on
   // /consume — same fold-pattern as fetch), we lock the panel
@@ -345,13 +344,31 @@ function ConnectPanel(props: {
     setNotice(null);
     setBusy(true);
     try {
-      // ADR-0065 phase 2 (UX 16.1): the link's owner may already be a
-      // contact whose keys were reset and not verified here. Refused before
-      // a use of the link is spent or anything is sent; a stranger passes.
+      // ADR-0065 R.2: the link's owner may already be a contact under other
+      // keys. The published identity then passes the fail-closed gate before
+      // a use of the link is spent or anything is sent (an attested reset is
+      // accepted there, silently); a stranger passes.
       await props.client.refuseContactRequestToUnverifiedKeys(
         cap.ownerAccountId,
         cap.ownerSignaturePubkey,
       );
+      // ADR-0065 R.7 case 1 / UX 16.6 - a link from a person who is already
+      // a contact (a reset loses their contacts; they may hand out a new
+      // link) opens the existing contact: no request is sent and no use of
+      // the link is spent. The check above ran R.2 first, so an attested
+      // reset was accepted there and an unproven change was refused.
+      // "Already a contact" is the pin or a verified binding naming the
+      // row's key: a row whose account id came only from a peer's own
+      // profile does not swallow this person's link.
+      const ownerAccountIdB64 = base64Encode(cap.ownerAccountId);
+      const existing = establishedContactOfAccount(loadAccepted(), groupIdHex(cap.ownerAccountId), {
+        pinKeysB64: pinKeysOf(accountKeysOf(ownerAccountIdB64)),
+        bindingKeyB64: readVerifiedBinding(ownerAccountIdB64)?.keyB64 ?? null,
+      });
+      if (existing !== undefined) {
+        navigate(paths.contact(base64UrlEncodeNoPad(base64Decode(existing.signaturePubkeyB64))));
+        return;
+      }
       // 1.18d2a-web: server-side max_uses enforcement runs on
       // the **pointer** path. Inline-bytes URLs have no
       // associated server row to bump — back-compat compromise
@@ -432,12 +449,11 @@ function ConnectPanel(props: {
     } catch (err) {
       // ADR-0054 S3: the consume spends an anonymous token; that failure,
       // like every other, renders from its kind (`contacts/errors.ts`).
-      const text = isDiscoveryRateLimited(err)
-        ? INVITE_LINK_RATE_LIMITED
-        : contactsErrorText(err, "contacts.error.send", labelOrFingerprint);
-      const href = keysResetOpenContactHref(err, loadAccepted());
-      setErrorOpenContact(href === null ? null : { text, href });
-      setError(text);
+      setError(
+        isDiscoveryRateLimited(err)
+          ? INVITE_LINK_RATE_LIMITED
+          : contactsErrorText(err, "contacts.error.send", labelOrFingerprint),
+      );
     } finally {
       setBusy(false);
     }
@@ -525,23 +541,7 @@ function ConnectPanel(props: {
         />
       </label>
 
-      <Show when={error()}>
-        {(message) => (
-          <div class="form-error">
-            {message()}
-            <Show when={openContactFor(error(), errorOpenContact())}>
-              {(href) => (
-                <>
-                  {" "}
-                  <A href={href()} class="ghost small">
-                    {t("contacts.keys_reset.open_contact")}
-                  </A>
-                </>
-              )}
-            </Show>
-          </div>
-        )}
-      </Show>
+      <Show when={error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
       {notice() !== null && <div class="form-notice">{notice()}</div>}
 
       <div class="lk-actions">

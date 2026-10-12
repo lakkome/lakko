@@ -12,13 +12,12 @@ import { describe, expect, it } from "vitest";
 import { supersessionRefusedMessage } from "./supersession-message";
 
 describe("supersessionRefusedMessage (KT-log S4)", () => {
-  it("loggedReset=true → points at the recorded reset state (ADR-0065 phase 2)", () => {
-    // A change the log confirms as a reset is a STATE of the contact
-    // (UX 16.1): the action's line says what to do, not what the log says.
-    const msg = supersessionRefusedMessage(true, "@alice");
-    expect(msg).toBe("Verify @alice's new safety number first.");
-    // It must NOT frame a confirmed owner reset as a compromise.
-    expect(msg).not.toContain("compromise");
+  it("loggedReset=true is never a copy of its own: it renders as unconfirmed (ADR-0065 R.2)", () => {
+    // A change that IS an attested reset is accepted silently and reaches no
+    // refusal; if the marker ever arrives here, nothing says "reset".
+    expect(supersessionRefusedMessage(true, "@alice")).toBe(
+      supersessionRefusedMessage(null, "@alice"),
+    );
   });
 
   it("loggedReset=false → possible-compromise copy", () => {
@@ -40,17 +39,14 @@ describe("supersessionRefusedMessage (KT-log S4)", () => {
   });
 
   it("falls back to a subject-less sentence when no peer label is given", () => {
-    expect(supersessionRefusedMessage(true)).toBe("Verify the new safety number first.");
-    expect(supersessionRefusedMessage(true, "")).toBe("Verify the new safety number first.");
     expect(supersessionRefusedMessage(false)).toContain("This contact");
     expect(supersessionRefusedMessage(null, "")).toContain("This contact");
   });
 
-  it("the three verdicts produce three DISTINCT messages", () => {
-    const a = supersessionRefusedMessage(true, "@x");
+  it("the two refusals produce two DISTINCT messages", () => {
     const b = supersessionRefusedMessage(false, "@x");
     const c = supersessionRefusedMessage(null, "@x");
-    expect(new Set([a, b, c]).size).toBe(3);
+    expect(b).not.toBe(c);
   });
 
   it("contains no emoji / pictographs (copy-style invariant)", () => {

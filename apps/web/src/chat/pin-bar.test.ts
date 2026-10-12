@@ -7,7 +7,15 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { clampPinIndex, nextPinIndex, pinBarItems, pinBarLabel, type HeldForPin } from "./pin-bar";
+import {
+  clampPinIndex,
+  nextPinIndex,
+  pinBarItems,
+  pinBarLabel,
+  pinsAcrossSegments,
+  type HeldForPin,
+} from "./pin-bar";
+import { historyRowId, isHistoryRowId } from "./lineage";
 import type { StoredPin } from "./pin-store";
 
 const pin = (updatedAtMs: bigint, pinned = true): StoredPin => ({ pinned, updatedAtMs });
@@ -141,5 +149,44 @@ describe("pinBarLabel", () => {
 
   it("is just the bar with one", () => {
     expect(pinBarLabel(0, 1)).toBe("Pinned message");
+  });
+});
+
+describe("a conversation's pins span its segments (ADR-0065 R.5)", () => {
+  it("an older segment's pins stay in the bar under the id their row is drawn with", () => {
+    const spanned = pinsAcrossSegments(
+      [
+        { distanceFromHead: 1, shared: new Map([[7, pin(10n)]]), personal: new Map([[3, 5n]]) },
+        { distanceFromHead: 0, shared: new Map([[7, pin(20n)]]), personal: new Map([[2, 30n]]) },
+      ],
+      historyRowId,
+    );
+    // The same DS message id in two segments is two different messages.
+    expect([...spanned.shared.keys()].sort((a, b) => a - b)).toEqual([historyRowId(7, 1), 7]);
+    expect([...spanned.personal.keys()].sort((a, b) => a - b)).toEqual([historyRowId(3, 1), 2]);
+    const items = pinBarItems({ ...spanned, held: allHeld });
+    expect(items).toEqual([
+      { messageId: 7, scope: "shared" },
+      { messageId: historyRowId(7, 1), scope: "shared" },
+      { messageId: 2, scope: "personal" },
+      { messageId: historyRowId(3, 1), scope: "personal" },
+    ]);
+    expect(items.filter((i) => isHistoryRowId(i.messageId))).toHaveLength(2);
+  });
+
+  it("a stored unpin of an older segment stays an unpin", () => {
+    const spanned = pinsAcrossSegments(
+      [{ distanceFromHead: 2, shared: new Map([[4, pin(10n, false)]]), personal: new Map() }],
+      historyRowId,
+    );
+    expect(pinBarItems({ ...spanned, held: allHeld })).toEqual([]);
+  });
+
+  it("a conversation that never moved is its one segment, unchanged", () => {
+    const shared = new Map([[9, pin(1n)]]);
+    const personal = new Map([[4, 2n]]);
+    const spanned = pinsAcrossSegments([{ distanceFromHead: 0, shared, personal }], historyRowId);
+    expect([...spanned.shared]).toEqual([...shared]);
+    expect([...spanned.personal]).toEqual([...personal]);
   });
 });

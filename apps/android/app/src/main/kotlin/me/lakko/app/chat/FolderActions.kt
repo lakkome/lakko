@@ -79,10 +79,15 @@ public class FolderActions(
         val threads = chats.state.value.threads.associateBy { it.groupIdHex }
         for (row in rows) {
             if (row.kind == ConversationRowKind.CHANNEL || !row.hasUnread) continue
-            val groupId = bytesOfHex(row.id) ?: continue
-            chats.setThreadOnScreen(row.id, true)
-            chats.setThreadOnScreen(row.id, false)
-            val highest = threads[row.id]?.messages?.maxOfOrNull { it.messageId } ?: -1L
+            // ADR-0065 R.5 — read is marked in the conversation's CURRENT
+            // group (the store files it under the conversation id, with its
+            // segment); the older segments' local counts are cleared too.
+            val groupId = bytesOfHex(row.headId) ?: continue
+            for (hex in chats.conversationSegments(row.headId)) {
+                chats.setThreadOnScreen(hex, true)
+                chats.setThreadOnScreen(hex, false)
+            }
+            val highest = threads[row.headId]?.messages?.maxOfOrNull { it.messageId } ?: -1L
             try {
                 if (highest >= 0) {
                     sync.setReadCursor(

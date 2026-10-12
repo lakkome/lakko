@@ -26,7 +26,7 @@ import {
   sortIncomingRequests,
   type SentRequestRecord,
 } from "./contact-list-model";
-import { keyResetOfContact, type AcceptedContact } from "./local-store";
+import type { AcceptedContact } from "./local-store";
 
 /** What the add menu offers. Web has no contact QR flow, so there is no
  *  "Show my QR code" / "Scan QR code" here. */
@@ -54,9 +54,6 @@ export interface ContactListPaneProps {
   readonly pending: () => readonly IncomingContactRequest[];
   readonly pendingBusy: () => boolean;
   readonly error: () => string | null;
-  /** ADR-0065 phase 2 (UX 16.1) — when the error line is the keys-reset
-   *  refusal, the `Open contact` action beside it; `null` otherwise. */
-  readonly errorOpenContact?: () => (() => void) | null;
   readonly onAccept: (request: IncomingContactRequest) => void;
   readonly onDecline: (request: IncomingContactRequest) => void;
   readonly sent: () => readonly SentRequestRecord[];
@@ -141,16 +138,6 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
           {(message) => (
             <div class="form-error" style={{ margin: "0 12px 8px" }}>
               {message()}
-              <Show when={props.errorOpenContact?.()}>
-                {(open) => (
-                  <>
-                    {" "}
-                    <button type="button" class="ghost small" onClick={() => open()()}>
-                      {t("contacts.keys_reset.open_contact")}
-                    </button>
-                  </>
-                )}
-              </Show>
             </div>
           )}
         </Show>
@@ -267,25 +254,10 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                         <Avatar label={nameOf(c)} id={c.signaturePubkeyB64} />
                         <div class="lk-row-body">
                           <span class="lk-row-title">{nameOf(c)}</span>
-                          {/* ADR-0065 phase 2 (UX 16.1) — the row keeps its
-                              place and its name and gains the muted line; the
-                              glyph is never the only signal. */}
-                          <Show
-                            when={keyResetOfContact(c) !== undefined}
-                            fallback={
-                              <Show when={usernameOf(c)}>
-                                {(u) => <span class="lk-row-sub">{u()}</span>}
-                              </Show>
-                            }
-                          >
-                            <span class="lk-row-sub">{t("contacts.keys_reset.row_sub")}</span>
+                          <Show when={usernameOf(c)}>
+                            {(u) => <span class="lk-row-sub">{u()}</span>}
                           </Show>
                         </div>
-                        <Show when={keyResetOfContact(c) !== undefined}>
-                          <span class="lk-row-trailing" aria-hidden="true">
-                            <Icon name="shieldAlert" size={16} />
-                          </span>
-                        </Show>
                       </div>
                     )}
                   </For>

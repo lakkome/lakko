@@ -24,7 +24,6 @@ import me.lakko.app.transparency.LastSeenRootStore
 import me.lakko.app.transparency.LogVerifyStatus
 import me.lakko.app.transparency.TransparencyClient
 import me.lakko.app.transparency.TransparencyConfig
-import me.lakko.app.transparency.lookupServedKeyReset
 import me.lakko.app.transparency.verifyIdentityInLog
 import me.lakko.app.transparency.verifyRotationChain
 import uniffi.lakko_ffi_uniffi.ContactAck
@@ -141,6 +140,36 @@ public class ContactsClient(
      * the identity (no step is known).
      */
     private val mailboxKeyOf: (ByteArray) -> ByteArray = { it },
+    /**
+     * ADR-0065 R.2 - the signed-in account the reset ledger and the verified
+     * bindings below belong to (standard base64). Empty without a session
+     * (tests): the in-memory defaults then hold one anonymous namespace.
+     */
+    private val ownerAccountIdB64: String = "",
+    /** ADR-0065 R.2 - the accepted generation, the retired keys and the
+     *  reset's `signed_at`, per peer account ([ResetLedgerRow]). */
+    private val resetLedger: ResetLedgerStore = InMemoryResetLedgerStore(),
+    /** ADR-0065 R.2 - what this device verified for accounts it never
+     *  pinned ([VerifiedBinding]). */
+    private val verifiedBindings: VerifiedBindingStore = InMemoryVerifiedBindingStore(),
+    /** ADR-0066 section 3.5 - the proven predecessors of an account's pinned
+     *  key: an accepted reset retires them with it. */
+    private val provenPredecessorsOf: (accountIdB64: String, pinnedKeyB64: String) -> List<String> = { _, _ -> emptyList() },
+    /**
+     * ADR-0065 R.2 - told once a reset was ACCEPTED and the re-pin written.
+     * The default is the process-wide seam ([ResetEvents]), where the
+     * contacts repository re-keys the contact row and tells the chat layer.
+     * Never called for a refusal or for no verdict.
+     */
+    private val onResetAccepted: (event: ResetAccepted) -> Unit = ResetEvents::notifyResetAccepted,
+    /** ADR-0065 R.2 step 1 - the bundle's attestation under the trusted
+     *  attest key. The default runs `verifyKeyResetAttestation` under
+     *  [DeviceAttestKey] (the build-time pin, else the JWKS key); a test
+     *  injects the answer, since the host JVM loads no native library. */
+    private val resetAttestCheck: (suspend (accountId: ByteArray, servedPubkey: ByteArray, attestationB64: String?) -> AttestCheck)? = null,
+    /** ADR-0065 R.2 step 3 - the VERIFIED key-log answer for the served key.
+     *  The default runs [verifyIdentityInLog]; a test injects the answer. */
+    private val resetLogCheck: (suspend (accountId: ByteArray, servedPubkey: ByteArray) -> LogCheck)? = null,
 ) : AutoCloseable {
 
     override fun close() {
@@ -198,49 +227,10 @@ public class ContactsClient(
             throw ContactsError.wrap(e)
         } ?: throw ContactsError.noIdentityBundle(recipientAccountId)
 
-        // G-30 #2 (ADR-0019): snapshot the pin BEFORE gate 1 runs. Gate 1
-        // re-pins to the new key on a verified rotation (overwriting the
-        // pin), but gate 2's rotation-chain check needs the OLD pinned key +
-        // the OLD chain-version floor to anchor the chain. Capturing it here
-        // keeps gate 1 untouched.
-        val oldPin = pinStore.readPin(base64Encode(recipientAccountId))
-
-        // G-4 (ADR-0016) rule #2 — verify the fetched bundle's
-        // AccountIdentity key against the local pin BEFORE using its
-        // keys to seal a ContactRequest. A changed key with no valid
-        // supersession proof throws [SupersessionRefused] (fail-
-        // closed) and we never seal to the unverified new key. The
-        // supersession gate runs FIRST (and may throw) so a pin always
-        // exists for the additive log check below to record on.
-        try {
-            verifyBundleAccountKey(recipientAccountId, bundle)
-        } catch (refused: SupersessionRefused) {
-            // KT-log S4 — on a fail-closed refusal of an UNPROVEN CHANGED
-            // key (the moment the reset-vs-compromise distinction matters
-            // most), enrich the error with a BEST-EFFORT transparency
-            // lookup of the NEW key's `is_reset` marker. This NEVER weakens
-            // the gate: it already threw, we re-throw it unchanged save for
-            // the added context. Any log fault leaves `loggedReset` null.
-            throw enrichRefusal(refused, recipientAccountId, bundle, oldPin)
-        }
-
-        // KT-log S3e — ADDITIVE equivocation-detection layer on top of the
-        // supersession/pin gate. HARD-FAILS only on a ROLLBACK (the log
-        // shrank — an unambiguous attack, [LogRollbackDetected]); every
-        // other verdict is recorded + surfaced but does NOT block (the log
-        // is eventually-consistent and the supersession/pin gate is the
-        // primary trust). NEVER weakens the gate above — a
-        // [SupersessionRefused] propagates before this runs at all.
-        // G-30 #2 (ADR-0019): pass the OLD pin + the bundle's supersession
-        // proof so the log check can route a key ROTATION through the chain
-        // verifier (anchoring the transition to the operator-signed log)
-        // instead of the standalone single-key inclusion check.
-        checkTransparencyLog(
-            recipientAccountId,
-            base64Decode(bundle.signature_pubkey),
-            oldPin,
-            bundle.supersession_proof,
-        )
+        // G-4 (ADR-0016) rule #2, ADR-0065 R.2 and the additive KT-log layer:
+        // the bundle's AccountIdentity key against what this device holds,
+        // BEFORE its keys seal a ContactRequest ([gateIdentity]).
+        gateIdentity(recipientAccountId, bundle)
 
         val recipientSignaturePub = base64Decode(bundle.signature_pubkey)
         val recipientX25519Pub = base64Decode(bundle.x25519_pubkey)
@@ -302,32 +292,30 @@ public class ContactsClient(
             throw ContactsError.wrap(e)
         } ?: throw ContactsError.noIdentityBundle(recipientAccountId)
 
-        val oldPin = pinStore.readPin(base64Encode(recipientAccountId))
-        try {
-            verifyBundleAccountKey(recipientAccountId, bundle)
-        } catch (refused: SupersessionRefused) {
-            throw enrichRefusal(refused, recipientAccountId, bundle, oldPin)
-        }
-        checkTransparencyLog(
-            recipientAccountId,
-            base64Decode(bundle.signature_pubkey),
-            oldPin,
-            bundle.supersession_proof,
-        )
+        gateIdentity(recipientAccountId, bundle)
         return Pair(recipientAccountId, base64Decode(bundle.signature_pubkey))
     }
 
     /**
-     * ADR-0065 phase 2 / UX 16.1 point 2 — the identity check for an account
-     * already known by id (the scheduled device-list arm of ADR-0050 runs it
-     * for every account in every open chat): fetch the bundle, run the SAME
-     * fail-closed gate [sendContactRequest] runs, then the additive log check.
-     * Returns the served bundle's signature key on a clean verify; throws
-     * [SupersessionRefused] (enriched with the served key, the pinned key and
-     * the log marker) on a changed key without a proof. Returns `null` when the
-     * account has no bundle.
+     * ADR-0065 R.2 - fetch an account's published identity and run the
+     * fail-closed check ([gateIdentity]). One of the rule's triggers: the
+     * scheduled per-chat device check, opening a one-to-one, a send whose
+     * last check is old. Returns the served bundle's signature key on a clean
+     * verify and `null` when the account has no bundle.
+     *
+     * [heldKeyB64] is the roster's account key of a group member this device
+     * never pinned. Ignored when a pin exists. It is NOT taken as the held key
+     * on the caller's word (the account id may be a member's own claim):
+     * [memberHeldKey] decides. The first time the directory serves exactly
+     * this key a verified binding is recorded; a change is judged only from
+     * such a binding; anything else is [IdentityCheckInconclusive] and
+     * nothing is written.
+     *
+     * Throws [SupersessionRefused] for a change that is neither proven nor
+     * an attested reset; [IdentityCheckInconclusive] when that could not be
+     * established yet; a rollback and a network failure propagate too.
      */
-    public suspend fun checkPeerIdentity(accountId: ByteArray): ByteArray? {
+    public suspend fun checkPeerIdentity(accountId: ByteArray, heldKeyB64: String? = null): ByteArray? {
         val bundle = try {
             discovery.identityFetch(accountId)
         } catch (e: DiscoveryHttpError) {
@@ -335,11 +323,68 @@ public class ContactsClient(
         } catch (e: DiscoveryNetworkError) {
             throw ContactsError.wrap(e)
         } ?: return null
-        val oldPin = pinStore.readPin(base64Encode(accountId))
+        gateIdentity(accountId, bundle, heldKeyB64)
+        return base64Decode(bundle.signature_pubkey)
+    }
+
+    /**
+     * Verify a freshly-fetched peer identity bundle before its keys are
+     * used. Layers, in order:
+     *
+     *   1. the supersession / pin gate ([verifyBundleAccountKey], ADR-0016):
+     *      the primary, fail-closed trust;
+     *   2. ADR-0065 R.2: a CHANGED key with NO supersession proof is asked
+     *      whether it is an attested reset ([judgeReset]). Accepted: the
+     *      re-pin is written and the call proceeds as for any trusted key,
+     *      with nothing shown. Refused: the gate's own refusal, with the
+     *      copy the verdict names. No verdict: [IdentityCheckInconclusive],
+     *      nothing changes. A change that CAME with a proof which failed is
+     *      never a reset and stays the gate's refusal;
+     *   3. the additive key-log check ([checkTransparencyLog]), which
+     *      hard-fails only on a rollback.
+     *
+     * MUST run after every `identityFetch` and BEFORE the bundle's keys are
+     * used. `internal` so the host suite drives the whole decision.
+     */
+    internal suspend fun gateIdentity(
+        accountId: ByteArray,
+        bundle: IdentityFetchResponse,
+        heldKeyB64: String? = null,
+    ) {
+        val accountIdB64 = base64Encode(accountId)
+        // G-30 #2 (ADR-0019): snapshot the pin BEFORE gate 1 re-pins; the
+        // rotation-chain check anchors on the OLD pinned key and floor.
+        val oldPin = pinStore.readPin(accountIdB64)
         try {
-            verifyBundleAccountKey(accountId, bundle)
+            verifyBundleAccountKey(accountId, bundle, heldKeyB64)
         } catch (refused: SupersessionRefused) {
-            throw enrichRefusal(refused, accountId, bundle, oldPin)
+            if (refused.reason != SupersessionRefusedReason.ProofAbsent) {
+                refused.loggedReset = loggedResetForRefusal(accountId, bundle)
+                throw refused
+            }
+            // The held key is the pin, else the verified binding the gate
+            // judged the change from. A roster key is never the held key by
+            // itself.
+            val heldBinding = if (oldPin == null) verifiedBindings.read(ownerAccountIdB64, accountIdB64) else null
+            val verdict = judgeReset(
+                accountId = accountId,
+                bundle = bundle,
+                heldKeyB64 = oldPin?.pinnedSignaturePubkeyB64 ?: heldBinding?.keyB64,
+                acceptedGeneration = if (oldPin != null) {
+                    resetLedger.load(ownerAccountIdB64, accountIdB64)?.acceptedKeyGeneration ?: 0L
+                } else {
+                    heldBinding?.keyGeneration ?: 0L
+                },
+            )
+            when (verdict) {
+                is ResetVerdict.Refused -> {
+                    refused.loggedReset = if (verdict.why == ResetRefusal.UNEXPLAINED) false else null
+                    throw refused
+                }
+                ResetVerdict.NoVerdict -> throw IdentityCheckInconclusive(accountIdB64)
+                // Accepted and re-pinned: the log check ran inside the verdict.
+                is ResetVerdict.Accepted -> return
+            }
         }
         checkTransparencyLog(
             accountId,
@@ -347,30 +392,188 @@ public class ContactsClient(
             oldPin,
             bundle.supersession_proof,
         )
-        return base64Decode(bundle.signature_pubkey)
     }
 
     /**
-     * Attach to a fail-closed refusal everything a reset-aware caller needs
-     * (ADR-0065 phase 2): the key the directory served, its key generation,
-     * the key that was pinned, and the best-effort log marker. The refusal is
-     * re-thrown unchanged otherwise — the gate already decided.
+     * ADR-0065 R.2 - gather the rule's inputs for a proof-less key change
+     * and act on the verdict ([resetVerdict]). On `Accepted` the re-pin and
+     * the ledger row are written and [onResetAccepted] is told; nothing is
+     * shown anywhere. Never throws.
      */
-    private suspend fun enrichRefusal(
-        refused: SupersessionRefused,
+    private suspend fun judgeReset(
         accountId: ByteArray,
         bundle: IdentityFetchResponse,
-        oldPin: Pin?,
-    ): SupersessionRefused {
-        refused.servedPubkeyB64 = bundle.signature_pubkey
-        refused.servedKeyGeneration = bundle.key_generation
-        refused.pinnedPubkeyB64 = oldPin?.pinnedSignaturePubkeyB64
-        refused.loggedReset = bestEffortServedKeyReset(
-            accountId,
-            base64Decode(bundle.signature_pubkey),
+        heldKeyB64: String?,
+        acceptedGeneration: Long,
+    ): ResetVerdict {
+        val accountIdB64 = base64Encode(accountId)
+        if (heldKeyB64 == null) return ResetVerdict.NoVerdict
+        val servedPubkey = try {
+            base64Decode(bundle.signature_pubkey)
+        } catch (_: IllegalArgumentException) {
+            return ResetVerdict.Refused(ResetRefusal.UNCONFIRMED)
+        }
+        val attest = try {
+            (resetAttestCheck ?: ::checkResetAttestation)(accountId, servedPubkey, bundle.key_reset_attest)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            AttestCheck.Invalid
+        }
+        val log = try {
+            (resetLogCheck ?: ::verifiedLogCheck)(accountId, servedPubkey)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            LogCheck(LogVerifyStatus.UNREACHABLE, null)
+        }
+        val verdict = resetVerdict(
+            ResetVerdictInput(
+                heldKeyB64 = heldKeyB64,
+                acceptedGeneration = acceptedGeneration,
+                fetchedKeyB64 = bundle.signature_pubkey,
+                bundleGeneration = bundle.key_generation,
+                attest = attest,
+                log = log,
+            ),
         )
-        return refused
+        if (verdict !is ResetVerdict.Accepted) return verdict
+        val pin = pinStore.readPin(accountIdB64)
+        val plan = acceptResetPlan(
+            pin = pin,
+            row = resetLedger.load(ownerAccountIdB64, accountIdB64),
+            provenPredecessorsB64 = pin?.let {
+                try {
+                    provenPredecessorsOf(accountIdB64, it.pinnedSignaturePubkeyB64)
+                } catch (_: Throwable) {
+                    emptyList()
+                }
+            } ?: emptyList(),
+            reset = AcceptedReset(
+                accountIdB64 = accountIdB64,
+                heldKeyB64 = heldKeyB64,
+                newKeyB64 = bundle.signature_pubkey,
+                keyGeneration = verdict.keyGeneration,
+                signedAtMs = verdict.signedAtMs,
+                nowMs = System.currentTimeMillis(),
+            ),
+        )
+        when (plan) {
+            AcceptResetPlan.Stale -> return ResetVerdict.Refused(ResetRefusal.UNCONFIRMED)
+            AcceptResetPlan.Already -> Unit
+            is AcceptResetPlan.Accepted -> {
+                // The ledger row first: a crash between the two writes leaves
+                // the OLD pin with a raised generation, and the next fetch
+                // then reads the same attestation as not above it (refused,
+                // fail closed) rather than a re-pin nothing recorded as a
+                // reset.
+                try {
+                    resetLedger.save(ownerAccountIdB64, accountIdB64, plan.row)
+                } catch (_: Throwable) {
+                    return ResetVerdict.NoVerdict
+                }
+                if (pinStore.setPin(accountIdB64, bundle.signature_pubkey, plan.marker) != SetPinResult.Set) {
+                    return ResetVerdict.Refused(ResetRefusal.UNCONFIRMED)
+                }
+                // The log verdict and chain floor described the old key.
+                pinStore.recordLogVersion(accountIdB64, null)
+            }
+        }
+        // The account is pinned now: the pin is the verified binding.
+        verifiedBindings.drop(ownerAccountIdB64, accountIdB64)
+        pinStore.recordLogStatus(accountIdB64, log.status)
+        pinStore.recordLogReset(accountIdB64, log.isReset)
+        if (plan is AcceptResetPlan.Accepted) {
+            try {
+                onResetAccepted(
+                    ResetAccepted(
+                        ownerAccountIdB64 = ownerAccountIdB64,
+                        accountIdB64 = accountIdB64,
+                        previousKeyB64 = heldKeyB64,
+                        newKeyB64 = bundle.signature_pubkey,
+                        newX25519B64 = bundle.x25519_pubkey,
+                        keyGeneration = verdict.keyGeneration,
+                        signedAtMs = verdict.signedAtMs,
+                        retiredKeysB64 = plan.retiredKeysB64,
+                    ),
+                )
+            } catch (cause: Throwable) {
+                Log.w("lakko-contacts", "accepted reset not announced: ${cause.javaClass.simpleName}")
+            }
+        }
+        return verdict
     }
+
+    /** R.2 step 1: the bundle's attestation under the trusted attest key (the
+     *  build-time pin when set, else the cached JWKS key). */
+    private suspend fun checkResetAttestation(
+        accountId: ByteArray,
+        servedPubkey: ByteArray,
+        attestationB64: String?,
+    ): AttestCheck {
+        if (attestationB64.isNullOrEmpty()) return AttestCheck.Absent
+        val attestation = try {
+            base64Decode(attestationB64)
+        } catch (_: IllegalArgumentException) {
+            return AttestCheck.Invalid
+        }
+        val attestKey = try {
+            DeviceAttestKey.fetch()
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            return AttestCheck.NoKey
+        }
+        return try {
+            val verified = uniffi.lakko_ffi_uniffi.verifyKeyResetAttestation(attestation, attestKey, accountId, servedPubkey)
+            AttestCheck.Verified(verified.keyGeneration.toLong(), verified.signedAtMillis)
+        } catch (_: Throwable) {
+            AttestCheck.Invalid
+        }
+    }
+
+    /** R.2 step 3: the key log read through the VERIFIED path (root
+     *  signature, no-rollback, the witness gate when pinned, inclusion). */
+    private suspend fun verifiedLogCheck(accountId: ByteArray, servedPubkey: ByteArray): LogCheck {
+        val client = try {
+            transparencyClientFactory()
+        } catch (_: Throwable) {
+            return LogCheck(LogVerifyStatus.UNREACHABLE, null)
+        } ?: return LogCheck(LogVerifyStatus.OFF, null)
+        return client.use { c ->
+            val result = verifyIdentityInLog(
+                accountId = accountId,
+                publishedSignaturePubkey = servedPubkey,
+                client = c,
+                operatorKey = TransparencyConfig.pinnedOperatorKey(),
+                lastSeenRoot = lastSeenRoot,
+                witnessKeys = TransparencyConfig.pinnedWitnessKeys(),
+                witnessThreshold = TransparencyConfig.witnessThreshold(),
+            )
+            LogCheck(result.status, result.isReset)
+        }
+    }
+
+    /**
+     * The copy marker for a refusal that is NOT a reset question (a proof
+     * that failed, a proof for another key): `false` only when the key log,
+     * read through the VERIFIED path, shows the served key without a reset.
+     * Never throws.
+     */
+    private suspend fun loggedResetForRefusal(accountId: ByteArray, bundle: IdentityFetchResponse): Boolean? =
+        try {
+            val log = (resetLogCheck ?: ::verifiedLogCheck)(accountId, base64Decode(bundle.signature_pubkey))
+            if (log.status == LogVerifyStatus.CONFIRMED && log.isReset == false) false else null
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            null
+        }
+
+    /** ADR-0065 R.2: the generation this device last accepted for an account
+     *  (0 when it never recorded one). */
+    public fun acceptedGenerationOf(accountIdB64: String): Long =
+        resetLedger.load(ownerAccountIdB64, accountIdB64)?.acceptedKeyGeneration ?: 0L
 
     /**
      * ADR-0048 §3 — resolve a username to the `account_id` discovery holds for
@@ -456,9 +659,6 @@ public class ContactsClient(
         /** ADR-0060 §2 — what authorises the write (a link grant from the
          *  capability, or a grant found through search). */
         reach: DsReachAuth? = null,
-        /** UX 16.1 — the recipient is a contact flagged `reset-unverified`
-         *  on this device; see [gateBundleRecipient]. */
-        resetUnverified: Boolean = false,
     ): SendResult {
         // ADR-0066 section 3.5a rule 1 - resolve before addressing. A bundle
         // carried by a link or a search result may name a key its owner has
@@ -476,7 +676,7 @@ public class ContactsClient(
         }
         // Before anything is composed: these keys did not come through the
         // fetch gate (or just did, and then this is the unchanged-pin case).
-        gateBundleRecipient(recipientAccountId, toSignaturePub, resetUnverified)
+        gateBundleRecipient(recipientAccountId, toSignaturePub)
         val publish = composeAndPublishContactRequest(
             senderSigningSeed = senderSigningSeed,
             senderAccountId = senderAccountId,
@@ -512,18 +712,7 @@ public class ContactsClient(
         } catch (e: DiscoveryNetworkError) {
             throw ContactsError.wrap(e)
         } ?: throw ContactsError.noIdentityBundle(accountId)
-        val oldPin = pinStore.readPin(base64Encode(accountId))
-        try {
-            verifyBundleAccountKey(accountId, bundle)
-        } catch (refused: SupersessionRefused) {
-            throw enrichRefusal(refused, accountId, bundle, oldPin)
-        }
-        checkTransparencyLog(
-            accountId,
-            base64Decode(bundle.signature_pubkey),
-            oldPin,
-            bundle.supersession_proof,
-        )
+        gateIdentity(accountId, bundle)
         return Pair(base64Decode(bundle.signature_pubkey), base64Decode(bundle.x25519_pubkey))
     }
 
@@ -588,42 +777,30 @@ public class ContactsClient(
     }
 
     /**
-     * UX 16.1 / ADR-0016 rule 2 — the gate for keys handed to this client
-     * instead of fetched through it ([bundleRecipientVerdict]). Throws
-     * [SupersessionRefused] and sends nothing when the account is a flagged
-     * contact, or is pinned to another key that the directory cannot explain.
+     * ADR-0016 rule 2 / ADR-0065 R.2 - the gate for keys handed to this
+     * client instead of fetched through it ([contactRequestGate]). Call it
+     * BEFORE anything is spent or sent.
      *
-     * A pinned-but-different key is first put to the real gate
-     * ([checkPeerIdentity]): a rotation carrying a valid proof re-pins there
-     * and the send goes on; a reset throws the enriched refusal, which is
-     * what flags the contact; anything else — no bundle, or a directory that
-     * names a third key — is refused here. A network failure propagates, so
-     * the answer is never "send" by default. A stranger (no pin) costs no
-     * request and is never refused.
+     * - no pin for the account (a stranger): passes, at no request;
+     * - a pinned account under a key that is not the pin: the published
+     *   identity is fetched and run through the fail-closed gate (an attested
+     *   reset is accepted there, silently; an unproven change is the gate's
+     *   own [SupersessionRefused]); if the gate passes and the key is STILL
+     *   not the pin (an old link naming a superseded key), the send is
+     *   refused as a key mismatch. Old keys do not come back.
+     *
+     * A network failure propagates, so the answer is never "send" by default.
      */
     public suspend fun gateBundleRecipient(
         recipientAccountId: ByteArray,
         recipientSignaturePubkey: ByteArray,
-        resetUnverified: Boolean,
     ) {
         val accountIdB64 = base64Encode(recipientAccountId)
         val recipientKeyB64 = base64Encode(recipientSignaturePubkey)
         val pinned = pinStore.readPin(accountIdB64)?.pinnedSignaturePubkeyB64
-        when (bundleRecipientVerdict(resetUnverified, pinned, recipientKeyB64)) {
-            BundleRecipientVerdict.SEND -> return
-            BundleRecipientVerdict.REFUSE_RESET_UNVERIFIED ->
-                throw SupersessionRefused(
-                    reason = SupersessionRefusedReason.ProofAbsent,
-                    accountIdB64 = accountIdB64,
-                    message = "this contact's account keys were reset and the new " +
-                        "safety number is not verified yet — nothing is sent.",
-                ).also {
-                    // The state is already recorded; this only makes the UI
-                    // answer `Verify ... first` with `Open contact`.
-                    it.loggedReset = true
-                    it.pinnedPubkeyB64 = pinned
-                }
-            BundleRecipientVerdict.REFUSE_KEY_CHANGED -> {
+        when (contactRequestGate(pinned, recipientKeyB64)) {
+            ContactRequestGateVerdict.SEND -> return
+            ContactRequestGateVerdict.CHECK_IDENTITY -> {
                 checkPeerIdentity(recipientAccountId)
                 val now = pinStore.readPin(accountIdB64)?.pinnedSignaturePubkeyB64
                 if (now != recipientKeyB64) {
@@ -633,7 +810,7 @@ public class ContactsClient(
                         message = "the keys named for this account are not the " +
                             "pinned ones and the directory does not authorise " +
                             "them — refusing. Please re-verify out of band.",
-                    ).also { it.pinnedPubkeyB64 = now }
+                    )
                 }
             }
         }
@@ -687,6 +864,9 @@ public class ContactsClient(
     internal fun verifyBundleAccountKey(
         accountId: ByteArray,
         bundle: IdentityFetchResponse,
+        /** ADR-0065 R.2: the roster's account key of a member this device
+         *  never pinned ([checkPeerIdentity]). Ignored when a pin exists. */
+        heldKeyB64: String? = null,
     ) {
         // `pinStore` is non-null by construction (see the ctor doc), so the
         // gate can never be silently skipped — it always runs.
@@ -694,16 +874,66 @@ public class ContactsClient(
         val accountIdB64 = base64Encode(accountId)
         val fetchedPubkeyB64 = bundle.signature_pubkey
 
-        val existing = store.readPin(accountIdB64)
+        val pinned = store.readPin(accountIdB64)
+        // With no pin, what this device HOLDS for the account is a VERIFIED
+        // BINDING, never the roster key on the strength of a claimed account
+        // id: a member's own profile can name any id.
+        val binding = if (pinned == null) verifiedBindings.read(ownerAccountIdB64, accountIdB64) else null
+        var existing: Pin? = pinned
+        var existingGeneration: Long? = null
+        if (pinned == null && heldKeyB64 != null) {
+            // The member path: a roster key under an account id this device
+            // never pinned. Nothing is pinned here.
+            when (val held = memberHeldKey(false, binding, heldKeyB64, fetchedPubkeyB64)) {
+                MemberHeldVerdict.Record -> {
+                    // The directory serves exactly the roster key: this device
+                    // has now seen the binding for itself. A first
+                    // observation, never a reset.
+                    verifiedBindings.record(
+                        ownerAccountIdB64,
+                        accountIdB64,
+                        VerifiedBinding(fetchedPubkeyB64, maxOf(0L, bundle.key_generation), System.currentTimeMillis()),
+                    )
+                    return
+                }
+                MemberHeldVerdict.Confirmed -> return
+                is MemberHeldVerdict.Held -> {
+                    existing = Pin(held.heldKeyB64, 0L)
+                    existingGeneration = held.acceptedGeneration
+                }
+                // Nothing is established for this roster key under this
+                // account id (a claimed id, or a first sight of an account
+                // that already moved on): no verdict, nothing done.
+                MemberHeldVerdict.Pin, MemberHeldVerdict.None -> throw IdentityCheckInconclusive(accountIdB64)
+            }
+        } else if (pinned == null && binding != null) {
+            // A caller with no roster key (a contact request, a search
+            // result): the binding this device verified earlier stands in
+            // for the pin, so a key that changed since is a CHANGE, not a
+            // first observation.
+            existing = Pin(binding.keyB64, 0L)
+            existingGeneration = binding.keyGeneration
+        }
 
-        // Case 2 — first-ever observation. TOFU-pin and proceed.
+        // Case 1 — first-ever observation. TOFU-pin and proceed. The bundle's
+        // generation is recorded as the accepted-generation baseline (R.2).
         if (existing == null) {
             store.setPin(accountIdB64, fetchedPubkeyB64, 0L)
+            recordGenerationBaseline(accountIdB64, bundle.key_generation)
             return
         }
 
-        // Case 3 — unchanged key. Nothing to verify.
+        // Case 2 — unchanged key. Nothing to verify. A pin from before the
+        // generation was recorded takes its baseline now; a verified binding
+        // met on the contact path becomes the pin, keeping its baseline.
         if (existing.pinnedSignaturePubkeyB64 == fetchedPubkeyB64) {
+            if (pinned == null) {
+                store.setPin(accountIdB64, fetchedPubkeyB64, 0L)
+                recordGenerationBaseline(accountIdB64, existingGeneration ?: bundle.key_generation)
+                verifiedBindings.drop(ownerAccountIdB64, accountIdB64)
+            } else {
+                recordGenerationBaseline(accountIdB64, bundle.key_generation)
+            }
             return
         }
 
@@ -796,6 +1026,12 @@ public class ContactsClient(
                     "Please re-verify out of band.",
             )
         }
+        // The account is pinned now: the pin is the verified binding, and
+        // the generation baseline travels with it.
+        if (pinned == null) {
+            verifiedBindings.drop(ownerAccountIdB64, accountIdB64)
+            recordGenerationBaseline(accountIdB64, existingGeneration ?: bundle.key_generation)
+        }
         // ADR-0066 section 3.5 - a PROVEN rotation: the key pinned until
         // now stays the binding of the conversation leaves that exist, as
         // the same person. Nothing is flagged, closed, evicted or shown
@@ -813,61 +1049,16 @@ public class ContactsClient(
         )
     }
 
-    /**
-     * KT-log S4 — best-effort lookup of the served (refused) key's
-     * `is_reset` marker, used ONLY to enrich a [SupersessionRefused].
-     *
-     * Mirror of the web `ContactsClient.bestEffortServedKeyReset`. Wraps
-     * [lookupServedKeyReset] (which itself never throws) and swallows any
-     * throw — including a factory misconfiguration — to a `null`, so the
-     * enrichment can never break the already-failing refusal path. Returns
-     * `true` / `false` only when the log's latest entry commits to exactly
-     * the served key; `null` otherwise (off / unreachable / absent /
-     * pubkey-divergence).
-     *
-     * `internal` (not `private`) so the instrumented test suite can drive
-     * it directly against a `MockEngine`-backed transparency client.
-     *
-     * @param accountId    the peer's raw 16-byte account_id.
-     * @param servedPubkey the 32-byte Ed25519 key discovery served (the
-     *                     refused NEW key).
-     */
-    internal suspend fun bestEffortServedKeyReset(
-        accountId: ByteArray,
-        servedPubkey: ByteArray,
-    ): Boolean? {
-        val client = try {
-            transparencyClientFactory()
-        } catch (cause: Throwable) {
-            // A factory that throws (misconfiguration) must NOT break the
-            // refusal enrichment — the marker is simply unknown.
-            Log.w(
-                "lakko-contacts",
-                "transparency: client factory threw during best-effort reset " +
-                    "lookup (refusal stands; loggedReset stays null)",
-                cause,
-            )
-            return null
-        }
-        if (client == null) return null
-        return try {
-            client.use { c ->
-                lookupServedKeyReset(
-                    accountId = accountId,
-                    servedSignaturePubkey = servedPubkey,
-                    client = c,
-                )
-            }
-        } catch (cause: Throwable) {
-            // lookupServedKeyReset is designed not to throw, but the .use
-            // close() or any unexpected path must never break the refusal.
-            Log.w(
-                "lakko-contacts",
-                "transparency: best-effort reset lookup threw (refusal " +
-                    "stands; loggedReset stays null)",
-                cause,
-            )
-            null
+    /** R.2 - the bundle's generation as the accepted-generation baseline,
+     *  when the account holds none. Best-effort: a failed write leaves the
+     *  baseline at 0, which only makes a later reset easier to tell apart,
+     *  never easier to accept (the attestation still has to verify). */
+    private fun recordGenerationBaseline(accountIdB64: String, bundleGeneration: Long) {
+        try {
+            val next = withGenerationBaseline(resetLedger.load(ownerAccountIdB64, accountIdB64), bundleGeneration) ?: return
+            resetLedger.save(ownerAccountIdB64, accountIdB64, next)
+        } catch (_: Throwable) {
+            // best-effort
         }
     }
 
@@ -1745,19 +1936,20 @@ public class SupersessionRefused(
      */
     public var loggedReset: Boolean? = null
 
-    /** ADR-0065 phase 2 — the key the directory served (standard base64), the
-     *  `pendingKey` of UX 16.8 when [loggedReset] is `true`. `null` when the
-     *  refusal was raised outside the fetch path. */
-    public var servedPubkeyB64: String? = null
-
-    /** ADR-0065 phase 2 — the directory's `key_generation` for the served
-     *  key, when known. */
-    public var servedKeyGeneration: Long? = null
-
-    /** ADR-0065 phase 2 — the key pinned before the refusal (standard base64),
-     *  the `previousKey` of UX 16.8. */
-    public var pinnedPubkeyB64: String? = null
 }
+
+/**
+ * ADR-0065 R.2 - the identity check of an account could not be decided yet:
+ * the attest key or the key log could not be reached, or nothing is
+ * established for a roster key under a claimed account id. Nothing was
+ * written and nothing is shown; the caller asks again at the next trigger.
+ * Never a refusal: an action that needs the answer does not proceed, and
+ * says nothing about the contact.
+ */
+public class IdentityCheckInconclusive(
+    /** base64 of the account id whose check has no verdict. */
+    public val accountIdB64: String,
+) : RuntimeException("identity check inconclusive")
 
 /**
  * KT-log S3e — thrown when the transparency log's signed root reports a

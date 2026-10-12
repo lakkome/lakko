@@ -25,7 +25,9 @@
 import type { ReachGrant as WasmReachGrant } from "../../wasm/lakko_ffi_wasm";
 import type { MailboxWriteAuth } from "../ds/client";
 import { journalHex, type ProofSigner } from "../ds/access";
-import { base64Decode } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
+import { acceptedResetOfKey } from "../contacts/local-store";
+import { continuityKeyUsable } from "./continuity";
 import { loadWasm } from "../wasm";
 import { personKeysHex, resolveAccountKey } from "../contacts/address-resolver";
 import {
@@ -37,7 +39,21 @@ import {
 import { reachSession, reachSignerForGrant, reachSignerForGrantWire } from "./reach-service";
 
 /** Which rule authorised a write. */
-export type WriteAuthKind = "own" | "explicit" | "kept" | "delegation" | "none";
+export type WriteAuthKind = "own" | "explicit" | "kept" | "continuity" | "delegation" | "none";
+
+/**
+ * ADR-0065 R.4 - the continuity reach key of an account whose reset this
+ * device ACCEPTED: derived from the account id and the attested generation,
+ * registered by the resetting device on its new mailbox. A Welcome to the
+ * new identity is signed with it when no grant issued by the new identity
+ * is held yet.
+ */
+export interface ContinuityAuth {
+  /** The 16-byte account id the reset was accepted for. */
+  readonly accountId: Uint8Array;
+  /** The accepted generation. */
+  readonly keyGeneration: number;
+}
 
 /** The pure decision, over what the caller could find. */
 export function chooseWriteAuth(facts: {
@@ -160,8 +176,11 @@ export async function resolveWriteAuth(
       return released(kind, await reachSignerForGrantWire(kept!.wireB64), null);
     case "delegation":
       return released(kind, await delegation!.signer(), delegationHeader);
+    // `chooseWriteAuth` never answers `continuity`: that key is a candidate
+    // of `planWriteToPerson` only.
+    case "continuity":
     case "none":
-      return released(kind, null, null);
+      return released("none", null, null);
   }
 }
 
@@ -322,8 +341,21 @@ export async function planWriteToPerson(
     readonly explicit?: WasmReachGrant | string | null;
     readonly allowMember?: boolean;
     readonly neverUnsigned?: boolean;
+    /** ADR-0065 R.4: tried after every grant the person itself issued (once
+     *  the new identity is in a conversation its own grants are used and
+     *  this key is not), before a committer delegation. */
+    readonly continuity?: ContinuityAuth | null;
   } = {},
 ): Promise<WritePlan> {
+  // A Welcome (`allowMember`) to the new identity of an account whose reset
+  // this device accepted resolves the continuity key by itself, so every
+  // Welcome path (a direct add, the sweep, the outbox replay) signs alike.
+  const continuity =
+    options.continuity !== undefined
+      ? options.continuity
+      : options.allowMember === true
+        ? continuityFor(targetAccountKey, Date.now())
+        : null;
   const session = reachSession();
   const mailbox = await accountMailboxOf(targetAccountKey);
   const personHexes = personKeysHex(journalHex(targetAccountKey));
@@ -368,16 +400,30 @@ export async function planWriteToPerson(
   }
   const candidates: WriteCandidate[] = [];
   if (session !== null) {
-    for (const held of grantsInOrderForPerson(session.receivedGrants(), personHexes, {
-      ...(options.scope === undefined ? {} : { scopeHex: journalHex(options.scope) }),
-      allowMember: options.allowMember === true,
-    })) {
-      candidates.push({
-        kind: "kept",
-        resolve: async () => released("kept", await reachSignerForGrantWire(held.wireB64), null),
-      });
+    // ADR-0065 R.7 case 3 - a Welcome into the successor of a conversation
+    // may use the `member` key the person granted for the conversation's
+    // EARLIER group: the lineage makes it the same conversation. The scope
+    // itself is tried first; each grant once.
+    const scopeHexes =
+      options.scope === undefined
+        ? [undefined]
+        : [journalHex(options.scope), ...scopeLineage(journalHex(options.scope))];
+    const offered = new Set<string>();
+    for (const scopeHex of scopeHexes) {
+      for (const held of grantsInOrderForPerson(session.receivedGrants(), personHexes, {
+        ...(scopeHex === undefined ? {} : { scopeHex }),
+        allowMember: options.allowMember === true,
+      })) {
+        if (offered.has(held.wireB64)) continue;
+        offered.add(held.wireB64);
+        candidates.push({
+          kind: "kept",
+          resolve: async () => released("kept", await reachSignerForGrantWire(held.wireB64), null),
+        });
+      }
     }
     const delegation = await delegationFor(personHexes);
+    if (continuity !== null) candidates.push(continuityCandidate(continuity));
     if (delegation !== null) {
       candidates.push({
         kind: "delegation",
@@ -385,10 +431,67 @@ export async function planWriteToPerson(
       });
     }
   }
+  // With no reach session (nothing kept, no delegation) the continuity key is
+  // still derivable: it needs nothing this account holds.
+  if (session === null && continuity !== null) candidates.push(continuityCandidate(continuity));
   if (candidates.length === 0 && options.neverUnsigned !== true) {
     candidates.push({ kind: "none", resolve: () => Promise.resolve(released("none", null, null)) });
   }
   return { mailbox, candidates };
+}
+
+/**
+ * The continuity key a Welcome to `targetAccountKey` may be signed with
+ * (R.4), or `null`: only when that key is the one an accepted reset re-pinned
+ * this device to, and only inside the key's window, counted from the
+ * attestation's `signed_at` this device verified. Reads the pin store;
+ * never throws.
+ */
+export function continuityFor(targetAccountKey: Uint8Array, nowMs: number): ContinuityAuth | null {
+  try {
+    const reset = acceptedResetOfKey(base64Encode(targetAccountKey));
+    if (reset === null || !continuityKeyUsable(reset.signedAtMs, nowMs)) return null;
+    return { accountId: base64Decode(reset.accountIdB64), keyGeneration: reset.keyGeneration };
+  } catch {
+    return null;
+  }
+}
+
+/** The continuity key as one write candidate; the seed is derived only when
+ *  the candidate is about to be tried, and wiped after. */
+function continuityCandidate(continuity: ContinuityAuth): WriteCandidate {
+  return {
+    kind: "continuity",
+    resolve: async () => {
+      const wasm = await loadWasm();
+      const seed = wasm.continuityReachSeed(continuity.accountId, BigInt(continuity.keyGeneration));
+      try {
+        return released("continuity", wasm.DsProofSigner.forReach(seed), null);
+      } finally {
+        seed.fill(0);
+      }
+    },
+  };
+}
+
+/** The earlier groups of the conversation a scope continues, as hex, or
+ *  nothing (ADR-0065 R.5). Installed by the runtime that holds the lineage. */
+export type ScopeLineage = (scopeHex: string) => readonly string[];
+
+let installedScopeLineage: ScopeLineage | null = null;
+
+/** Install (or, with `null`, remove) the lineage a Welcome's grant scope is
+ *  widened through. */
+export function installScopeLineage(lineage: ScopeLineage | null): void {
+  installedScopeLineage = lineage;
+}
+
+function scopeLineage(scopeHex: string): readonly string[] {
+  try {
+    return (installedScopeLineage?.(scopeHex) ?? []).filter((hex) => hex !== scopeHex);
+  } catch {
+    return [];
+  }
 }
 
 /** Re-checks the address of the person a key names (rule 6): fetch their
@@ -420,6 +523,8 @@ export async function writeToPerson<T>(
      *  {@link MailboxUnreachableError} so the caller keeps it owed. */
     readonly neverUnsigned?: boolean;
     readonly recheck?: AddressRecheck | null;
+    /** ADR-0065 R.4: see {@link planWriteToPerson}. */
+    readonly continuity?: ContinuityAuth | null;
   },
   write: (mailbox: Uint8Array, auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
 ): Promise<T> {

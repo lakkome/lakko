@@ -2226,46 +2226,6 @@
       "text": "Поделиться",
       "status": "machine"
     },
-    "chat.keys_reset.bubble_warning": {
-      "text": "Не подтверждён(а) с тех пор, как {name} сбросил(а) ключи аккаунта.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_being_removed": {
-      "text": "Ключи аккаунта сброшены. Удаляется.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_flag": {
-      "text": "Ключи аккаунта сброшены.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_closed": {
-      "text": "{name} сбросил(а) ключи аккаунта. Этот чат закрыт.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_composer": {
-      "text": "Вы больше не можете отправлять сообщения в этот чат.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_row": {
-      "text": "Чат закрыт. {name} сбросил(а) ключи аккаунта.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice": {
-      "text": "{name}, владелец этой группы, сбросил(а) ключи аккаунта. Старые устройства владельца нельзя удалить из группы, и у группы не может появиться новый владелец. Чтобы продолжить общаться безопасно, создайте группу заново.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice_member": {
-      "text": "Администратор может создать её заново.",
-      "status": "machine"
-    },
-    "chat.keys_reset.start_new_chat": {
-      "text": "Начать новый чат",
-      "status": "machine"
-    },
-    "chat.keys_reset.system_removed": {
-      "text": "{name} сбросил(а) ключи аккаунта. Старые устройства этого участника удалены из группы.",
-      "status": "machine"
-    },
     "chat.leave.action": {
       "text": "Выйти из группы",
       "status": "machine"
@@ -3854,14 +3814,6 @@
       "text": "Не удалось начать чат. Попробуйте ещё раз.",
       "status": "machine"
     },
-    "contacts.identity_changed.reset": {
-      "text": "Ключи аккаунта {name} сброшены (например, после потери устройства). Журнал прозрачности подтверждает, что сброс выполнил владелец аккаунта. Если вы уверены, что это действительно этот человек, перед продолжением снова сверьте код безопасности по другому каналу связи.",
-      "status": "machine"
-    },
-    "contacts.identity_changed.reset_unnamed": {
-      "text": "Ключи аккаунта этого контакта сброшены (например, после потери устройства). Журнал прозрачности подтверждает, что сброс выполнил владелец аккаунта. Если вы уверены, что это действительно этот человек, перед продолжением снова сверьте код безопасности по другому каналу связи.",
-      "status": "machine"
-    },
     "contacts.identity_changed.unconfirmed": {
       "text": "Ключи аккаунта {name} изменились, и это не удалось подтвердить по журналу прозрачности. Прежде чем доверять, проверьте по другому каналу связи.",
       "status": "machine"
@@ -3884,38 +3836,6 @@
     },
     "contacts.invite_links.title": {
       "text": "Ссылки-приглашения",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner": {
-      "text": "{name} сбросил(а) ключи аккаунта. Сверьте новый код безопасности, прежде чем снова писать этому контакту.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_action": {
-      "text": "Сверить",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_unnamed": {
-      "text": "Этот контакт сбросил ключи аккаунта. Сверьте новый код безопасности, прежде чем снова ему писать.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.open_contact": {
-      "text": "Открыть контакт",
-      "status": "machine"
-    },
-    "contacts.keys_reset.picker_sub": {
-      "text": "Ключи аккаунта сброшены. Сначала сверьте новый код безопасности.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.row_sub": {
-      "text": "Ключи аккаунта сброшены. Сверьте новый код безопасности.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first": {
-      "text": "Сначала сверьте новый код безопасности контакта {name}.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first_short": {
-      "text": "Сначала сверьте новый код безопасности.",
       "status": "machine"
     },
     "contacts.list.add": {
@@ -4056,54 +3976,6 @@
     },
     "contacts.safety.number": {
       "text": "Код безопасности",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body": {
-      "text": "Ключи аккаунта контакта {name} были сброшены, поэтому код безопасности, который вы, возможно, сверяли раньше, больше не действует. Сверьте этот новый код с {name} при встрече или во время звонка.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body_unnamed": {
-      "text": "Ключи аккаунта этого контакта были сброшены, поэтому код безопасности, который вы, возможно, сверяли раньше, больше не действует. Сверьте этот новый код с контактом при встрече или во время звонка.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox": {
-      "text": "Я сверил(а) новый код безопасности с {name}, и он совпал.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox_unnamed": {
-      "text": "Я сверил(а) новый код безопасности с этим контактом, и он совпал.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirm": {
-      "text": "Я сверил(а) новый код безопасности",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirming": {
-      "text": "Проверка...",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done": {
-      "text": "{name} снова подтверждён(а).",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done_unnamed": {
-      "text": "Этот контакт снова подтверждён.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.save_failed": {
-      "text": "Не удалось сохранить. Попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.title": {
-      "text": "Сверьте новый код безопасности",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning": {
-      "text": "Если вы подтвердите без сверки, тот, кто завладел аккаунтом {name}, будет выглядеть для вас как {name}.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning_unnamed": {
-      "text": "Если вы подтвердите без сверки, тот, кто завладел этим аккаунтом, будет выглядеть для вас как ваш контакт.",
       "status": "machine"
     },
     "contacts.safety.row_sub": {
@@ -5778,26 +5650,6 @@
       "text": "{name}, {count, plural, one {# непрочитанный чат} few {# непрочитанных чата} many {# непрочитанных чатов} other {# непрочитанного чата}}",
       "status": "machine"
     },
-    "group.closed.composer": {
-      "text": "Эта группа закрыта.",
-      "status": "machine"
-    },
-    "group.closed.open_new": {
-      "text": "Открыть новую группу",
-      "status": "machine"
-    },
-    "group.closed.panel": {
-      "text": "Эта группа закрыта. Продолжайте в группе «{name}».",
-      "status": "machine"
-    },
-    "group.closed.row": {
-      "text": "Группа закрыта",
-      "status": "machine"
-    },
-    "group.closed.system": {
-      "text": "{name} закрыл(а) эту группу после сброса ключей аккаунта владельца.",
-      "status": "machine"
-    },
     "group.join.needs_account": {
       "text": "Чтобы запросить вступление, нужен аккаунт. Создайте его или войдите.",
       "status": "machine"
@@ -5844,38 +5696,6 @@
     },
     "group.join.wait_secondary": {
       "text": "Ни у одного из шагов нет ограничения по времени. Если ничего не происходит, запрос можно отправить снова.",
-      "status": "machine"
-    },
-    "group.recreate.action": {
-      "text": "Создать группу заново",
-      "status": "machine"
-    },
-    "group.recreate.done": {
-      "text": "Готово",
-      "status": "machine"
-    },
-    "group.recreate.excluded_reset": {
-      "text": "Ключи аккаунта сброшены. Сверьте новый код безопасности, чтобы включить этого участника.",
-      "status": "machine"
-    },
-    "group.recreate.members_heading": {
-      "text": "Участники ({count})",
-      "status": "machine"
-    },
-    "group.recreate.note": {
-      "text": "Старая группа остаётся как есть для всех, пока вы её не закроете.",
-      "status": "machine"
-    },
-    "group.recreate.submit": {
-      "text": "Создать и закрыть старую группу",
-      "status": "machine"
-    },
-    "group.recreate.title": {
-      "text": "Создать группу заново",
-      "status": "machine"
-    },
-    "group.recreate.working": {
-      "text": "Создание...",
       "status": "machine"
     },
     "invite.contact.accept_failed": {
@@ -6807,7 +6627,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "Ваши контакты увидят, что ваш код безопасности изменился, и им нужно будет снова подтвердить вас, прежде чем безопасно переписываться с вами.",
+      "text": "Ваши контакты сохранят чаты с вами. Ваш код безопасности изменится.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -6935,7 +6755,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_contacts": {
-      "text": "Ваши контакты увидят, что ваш код безопасности изменился, и должны будут снова подтвердить вас, прежде чем безопасно переписываться с вами.",
+      "text": "Ваши контакты сохранят чаты с вами. Ваш код безопасности изменится.",
       "status": "machine"
     },
     "restore_identity.reset.effect_devices": {

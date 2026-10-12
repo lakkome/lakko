@@ -271,13 +271,20 @@ public enum NsePushOutcome: Equatable {
 public struct NsePushPreview: Equatable {
     public let title: String
     public let body: String
-    /// The group hex — collapses a burst into one grouped notification.
+    /// The conversation hex — collapses a burst into one grouped
+    /// notification. The group's own hex unless the group continues another
+    /// conversation (ADR-0065 R.5).
     public let tag: String
+    /// ADR-0065 R.5 — whether the group this preview came from continues
+    /// another conversation, so ``tag`` (the conversation) is what the
+    /// notification is grouped under rather than the wake's own routing id.
+    public let movedConversation: Bool
 
-    public init(title: String, body: String, tag: String) {
+    public init(title: String, body: String, tag: String, movedConversation: Bool = false) {
         self.title = title
         self.body = body
         self.tag = tag
+        self.movedConversation = movedConversation
     }
 }
 
@@ -390,11 +397,19 @@ public protocol NsePushDecryptDeps {
     /// answer "not muted", so the call rings. Failing the other way would
     /// swallow calls because a file was not there.
     func isMuted(accountIdB64: String, groupIdHex: String) -> Bool
+
+    /// ADR-0065 R.5 — the conversation `groupIdHex` belongs to, hex: the
+    /// group itself unless it continues another conversation. What a
+    /// notification is grouped under, so a conversation that moved to a new
+    /// group keeps one stack. READ-ONLY, from the App Group lineage mirror
+    /// (C-59).
+    func conversationHex(accountIdB64: String, groupIdHex: String) -> String
 }
 
 public extension NsePushDecryptDeps {
     func callerName(accountIdB64: String, groupIdHex: String) -> String? { nil }
     func isMuted(accountIdB64: String, groupIdHex: String) -> Bool { false }
+    func conversationHex(accountIdB64: String, groupIdHex: String) -> String { groupIdHex }
 }
 
 /// Produce a real decrypted notification preview for a GroupMessage wake, or
@@ -557,6 +572,10 @@ public func decryptPushOutcome(
     //    A call-signaling row is classified separately and OUTRANKS a message
     //    (see this function's docs): the newest call event decides, and an
     //    `end` for a call cancels its own `offer` from the same batch.
+    // ADR-0065 R.5 — notifications are grouped by CONVERSATION: a group
+    // that continues one stacks with it.
+    let conversationTag = deps.conversationHex(
+        accountIdB64: account.accountIdB64, groupIdHex: realGroupHex)
     var latest: NsePushPreview?
     var latestCall: (row: NseProcessedRow, createdAt: String)?
     for row in rows {
@@ -566,7 +585,9 @@ public func decryptPushOutcome(
             latestCall = (row: processed, createdAt: row.createdAt)
         default:
             guard let body = previewBody(of: processed) else { continue }
-            latest = NsePushPreview(title: "Lakko", body: body, tag: realGroupHex)
+            latest = NsePushPreview(
+                title: "Lakko", body: body, tag: conversationTag,
+                movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame)
         }
     }
     if let latestCall, let callIdHex = latestCall.row.callIdHex {
@@ -587,21 +608,21 @@ public func decryptPushOutcome(
                     title: title,
                     body: nseCallKindLabel(video: video),
                     callIdHex: callIdHex,
-                    tag: realGroupHex
+                    tag: conversationTag
                 ))
             case .silent:
                 return .callSilent(NseCallAlert(
                     title: title,
                     body: nseCallKindLabel(video: video),
                     callIdHex: callIdHex,
-                    tag: realGroupHex
+                    tag: conversationTag
                 ))
             case .tooLate:
                 return .callSilent(NseCallAlert(
                     title: title,
                     body: nseMissedCallBody,
                     callIdHex: callIdHex,
-                    tag: realGroupHex
+                    tag: conversationTag
                 ))
             }
         case .callEnd:

@@ -481,7 +481,7 @@ final class TransparencyVerifyTests: XCTestCase {
     /// enrichment populates `loggedReset` from the best-effort log lookup
     /// of the served key. The gate refuses REGARDLESS of the log — this
     /// only colours the error.
-    func testRefusalCarriesLoggedResetTrue() async {
+    func testALoggedResetWithNoAttestationIsStillRefused() async {
         let pinStore = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let oldPubkey = Data(repeating: 0x01, count: 32)
         pinStore.setPin(
@@ -516,7 +516,13 @@ final class TransparencyVerifyTests: XCTestCase {
             XCTFail("expected SupersessionRefused")
         } catch let refused as SupersessionRefused {
             XCTAssertEqual(refused.reason, .proofAbsent)
-            XCTAssertEqual(refused.loggedReset, true)
+            // ADR-0065 R.2 — a log that records a reset does not make an
+            // UNATTESTED change one: with no attestation the verdict is the
+            // refusal, with the neutral copy, and nothing is re-pinned.
+            XCTAssertNil(refused.loggedReset)
+            XCTAssertEqual(
+                pinStore.readPin(accountIdB64: base64Encode(accountId))?.pinnedSignaturePubkeyB64,
+                base64Encode(oldPubkey))
         } catch {
             XCTFail("unexpected error: \(error)")
         }
@@ -591,16 +597,13 @@ final class TransparencyVerifyTests: XCTestCase {
 
     // MARK: - KT-log S4: reset-aware message mapping
 
-    func testMessageLoggedResetTrueIsConfirmedOwnerReset() {
-        let msg = ContactsViewModel.supersessionRefusedMessage(
-            loggedReset: true, peerLabel: "@alice"
-        )
-        XCTAssertTrue(msg.contains("@alice"))
-        XCTAssertTrue(msg.contains("reset their secure identity"))
-        XCTAssertTrue(msg.contains("owner-initiated reset"))
-        XCTAssertTrue(msg.contains("re-verify"))
-        // A confirmed owner reset must NOT be framed as a compromise.
-        XCTAssertFalse(msg.contains("compromise"))
+    /// ADR-0065 R.2 — an attested reset is accepted silently and reaches no
+    /// refusal; a `true` marker, should one ever arrive, has no copy of its
+    /// own and reads as the neutral `unconfirmed`.
+    func testMessageLoggedResetTrueHasNoCopyOfItsOwn() {
+        XCTAssertEqual(
+            ContactsViewModel.supersessionRefusedMessage(loggedReset: true, peerLabel: "@alice"),
+            ContactsViewModel.supersessionRefusedMessage(loggedReset: nil, peerLabel: "@alice"))
     }
 
     func testMessageLoggedResetFalseIsPossibleCompromise() {
@@ -636,11 +639,10 @@ final class TransparencyVerifyTests: XCTestCase {
         )
     }
 
-    func testMessageThreeVerdictsAreDistinct() {
-        let a = ContactsViewModel.supersessionRefusedMessage(loggedReset: true, peerLabel: "@x")
+    func testMessageTwoVerdictsAreDistinct() {
         let b = ContactsViewModel.supersessionRefusedMessage(loggedReset: false, peerLabel: "@x")
         let c = ContactsViewModel.supersessionRefusedMessage(loggedReset: nil, peerLabel: "@x")
-        XCTAssertEqual(Set([a, b, c]).count, 3)
+        XCTAssertNotEqual(b, c)
     }
 
     // MARK: - G-30 #2 (ADR-0019): verifyRotationChain outcome mapping
@@ -1030,8 +1032,8 @@ final class TransparencyVerifyTests: XCTestCase {
             XCTFail("expected SupersessionRefused")
         } catch let refused as SupersessionRefused {
             XCTAssertEqual(refused.reason, .proofAbsent)
-            // Gate-1 enrichment still attaches the loggedReset context.
-            XCTAssertEqual(refused.loggedReset, true)
+            // ADR-0065 R.2 — no attestation: refused, neutral copy.
+            XCTAssertNil(refused.loggedReset)
         } catch {
             XCTFail("unexpected error: \(error)")
         }

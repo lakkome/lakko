@@ -40,7 +40,16 @@ public object DeviceReadmission {
     public const val INTERVAL_MS: Long = 10L * 60_000L
 
     /** A device row from the directory, as fetched. */
-    public class DirectoryDevice(public val deviceKey: String, public val keyPackage: ByteArray)
+    public class DirectoryDevice(
+        public val deviceKey: String,
+        public val keyPackage: ByteArray,
+        /** ADR-0066 (a device paired after a key rotation): `false` when the
+         *  listed KeyPackage of an OWN device is bound to another account key
+         *  than this account's conversation key ([ownKeyPackageUsable]). The
+         *  row still counts as listed (its leaf is not retired); it is not
+         *  admitted until the device publishes one bound to the right key. */
+        public val admissible: Boolean = true,
+    )
 
     /** A roster leaf with the person it resolves to. */
     public data class RosterLeaf(val leafKey: String, val personKey: String)
@@ -82,6 +91,7 @@ public object DeviceReadmission {
                 if (d.deviceKey in rosterKeys) continue
                 if (d.deviceKey in removed) continue
                 if (own && !ownDeviceAdmissible(d.deviceKey, ownDeviceRoster)) continue
+                if (own && !d.admissible) continue
                 if (!seen.add(d.deviceKey)) continue
                 admit += d
             }
@@ -104,6 +114,124 @@ public object DeviceReadmission {
     public fun ownDeviceAdmissible(deviceKey: String, ownDeviceRoster: Set<String>?): Boolean =
         ownDeviceRoster != null && deviceKey in ownDeviceRoster
 
+    /**
+     * ADR-0066 - whether a KeyPackage an OWN device published may be used to
+     * admit it to a conversation: its device binding must name the account
+     * key this account's conversation leaves are bound to ([conversationKey],
+     * the earliest own predecessor after a rotation). A device paired after a
+     * rotation learns that key from the pairing state bundle; a KeyPackage it
+     * published before the bundle arrived names the CURRENT key, and a leaf
+     * admitted with it would read as another account in the chat. An unbound
+     * KeyPackage ([boundAccountKey] `null`) and an unknown conversation key
+     * change nothing.
+     */
+    public fun ownKeyPackageUsable(boundAccountKey: ByteArray?, conversationKey: ByteArray?): Boolean =
+        boundAccountKey == null || conversationKey == null || boundAccountKey.contentEquals(conversationKey)
+
+    // ---- ADR-0065 R.2: the wider lookup ----------------------------------
+
+    /** A roster person this device can look up in the directory. */
+    public data class LookupCandidate(
+        /** The PERSON key the roster names (the key the leaves are bound to). */
+        val rosterKeyB64: String,
+        /** The account id this device knows that person under, base64. */
+        val accountIdB64: String,
+    )
+
+    /** The slice of a contact row the lookup reads. */
+    public data class LookupContact(val signaturePubkeyB64: String, val accountIdB64: String?)
+
+    /**
+     * ADR-0065 R.2 "Triggers" — every roster account whose account id this
+     * device knows, not only its accepted contacts: a contact row (found by
+     * its current key, or by a key an accepted reset retired for the account
+     * the row names), else the profile store (the profile envelope carries
+     * the account id, ADR-0048 v2). This is also what removes G-44's "no
+     * admin is the person's contact" case.
+     *
+     * The contact row wins over the profile's claim. The own account is not
+     * a candidate (the caller looks itself up with its own id). Mirror of web
+     * `readmissionCandidates`; Android keeps a contact's retired keys in the
+     * reset ledger rather than on the row, hence [accountOfRetiredKey].
+     */
+    public fun readmissionCandidates(
+        rosterPersonKeysB64: List<String>,
+        ownPersonKeyB64: String,
+        contacts: List<LookupContact>,
+        /** The account id (base64) an accepted reset retired this key for. */
+        accountOfRetiredKey: (String) -> String?,
+        /** The account id (base64) a member's own profile claims, or `null`. */
+        profileAccountIdB64Of: (String) -> String?,
+    ): List<LookupCandidate> {
+        val out = ArrayList<LookupCandidate>()
+        val seen = HashSet<String>()
+        for (rosterKey in rosterPersonKeysB64) {
+            if (rosterKey == ownPersonKeyB64 || !seen.add(rosterKey)) continue
+            val retiredFor = accountOfRetiredKey(rosterKey)
+            val row = contacts.firstOrNull { it.signaturePubkeyB64 == rosterKey }
+                ?: retiredFor?.let { id -> contacts.firstOrNull { it.accountIdB64 == id } }
+            val accountId = row?.accountIdB64 ?: retiredFor ?: profileAccountIdB64Of(rosterKey) ?: continue
+            if (!isAccountIdB64(accountId)) continue
+            out += LookupCandidate(rosterKey, accountId)
+        }
+        return out
+    }
+
+    private fun isAccountIdB64(value: String): Boolean =
+        try {
+            java.util.Base64.getDecoder().decode(value).size == ACCOUNT_ID_LEN
+        } catch (_: IllegalArgumentException) {
+            false
+        }
+
+    private const val ACCOUNT_ID_LEN: Int = 16
+
+    /** How the roster's key for a person stands against what this device
+     *  trusts for the account AFTER the identity check ran. */
+    public enum class LookupStanding {
+        /** The roster key is the account's current key or a PROVEN
+         *  predecessor of it: the ordinary ADR-0050 re-admission. */
+        SAME_PERSON,
+
+        /** The roster key was retired by an ACCEPTED RESET of the account:
+         *  the directory now lists the new identity's devices (R.7 case 2). */
+        RESET_IDENTITY,
+
+        /** Anything else (no pin, an unrelated key): the account's devices
+         *  are not admitted under this person. */
+        SKIP,
+    }
+
+    /**
+     * | pinned | roster key is ...                               | standing         |
+     * |--------|-------------------------------------------------|------------------|
+     * | yes    | the pin, or a proven predecessor of the pin     | `SAME_PERSON`    |
+     * | yes    | a key an accepted reset of this account retired | `RESET_IDENTITY` |
+     * | yes    | anything else                                   | `SKIP`           |
+     * | no     | the key of this device's VERIFIED BINDING       | `SAME_PERSON`    |
+     * | no     | anything else, or no binding                    | `SKIP`           |
+     *
+     * `SKIP` is what stops a member's own profile from attaching another
+     * account's devices to itself: an account id is only followed to devices
+     * when the roster's key is one this device TRUSTS for that account. A
+     * claimed id alone is never followed.
+     */
+    public fun lookupStanding(
+        rosterKeyB64: String,
+        /** The pinned key and its proven predecessors; `null` = not pinned. */
+        pinnedChainB64: List<String>?,
+        /** The keys an accepted reset of THIS account retired. */
+        supersededKeysB64: Set<String>,
+        /** The key of the verified binding of the account when NOT pinned. */
+        bindingKeyB64: String?,
+    ): LookupStanding {
+        if (pinnedChainB64 == null) {
+            return if (bindingKeyB64 != null && bindingKeyB64 == rosterKeyB64) LookupStanding.SAME_PERSON else LookupStanding.SKIP
+        }
+        if (rosterKeyB64 in pinnedChainB64) return LookupStanding.SAME_PERSON
+        return if (rosterKeyB64 in supersededKeysB64) LookupStanding.RESET_IDENTITY else LookupStanding.SKIP
+    }
+
     // ---- the throttle -----------------------------------------------------
 
     private val lastCheckedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
@@ -116,6 +244,11 @@ public object DeviceReadmission {
             lastCheckedAt[groupIdHex] = nowMs
             return true
         }
+    }
+
+    /** Make [groupIdHex] due at once (a claim arrived, R.6). */
+    public fun clearSlot(groupIdHex: String) {
+        lastCheckedAt.remove(groupIdHex)
     }
 
     /** Sign-out and tests. */

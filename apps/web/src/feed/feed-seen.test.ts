@@ -8,7 +8,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { mergeForegroundSlot, summarizeGroupSlot } from "../chat/background-log";
 import type { PersistedGroup, PersistedMessage } from "../chat/message-log-store";
-import { isSeenInSlot, markSeenInSlot, readCursorBytes } from "./feed-seen";
+import { isSeenInSlot, markSeenInSlot } from "./feed-seen";
 
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -69,11 +69,5 @@ describe("unread and the chat's own write", () => {
     expect(merged.feedSeen).toEqual(["4"]);
     const covered = mergeForegroundSlot(s, { messages: s.messages, cursor: 5 });
     expect(covered.feedSeen).toBeUndefined();
-  });
-});
-
-describe("readCursorBytes", () => {
-  it("is 8 bytes big-endian", () => {
-    expect(Array.from(readCursorBytes(0x0102n))).toEqual([0, 0, 0, 0, 0, 0, 1, 2]);
   });
 });

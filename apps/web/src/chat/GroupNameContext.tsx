@@ -79,6 +79,11 @@ export interface GroupNameApi {
   /** The creator's name right after the creating commit: store first, then
    *  send best-effort (a failed send is covered by the growth re-send). */
   recordCreated(entry: ActiveGroup, name: string): Promise<void>;
+  /** ADR-0065 R.6 step 4 — the conversation continues in `to`: file the
+   *  name `from` holds under `to` with its ORIGINAL stamp and send it there
+   *  (ADR-0051: a re-send never re-stamps). Idempotent; nothing happens when
+   *  `from` holds no name or `to` already holds one at least as new. */
+  carryOver(from: ActiveGroup, to: ActiveGroup): Promise<void>;
   /** `groupIdB64` gained at least one member: schedule the re-send. */
   groupGrew(groupIdB64: string): void;
   /** This device's ADR-0022 role, read off the LIVE group now. */
@@ -313,6 +318,26 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
           // The store holds it; the next growth re-send carries it.
           // eslint-disable-next-line no-console
           console.warn("[group-name] initial send failed", err);
+        }
+      });
+    },
+    async carryOver(from, to) {
+      const account = accountId();
+      if (account === null) return;
+      await opened;
+      const held = store.get(from.groupIdB64);
+      if (held === undefined) return;
+      await withRoutingRowLock(account, to.groupIdB64, async () => {
+        const already = store.get(to.groupIdB64);
+        if (already !== undefined && already.updatedAtMs >= held.updatedAtMs) return;
+        const { envelope, value } = await compose(held.name, held.updatedAtMs);
+        await store.set(account, to.groupIdB64, value);
+        try {
+          await send(to, envelope);
+        } catch (err) {
+          // The store holds it; the growth re-send carries it.
+          // eslint-disable-next-line no-console
+          console.warn("[group-name] carry-over send failed", err);
         }
       });
     },

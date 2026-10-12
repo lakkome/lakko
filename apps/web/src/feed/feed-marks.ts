@@ -88,13 +88,15 @@ export function showConversation(marks: FeedMarks, id: string): FeedMarks {
 
 /** The sources a feed may draw from: every one not hidden. Applied before
  *  ranking, so a hidden conversation never reaches the core. */
-export function withoutHidden<T extends { readonly idHex: string }>(
+export function withoutHidden<T extends { readonly idHex: string; readonly conversationHex?: string }>(
   sources: readonly T[],
   hidden: readonly string[],
 ): T[] {
   if (hidden.length === 0) return [...sources];
   const set = new Set(hidden);
-  return sources.filter((s) => !set.has(s.idHex));
+  // Hidden by the CONVERSATION id (ADR-0065 R.5): a conversation hidden
+  // before it moved to a successor group stays hidden after.
+  return sources.filter((s) => !set.has(s.conversationHex ?? s.idHex));
 }
 
 /** Suggestions with hidden channels left out, before they are ranked. */

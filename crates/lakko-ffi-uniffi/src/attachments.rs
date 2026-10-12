@@ -312,6 +312,104 @@ pub fn compose_forward_envelope(
     inner::compose_forward(&text, refs_from_ffi(attachments)?, &forward).map_err(Into::into)
 }
 
+/// The optional parts a chat message may carry beside its text and
+/// attachments, for [`compose_chat_envelope`]. Every field defaults to
+/// `None`, so a caller names only the parts it has.
+#[derive(uniffi::Record, Default)]
+pub struct ChatEnvelopeParts {
+    /// ADR-0052 — the DS `messageId` this message replies to. The two reply
+    /// snapshots below are carried only when this is set.
+    #[uniffi(default = None)]
+    pub reply_to: Option<i64>,
+    /// ADR-0052 — the quoted author's display name, a snapshot.
+    #[uniffi(default = None)]
+    pub reply_author: Option<String>,
+    /// ADR-0052 — an excerpt of the quoted message's own text, a snapshot.
+    #[uniffi(default = None)]
+    pub reply_excerpt: Option<String>,
+    /// ADR-0052 — on a forwarded message, the ORIGINAL author's display
+    /// name as a snapshot.
+    #[uniffi(default = None)]
+    pub forwarded_from: Option<String>,
+    /// ADR-0052 — base64 of the forward's origin group id; carried only
+    /// together with `forward_origin_message_id`.
+    #[uniffi(default = None)]
+    pub forward_origin_group_b64: Option<String>,
+    /// ADR-0052 — the DS `messageId` of the forwarded original.
+    #[uniffi(default = None)]
+    pub forward_origin_message_id: Option<i64>,
+    /// ADR-0065 — base64 of the group id of the conversation this message
+    /// was ORIGINALLY sent in, when it is a re-send into a successor
+    /// one-to-one; carried only together with `resend_origin_message_id`.
+    #[uniffi(default = None)]
+    pub resend_origin_group_b64: Option<String>,
+    /// ADR-0065 — the DS `messageId` of the original in that conversation.
+    #[uniffi(default = None)]
+    pub resend_origin_message_id: Option<i64>,
+}
+
+/// Build a chat message with any combination of its optional parts: a reply
+/// (ADR-0052), a forward attribution (ADR-0052) and a re-send marker
+/// (ADR-0065). [`compose_envelope`], [`compose_reply_envelope`] and
+/// [`compose_forward_envelope`] are this call with one part set.
+///
+/// A message re-sent into a successor one-to-one passes the original's
+/// attachments (re-encrypted, as for a forward), its reply snapshot and its
+/// forward fields unchanged, plus the re-send origin: the group id and DS
+/// `messageId` the original had. The marker is never rendered. A half pair
+/// (origin group without message id or the reverse), or a group id that is
+/// empty or over its bound, is not carried.
+///
+/// # Errors
+///
+/// - [`FfiError::Attachment`] on a wrong-length byte field in any passed
+///   `AttachmentRef` (or on a `serde_json` failure, impossible for valid
+///   inputs).
+#[uniffi::export]
+pub fn compose_chat_envelope(
+    text: String,
+    attachments: Vec<AttachmentRef>,
+    parts: ChatEnvelopeParts,
+) -> Result<Vec<u8>, FfiError> {
+    let reply = parts.reply_to.map(|target| inner::Reply {
+        target,
+        author: parts.reply_author,
+        excerpt: parts.reply_excerpt,
+    });
+    let origin = match (
+        parts.forward_origin_group_b64,
+        parts.forward_origin_message_id,
+    ) {
+        (Some(group_id_b64), Some(message_id)) => Some(inner::ForwardOrigin {
+            group_id_b64,
+            message_id,
+        }),
+        _ => None,
+    };
+    let forward = (parts.forwarded_from.is_some() || origin.is_some()).then_some(inner::Forward {
+        author: parts.forwarded_from,
+        origin,
+    });
+    let resend = match (
+        parts.resend_origin_group_b64,
+        parts.resend_origin_message_id,
+    ) {
+        (Some(group_id_b64), Some(message_id)) => Some(inner::ResendOrigin {
+            group_id_b64,
+            message_id,
+        }),
+        _ => None,
+    };
+    inner::compose_chat(
+        &text,
+        refs_from_ffi(attachments)?,
+        reply.as_ref(),
+        forward.as_ref(),
+        resend.as_ref(),
+    )
+    .map_err(Into::into)
+}
+
 /// Convert FFI attachment refs to the wire shape: byte fields to base64,
 /// lengths checked up front so a wrong-shape input fails fast at the FFI
 /// rather than at JSON parse on the other side.
@@ -467,6 +565,15 @@ pub struct ParsedBody {
     /// ADR-0052 — the DS `messageId` of the original in the origin
     /// conversation.
     pub forward_origin_message_id: Option<i64>,
+    /// ADR-0065 — on a message re-sent into a successor one-to-one, base64
+    /// of the ORIGINAL conversation's group id; present only together with
+    /// `resend_origin_message_id`. Never shown: it lets a device that already
+    /// holds the original show the message once.
+    #[uniffi(default = None)]
+    pub resend_origin_group_b64: Option<String>,
+    /// ADR-0065 — the DS `messageId` of the original in that conversation.
+    #[uniffi(default = None)]
+    pub resend_origin_message_id: Option<i64>,
 }
 
 /// Build an EDIT envelope (ADR-0023) replacing the target message's
@@ -535,6 +642,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             attachments,
             reply,
             forward,
+            resend,
         } => ParsedBody {
             kind: MessageBodyKind::Chat,
             text,
@@ -550,6 +658,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
                 .as_ref()
                 .and_then(|f| f.origin.as_ref().map(|o| o.group_id_b64.clone())),
             forward_origin_message_id: forward.and_then(|f| f.origin.map(|o| o.message_id)),
+            resend_origin_group_b64: resend.as_ref().map(|r| r.group_id_b64.clone()),
+            resend_origin_message_id: resend.map(|r| r.message_id),
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
             kind: MessageBodyKind::Edit,
@@ -564,6 +674,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forwarded_from: None,
             forward_origin_group_b64: None,
             forward_origin_message_id: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::Delete { target } => ParsedBody {
             kind: MessageBodyKind::Delete,
@@ -578,6 +690,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forwarded_from: None,
             forward_origin_group_b64: None,
             forward_origin_message_id: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::Reaction { target, emoji } => ParsedBody {
             kind: MessageBodyKind::Reaction,
@@ -592,6 +706,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forwarded_from: None,
             forward_origin_group_b64: None,
             forward_origin_message_id: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::Typing { is_typing } => ParsedBody {
             kind: MessageBodyKind::Typing,
@@ -606,6 +722,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forwarded_from: None,
             forward_origin_group_b64: None,
             forward_origin_message_id: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
             kind: MessageBodyKind::ReadReceipt,
@@ -620,6 +738,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forwarded_from: None,
             forward_origin_group_b64: None,
             forward_origin_message_id: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::Unsupported { version } => ParsedBody {
             kind: MessageBodyKind::Unsupported,
@@ -634,6 +754,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forwarded_from: None,
             forward_origin_group_b64: None,
             forward_origin_message_id: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
         inner::MessageBody::ServiceEnvelope => ParsedBody {
             kind: MessageBodyKind::ServiceEnvelope,
@@ -648,6 +770,8 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forwarded_from: None,
             forward_origin_group_b64: None,
             forward_origin_message_id: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
         },
     }
 }
@@ -1059,6 +1183,56 @@ mod tests {
         assert_eq!(body.reply_to, None);
         assert_eq!(body.reply_author, None);
         assert_eq!(body.reply_excerpt, None);
+    }
+
+    #[test]
+    fn resend_marker_round_trips_beside_reply_and_forward() {
+        let wire = compose_chat_envelope(
+            "again".to_string(),
+            vec![],
+            ChatEnvelopeParts {
+                reply_to: Some(5),
+                reply_author: Some("Bob".to_string()),
+                forwarded_from: Some("Alice".to_string()),
+                resend_origin_group_b64: Some("b2xk".to_string()),
+                resend_origin_message_id: Some(17),
+                ..ChatEnvelopeParts::default()
+            },
+        )
+        .unwrap();
+        let body = parse_body_envelope(wire);
+        assert_eq!(body.kind, MessageBodyKind::Chat);
+        assert_eq!(body.text, "again");
+        assert_eq!(body.reply_to, Some(5));
+        assert_eq!(body.reply_author.as_deref(), Some("Bob"));
+        assert_eq!(body.forwarded_from.as_deref(), Some("Alice"));
+        assert_eq!(body.resend_origin_group_b64.as_deref(), Some("b2xk"));
+        assert_eq!(body.resend_origin_message_id, Some(17));
+        // Half a marker is no marker.
+        let wire = compose_chat_envelope(
+            "x".to_string(),
+            vec![],
+            ChatEnvelopeParts {
+                resend_origin_group_b64: Some("b2xk".to_string()),
+                ..ChatEnvelopeParts::default()
+            },
+        )
+        .unwrap();
+        let body = parse_body_envelope(wire);
+        assert_eq!(body.resend_origin_group_b64, None);
+        assert_eq!(body.resend_origin_message_id, None);
+        // No parts is the plain envelope, byte for byte.
+        assert_eq!(
+            compose_chat_envelope("hi".to_string(), vec![], ChatEnvelopeParts::default()).unwrap(),
+            compose_envelope("hi".to_string(), vec![]).unwrap()
+        );
+        // An op that also carries the marker is still that op.
+        let body = parse_body_envelope(
+            br#"{"v":1,"delete_of":7,"resend_origin_group":"b2xk","resend_origin_message":3}"#
+                .to_vec(),
+        );
+        assert_eq!(body.kind, MessageBodyKind::Delete);
+        assert_eq!(body.resend_origin_message_id, None);
     }
 
     #[test]

@@ -2226,46 +2226,6 @@
       "text": "مشاركة",
       "status": "machine"
     },
-    "chat.keys_reset.bubble_warning": {
-      "text": "غير متحقَّق منه منذ أن أعاد {name} تعيين مفاتيح حسابه.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_being_removed": {
-      "text": "أُعيد تعيين مفاتيح الحساب. تتم الإزالة.",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_flag": {
-      "text": "أُعيد تعيين مفاتيح الحساب.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_closed": {
-      "text": "أعاد {name} تعيين مفاتيح حسابه. هذه الدردشة مغلقة.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_composer": {
-      "text": "لم يعد بإمكانك إرسال رسائل في هذه الدردشة.",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_row": {
-      "text": "الدردشة مغلقة. أعاد {name} تعيين مفاتيح حسابه.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice": {
-      "text": "أعاد {name}، مالك هذه المجموعة، تعيين مفاتيح حسابه. لا يمكن إزالة أجهزته القديمة من هذه المجموعة ولا يمكن للمجموعة الحصول على مالك جديد. لمواصلة الدردشة بأمان، أعد إنشاء المجموعة.",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice_member": {
-      "text": "يمكن لمشرف إعادة إنشائها.",
-      "status": "machine"
-    },
-    "chat.keys_reset.start_new_chat": {
-      "text": "بدء دردشة جديدة",
-      "status": "machine"
-    },
-    "chat.keys_reset.system_removed": {
-      "text": "أعاد {name} تعيين مفاتيح حسابه. أُزيلت أجهزته القديمة من هذه المجموعة.",
-      "status": "machine"
-    },
     "chat.leave.action": {
       "text": "مغادرة المجموعة",
       "status": "machine"
@@ -3854,14 +3814,6 @@
       "text": "تعذّر بدء الدردشة. حاول مجددًا.",
       "status": "machine"
     },
-    "contacts.identity_changed.reset": {
-      "text": "أعاد {name} تعيين هويته الآمنة (مثلًا بعد فقدان جهازه). يؤكّد سجل الشفافية أن صاحب الحساب هو من أجرى إعادة التعيين. إذا كنت واثقًا من أنه هو فعلًا، فتحقّق مجددًا من رقم الأمان الخاص به عبر وسيلة أخرى قبل المتابعة.",
-      "status": "machine"
-    },
-    "contacts.identity_changed.reset_unnamed": {
-      "text": "أعادت جهة الاتصال هذه تعيين هويتها الآمنة (مثلًا بعد فقدان جهازها). يؤكّد سجل الشفافية أن صاحب الحساب هو من أجرى إعادة التعيين. إذا كنت واثقًا من أنها هي فعلًا، فتحقّق مجددًا من رقم الأمان الخاص بها عبر وسيلة أخرى قبل المتابعة.",
-      "status": "machine"
-    },
     "contacts.identity_changed.unconfirmed": {
       "text": "تغيّرت الهوية الآمنة لـ {name} وتعذّر تأكيد ذلك من سجل الشفافية. تحقّق عبر وسيلة أخرى قبل أن تثق بها.",
       "status": "machine"
@@ -3884,38 +3836,6 @@
     },
     "contacts.invite_links.title": {
       "text": "روابط الدعوة",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner": {
-      "text": "أعاد {name} تعيين مفاتيح حسابه. تحقّق من رقم الأمان الجديد قبل مراسلته مجددًا.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_action": {
-      "text": "تحقّق",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_unnamed": {
-      "text": "أعادت جهة الاتصال هذه تعيين مفاتيح حسابها. تحقّق من رقم الأمان الجديد قبل مراسلتها مجددًا.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.open_contact": {
-      "text": "فتح جهة الاتصال",
-      "status": "machine"
-    },
-    "contacts.keys_reset.picker_sub": {
-      "text": "أُعيد تعيين مفاتيح الحساب. تحقّق أولًا من رقم الأمان الجديد.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.row_sub": {
-      "text": "أُعيد تعيين مفاتيح الحساب. تحقّق من رقم الأمان الجديد.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first": {
-      "text": "تحقّق أولًا من رقم الأمان الجديد لـ {name}.",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first_short": {
-      "text": "تحقّق أولًا من رقم الأمان الجديد.",
       "status": "machine"
     },
     "contacts.list.add": {
@@ -4056,54 +3976,6 @@
     },
     "contacts.safety.number": {
       "text": "رقم الأمان",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body": {
-      "text": "أُعيد تعيين مفاتيح حساب {name}، لذا لم يعد رقم الأمان الذي ربما قارنته سابقًا ساريًا. قارن هذا الرقم الجديد مع {name} وجهًا لوجه أو في مكالمة.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body_unnamed": {
-      "text": "أُعيد تعيين مفاتيح حساب جهة الاتصال هذه، لذا لم يعد رقم الأمان الذي ربما قارنته سابقًا ساريًا. قارن هذا الرقم الجديد مع جهة اتصالك وجهًا لوجه أو في مكالمة.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox": {
-      "text": "قارنت رقم الأمان الجديد مع {name} وتطابق.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox_unnamed": {
-      "text": "قارنت رقم الأمان الجديد مع جهة الاتصال هذه وتطابق.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirm": {
-      "text": "تحقّقت من رقم الأمان الجديد",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirming": {
-      "text": "جارٍ التحقّق...",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done": {
-      "text": "تم التحقّق من {name} مجددًا.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done_unnamed": {
-      "text": "تم التحقّق من جهة الاتصال هذه مجددًا.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.save_failed": {
-      "text": "تعذّر الحفظ. حاول مجددًا.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.title": {
-      "text": "تحقّق من رقم الأمان الجديد",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning": {
-      "text": "إذا أكّدت دون مقارنة، فسيبدو لك من استولى على حساب {name} كأنه {name}.",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning_unnamed": {
-      "text": "إذا أكّدت دون مقارنة، فسيبدو لك من استولى على هذا الحساب كأنه جهة اتصالك.",
       "status": "machine"
     },
     "contacts.safety.row_sub": {
@@ -5778,26 +5650,6 @@
       "text": "{name}، {count, plural, zero {لا دردشات غير مقروءة} one {دردشة واحدة غير مقروءة} two {دردشتان غير مقروءتين} few {# دردشات غير مقروءة} many {# دردشة غير مقروءة} other {# دردشة غير مقروءة}}",
       "status": "machine"
     },
-    "group.closed.composer": {
-      "text": "أُغلقت هذه المجموعة.",
-      "status": "machine"
-    },
-    "group.closed.open_new": {
-      "text": "فتح المجموعة الجديدة",
-      "status": "machine"
-    },
-    "group.closed.panel": {
-      "text": "أُغلقت هذه المجموعة. تابع في {name}.",
-      "status": "machine"
-    },
-    "group.closed.row": {
-      "text": "المجموعة مغلقة",
-      "status": "machine"
-    },
-    "group.closed.system": {
-      "text": "أغلق {name} هذه المجموعة بعد إعادة تعيين مفاتيح حساب المالك.",
-      "status": "machine"
-    },
     "group.join.needs_account": {
       "text": "تحتاج إلى حساب لطلب الانضمام. أنشئ حسابًا أو سجّل الدخول.",
       "status": "machine"
@@ -5844,38 +5696,6 @@
     },
     "group.join.wait_secondary": {
       "text": "لا توجد مهلة زمنية لأي من الخطوتين. إذا لم يحدث شيء، يمكنك إرسال الطلب مجددًا.",
-      "status": "machine"
-    },
-    "group.recreate.action": {
-      "text": "إعادة إنشاء المجموعة",
-      "status": "machine"
-    },
-    "group.recreate.done": {
-      "text": "تم",
-      "status": "machine"
-    },
-    "group.recreate.excluded_reset": {
-      "text": "أُعيد تعيين مفاتيح الحساب. تحقّق من رقم الأمان الجديد لتضمين هذا العضو.",
-      "status": "machine"
-    },
-    "group.recreate.members_heading": {
-      "text": "الأعضاء ({count})",
-      "status": "machine"
-    },
-    "group.recreate.note": {
-      "text": "تبقى المجموعة القديمة كما هي للجميع حتى تغلقها.",
-      "status": "machine"
-    },
-    "group.recreate.submit": {
-      "text": "إنشاء وإغلاق المجموعة القديمة",
-      "status": "machine"
-    },
-    "group.recreate.title": {
-      "text": "إعادة إنشاء المجموعة",
-      "status": "machine"
-    },
-    "group.recreate.working": {
-      "text": "جارٍ الإنشاء...",
       "status": "machine"
     },
     "invite.contact.accept_failed": {
@@ -6807,7 +6627,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "سيرى جهات اتصالك أن رقم الأمان الخاص بك قد تغيّر، وسيحتاجون إلى التحقق منك مجددًا قبل مراسلتك بأمان.",
+      "text": "تبقى محادثات جهات اتصالك معك كما هي. رقم الأمان الخاص بك يتغيّر.",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -6935,7 +6755,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_contacts": {
-      "text": "سيرى جهات اتصالك أن رقم الأمان الخاص بك قد تغيّر، وعليهم التحقق منك مجددًا قبل مراسلتك بأمان.",
+      "text": "تبقى محادثات جهات اتصالك معك كما هي. رقم الأمان الخاص بك يتغيّر.",
       "status": "machine"
     },
     "restore_identity.reset.effect_devices": {

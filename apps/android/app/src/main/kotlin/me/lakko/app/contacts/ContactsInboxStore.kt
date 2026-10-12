@@ -48,7 +48,16 @@ public interface ContactsInboxStore {
     /** Persist the pending list as-is (an empty list is a valid state). */
     public fun savePending(accountIdB64: String, pending: List<IncomingContactRequest>)
 
-    /** Drop both entries for [accountIdB64] (forget device only; log out
+    /**
+     * ADR-0065 R.7 case 1 / UX 16.6 — persist the requests from EXISTING
+     * contacts that have no verdict yet ([withWaitingRequest]). They are
+     * never shown; the mailbox cursor has moved past them, so this is the
+     * only place they survive a process death. The default keeps nothing (a
+     * store that predates the arm).
+     */
+    public fun saveWaiting(accountIdB64: String, waiting: List<IncomingContactRequest>) {}
+
+    /** Drop every entry for [accountIdB64] (forget device only; log out
      *  keeps them for the next login of the same account). */
     public fun delete(accountIdB64: String)
 }
@@ -57,7 +66,27 @@ public interface ContactsInboxStore {
 public data class ContactsInboxSnapshot(
     val cursor: Long = 0L,
     val pending: List<IncomingContactRequest> = emptyList(),
+    /** Requests from existing contacts waiting, unshown, for a verdict. */
+    val waiting: List<IncomingContactRequest> = emptyList(),
 )
+
+/** How many unshown waiting requests are kept. Chosen: a bound, not a
+ *  measurement (mirror of the web `MAX_WAITING_REQUESTS`). */
+public const val MAX_WAITING_REQUESTS: Int = 32
+
+/** Outcome of [withWaitingRequest]. */
+public data class WaitingRequests(val waiting: List<IncomingContactRequest>, val kept: Boolean)
+
+/**
+ * The waiting list after one more request is held: appended once (by DS
+ * message id), and refused when the list is full — the caller then lets the
+ * request go, and the sender's next request is judged afresh.
+ */
+public fun withWaitingRequest(waiting: List<IncomingContactRequest>, request: IncomingContactRequest): WaitingRequests {
+    if (waiting.any { it.messageId == request.messageId }) return WaitingRequests(waiting, kept = true)
+    if (waiting.size >= MAX_WAITING_REQUESTS) return WaitingRequests(waiting, kept = false)
+    return WaitingRequests(waiting + request, kept = true)
+}
 
 /** The production store over [SharedPreferences]. */
 public class SharedPreferencesContactsInboxStore(context: Context) : ContactsInboxStore {
@@ -70,7 +99,21 @@ public class SharedPreferencesContactsInboxStore(context: Context) : ContactsInb
         val pending = prefs.getString(pendingKey(accountIdB64), null)
             ?.let { decodePendingRequests(it) }
             ?: emptyList()
-        return ContactsInboxSnapshot(cursor = cursor, pending = pending)
+        val waiting = prefs.getString(waitingKey(accountIdB64), null)
+            ?.let { decodePendingRequests(it) }
+            ?.take(MAX_WAITING_REQUESTS)
+            ?: emptyList()
+        return ContactsInboxSnapshot(cursor = cursor, pending = pending, waiting = waiting)
+    }
+
+    override fun saveWaiting(accountIdB64: String, waiting: List<IncomingContactRequest>) {
+        val edit = prefs.edit()
+        if (waiting.isEmpty()) {
+            edit.remove(waitingKey(accountIdB64))
+        } else {
+            edit.putString(waitingKey(accountIdB64), encodePendingRequests(waiting.take(MAX_WAITING_REQUESTS)))
+        }
+        edit.apply()
     }
 
     override fun saveCursor(accountIdB64: String, cursor: Long) {
@@ -87,6 +130,7 @@ public class SharedPreferencesContactsInboxStore(context: Context) : ContactsInb
         prefs.edit()
             .remove(cursorKey(accountIdB64))
             .remove(pendingKey(accountIdB64))
+            .remove(waitingKey(accountIdB64))
             .apply()
     }
 
@@ -94,6 +138,7 @@ public class SharedPreferencesContactsInboxStore(context: Context) : ContactsInb
         const val PREFS = "lakko-contacts-inbox"
         fun cursorKey(accountIdB64: String) = "cursor.v1:$accountIdB64"
         fun pendingKey(accountIdB64: String) = "pending.v1:$accountIdB64"
+        fun waitingKey(accountIdB64: String) = "waiting.v1:$accountIdB64"
     }
 }
 
@@ -102,12 +147,22 @@ public class SharedPreferencesContactsInboxStore(context: Context) : ContactsInb
 public class InMemoryContactsInboxStore : ContactsInboxStore {
     private val cursors = HashMap<String, Long>()
     private val pendingByAccount = HashMap<String, String>()
+    private val waitingByAccount = HashMap<String, String>()
 
     override fun load(accountIdB64: String): ContactsInboxSnapshot = synchronized(this) {
         ContactsInboxSnapshot(
             cursor = cursors[accountIdB64] ?: 0L,
             pending = pendingByAccount[accountIdB64]?.let { decodePendingRequests(it) } ?: emptyList(),
+            waiting = waitingByAccount[accountIdB64]?.let { decodePendingRequests(it) } ?: emptyList(),
         )
+    }
+
+    override fun saveWaiting(accountIdB64: String, waiting: List<IncomingContactRequest>): Unit = synchronized(this) {
+        if (waiting.isEmpty()) {
+            waitingByAccount.remove(accountIdB64)
+        } else {
+            waitingByAccount[accountIdB64] = encodePendingRequests(waiting.take(MAX_WAITING_REQUESTS))
+        }
     }
 
     override fun saveCursor(accountIdB64: String, cursor: Long): Unit = synchronized(this) {
@@ -122,6 +177,7 @@ public class InMemoryContactsInboxStore : ContactsInboxStore {
     override fun delete(accountIdB64: String): Unit = synchronized(this) {
         cursors.remove(accountIdB64)
         pendingByAccount.remove(accountIdB64)
+        waitingByAccount.remove(accountIdB64)
     }
 }
 

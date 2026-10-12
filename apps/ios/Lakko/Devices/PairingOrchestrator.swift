@@ -481,7 +481,7 @@ public enum PairingOrchestrator {
         var historySealed: Data?
         /// The state bundle (contacts, pins, known groups), applied at
         /// ``persist()``.
-        var stateBundle: StateBundle.V1?
+        var stateBundle: StateBundle.V2?
         /// The only owner of the device-identity seed once the join moved
         /// it here; zeroed in place after the write and on release.
         private var deviceSeed: Data

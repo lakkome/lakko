@@ -138,6 +138,13 @@ export interface IdentityFetchResponse {
    *  never reset). A device compares it with the generation of its own
    *  session pair before it uploads anything (`auth/landing-rule.ts`). */
   key_generation: number;
+  /** ADR-0065 R.3: standard base64 of the auth-signed key-reset attestation
+   *  of the account's LATEST reset (177 bytes); absent for an account that
+   *  never reset. Discovery passes the stored bytes through unparsed; a
+   *  peer verifies it locally (`contacts/reset-verdict.ts`). After a later
+   *  PROVEN rotation it no longer binds the published key, and that path
+   *  carries a supersession proof instead. */
+  key_reset_attest?: string;
 }
 
 // ----------------------------------------------------------------------------

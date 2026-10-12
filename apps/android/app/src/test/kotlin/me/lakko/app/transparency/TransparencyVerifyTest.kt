@@ -459,60 +459,6 @@ class TransparencyVerifyTest {
     }
 
     // -----------------------------------------------------------------
-    // KT-log S4 — lookupServedKeyReset best-effort marker
-    // -----------------------------------------------------------------
-
-    private suspend fun lookup(
-        client: TransparencyClient?,
-        servedPubkey: ByteArray = this.servedPubkey,
-    ): Boolean? = lookupServedKeyReset(
-        accountId = accountId,
-        servedSignaturePubkey = servedPubkey,
-        client = client,
-        accountKeyDeriver = deriver,
-    )
-
-    @Test
-    fun `lookupServedKeyReset returns true when latest commits to the served key with reset`() =
-        runTest {
-            assertEquals(
-                true,
-                lookup(client = mockClient(latestPubkey = servedPubkey, latestIsReset = true)),
-            )
-        }
-
-    @Test
-    fun `lookupServedKeyReset returns false when latest commits to the served key without reset`() =
-        runTest {
-            assertEquals(
-                false,
-                lookup(client = mockClient(latestPubkey = servedPubkey, latestIsReset = false)),
-            )
-        }
-
-    @Test
-    fun `lookupServedKeyReset returns null when the log is off`() = runTest {
-        assertNull(lookup(client = null))
-    }
-
-    @Test
-    fun `lookupServedKeyReset returns null when the account is absent`() = runTest {
-        assertNull(lookup(client = mockClient(latestStatus = HttpStatusCode.NotFound)))
-    }
-
-    @Test
-    fun `lookupServedKeyReset returns null when latest commits to a different key`() = runTest {
-        // The marker (even if true) describes some OTHER key, so it tells
-        // us nothing about the served one — null.
-        assertNull(
-            lookup(
-                client = mockClient(latestPubkey = otherPubkey, latestIsReset = true),
-                servedPubkey = servedPubkey,
-            ),
-        )
-    }
-
-    // -----------------------------------------------------------------
     // G-30 #2 (ADR-0019) — verifyRotationChain verdict mapping
     // -----------------------------------------------------------------
 

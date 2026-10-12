@@ -1019,6 +1019,8 @@ internal fun toEvent(
                             originGroupB64 = body.forwardOriginGroupB64,
                             originMessageId = body.forwardOriginMessageId,
                         ),
+                        // ADR-0065 — the re-send marker, only as a whole pair.
+                        resendOrigin = resendOriginFrom(body.resendOriginGroupB64, body.resendOriginMessageId),
                     )
                     MessageBodyKind.EDIT -> IncomingChatEvent.Op(
                         messageId = messageId,
@@ -1176,6 +1178,11 @@ public sealed interface IncomingChatEvent {
         /** ADR-0052 decision 2 — the forward attribution, when the envelope
          *  carried `forwarded_from` or an origin; `null` otherwise. */
         val forward: ForwardRef? = null,
+        /** ADR-0065 R.7 case 1 — where a RE-SENT message was originally sent
+         *  ([ResendOrigin]), as the sealed envelope names it; `null` for an
+         *  ordinary message. A sender's claim: believed only against a row
+         *  this device already holds ([resendVerdict]). Never drawn. */
+        val resendOrigin: ResendOrigin? = null,
         /** Zero or more attachment refs from the envelope. */
         val attachments: List<AttachmentRef>,
         /** Alias of [text] — kept for the few call sites that

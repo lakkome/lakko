@@ -21,13 +21,31 @@
 //! Tombstones and `NONE` member registers are kept forever: pruning either
 //! lets a device that was offline across the change resurrect what was
 //! removed.
+//!
+//! ## The lineage register (ADR-0065 R.5)
+//!
+//! `successor group id -> root conversation id`, one register per successor,
+//! folded by the same rule as every other register, so convergence needs no
+//! second argument. It is **write-once at the writer**: [`SyncedState::set_lineage`]
+//! refuses to write a successor that already holds a register, so a device
+//! never mints a second stamp for a conversation that has already moved. Two
+//! devices that write the same successor concurrently converge on one value
+//! by the ordinary rule. It does not travel in [`StateSnapshot`] (whose wire
+//! codec lives in `lakko-mls`); [`SyncedState::lineage_envelopes`] and
+//! [`SyncedState::apply_lineage_envelope`] carry it instead, and
+//! [`SyncedState::to_bytes`] persists it with the rest.
 
 use std::collections::BTreeMap;
 
 use super::entry::{
     take_bytes32, take_u32, take_u64, take_u8, CodecError, ConversationEntry,
     ConversationOrderEntry, ConversationRef, DraftEntry, FlagsEntry, FolderChanges, FolderId,
-    FolderMeta, MemberState, ReadCursorEntry, RegisterKey, Stamped, StateSnapshot, SyncEntry,
+    FolderMeta, LineageEntry, MemberState, ReadCursorEntry, RegisterKey, Stamped, StateSnapshot,
+    SyncEntry,
+};
+use super::lineage::{
+    compose_lineage_envelope, decode_lineage_envelope, LineageEnvelopeError,
+    LINEAGE_ENVELOPE_MAX_ENTRIES,
 };
 
 /// The persistence format's version byte.
@@ -205,12 +223,151 @@ impl SyncedState {
                         value: o.clone(),
                     });
                 },
+                // Lineage registers travel in their own envelope
+                // (`lineage_envelopes`), never in the snapshot.
+                SyncEntry::Lineage(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
             }
         }
         snap
+    }
+
+    // -----------------------------------------------------------------
+    // Conversation lineage (ADR-0065 R.5).
+    // -----------------------------------------------------------------
+
+    /// Record that `successor_group_id` continues the conversation
+    /// `root_conversation_id`, stamped `hlc`. **Write-once**: when a register
+    /// is already held for this successor nothing is written and `Ok(false)`
+    /// is returned, whatever root it names; read it with
+    /// [`Self::lineage_root`]. `Ok(true)` means the register was written and
+    /// the caller should send it ([`Self::lineage_envelope_for`]).
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::LineageIdLength`] /
+    /// [`super::entry::BoundsError::LineageSelfReference`].
+    pub fn set_lineage(
+        &mut self,
+        hlc: u64,
+        successor_group_id: &[u8],
+        root_conversation_id: &[u8],
+    ) -> Result<bool, super::entry::BoundsError> {
+        let entry = LineageEntry {
+            successor_group_id: successor_group_id.to_vec(),
+            root_conversation_id: root_conversation_id.to_vec(),
+        };
+        entry.validate()?;
+        if self
+            .registers
+            .contains_key(&RegisterKey::Lineage(successor_group_id.to_vec()))
+        {
+            return Ok(false);
+        }
+        Ok(matches!(
+            self.apply(hlc, SyncEntry::Lineage(entry))?,
+            ApplyOutcome::Applied
+        ))
+    }
+
+    /// The lineage register held for a successor group: which conversation
+    /// it continues. `None` for a group that is itself a root, or unknown.
+    #[must_use]
+    pub fn lineage_root(&self, successor_group_id: &[u8]) -> Option<Stamped<LineageEntry>> {
+        match self
+            .registers
+            .get(&RegisterKey::Lineage(successor_group_id.to_vec()))
+        {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::Lineage(l),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: l.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The conversation id a group belongs to: the root its lineage register
+    /// names, or the group id itself when it holds none (a root, or a group
+    /// this device knows no lineage for).
+    #[must_use]
+    pub fn conversation_id_of(&self, group_id: &[u8]) -> Vec<u8> {
+        self.lineage_root(group_id)
+            .map_or_else(|| group_id.to_vec(), |s| s.value.root_conversation_id)
+    }
+
+    /// Every successor recorded for one conversation, ordered by `(stamp,
+    /// successor id)`: the order the registers were written in, as far as
+    /// the stamps tell. The root itself is not listed.
+    #[must_use]
+    pub fn lineage_successors(&self, root_conversation_id: &[u8]) -> Vec<Stamped<LineageEntry>> {
+        let mut out: Vec<Stamped<LineageEntry>> = self
+            .all_lineage()
+            .into_iter()
+            .filter(|s| s.value.root_conversation_id == root_conversation_id)
+            .collect();
+        out.sort_by(|a, b| {
+            a.hlc
+                .cmp(&b.hlc)
+                .then_with(|| a.value.successor_group_id.cmp(&b.value.successor_group_id))
+        });
+        out
+    }
+
+    /// Every lineage register, ascending by successor id.
+    #[must_use]
+    pub fn all_lineage(&self) -> Vec<Stamped<LineageEntry>> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::Lineage(l) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: l.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The envelope carrying the ONE register held for `successor_group_id`
+    /// with its original stamp: what a device sends to its other devices
+    /// right after [`Self::set_lineage`] returned `true`. `None` when no
+    /// register is held.
+    #[must_use]
+    pub fn lineage_envelope_for(&self, successor_group_id: &[u8]) -> Option<Vec<u8>> {
+        let held = self.lineage_root(successor_group_id)?;
+        compose_lineage_envelope(&[held]).ok()
+    }
+
+    /// Every held lineage register with its original stamp, as envelopes of
+    /// at most [`LINEAGE_ENVELOPE_MAX_ENTRIES`] each: the catch-up re-send
+    /// beside [`Self::snapshot`]. Empty when none is held.
+    #[must_use]
+    pub fn lineage_envelopes(&self) -> Vec<Vec<u8>> {
+        self.all_lineage()
+            .chunks(LINEAGE_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_lineage_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode a lineage envelope and fold every register in with its
+    /// original stamp. Fail closed: a malformed envelope changes nothing.
+    /// Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`LineageEnvelopeError`].
+    pub fn apply_lineage_envelope(&mut self, bytes: &[u8]) -> Result<bool, LineageEnvelopeError> {
+        let entries = decode_lineage_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::Lineage(s.value))),
+        ))
     }
 
     // -----------------------------------------------------------------
@@ -497,6 +654,7 @@ mod tests {
         ConversationRefKind, FolderMember, FolderOrder, FolderPins, EXCLUDE_ARCHIVED,
         INCLUDE_GROUPS,
     };
+    use super::super::lineage::LINEAGE_ENVELOPE_DOMAIN_V1;
     use super::*;
     use proptest::prelude::*;
 
@@ -517,12 +675,139 @@ mod tests {
             id: vec![b; 4],
         }
     }
+    fn lineage(successor: u8, root: u8) -> SyncEntry {
+        SyncEntry::Lineage(LineageEntry {
+            successor_group_id: vec![successor],
+            root_conversation_id: vec![root],
+        })
+    }
     fn member(f: u8, c: u8, state: MemberState) -> SyncEntry {
         SyncEntry::FolderMember(FolderMember {
             folder_id: fid(f),
             conversation: cref(c),
             state,
         })
+    }
+
+    #[test]
+    fn set_lineage_is_write_once_and_reads_back() {
+        let mut s = SyncedState::new();
+        assert_eq!(s.set_lineage(5, b"succ-1", b"root"), Ok(true));
+        // A second local write for the same successor mints nothing, with
+        // the same root or another, at any stamp.
+        assert_eq!(s.set_lineage(9, b"succ-1", b"root"), Ok(false));
+        assert_eq!(s.set_lineage(9, b"succ-1", b"other"), Ok(false));
+        let held = s.lineage_root(b"succ-1").unwrap();
+        assert_eq!(held.hlc, 5);
+        assert_eq!(held.value.root_conversation_id, b"root");
+        assert_eq!(s.conversation_id_of(b"succ-1"), b"root");
+        assert_eq!(s.conversation_id_of(b"root"), b"root");
+        assert_eq!(s.conversation_id_of(b"unknown"), b"unknown");
+        assert!(s.lineage_root(b"root").is_none());
+
+        assert_eq!(
+            s.set_lineage(1, b"x", b"x"),
+            Err(super::super::entry::BoundsError::LineageSelfReference)
+        );
+        assert_eq!(
+            s.set_lineage(1, b"", b"x"),
+            Err(super::super::entry::BoundsError::LineageIdLength)
+        );
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn a_conversation_lists_its_successors_in_stamp_order() {
+        let mut s = SyncedState::new();
+        s.set_lineage(7, b"s2", b"root").unwrap();
+        s.set_lineage(3, b"s9", b"root").unwrap();
+        s.set_lineage(3, b"s1", b"root").unwrap();
+        s.set_lineage(1, b"t1", b"elsewhere").unwrap();
+        let ids: Vec<Vec<u8>> = s
+            .lineage_successors(b"root")
+            .into_iter()
+            .map(|l| l.value.successor_group_id)
+            .collect();
+        assert_eq!(ids, vec![b"s1".to_vec(), b"s9".to_vec(), b"s2".to_vec()]);
+        assert!(s.lineage_successors(b"nobody").is_empty());
+        assert_eq!(s.all_lineage().len(), 4);
+    }
+
+    #[test]
+    fn a_received_lineage_register_follows_the_fold_rule() {
+        // Two devices wrote the same successor concurrently: the greater
+        // stamp wins, an equal stamp is decided by the bytes, in any order.
+        let mut a = SyncedState::new();
+        a.apply(5, lineage(1, 10)).ok();
+        assert_eq!(a.apply(4, lineage(1, 11)), Ok(ApplyOutcome::Superseded));
+        assert_eq!(a.apply(6, lineage(1, 12)), Ok(ApplyOutcome::Applied));
+        let mut x = SyncedState::new();
+        x.apply(5, lineage(1, 10)).ok();
+        x.apply(5, lineage(1, 11)).ok();
+        let mut y = SyncedState::new();
+        y.apply(5, lineage(1, 11)).ok();
+        y.apply(5, lineage(1, 10)).ok();
+        assert_eq!(x, y);
+        assert_eq!(
+            x.lineage_root(&[1]).unwrap().value.root_conversation_id,
+            [11]
+        );
+    }
+
+    #[test]
+    fn lineage_travels_by_envelope_and_persistence_never_by_snapshot() {
+        let mut a = SyncedState::new();
+        a.apply(1, meta(1, "Work")).ok();
+        a.set_lineage(4, b"succ", b"root").unwrap();
+        assert!(a
+            .snapshot()
+            .stamped_entries()
+            .iter()
+            .all(|(_, e)| !matches!(e, SyncEntry::Lineage(_))));
+
+        let live = a.lineage_envelope_for(b"succ").unwrap();
+        assert!(a.lineage_envelope_for(b"root").is_none());
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_lineage_envelope(&live), Ok(true));
+        assert_eq!(b.apply_lineage_envelope(&live), Ok(false));
+        assert_eq!(b.lineage_root(b"succ"), a.lineage_root(b"succ"));
+        // The original stamp travelled, so a re-send never beats a later write.
+        assert_eq!(b.lineage_root(b"succ").unwrap().hlc, 4);
+
+        assert!(SyncedState::new().lineage_envelopes().is_empty());
+        assert_eq!(a.lineage_envelopes(), vec![live]);
+        let restored = SyncedState::from_bytes(&a.to_bytes()).unwrap();
+        assert_eq!(restored.lineage_root(b"succ"), a.lineage_root(b"succ"));
+        let mut merged = SyncedState::new();
+        assert!(merged.merge_from(&restored));
+        assert_eq!(merged, a);
+
+        // A malformed envelope changes nothing.
+        let mut bad = a.lineage_envelope_for(b"succ").unwrap();
+        bad.push(0);
+        let before = b.clone();
+        assert_eq!(
+            b.apply_lineage_envelope(&bad),
+            Err(LineageEnvelopeError::Trailing)
+        );
+        assert_eq!(b, before);
+    }
+
+    #[test]
+    fn more_registers_than_one_envelope_holds_are_split() {
+        let mut s = SyncedState::new();
+        let n = u32::try_from(LINEAGE_ENVELOPE_MAX_ENTRIES + 3).unwrap();
+        for i in 0..n {
+            s.set_lineage(u64::from(i), &i.to_be_bytes(), b"root")
+                .unwrap();
+        }
+        let envelopes = s.lineage_envelopes();
+        assert_eq!(envelopes.len(), 2);
+        let mut fresh = SyncedState::new();
+        for e in &envelopes {
+            fresh.apply_lineage_envelope(e).unwrap();
+        }
+        assert_eq!(fresh, s);
     }
 
     #[test]
@@ -755,13 +1040,25 @@ mod tests {
                     reply_to_id: vec![],
                 })
             )),
-            (hlc, prop::collection::vec(c, 0..3)).prop_map(|(h, cs)| (
+            (hlc.clone(), prop::collection::vec(c.clone(), 0..3)).prop_map(|(h, cs)| (
                 h,
                 SyncEntry::ConversationOrder(ConversationOrderEntry {
                     group_ids: cs.into_iter().map(|c| vec![c]).collect(),
                 })
             )),
+            // Successors 0..3 and roots 10..13: several writers naming
+            // different roots for one successor collide often.
+            (hlc, c, 10u8..13).prop_map(|(h, s, r)| (h, lineage(s, r))),
         ]
+    }
+
+    /// Everything a fresh device is sent to catch up: the snapshot's entries
+    /// and the lineage envelopes.
+    fn catch_up(from: &SyncedState, into: &mut SyncedState) {
+        into.apply_all(from.snapshot().stamped_entries());
+        for envelope in from.lineage_envelopes() {
+            into.apply_lineage_envelope(&envelope).unwrap();
+        }
     }
 
     fn fold(entries: &[(u64, SyncEntry)]) -> SyncedState {
@@ -812,7 +1109,7 @@ mod tests {
         ) {
             let mut l = fold(&left);
             let r = fold(&right);
-            l.apply_all(r.snapshot().stamped_entries());
+            catch_up(&r, &mut l);
             let mut all = left.clone();
             all.extend(right.iter().cloned());
             prop_assert_eq!(l, fold(&all));
@@ -824,9 +1121,147 @@ mod tests {
         fn snapshot_and_persistence_rebuild_the_state(entries in prop::collection::vec(arb_entry(), 0..24)) {
             let a = fold(&entries);
             let mut fresh = SyncedState::new();
-            fresh.apply_all(a.snapshot().stamped_entries());
+            catch_up(&a, &mut fresh);
             prop_assert_eq!(&fresh, &a);
             prop_assert_eq!(SyncedState::from_bytes(&a.to_bytes()), Ok(a));
+        }
+
+        /// `merge_from` (the backup restore) is commutative and idempotent
+        /// with lineage registers in play, and agrees with the union fold.
+        #[test]
+        fn merge_from_is_commutative_and_idempotent(
+            left in prop::collection::vec(arb_entry(), 0..16),
+            right in prop::collection::vec(arb_entry(), 0..16),
+        ) {
+            let (l, r) = (fold(&left), fold(&right));
+            let mut lr = l.clone();
+            lr.merge_from(&r);
+            let mut rl = r.clone();
+            rl.merge_from(&l);
+            prop_assert_eq!(&lr, &rl);
+            prop_assert_eq!(lr.all_lineage(), rl.all_lineage());
+            let mut again = lr.clone();
+            prop_assert!(!again.merge_from(&r));
+            prop_assert!(!again.merge_from(&l));
+            prop_assert_eq!(&again, &lr);
+            let mut all = left.clone();
+            all.extend(right.iter().cloned());
+            prop_assert_eq!(lr, fold(&all));
+        }
+
+        /// Lineage registers alone: any arrival order of any writers'
+        /// envelopes converges, every held register is the greatest
+        /// `(stamp, bytes)` written for its successor, and the envelopes
+        /// rebuild exactly the lineage part of the state.
+        #[test]
+        fn lineage_envelopes_converge_in_any_order(
+            writes in prop::collection::vec((0u64..6, 0u8..4, 10u8..13), 1..20),
+            seed in any::<u64>(),
+        ) {
+            let envelopes: Vec<Vec<u8>> = writes
+                .iter()
+                .map(|(h, s, r)| {
+                    compose_lineage_envelope(&[Stamped {
+                        hlc: *h,
+                        value: LineageEntry {
+                            successor_group_id: vec![*s; 4],
+                            root_conversation_id: vec![*r; 4],
+                        },
+                    }])
+                    .unwrap()
+                })
+                .collect();
+            let mut a = SyncedState::new();
+            for e in &envelopes {
+                a.apply_lineage_envelope(e).unwrap();
+            }
+            let mut shuffled = envelopes.clone();
+            let mut x = seed | 1;
+            for i in (1..shuffled.len()).rev() {
+                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                let j = usize::try_from(x % (i as u64 + 1)).unwrap_or(0);
+                shuffled.swap(i, j);
+            }
+            let mut b = SyncedState::new();
+            for e in shuffled.iter().chain(envelopes.iter()) {
+                b.apply_lineage_envelope(e).unwrap();
+            }
+            prop_assert_eq!(&a, &b);
+            for held in a.all_lineage() {
+                let s = held.value.successor_group_id[0];
+                let best = writes
+                    .iter()
+                    .filter(|(_, ws, _)| *ws == s)
+                    .map(|(h, _, r)| (*h, *r))
+                    .max()
+                    .unwrap();
+                prop_assert_eq!((held.hlc, held.value.root_conversation_id[0]), best);
+            }
+            let mut rebuilt = SyncedState::new();
+            for e in a.lineage_envelopes() {
+                prop_assert!(rebuilt.apply_lineage_envelope(&e).unwrap());
+            }
+            prop_assert_eq!(rebuilt, a);
+        }
+
+        /// The persistence decoder is total on arbitrary bytes and on a
+        /// damaged valid state, and whatever it accepts re-encodes to a
+        /// state that reads back identically.
+        #[test]
+        fn from_bytes_is_fail_closed_on_hostile_input(
+            entries in prop::collection::vec(arb_entry(), 0..12),
+            noise in prop::collection::vec(any::<u8>(), 0..64),
+            at in any::<usize>(),
+            flip in 1u8..=255,
+        ) {
+            let _ = SyncedState::from_bytes(&noise);
+            let mut bytes = fold(&entries).to_bytes();
+            let i = at % bytes.len();
+            // Every strict prefix of a valid state is refused.
+            prop_assert!(SyncedState::from_bytes(&bytes[..i]).is_err());
+            bytes[i] ^= flip;
+            if let Ok(state) = SyncedState::from_bytes(&bytes) {
+                prop_assert_eq!(SyncedState::from_bytes(&state.to_bytes()), Ok(state));
+            }
+        }
+
+        /// The lineage envelope decoder is total, and whatever it accepts
+        /// is canonical: it re-encodes to the identical bytes.
+        #[test]
+        fn lineage_envelope_decode_is_total_and_canonical(
+            noise in prop::collection::vec(any::<u8>(), 0..96),
+            writes in prop::collection::vec((any::<u64>(), 0u8..8, 10u8..13), 1..8),
+            at in any::<usize>(),
+            flip in 1u8..=255,
+        ) {
+            let mut prefixed = LINEAGE_ENVELOPE_DOMAIN_V1.to_vec();
+            prefixed.extend_from_slice(&noise);
+            for candidate in [noise.clone(), prefixed] {
+                if let Ok(decoded) = decode_lineage_envelope(&candidate) {
+                    prop_assert_eq!(compose_lineage_envelope(&decoded).unwrap(), candidate);
+                }
+            }
+            let mut dedup = std::collections::BTreeMap::new();
+            for (h, s, r) in writes {
+                dedup.insert(s, (h, r));
+            }
+            let entries: Vec<Stamped<LineageEntry>> = dedup
+                .into_iter()
+                .map(|(s, (h, r))| Stamped {
+                    hlc: h,
+                    value: LineageEntry {
+                        successor_group_id: vec![s],
+                        root_conversation_id: vec![r],
+                    },
+                })
+                .collect();
+            let mut wire = compose_lineage_envelope(&entries).unwrap();
+            prop_assert_eq!(decode_lineage_envelope(&wire).unwrap(), entries);
+            let i = at % wire.len();
+            wire[i] ^= flip;
+            if let Ok(decoded) = decode_lineage_envelope(&wire) {
+                prop_assert_eq!(compose_lineage_envelope(&decoded).unwrap(), wire);
+            }
         }
     }
 }

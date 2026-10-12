@@ -139,7 +139,9 @@ internal fun bytesToHex(bytes: ByteArray): String =
 public fun rankFeedInput(core: FeedCore, rule: FeedRule, input: FeedInput, nowMs: Long): List<RankedItem> {
     val conversations = input.sources.map { s ->
         FeedConversation(
-            id = hexToBytesOrEmpty(s.idHex),
+            // ADR-0065 R.5 — a rule's include / exclude lists name
+            // conversation ids.
+            id = hexToBytesOrEmpty(feedSourceKey(s)),
             kind = if (s.kind == FeedSourceKind.CHANNEL) FeedConversationKind.CHANNEL else FeedConversationKind.GROUP,
             muted = s.muted,
             audience = s.audience.coerceAtLeast(0).toUInt(),

@@ -671,7 +671,7 @@ final class MultiJoinerCall {
             break
         case .groupClosed:
             // ADR-0065 phase 2 — a group-closed notice rides the GROUP JOURNAL
-            // (role-gated in `ChatRepository.receiveGroupClosed`), never the
+            // (judged in `ChatRepository.receiveGroupClosed`), never the
             // SFU signal-relay. Out of place here — drop.
             break
         case .keyRotation:

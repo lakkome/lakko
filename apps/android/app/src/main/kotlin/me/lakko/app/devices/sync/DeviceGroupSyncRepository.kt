@@ -521,13 +521,19 @@ public class DeviceGroupSyncRepository(
         synchronized(stateLock) {
             val state = syncedState ?: return
             try {
+                republishLineage(state)
+                // ADR-0065 R.5 - every person-facing store is keyed by
+                // conversation id; a screen holding ANY segment's id reads the
+                // conversation's row ([me.lakko.app.chat.aliasAcrossSegments]).
+                val lineageEntries = mutableLineage.value
+                val lineage = me.lakko.app.chat.buildLineage(lineageEntries)
                 mutableDrafts.value = state.allDrafts().associate { d ->
                     groupIdHexOf(d.groupId) to DraftState(
                         text = d.text,
                         replyToId = d.replyToId,
                         updatedAtHlc = d.hlc,
                     )
-                }
+                }.let { me.lakko.app.chat.aliasAcrossSegments(it, lineageEntries, lineage) }
                 mutableFlags.value = state.allFlags().associate { f ->
                     groupIdHexOf(f.groupId) to FlagsState(
                         pinned = f.pinned,
@@ -536,14 +542,24 @@ public class DeviceGroupSyncRepository(
                         unreadOverride = f.unreadOverride,
                         updatedAtHlc = f.hlc,
                     )
-                }
-                mutableReadCursors.value = state.allReadCursors().associate { c ->
+                }.let { me.lakko.app.chat.aliasAcrossSegments(it, lineageEntries, lineage) }
+                val rawCursors = state.allReadCursors().associate { c ->
                     groupIdHexOf(c.groupId) to ReadCursorState(
                         upToMessageId = c.upToMessageId,
                         readAtMs = c.readAtMs,
                         updatedAtHlc = c.hlc,
                     )
                 }
+                conversationReadCursors = rawCursors
+                // The read position is one per conversation and carries its
+                // segment; each segment's readers get it as that segment's
+                // own 8-byte message id.
+                mutableReadCursors.value =
+                    me.lakko.app.chat.aliasAcrossSegments(rawCursors, lineageEntries, lineage) { c, segment ->
+                        me.lakko.app.chat.readCursorBytesForSegment(c.upToMessageId, segment)?.let { bytes ->
+                            ReadCursorState(upToMessageId = bytes, readAtMs = c.readAtMs, updatedAtHlc = c.updatedAtHlc)
+                        }
+                    }
                 mutableOrder.value = state.conversationOrder()?.let { o ->
                     OrderState(groupIds = o.groupIds, updatedAtHlc = o.hlc)
                 }
@@ -574,6 +590,87 @@ public class DeviceGroupSyncRepository(
         return changed
     }
 
+    // ------------------------------------------------------------
+    // ADR-0065 R.5 / R.13a - the conversation lineage
+    // ------------------------------------------------------------
+
+    private val mutableLineage: MutableStateFlow<List<me.lakko.app.chat.LineageEntry>> =
+        MutableStateFlow(emptyList())
+
+    /**
+     * The lineage registers `successor group -> root conversation` of the
+     * synced state, as plain values (lower-case hex ids). A conversation that
+     * continues in a new group keeps its row, pin, mute, folder, draft and
+     * read position through these: every person-facing store stays keyed on
+     * the root.
+     */
+    public val lineage: StateFlow<List<me.lakko.app.chat.LineageEntry>> = mutableLineage.asStateFlow()
+
+    /** Project the registers and mirror them for the readers that open no
+     *  synced state ([me.lakko.app.chat.LineageMirror]). Under [stateLock]. */
+    private fun republishLineage(state: SyncedState) {
+        val entries = state.allLineage().map {
+            me.lakko.app.chat.LineageEntry(
+                successorHex = groupIdHexOf(it.successorGroupId),
+                rootHex = groupIdHexOf(it.rootConversationId),
+                hlc = it.hlc,
+            )
+        }
+        if (entries == mutableLineage.value) return
+        mutableLineage.value = entries
+        activeAccountIdB64.get()?.let { me.lakko.app.chat.LineageMirror.save(applicationContext, it, entries) }
+    }
+
+    /**
+     * Record that [successorGroupId] continues the conversation
+     * [rootConversationId] and tell the account's other devices. WRITE-ONCE
+     * on the writer's side: a successor this device already holds a register
+     * for is left as it is (`false`). The register travels as a `lakko-sync`
+     * lineage envelope inside a DeviceGroup `ServiceEnvelope` (R.13a); a
+     * failed publish is not lost, since a catch-up re-send carries every
+     * register again.
+     */
+    public suspend fun recordLineage(successorGroupId: ByteArray, rootConversationId: ByteArray): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            val written = try {
+                state.setLineage(Hlc.mint(), successorGroupId, rootConversationId)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "lineage register refused (${cause.javaClass.simpleName})")
+                false
+            }
+            if (!written) return false
+            runCatching { state.lineageEnvelopeFor(successorGroupId) }.getOrNull()
+        }
+        republish()
+        if (envelope != null) {
+            try {
+                sendServiceEnvelope(envelope)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "lineage register not published (${cause.javaClass.simpleName})")
+                pendingFlag?.recordFailure()
+            }
+        }
+        return true
+    }
+
+    /** A received lineage envelope: folded by the ordinary rule, so two
+     *  devices that wrote different roots for one successor converge. */
+    private fun applyLineage(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyLineageEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "lineage envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
     /** Fold this device's own write in, under its own leaf. */
     private fun foldLocal(body: DeviceGroupBody, hlc: ULong) {
         val ownLeaf = runCatching { group.get()?.ownLeafIndex() }.getOrNull() ?: 0u
@@ -602,6 +699,9 @@ public class DeviceGroupSyncRepository(
                 ),
             )
         }
+        // ADR-0065 R.13a - the backup payload carries the lineage registers
+        // (`to_bytes`), and `snapshotParts()` does not.
+        for (envelope in runCatching { restored.lineageEnvelopes() }.getOrNull().orEmpty()) applyLineage(envelope)
     }
 
     /** Permanently destroy the repository — cancels the
@@ -610,6 +710,28 @@ public class DeviceGroupSyncRepository(
     public fun close() {
         clear()
         scope.cancel()
+    }
+
+    /** The read cursors as stored: one per conversation id, the value
+     *  carrying its segment. Under [stateLock]. */
+    private var conversationReadCursors: Map<String, ReadCursorState> = emptyMap()
+
+    /** ADR-0065 R.5 - the conversation id a person-facing write for
+     *  [groupId] is filed under, and the index of that group among the
+     *  conversation's segments. */
+    private fun conversationOf(groupId: ByteArray): Pair<ByteArray, Int> {
+        val entries = mutableLineage.value
+        if (entries.isEmpty()) return groupId to 0
+        val lineage = me.lakko.app.chat.buildLineage(entries)
+        val hex = groupIdHexOf(groupId).lowercase()
+        val root = lineage.conversationOf(hex)
+        if (root == hex) return groupId to 0
+        val rootBytes = try {
+            ByteArray(root.length / 2) { i -> root.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+        } catch (_: Throwable) {
+            return groupId to 0
+        }
+        return rootBytes to lineage.segmentIndexOf(hex)
     }
 
     /** Lookup helper: current draft for `groupId` (raw bytes)
@@ -638,7 +760,7 @@ public class DeviceGroupSyncRepository(
     ) {
         writeLocal(
             DeviceGroupBody.Draft(
-                groupId = groupId,
+                groupId = conversationOf(groupId).first,
                 text = text,
                 replyToId = replyToId,
             ),
@@ -655,7 +777,7 @@ public class DeviceGroupSyncRepository(
     ) {
         writeLocal(
             DeviceGroupBody.Flags(
-                groupId = groupId,
+                groupId = conversationOf(groupId).first,
                 pinned = pinned,
                 muted = muted,
                 archived = archived,
@@ -670,10 +792,19 @@ public class DeviceGroupSyncRepository(
         upToMessageId: ByteArray,
         readAtMs: ULong,
     ) {
+        // ADR-0065 R.5 - one position per conversation: `message_id(8 BE)`
+        // in the first segment, `message_id(8 BE) || segment(4 BE)` later.
+        val (conversationId, segment) = conversationOf(groupId)
+        val held = synchronized(stateLock) { conversationReadCursors[groupIdHexOf(conversationId)]?.upToMessageId }
+        val bytes = if (segment == 0 && held?.let { it.size >= 12 } != true) {
+            upToMessageId
+        } else {
+            me.lakko.app.chat.readCursorBytesForWrite(upToMessageId, segment, held) ?: return
+        }
         writeLocal(
             DeviceGroupBody.ReadCursor(
-                groupId = groupId,
-                upToMessageId = upToMessageId,
+                groupId = conversationId,
+                upToMessageId = bytes,
                 readAtMs = readAtMs,
             ),
         )
@@ -763,6 +894,12 @@ public class DeviceGroupSyncRepository(
         for (part in parts) {
             sendBody(DeviceGroupBody.StateSnapshot(part), Hlc.mint())
         }
+        // ADR-0065 R.13a - the lineage registers are not in `snapshot()`: a
+        // catch-up is the snapshot parts plus `lineageEnvelopes()`.
+        val lineageEnvelopes = synchronized(stateLock) {
+            runCatching { syncedState?.lineageEnvelopes() }.getOrNull().orEmpty()
+        }
+        for (envelope in lineageEnvelopes) sendServiceEnvelope(envelope)
     }
 
     /** Re-send everything this device holds if a write of ours is still
@@ -946,7 +1083,15 @@ public class DeviceGroupSyncRepository(
                                 processed.`data`,
                             )
                             val body = parsed.body
-                            if (body is DeviceGroupBody.ServiceEnvelope && isKeyRotation(body.envelope)) {
+                            if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isLineageEnvelope(body.envelope)
+                            ) {
+                                // ADR-0065 R.13a - a lineage register from
+                                // another of this account's devices. Routed
+                                // BEFORE the lakko-contacts dispatcher: it is
+                                // a `lakko-sync` envelope, not one of those.
+                                applyLineage(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope && isKeyRotation(body.envelope)) {
                                 // ADR-0066 section 3.3 - the account's new
                                 // keys from the device that changed them.
                                 // Meaningful ONLY here, in the account's own
@@ -1430,6 +1575,11 @@ public class DeviceGroupSyncRepository(
                                 body = DeviceGroupBody.StateSnapshot(part),
                             ),
                         )
+                    }
+                    // ADR-0065 R.13a - and the lineage registers, which are
+                    // not part of `snapshotParts()`.
+                    for (envelope in SyncedState.fromBytes(bytes).lineageEnvelopes()) {
+                        existing.applyLineageEnvelope(envelope)
                     }
                     existing.toBytes()
                 }

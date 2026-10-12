@@ -73,6 +73,13 @@ final class CallHost: ObservableObject {
         /// shows. One value, because the whole point is that neither surface
         /// stores the finished sentence.
         var recordCall: @MainActor (_ call: FinishedCall) -> Void = { _ in }
+        /// ADR-0065 R.7 case 1 — where a one-to-one call asked for in
+        /// `groupIdHex` is dialled: that group, the group the conversation
+        /// moved to, or nowhere (`CallContinuity.oneToOneCallTarget`). The
+        /// ids are the app's hex keys.
+        var callTarget: @MainActor (_ groupIdHex: String) -> CallContinuity.Target = {
+            .dial(groupIdB64: $0)
+        }
         /// `docs/ux/calls.md` sections 2.1 and 2.1.1 — does this conversation
         /// carry the mute flag? A muted conversation never rings; the call is
         /// still offered, still answerable, and still recorded.
@@ -220,8 +227,8 @@ final class CallHost: ObservableObject {
         repository.callSignalingSink = { [weak self] row in
             self?.receive(row)
         }
-        repository.onOneToOneClosed = { [weak self] groupIdHex in
-            self?.conversationClosed(groupIdHex: groupIdHex)
+        repository.onOneToOneMoved = { [weak self] groupIdHex in
+            self?.conversationMoved(groupIdHex: groupIdHex)
         }
     }
 
@@ -336,10 +343,22 @@ final class CallHost: ObservableObject {
     ///
     /// A video call on a device with no camera is a voice call with one line
     /// saying so, never a check of a camera that does not exist.
-    func startOutgoingCall(groupIdHex: String, button: CallButtonKind = .voice) {
+    func startOutgoingCall(groupIdHex askedGroupIdHex: String, button: CallButtonKind = .voice) {
         guard !hasLiveCall, !callStarting else { return }
         if let other = otherCallOccupant() {
             callError = CallSlot.busyText(other, verb: .start)
+            return
+        }
+        // ADR-0065 R.7 case 1 — a call started in a one-to-one whose other
+        // person reset their keys dials the group the conversation continues
+        // in, when there is one and it is not dead itself; otherwise it fails
+        // here, before anything is signalled, with the ordinary copy.
+        let groupIdHex: String
+        switch ports.callTarget(askedGroupIdHex) {
+        case .dial(let target):
+            groupIdHex = target
+        case .unavailable:
+            callError = .key("call.error.unavailable")
             return
         }
         callStarting = true
@@ -428,15 +447,13 @@ final class CallHost: ObservableObject {
         }
     }
 
-    /// `docs/ux/identity-recovery.md` 16.4 — the one-to-one a call is in was
-    /// closed on this device (the other person reset their account keys). End
-    /// the call here: nothing can be sent into the chat any more, so its End
-    /// frame is refused by the repository and only logged, and nothing is
-    /// read from the chat either, so the other side's End would never arrive
-    /// and the call would sit "connected" until the transport gave up. The
-    /// session tears its media down and reaches `.done` without waiting on
-    /// the publish.
-    func conversationClosed(groupIdHex: String) {
+    /// ADR-0065 R.12 — the one-to-one a call is in MOVED to a successor group
+    /// (the other person reset their account keys and the conversation
+    /// continues on new keys). The call's keys come from the old group, whose
+    /// other side is devices that were removed: end it here. The session
+    /// tears its media down and reaches `.done` without waiting on the End
+    /// frame, which is not sent into the old group.
+    func conversationMoved(groupIdHex: String) {
         guard activeGroupIdHex == groupIdHex else { return }
         endCurrentCall()
     }
@@ -768,6 +785,9 @@ extension CallHost {
             mintCallId: { CallSession.mintCallId() },
             recordCall: { [weak repository] call in
                 repository?.recordFinishedCall(call)
+            },
+            callTarget: { [weak repository] groupIdHex in
+                repository?.oneToOneCallTarget(groupIdHex: groupIdHex) ?? .dial(groupIdB64: groupIdHex)
             },
             turnClient: {
                 guard let token = sessionTokenProvider(), !token.isEmpty else { return nil }

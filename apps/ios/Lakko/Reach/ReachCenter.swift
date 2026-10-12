@@ -403,6 +403,17 @@ public final class ReachCenter: ObservableObject {
             guard let pk = try? Self.publicKey(accountSeed: seed, spec: spec) else { continue }
             desired.append((pk, spec.expiresAtMs))
         }
+        // ADR-0065 R.4 — after a reset of THIS account, the continuity key
+        // stays registered on the new mailbox until its expiry, so a peer
+        // that accepted the reset can deliver a Welcome. Derived from public
+        // values; removed by the diff once it is no longer wanted.
+        if let wanted = Continuity.keyWanted(
+            marker: Continuity.readMarker(accountIdB64: accountIdB64), nowMs: Int64(now)),
+           let accountId = Data(base64Encoded: accountIdB64),
+           let continuitySeed = try? continuityReachSeed(accountId: accountId, keyGeneration: wanted.keyGeneration),
+           let pk = try? reachVerifyingKey(seed: continuitySeed) {
+            desired.append((pk, UInt64(wanted.expiresAtMs)))
+        }
         let registered = Set(record.registeredB64.compactMap { Data(base64Encoded: $0) })
         let diff = ReachRules.registrationDiff(desired: desired, registered: registered)
         let open = ReachRules.mailboxOpen(setting)
@@ -965,8 +976,46 @@ public final class ReachCenter: ObservableObject {
             return DsMailboxWriteAuth(reachSeed: seed)
         }
         let held = heldForPerson(accountKey)
-        guard let seed = ReachRules.writeSeed(from: held, groupIdHex: groupIdHex) else { return nil }
+        if let seed = ReachRules.writeSeed(from: held, groupIdHex: groupIdHex) {
+            return DsMailboxWriteAuth(reachSeed: seed)
+        }
+        return continuityAuth(toAccountKey: currentAccountKey(of: accountKey))
+    }
+
+    /// The pin store the continuity key is resolved from. Injectable for tests.
+    var continuityPins: () -> [String: PeerPinStore.AccountPubkeyPin] = { PeerPinStore().allPins() }
+
+    /// ADR-0065 R.4 — the continuity key of an account whose reset this
+    /// device ACCEPTED, as a way to sign a Welcome to its new mailbox: tried
+    /// after every grant the person itself issued (once the new identity is
+    /// in a conversation its own grants are used and this key is not), and
+    /// before a committer delegation. `nil` for any other key, and past the
+    /// key's window.
+    func continuityAuth(toAccountKey accountKey: Data) -> DsMailboxWriteAuth? {
+        guard let auth = Continuity.auth(
+            targetAccountKeyB64: accountKey.base64EncodedString(),
+            pins: continuityPins(), nowMs: Int64(Self.nowMs())),
+              let seed = try? continuityReachSeed(accountId: auth.accountId, keyGeneration: auth.keyGeneration)
+        else { return nil }
         return DsMailboxWriteAuth(reachSeed: seed)
+    }
+
+    /// ``continuityAuth(toAccountKey:)`` for a write addressed by its mailbox
+    /// pseudonym alone.
+    private func continuityAuth(toMailbox pseudonym: Data) -> DsMailboxWriteAuth? {
+        let nowMs = Int64(Self.nowMs())
+        for (accountIdB64, pin) in continuityPins() {
+            guard pin.resetSignedAtMs != nil,
+                  let key = Data(base64Encoded: pin.pinnedSignaturePubkeyB64),
+                  Self.mailbox(of: key) == pseudonym,
+                  let auth = Continuity.auth(
+                    targetAccountKeyB64: pin.pinnedSignaturePubkeyB64,
+                    pins: [accountIdB64: pin], nowMs: nowMs),
+                  let seed = try? continuityReachSeed(accountId: auth.accountId, keyGeneration: auth.keyGeneration)
+            else { continue }
+            return DsMailboxWriteAuth(reachSeed: seed)
+        }
+        return nil
     }
 
     /// ``writeAuth(toAccountKey:groupIdHex:)`` for a write addressed by its
@@ -985,7 +1034,7 @@ public final class ReachCenter: ObservableObject {
             else { continue }
             return DsMailboxWriteAuth(reachSeed: seed)
         }
-        return delegatedAuth(toMailbox: pseudonym)
+        return continuityAuth(toMailbox: pseudonym) ?? delegatedAuth(toMailbox: pseudonym)
     }
 
     /// ADR-0050 2.5a item 7 — every way this device can sign a write to the
@@ -1003,6 +1052,9 @@ public final class ReachCenter: ObservableObject {
         for person in heldPeople() where Self.mailbox(of: person) == pseudonym {
             out += ReachRules.writeSeeds(from: heldForPerson(person), groupIdHex: groupIdHex)
                 .map { DsMailboxWriteAuth(reachSeed: $0) }
+        }
+        if let continuity = continuityAuth(toMailbox: pseudonym), !out.contains(continuity) {
+            out.append(continuity)
         }
         if let delegated = delegatedAuth(toMailbox: pseudonym) { out.append(delegated) }
         return out

@@ -261,7 +261,7 @@ public struct ChatScreen: View {
             // joinable after a minute, any call after four hours), so the
             // banner re-evaluates on a timer rather than only on a new
             // journal row.
-            if !viewModel.membershipHasEnded, !viewModel.conversationClosed {
+            if !viewModel.membershipHasEnded {
                 GroupCallBanner(
                     affordance: viewModel.groupCallAffordance(
                         nowMs: Int64(now.timeIntervalSince1970 * 1000)
@@ -488,34 +488,7 @@ public struct ChatScreen: View {
             // info belongs back here.
             }
         }
-        .sheet(isPresented: $viewModel.conversationInfoOpen) {
-            // Section 3 — a layer over the conversation, which stays where it
-            // is behind it. On iOS that is a sheet, which is what this already
-            // was.
-            ConversationInfoSheet(
-                destination: infoDestination,
-                chat: viewModel,
-                // ADR-0045 UX 6.2.4 - a deleted chat's row is gone from the
-                // registry, so the screen it was opened from has nothing left
-                // to show. Route back the same way the Back button does.
-                onDeleted: onBack,
-                // ADR-0065 phase 2 (UX 16.5) — `Create and close the old
-                // group` ends by opening the new group.
-                onRecreated: { groupIdHex in
-                    viewModel.closeConversationInfo()
-                    onOpenConversation(groupIdHex, nil)
-                },
-                // UX 16.5, "created, some invitations failed: the group
-                // exists and is open behind it". This sheet is presented by
-                // THIS screen, which stays in the tab's stack when the new
-                // chat is pushed above it, so the sheet stays up over the new
-                // group. `Done` then runs `onRecreated`, which closes the
-                // sheet; opening a chat already on top is a no-op.
-                onRecreatedBehind: { groupIdHex in
-                    onOpenConversation(groupIdHex, nil)
-                }
-            )
-        }
+        .sheet(isPresented: $viewModel.conversationInfoOpen) { conversationInfoLayer }
         .task {
             // Continuous foreground polling. SwiftUI's `.task`
             // ties the lifecycle to the view: the loop starts on
@@ -751,17 +724,6 @@ public struct ChatScreen: View {
                                     : nil,
                                 showsSenderColumn: viewModel.presentsAsGroup
                                     && entry.message.direction == .incoming,
-                                // ADR-0065 phase 2 (UX 16.1) — the warning
-                                // under the name, once per run, for a message
-                                // from a flagged contact's new keys; a tap
-                                // opens the contact screen.
-                                keyResetWarning: viewModel.keyResetWarning(for: entry.message),
-                                onKeyResetWarning: {
-                                    if let id = viewModel.keyResetContactMessageId(for: entry.message) {
-                                        onOpenContact(id)
-                                    }
-                                },
-                                systemText: viewModel.keyResetSystemRowText(for: entry.message),
                                 startsRun: entry.startsRun,
                                 timeLabel: entry.timeLabel,
                                 // UX spec section 5.2 — about 78 percent of
@@ -852,11 +814,7 @@ public struct ChatScreen: View {
                     // the state is terminal. Carried by TEXT, never by hue
                     // or an icon, and never announced over what the reader
                     // is doing.
-                    // ADR-0065 phase 2 (UX 16.4 / 16.5) — a closed
-                    // conversation's own terminal row; the membership row
-                    // otherwise. Never both: a closed group whose membership
-                    // later ended is still closed first.
-                    if let row = viewModel.closedTerminalRowCopy ?? viewModel.terminalRowCopy {
+                    if let row = viewModel.terminalRowCopy {
                         VStack(spacing: 4) {
                             Text(row.headline)
                             Text(row.consequence)
@@ -925,6 +883,10 @@ public struct ChatScreen: View {
     /// timeline this device holds; otherwise do nothing and say nothing ("a
     /// quote is not a promise that the original exists").
     private func jumpToQuoted(_ messageId: Int64) {
+        // ADR-0065 R.7 case 1 — a reply flushed into a successor group
+        // carries target 0: the quote is drawn, and there is nowhere to jump
+        // (an unsent row also has id 0 and is not what was quoted).
+        guard messageId != HeldSend.replyNoJumpTarget else { return }
         guard viewModel.messages.contains(where: {
             $0.messageId == messageId && !ChatTimeline.isHiddenSystemRow($0)
         }) else { return }
@@ -963,7 +925,7 @@ public struct ChatScreen: View {
             // once the membership has ended that is an invitation the composer
             // below can no longer accept. The terminal row that follows carries
             // the whole of what there is to say.
-            if viewModel.membershipHasEnded || viewModel.conversationClosed {
+            if viewModel.membershipHasEnded {
                 EmptyView()
             } else if viewModel.threadKnown {
                 Text(l10n.t("chat.timeline.empty"))
@@ -1231,86 +1193,28 @@ public struct ChatScreen: View {
     /// never be in again is a control promising a future it does not have.
     @ViewBuilder
     private var composer: some View {
-        // ADR-0065 phase 2 (UX 16.4 / 16.5) — a conversation this device
-        // CLOSED takes the ended-chat shape with its own words and one button;
-        // decided before the membership slot because an ended membership in a
-        // closed group is still the closed shape (the roster line of 6.2.7 is
-        // not used: the roster is live).
-        if let closed = viewModel.closedComposer {
-            closedComposerBar(closed)
-        } else {
-            switch viewModel.composerSlot {
-            case .composer:
-                liveComposer
-            case .withdrawn(let notice, let draft, let draftLabel):
-                withdrawnComposer(notice: notice, draft: draft, draftLabel: draftLabel)
-            }
+        switch viewModel.composerSlot {
+        case .composer:
+            liveComposer
+        case .withdrawn(let notice, let draft, let draftLabel):
+            withdrawnComposer(notice: notice, draft: draft, draftLabel: draftLabel)
         }
     }
 
-    /// UX 16.4 / 16.5 — the static bar in the composer's slot plus
-    /// `Start a new chat` (disabled with the helper and `Open contact` while
-    /// the contact is unverified) or `Open the new group` (only once joined).
+    /// The layer the conversation's name opens.
     @ViewBuilder
-    private func closedComposerBar(_ closed: ClosedComposerSlot) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let draft = closed.draft, let draftLabel = closed.draftLabel {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(draftLabel)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(draft)
-                        .font(.footnote)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            if let err = viewModel.sendError {
-                Text(err.text)
-                    .font(.footnote)
-                    .foregroundStyle(Color.lakkoDanger)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            HStack(alignment: .center, spacing: 12) {
-                Text(closed.notice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if let action = closed.action {
-                    Button(action) {
-                        if let successor = viewModel.successorGroupIdHex {
-                            onOpenConversation(successor, nil)
-                        } else {
-                            Task { @MainActor in
-                                if let fresh = await viewModel.startNewChatAfterReset() {
-                                    onOpenConversation(fresh, nil)
-                                }
-                            }
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!closed.actionEnabled)
-                }
-            }
-            if let helper = closed.helper {
-                HStack(spacing: 8) {
-                    Text(helper)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    if let contactMessageId = viewModel.closedContactMessageId {
-                        Button(l10n.t("contacts.keys_reset.open_contact")) {
-                            onOpenContact(contactMessageId)
-                        }
-                        .font(.caption2)
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Color.lakkoAccent)
-                    }
-                }
-            }
-        }
-        .padding(12)
-        .background(Color(.systemBackground))
-        .accessibilityElement(children: .contain)
+    private var conversationInfoLayer: some View {
+        // Section 3 — a layer over the conversation, which stays where it
+        // is behind it. On iOS that is a sheet, which is what this already
+        // was.
+        ConversationInfoSheet(
+            destination: infoDestination,
+            chat: viewModel,
+            // ADR-0045 UX 6.2.4 - a deleted chat's row is gone from the
+            // registry, so the screen it was opened from has nothing left
+            // to show. Route back the same way the Back button does.
+            onDeleted: onBack
+        )
     }
 
     /// The bar that occupies the composer's own slot so the layout does not
@@ -1842,14 +1746,6 @@ struct MessageRow: View {
     var authorName: String? = nil
     /// Whether the row reserves the avatar column (incoming rows in a group).
     var showsSenderColumn: Bool = false
-    /// ADR-0065 phase 2 (UX 16.1) — the muted warning line under the sender
-    /// name of a message from a contact's unverified new keys, or `nil`.
-    var keyResetWarning: String? = nil
-    /// Tapping the warning line opens the contact screen.
-    var onKeyResetWarning: () -> Void = {}
-    /// ADR-0065 phase 2 (UX 16.3) — the worded form of a system row stored as
-    /// a machine marker, or `nil` to draw the row's own text.
-    var systemText: String? = nil
     /// Whether this message opens a run (name + avatar are drawn on it).
     var startsRun: Bool = true
     /// The bubble-corner time, `nil` when the server time is unknown.
@@ -2073,18 +1969,6 @@ struct MessageRow: View {
                             .lineLimit(1)
                             .padding(.leading, 4)
                     }
-                    // UX 16.1 — a warning, not a redaction: the bubble renders
-                    // the message, the line names the state. A tap target of
-                    // its own (section 16.9), to the contact screen.
-                    if startsRun, let keyResetWarning {
-                        Button(action: onKeyResetWarning) {
-                            Label(keyResetWarning, systemImage: "exclamationmark.shield")
-                                .font(.caption2)
-                                .foregroundStyle(Color.lakkoTextMuted)
-                                .padding(.leading, 4)
-                        }
-                        .buttonStyle(.plain)
-                    }
                     if isBareVideoNote {
                         menuTarget(videoNoteColumn(alignment: .leading))
                     } else if let ref = bareVisualMedia {
@@ -2101,7 +1985,7 @@ struct MessageRow: View {
                 callRow(call)
             } else {
                 // Small and centred (UX spec section 5.2).
-                Text(systemText ?? message.text)
+                Text(message.text)
                     .font(.caption)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
@@ -2188,7 +2072,14 @@ struct MessageRow: View {
             && message.direction != .system
             && !message.deleted
             && !message.text.isEmpty
+            // ADR-0065 R.5 — a row of an older group of the conversation is
+            // read-only: its menu offers nothing but Unpin (below).
+            && !isHistoryRow
     }
+
+    /// ADR-0065 R.5 — whether this row belongs to an older segment of the
+    /// conversation.
+    private var isHistoryRow: Bool { LineageRules.isHistoryRowId(message.messageId) }
 
     /// `docs/ux/message-actions.md` §3 — the card's rows for THIS message.
     private var menuActions: [MessageMenuAction] {
@@ -2197,7 +2088,9 @@ struct MessageRow: View {
             hasText: canCopy,
             // Section 4.1 — on any message whose send is complete and that
             // is not deleted, which is the set Forward is offered on.
-            pin: canForward ? pinState : .unavailable,
+            // ADR-0065 R.5 — ...and on a pinned row of an older segment,
+            // which offers Unpin alone (the view model decides).
+            pin: (canForward || isHistoryRow) ? pinState : .unavailable,
             canSelect: canSelect)
     }
 
@@ -2874,14 +2767,6 @@ struct MembersSheet: View {
     /// thread the registry has forgotten. Supplied by the presenting screen.
     var onDeleted: () -> Void = {}
 
-    /// ADR-0065 phase 2 (UX 16.5) — the `Recreate group` sheet.
-    @State private var recreateSheetPresented = false
-    /// Where the screen goes once the new group exists: the presenting screen
-    /// opens it and closes this panel.
-    var onRecreated: (_ groupIdHex: String) -> Void = { _ in }
-    /// UX 16.5 — open the new group behind the panel, which stays up.
-    var onRecreatedBehind: (_ groupIdHex: String) -> Void = { _ in }
-
     /// Which blocks this panel holds — `docs/ux/conversation-info.md` section
     /// 2.2, answered by the shared rule in `crates/lakko-ui-rules` rather than
     /// by this view.
@@ -3097,20 +2982,11 @@ struct MembersSheet: View {
                                     }
                                 }
                                 Spacer()
-                                // ADR-0065 phase 2 (UX 16.1) — a request from a
-                                // flagged contact's new keys: `Approve` disabled
-                                // with the sentence, `Reject` live.
-                                let approveBlocked = viewModel.approveBlockedReason(proposalRef: ref)
-                                if let approveBlocked {
-                                    Text(approveBlocked)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
                                 Button(l10n.t("chat.members.join.approve")) {
                                     viewModel.onApproveJoin(proposalRef: ref)
                                 }
                                 .buttonStyle(.borderless)
-                                .disabled(viewModel.membershipBusy || approveBlocked != nil)
+                                .disabled(viewModel.membershipBusy)
                                 Button(role: .destructive) {
                                     viewModel.onRejectJoin(proposalRef: ref)
                                 } label: {
@@ -3130,35 +3006,6 @@ struct MembersSheet: View {
                 // own request — lands before anyone could look, and a notice
                 // that appears and vanishes teaches the user that membership is
                 // slow when it is not.
-                // ADR-0065 phase 2 (UX 16.5) — the owned-group notice, above
-                // the pending notice: the owner's old devices cannot be removed
-                // and the group cannot get a new owner. `Recreate group` for an
-                // admin; `An admin can recreate it.` for a plain member. Once
-                // the group is closed, the line naming the new group instead.
-                if let line = viewModel.closedGroupPanelLine {
-                    Section {
-                        Text(line).font(.footnote)
-                    }
-                } else if let owned = viewModel.ownedGroupNotice {
-                    Section {
-                        Label {
-                            Text(owned.text).font(.footnote)
-                        } icon: {
-                            Image(systemName: "exclamationmark.shield")
-                                .foregroundStyle(Color.lakkoTextMuted)
-                        }
-                        if let memberLine = owned.memberLine {
-                            Text(memberLine)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        if owned.canRecreate {
-                            Button(l10n.t("group.recreate.action")) { recreateSheetPresented = true }
-                                .disabled(viewModel.membershipBusy)
-                        }
-                    }
-                    .accessibilityElement(children: .contain)
-                }
                 if let notice = viewModel.pendingNoticeText {
                     Section {
                         Text(notice.count).font(.footnote)
@@ -3266,16 +3113,7 @@ struct MembersSheet: View {
                                     // is annotated. Dropping the row would assert
                                     // they are gone while they are still in the
                                     // group and still decrypting every message.
-                                    // ADR-0065 phase 2 (UX 16.3) — a member
-                                    // whose keys were reset carries the shield
-                                    // and the reset's own words (`Being
-                                    // removed.` where this device proposed it),
-                                    // in place of the generic pending line.
-                                    if let reset = viewModel.keyResetAnnotation(member) {
-                                        Label(reset, systemImage: "exclamationmark.shield")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                    } else if let annotation = viewModel.pendingAnnotation(member) {
+                                    if let annotation = viewModel.pendingAnnotation(member) {
                                         Text(annotation)
                                             .font(.caption2)
                                             .foregroundStyle(.secondary)
@@ -3481,18 +3319,6 @@ struct MembersSheet: View {
             // on different screens.
             .navigationDestination(isPresented: $viewModel.transferStepOpen) {
                 TransferOwnershipStep(viewModel: viewModel)
-            }
-            // ADR-0065 phase 2 (UX 16.5) — the recreate sheet is the new-group
-            // flow's own surface pre-filled, pushed inside this sheet's stack
-            // like the transfer step (one modal surface owns the choice).
-            .navigationDestination(isPresented: $recreateSheetPresented) {
-                RecreateGroupScreen(
-                    viewModel: viewModel,
-                    onCreated: { groupIdHex in
-                        recreateSheetPresented = false
-                        onRecreated(groupIdHex)
-                    },
-                    onCreatedBehind: onRecreatedBehind)
             }
             // UX §3 / §6 — the confirmation is the LAST EXIT, not a courtesy: a
             // published request cannot be withdrawn (there is no wire withdraw,

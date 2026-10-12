@@ -46,6 +46,73 @@ export interface MintedLink {
   readonly linkId: Uint8Array;
 }
 
+/** A minted link as the spend round of ADR-0066 section 3.5a rule 5 reads
+ *  it: where it lives and when this device minted it. */
+export interface MintedLinkRow extends MintedLink {
+  readonly kind: MintedLinkKind;
+  /** The ledger id as the URL slug, or {@link inlineLinkSlug} for a link
+   *  that has no ledger row. */
+  readonly blobIdSlug: string;
+  /** When this device minted it; `null` for a row kept before the time was
+   *  recorded (older than any rotation this build can observe). */
+  readonly mintedAtMs: number | null;
+}
+
+const INLINE_SLUG_PREFIX = "inline:";
+
+/** The row name of a link with no ledger row (a call link minted while the
+ *  ledger was unreachable): only its reach key can be revoked. */
+export function inlineLinkSlug(linkIdB64Url: string): string {
+  return `${INLINE_SLUG_PREFIX}${linkIdB64Url}`;
+}
+
+export function isInlineLinkSlug(slug: string): boolean {
+  return slug.startsWith(INLINE_SLUG_PREFIX);
+}
+
+/** Split a row key back into its parts; `null` for a key of another shape
+ *  or another account. Pure. */
+export function parseMintedRowKey(
+  key: string,
+  accountIdB64: string,
+): { readonly kind: MintedLinkKind; readonly blobIdSlug: string } | null {
+  const prefix = `${accountIdB64}|`;
+  if (!key.startsWith(prefix)) return null;
+  const rest = key.slice(prefix.length);
+  const bar = rest.indexOf("|");
+  if (bar <= 0) return null;
+  const kind = rest.slice(0, bar);
+  const blobIdSlug = rest.slice(bar + 1);
+  if ((kind !== "contact" && kind !== "call") || blobIdSlug.length === 0) return null;
+  return { kind, blobIdSlug };
+}
+
+/** Parse a row's opened plaintext. Pure. */
+export function decodeMintedLink(
+  json: string,
+): (MintedLink & { readonly mintedAtMs: number | null }) | null {
+  try {
+    const parsed = JSON.parse(json) as { s?: unknown; l?: unknown; t?: unknown };
+    if (typeof parsed.s !== "string" || typeof parsed.l !== "string") return null;
+    const t = parsed.t;
+    return {
+      linkSecret: base64Decode(parsed.s),
+      linkId: base64Decode(parsed.l),
+      mintedAtMs: typeof t === "number" && Number.isFinite(t) && t > 0 ? t : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function encodeMintedLink(link: MintedLink, mintedAtMs: number): string {
+  return JSON.stringify({
+    s: base64Encode(link.linkSecret),
+    l: base64Encode(link.linkId),
+    t: Math.floor(mintedAtMs),
+  });
+}
+
 interface PersistedRow {
   key: string;
   ciphertext: Uint8Array;
@@ -95,13 +162,12 @@ export async function rememberMintedLink(
   kind: MintedLinkKind,
   blobIdSlug: string,
   link: MintedLink,
+  mintedAtMs: number = Date.now(),
 ): Promise<void> {
   const key = await withKey(accountIdB64);
   if (key === null) return;
   try {
-    const plaintext = new TextEncoder().encode(
-      JSON.stringify({ s: base64Encode(link.linkSecret), l: base64Encode(link.linkId) }),
-    );
+    const plaintext = new TextEncoder().encode(encodeMintedLink(link, mintedAtMs));
     const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
     const blob = new Uint8Array(IV_LEN + ct.length);
@@ -152,11 +218,56 @@ export async function mintedLinkFor(
         row.ciphertext.slice(IV_LEN),
       ),
     );
-    const parsed = JSON.parse(new TextDecoder().decode(plaintext)) as { s?: unknown; l?: unknown };
-    if (typeof parsed.s !== "string" || typeof parsed.l !== "string") return null;
-    return { linkSecret: base64Decode(parsed.s), linkId: base64Decode(parsed.l) };
+    const decoded = decodeMintedLink(new TextDecoder().decode(plaintext));
+    return decoded === null ? null : { linkSecret: decoded.linkSecret, linkId: decoded.linkId };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Every link this device minted for the account and still keeps, of both
+ * kinds. A row that does not open is left out. Never throws: an unreadable
+ * store reads as no links.
+ */
+export async function listMintedLinks(accountIdB64: string): Promise<MintedLinkRow[]> {
+  const key = await withKey(accountIdB64);
+  if (key === null) return [];
+  try {
+    const db = await openDb();
+    let rows: PersistedRow[];
+    try {
+      const tx = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).getAll();
+      rows = await new Promise<PersistedRow[]>((resolve, reject) => {
+        req.onsuccess = (): void => resolve((req.result ?? []) as PersistedRow[]);
+        req.onerror = (): void => reject(req.error ?? new Error("idb getAll failed"));
+      });
+    } finally {
+      db.close();
+    }
+    const out: MintedLinkRow[] = [];
+    for (const row of rows) {
+      if (typeof row.key !== "string" || row.ciphertext.length < IV_LEN + 16) continue;
+      const named = parseMintedRowKey(row.key, accountIdB64);
+      if (named === null) continue;
+      try {
+        const plaintext = new Uint8Array(
+          await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
+            key,
+            row.ciphertext.slice(IV_LEN),
+          ),
+        );
+        const decoded = decodeMintedLink(new TextDecoder().decode(plaintext));
+        if (decoded !== null) out.push({ ...named, ...decoded });
+      } catch {
+        /* a row another key sealed: not this device's to act on */
+      }
+    }
+    return out;
+  } catch {
+    return [];
   }
 }
 

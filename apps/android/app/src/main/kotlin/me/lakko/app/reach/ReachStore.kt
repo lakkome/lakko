@@ -114,11 +114,24 @@ internal data class ReachDoc(
      *  reach keys; `null` before any rotation (the key the session first
      *  bound). */
     val registeredForKeyHex: String? = null,
+    /** ADR-0065 R.4 - the continuity key this device registered after its
+     *  own account-key reset, and the mailbox (hex) it registered it on. Kept
+     *  beside [registered], not in it: the key derives from the account id
+     *  and the key generation, not from a reach class of the account seed. */
+    val continuityRegistered: RegisteredContinuityKey? = null,
+    val continuityMailboxHex: String? = null,
     /** ADR-0066 section 3.5a rule 3 - the account key (hex) the profile
      *  still has to be re-sent under to every conversation, set when the
      *  reach keys moved to it and cleared once every conversation took the
      *  envelope; `null` when nothing is owed. */
     val profileResendOwedForKeyHex: String? = null,
+    /** ADR-0066 section 3.5a rule 5 - the account key (hex) under which
+     *  this device still has to spend what it granted before the keys moved
+     *  (revoke its `/i/` and `/c/` links, re-send its unanswered contact
+     *  requests): set when the reach keys moved to that key, on the rotating
+     *  device and on a kept one alike, and cleared once the round found
+     *  nothing left to do; `null` when nothing is owed. */
+    val grantsSpendOwedForKeyHex: String? = null,
     /** Every conversation group this account is in, hex. */
     val joinedGroups: List<String> = emptyList(),
     /** Every channel this account is subscribed to or publishes, hex. */

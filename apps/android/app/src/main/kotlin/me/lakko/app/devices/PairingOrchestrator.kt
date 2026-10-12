@@ -356,7 +356,7 @@ public object PairingOrchestrator {
         }
 
         /** Apply what [fetchCatchUpBundles] held. Best-effort. */
-        private fun applyFetchedBundles(joined: DeviceGroup, accountIdB64: String, bundles: FetchedBundles) {
+        private suspend fun applyFetchedBundles(joined: DeviceGroup, accountIdB64: String, bundles: FetchedBundles) {
             val sealed = bundles.historySealed
             if (sealed != null) {
                 try {
@@ -379,8 +379,17 @@ public object PairingOrchestrator {
             val bundle = bundles.stateBundle
             if (bundle != null) {
                 try {
-                    val (contacts, pins) = StateBundle.apply(context, accountIdB64, bundle)
-                    android.util.Log.i("PairingOrchestrator", "state bundle: $contacts contacts, $pins pins")
+                    val applied = StateBundle.apply(context, accountIdB64, bundle)
+                    android.util.Log.i(
+                        "PairingOrchestrator",
+                        "state bundle: ${applied.contacts} contacts, ${applied.pins} pins, " +
+                            "${applied.ownPredecessors} earlier account keys",
+                    )
+                    // ADR-0066: a chat layer already loaded under the current
+                    // key is rebuilt under the conversation key.
+                    StateBundle.afterApply(accountIdB64, applied)
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
                 } catch (cause: Throwable) {
                     android.util.Log.w("PairingOrchestrator", "state bundle apply failed", cause)
                 }
@@ -434,11 +443,15 @@ public object PairingOrchestrator {
                     )
                     val bundle = StateBundle.decode(openWithKey(key, sealed))
                     if (bundle != null) {
-                        val (contacts, pins) = StateBundle.apply(context, accountIdB64, bundle)
+                        val applied = StateBundle.apply(context, accountIdB64, bundle)
                         android.util.Log.i(
                             "PairingOrchestrator",
-                            "state bundle: $contacts contacts, $pins pins",
+                            "state bundle: ${applied.contacts} contacts, ${applied.pins} pins, " +
+                                "${applied.ownPredecessors} earlier account keys",
                         )
+                        // ADR-0066: a chat layer already loaded under the
+                        // current key is rebuilt under the conversation key.
+                        StateBundle.afterApply(accountIdB64, applied)
                     }
                 }
             } catch (cause: kotlinx.coroutines.CancellationException) {

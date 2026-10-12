@@ -32,12 +32,8 @@ public struct ContactsScreen: View {
     @State private var inviteLinksPresented = false
     @State private var sentExpanded = false
 
-    /// UX 16.1 — `Open contact` from the add sheet's refusal line.
-    private let onOpenContact: (Int64) -> Void
-
-    public init(viewModel: ContactsViewModel, onOpenContact: @escaping (Int64) -> Void = { _ in }) {
+    public init(viewModel: ContactsViewModel) {
         self.viewModel = viewModel
-        self.onOpenContact = onOpenContact
     }
 
     // MARK: - Derived
@@ -151,8 +147,7 @@ public struct ContactsScreen: View {
         .sheet(isPresented: $addContactPresented) {
             AddContactSheet(
                 viewModel: viewModel,
-                onDismiss: { addContactPresented = false },
-                onOpenContact: onOpenContact)
+                onDismiss: { addContactPresented = false })
         }
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })
@@ -295,20 +290,6 @@ private struct ContactRow: View {
                                 .font(.subheadline)
                                 .foregroundStyle(Color.lakkoTextMuted)
                         }
-                        // ADR-0065 phase 2 (UX 16.1) — the row keeps its place
-                        // and its name; the words carry the state, the glyph
-                        // is never the only signal.
-                        if contact.keyState == .resetUnverified {
-                            Text(Localization.text("contacts.keys_reset.row_sub"))
-                                .font(.footnote)
-                                .foregroundStyle(Color.lakkoTextMuted)
-                        }
-                    }
-                    if contact.keyState == .resetUnverified {
-                        Spacer()
-                        Image(systemName: "exclamationmark.shield")
-                            .foregroundStyle(Color.lakkoTextMuted)
-                            .accessibilityHidden(true)
                     }
                 }
                 .padding(.vertical, 2)

@@ -119,6 +119,36 @@ export function forwardJumpTarget(
   return holdsConversation(origin.groupIdB64) ? origin : null;
 }
 
+/**
+ * ADR-0065 R.5 — the origin of a forward names a GROUP and a message id; the
+ * conversation that group belongs to may since have continued in a successor
+ * group. The jump then lands in an OLDER segment of the conversation, whose
+ * rows the timeline draws under `rowId(messageId, distance)`
+ * (`lineage.ts` `historyRowId`). This resolves the id of the row to jump to:
+ *
+ * | the origin group is ...                              | row to jump to                |
+ * |------------------------------------------------------|-------------------------------|
+ * | the conversation's current group                     | the message id                |
+ * | an older segment this device holds (`d` before head) | `rowId(messageId, d)`         |
+ * | anything else (a segment not held, beyond the head)  | `null`: nothing, silently     |
+ *
+ * `heldHistory` is the older segments this device holds, oldest first, as
+ * the view lists them; `d` counts within THAT list, which is what the
+ * timeline numbers its history rows by.
+ */
+export function forwardJumpRow(input: {
+  readonly originGroupIdB64: string;
+  readonly messageId: number;
+  readonly headGroupIdB64: string;
+  readonly heldHistory: readonly string[];
+  readonly rowId: (messageId: number, distanceFromHead: number) => number;
+}): number | null {
+  if (input.originGroupIdB64 === input.headGroupIdB64) return input.messageId;
+  const index = input.heldHistory.indexOf(input.originGroupIdB64);
+  if (index === -1) return null;
+  return input.rowId(input.messageId, input.heldHistory.length - index);
+}
+
 // ----- persistence -------------------------------------------------------
 
 /** The on-disk shape of a forward attribution (`message-log-store.ts`). The

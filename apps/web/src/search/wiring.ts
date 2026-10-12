@@ -12,7 +12,6 @@
 import type { ContactsClient } from "../contacts/client";
 import { ContactsError } from "../contacts/client";
 import { contactsErrorText } from "../contacts/errors";
-import { keysResetOpenContactHref } from "../contacts/keys-reset-open-contact";
 import type { ProfileApi } from "../profile/ProfileContext";
 import { loadAccepted } from "../contacts/local-store";
 import { base64Decode, base64Encode } from "../auth/account-id";
@@ -299,6 +298,5 @@ export function sendDeps(args: {
     },
     isRefusal: (err) => err instanceof ContactsError && err.variant.kind === "username-unknown",
     errorMessage: (err) => contactsErrorText(err, "contacts.error.send", args.peerLabel),
-    openContactHref: (err) => keysResetOpenContactHref(err, loadAccepted()),
   };
 }

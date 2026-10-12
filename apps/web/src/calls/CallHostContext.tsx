@@ -92,6 +92,7 @@ import { A } from "@solidjs/router";
 
 import { cameraStartFailure } from "./capture-fallback";
 import { composeAndUploadCallInvite } from "./composer";
+import { inlineLinkSlug, rememberMintedLink } from "../contacts/minted-links";
 import {
   CALL_INVITE_LABEL,
   callInviteMaxUses,
@@ -112,6 +113,14 @@ import { TurnCredentialClient } from "./turn-credential-client";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { useLineage } from "../chat/use-lineage";
+import {
+  CallUnavailableInSession,
+  oneToOneCallEndsOnMove,
+  oneToOneCallTarget,
+} from "./call-continuity";
+import { unrepairableBy } from "../chat/successor-claim";
+import { loadSupersededKeys, subscribeAcceptedChanged } from "../contacts/local-store";
 import {
   offerAgeMs,
   offerExpiresAtMs,
@@ -129,7 +138,7 @@ import { pushGidForGroup } from "../push/group-routing";
 import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
 import { readIsActive } from "../chat/membership-ended";
 import { memberKeysOf, peerName } from "../chat/peer-name";
-import { ownPersonKeyB64 } from "../chat/person-key";
+import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { loadAccepted } from "../contacts/local-store";
 import { onGroupMlsIdle } from "../mls/group-lock";
@@ -533,6 +542,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * consulted it.
    */
   const sync = useDeviceGroupSync();
+  // ADR-0065 R.5 — mute is the CONVERSATION's, whichever of its groups a
+  // call arrives in.
+  const lineageView = useLineage();
 
   /**
    * The ringing 1x1 call is muted: it happens and it is recorded, but it does
@@ -680,7 +692,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    */
   function isMuted(groupIdB64: string): boolean {
     try {
-      return sync.getFlags(base64Decode(groupIdB64))?.muted === true;
+      return sync.getFlags(lineageView.conversationIdOf(base64Decode(groupIdB64)))?.muted === true;
     } catch {
       return false;
     }
@@ -1112,8 +1124,45 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
 
   // ----- controls ---------------------------------------------------------
 
-  async function dial(groupIdB64: string, withVideo: boolean): Promise<void> {
+  /** `successor-claim.ts` `unrepairableBy` over a group this device holds:
+   *  the superseded account that makes it a dead session, else `null` (also
+   *  for a group whose roster cannot be read). */
+  function unrepairableKeyOfGroup(groupIdB64: string): string | null {
+    const entry = chats.get(groupIdB64);
+    if (entry === undefined) return null;
+    try {
+      const owner = entry.group.roleTableOwner() as Uint8Array | undefined;
+      return unrepairableBy({
+        kind: conversationKindOf(entry.group),
+        rosterPersonKeysB64: personKeysOf(entry.group),
+        ownPersonKeyB64: ownPersonKeyB64(chats.identity()),
+        ownerKeyB64: owner === undefined ? undefined : base64Encode(owner),
+        supersededKeys: loadSupersededKeys(),
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async function dial(askedGroupIdB64: string, withVideo: boolean): Promise<void> {
     if (currentOccupant() !== null) return;
+    if (groupEntry(askedGroupIdB64) === undefined) return;
+    // ADR-0065 R.12 — never signal into a dead session: the call is placed
+    // in the conversation's successor when this device holds one, and
+    // otherwise does not start (the caller shows its ordinary
+    // could-not-start state; no copy of its own).
+    const headGroupIdB64 = lineageView.resolve(askedGroupIdB64)?.head.groupIdB64 ?? null;
+    const target = oneToOneCallTarget({
+      groupIdB64: askedGroupIdB64,
+      unrepairableKeyB64: unrepairableKeyOfGroup(askedGroupIdB64),
+      headGroupIdB64,
+      headUnrepairableKeyB64:
+        headGroupIdB64 === null || headGroupIdB64 === askedGroupIdB64
+          ? null
+          : unrepairableKeyOfGroup(headGroupIdB64),
+    });
+    if (target.kind === "unavailable") throw new CallUnavailableInSession();
+    const groupIdB64 = target.groupIdB64;
     if (groupEntry(groupIdB64) === undefined) return;
     setVideoCall(withVideo);
     // The window the callee will ring for, so both sides give up together.
@@ -1164,6 +1213,26 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   async function hangUp(): Promise<void> {
     await activeCall?.hangUp("hungUp");
   }
+
+  // ADR-0065 R.12 / UX 16.4 — a live one-to-one call ends when its
+  // conversation moves: once the other person's reset is accepted the media
+  // is going to a removed device. It ends as a call ends when the other side
+  // drops; nothing is said (R.0). The decision is `call-continuity.ts`.
+  const [contactsVersion, setContactsVersion] = createSignal(0);
+  const unsubscribeContacts = subscribeAcceptedChanged(() => setContactsVersion((v) => v + 1));
+  onCleanup(unsubscribeContacts);
+  createEffect(() => {
+    contactsVersion();
+    const groupIdB64 = inCall() ? callGroup() : null;
+    if (groupIdB64 === null) return;
+    if (chats.get(groupIdB64) === undefined) return;
+    const ends = oneToOneCallEndsOnMove({
+      callGroupIdB64: groupIdB64,
+      unrepairableKeyB64: unrepairableKeyOfGroup(groupIdB64),
+      headGroupIdB64: lineageView.resolve(groupIdB64)?.head.groupIdB64 ?? null,
+    });
+    if (ends) untrack(() => void activeCall?.hangUp("hungUp"));
+  });
 
   // The embedded in-call UI's End button moves the store to `ended`.
   createEffect(() => {
@@ -2199,6 +2268,17 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         label: CALL_INVITE_LABEL,
       });
       url = minted.url;
+      // ADR-0066 section 3.5a rule 5: the ledger id and the link id, kept
+      // under the device key, are what revokes this link if the account's
+      // keys are rotated later. Best effort; the link works either way.
+      void rememberMintedLink(
+        base64Encode(secrets.accountId),
+        "call",
+        minted.blobId === null
+          ? inlineLinkSlug(base64UrlEncodeNoPad(minted.linkId))
+          : base64UrlEncodeNoPad(minted.blobId),
+        { linkSecret: minted.linkSecret, linkId: minted.linkId },
+      );
     } catch (err) {
       // The call runs over the SFU and owes the ledger nothing, so a failed
       // mint is a sentence and an unchanged call.

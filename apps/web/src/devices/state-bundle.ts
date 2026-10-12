@@ -16,6 +16,15 @@
  * recovery row's construction: both devices derive the same key, the DS
  * stores ciphertext.
  *
+ * ADR-0066 (v2): the bundle also carries the account's OWN predecessor seeds
+ * and each contact's proven predecessor keys, so a device paired AFTER a
+ * rotation of the account keys holds what a kept device that adopted holds:
+ * its conversation leaves are bound to the same account key as the sending
+ * device's, it reads the predecessor mailboxes for what is left of their
+ * windows, and a contact's old-key leaves name the same person. The format
+ * is hand-mirrored on iOS (`StateBundle.swift`) and Android
+ * (`StateBundle.kt`); `v` is 2 and nothing else is accepted.
+ *
  * Channel subscriptions are NOT here yet: the channel list does not survive a
  * reload on this device either (`docs/PRODUCT-READINESS.md`), so there is
  * nothing durable to carry until that lands.
@@ -25,11 +34,21 @@ import {
   boundContactsAccount,
   loadAccepted,
   readPin,
+  recordCarriedProvenPredecessors,
   setPin,
   upsertAccepted,
   type AcceptedContact,
 } from "../contacts/local-store";
-import { base64Encode } from "../auth/account-id";
+import {
+  readPredecessorAdoptedAtMs,
+  stampPredecessorAdoption,
+} from "../contacts/address-resolver";
+import { base64Decode, base64Encode } from "../auth/account-id";
+import {
+  getKeyRotationState,
+  updateKeyRotationState,
+  type KeyRotationState,
+} from "../auth/key-rotation-store";
 
 /** Exporter label; the context is the 32-byte rendezvous pseudonym. */
 export const STATE_EXPORTER_LABEL = "lakko/state-bundle/v1";
@@ -45,30 +64,54 @@ const KNOWN_GROUPS_PREFIX = "lakko.pairing.known-groups.v2.";
 const RETIRED_KNOWN_GROUPS_KEY = "lakko.pairing.known-groups.v1";
 const MAX_BUNDLE_BYTES = 1 << 20;
 
+/** The most own predecessors, and the most proven predecessors of one
+ *  contact, a bundle carries. One more refuses the whole bundle. */
+export const MAX_CARRIED_PREDECESSORS = 8;
+const ACCOUNT_SEED_LENGTH = 64;
+const SIGNATURE_KEY_LENGTH = 32;
+
 /** A pinned account key as carried in the bundle. */
 export interface CarriedPin {
   readonly accountIdB64: string;
   readonly pinnedSignaturePubkeyB64: string;
   readonly rotationMarker: number;
+  /** The contact's proven predecessors as the sending device holds them:
+   *  standard-base64 32-byte signature keys, oldest first (ADR-0066). */
+  readonly provenPredecessorsB64: readonly string[];
+}
+
+/** One earlier account key of the OWN account (ADR-0066 Stage A). */
+export interface CarriedOwnPredecessor {
+  /** Standard base64 of the 64-byte account phrase seed of that key. Key
+   *  material: never logged, stored only under the device key. */
+  readonly seedB64: string;
+  /** When the sending device adopted the key that replaced it. The
+   *  predecessor mailbox's 30-day read window counts from here. */
+  readonly adoptedAtMs: number;
 }
 
 /** The bundle. `v` is the only version there is. */
-export interface StateBundleV1 {
-  readonly v: 1;
+export interface StateBundleV2 {
+  readonly v: 2;
   readonly contacts: readonly AcceptedContact[];
   readonly pins: readonly CarriedPin[];
   /** base64 group ids the old device holds; the new device counts the ones
    *  it has not joined yet as "still synchronizing". */
   readonly knownGroupIdsB64: readonly string[];
+  /** The own account's earlier keys, OLDEST first; empty when the account
+   *  never rotated. */
+  readonly ownPredecessors: readonly CarriedOwnPredecessor[];
 }
 
 /** Read the account's contacts, pins and the given group ids into a bundle.
  *  `ownerAccountIdB64` is the account being paired (the contacts are that
- *  account's, never another account's on this browser). */
+ *  account's, never another account's on this browser). `ownPredecessors`
+ *  is {@link collectOwnPredecessors}'s answer on the sending device. */
 export function buildStateBundle(
   knownGroupIdsB64: readonly string[],
   ownerAccountIdB64: string,
-): StateBundleV1 {
+  ownPredecessors: readonly CarriedOwnPredecessor[] = [],
+): StateBundleV2 {
   const contacts = loadAccepted(ownerAccountIdB64);
   const pins: CarriedPin[] = [];
   for (const c of contacts) {
@@ -80,18 +123,54 @@ export function buildStateBundle(
       accountIdB64,
       pinnedSignaturePubkeyB64: pin.pinnedSignaturePubkeyB64,
       rotationMarker: pin.rotationMarker,
+      provenPredecessorsB64: carriedKeys(pin.provenPredecessorsB64 ?? []),
     });
   }
-  return { v: 1, contacts, pins, knownGroupIdsB64: [...knownGroupIdsB64] };
+  return {
+    v: 2,
+    contacts,
+    pins,
+    knownGroupIdsB64: [...knownGroupIdsB64],
+    ownPredecessors: carriedOwn(ownPredecessors),
+  };
 }
 
-export function encodeStateBundle(bundle: StateBundleV1): Uint8Array {
+function decodesTo(b64: string, length: number): boolean {
+  try {
+    return base64Decode(b64).length === length;
+  } catch {
+    return false;
+  }
+}
+
+/** What a sender puts on the wire for one contact: well-formed keys only,
+ *  and never more than the bound (the NEWEST are kept: they are the ones a
+ *  leaf or a grant met today is most likely bound to). */
+function carriedKeys(keysB64: readonly string[]): string[] {
+  const valid = keysB64.filter((k) => decodesTo(k, SIGNATURE_KEY_LENGTH));
+  return valid.slice(Math.max(0, valid.length - MAX_CARRIED_PREDECESSORS));
+}
+
+/** The own chain a sender puts on the wire. Over the bound, the OLDEST (the
+ *  key the conversation leaves are bound to) and the newest are kept. */
+function carriedOwn(own: readonly CarriedOwnPredecessor[]): CarriedOwnPredecessor[] {
+  const valid = own.filter(
+    (p) => decodesTo(p.seedB64, ACCOUNT_SEED_LENGTH) && Number.isSafeInteger(p.adoptedAtMs),
+  );
+  if (valid.length <= MAX_CARRIED_PREDECESSORS) return valid;
+  const first = valid[0];
+  const newest = valid.slice(valid.length - (MAX_CARRIED_PREDECESSORS - 1));
+  return first === undefined ? newest : [first, ...newest];
+}
+
+export function encodeStateBundle(bundle: StateBundleV2): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(bundle));
 }
 
 /** Decode a bundle, refusing anything that is not the shape above. A refused
- *  bundle is `null` — the joiner then lands without contacts, as before. */
-export function decodeStateBundle(bytes: Uint8Array): StateBundleV1 | null {
+ *  bundle is `null` — the joiner then lands without contacts, as before.
+ *  A bundle of any other version is refused (no dual accept). */
+export function decodeStateBundle(bytes: Uint8Array): StateBundleV2 | null {
   if (bytes.length === 0 || bytes.length > MAX_BUNDLE_BYTES) return null;
   let parsed: unknown;
   try {
@@ -101,9 +180,10 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV1 | null {
   }
   if (typeof parsed !== "object" || parsed === null) return null;
   const o = parsed as Record<string, unknown>;
-  if (o["v"] !== 1) return null;
+  if (o["v"] !== 2) return null;
   if (!Array.isArray(o["contacts"]) || !Array.isArray(o["pins"])) return null;
   if (!Array.isArray(o["knownGroupIdsB64"])) return null;
+  if (!Array.isArray(o["ownPredecessors"])) return null;
   const contacts: AcceptedContact[] = [];
   for (const c of o["contacts"] as unknown[]) {
     if (typeof c !== "object" || c === null) return null;
@@ -124,10 +204,18 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV1 | null {
     ) {
       return null;
     }
+    const proven = r["provenPredecessorsB64"];
+    if (!Array.isArray(proven) || proven.length > MAX_CARRIED_PREDECESSORS) return null;
+    const provenPredecessorsB64: string[] = [];
+    for (const k of proven as unknown[]) {
+      if (typeof k !== "string" || !decodesTo(k, SIGNATURE_KEY_LENGTH)) return null;
+      provenPredecessorsB64.push(k);
+    }
     pins.push({
       accountIdB64: r["accountIdB64"],
       pinnedSignaturePubkeyB64: r["pinnedSignaturePubkeyB64"],
       rotationMarker: r["rotationMarker"],
+      provenPredecessorsB64,
     });
   }
   const knownGroupIdsB64: string[] = [];
@@ -135,7 +223,19 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV1 | null {
     if (typeof g !== "string") return null;
     knownGroupIdsB64.push(g);
   }
-  return { v: 1, contacts, pins, knownGroupIdsB64 };
+  const own = o["ownPredecessors"] as unknown[];
+  if (own.length > MAX_CARRIED_PREDECESSORS) return null;
+  const ownPredecessors: CarriedOwnPredecessor[] = [];
+  for (const p of own) {
+    if (typeof p !== "object" || p === null) return null;
+    const r = p as Record<string, unknown>;
+    const seedB64 = r["seedB64"];
+    const adoptedAtMs = r["adoptedAtMs"];
+    if (typeof seedB64 !== "string" || !decodesTo(seedB64, ACCOUNT_SEED_LENGTH)) return null;
+    if (typeof adoptedAtMs !== "number" || !Number.isSafeInteger(adoptedAtMs)) return null;
+    ownPredecessors.push({ seedB64, adoptedAtMs });
+  }
+  return { v: 2, contacts, pins, knownGroupIdsB64, ownPredecessors };
 }
 
 /** Merge a bundle into this browser, into the list of `ownerAccountIdB64`
@@ -144,7 +244,7 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV1 | null {
  *  new device may run this before its session lands, so the account is
  *  named, not taken from the binding. */
 export function applyStateBundle(
-  bundle: StateBundleV1,
+  bundle: StateBundleV2,
   ownerAccountIdB64: string,
 ): { contacts: number; pins: number } {
   const have = new Set(loadAccepted(ownerAccountIdB64).map((c) => c.signaturePubkeyB64));
@@ -164,9 +264,109 @@ export function applyStateBundle(
       // A pin the setter refuses (a lower marker than one already held) is
       // not ours to force.
     }
+    // ADR-0066: the contact's proven predecessors, as the sending device
+    // holds them. Recorded only beside the very key they were proven for;
+    // a pin this device holds under another key keeps its own chain.
+    try {
+      recordCarriedProvenPredecessors(
+        p.accountIdB64,
+        p.pinnedSignaturePubkeyB64,
+        p.provenPredecessorsB64,
+        ownerAccountIdB64,
+      );
+    } catch {
+      /* an unreadable pin store proves nothing; the gate records it later */
+    }
   }
   saveKnownGroupIds(bundle.knownGroupIdsB64, ownerAccountIdB64);
   return { contacts, pins };
+}
+
+// ---- the own predecessors (ADR-0066, a device paired after a rotation) -----
+
+/**
+ * The predecessor seeds a device holds after a bundle arrived: the carried
+ * chain (the sending device's, oldest first) with any seed this device held
+ * and the bundle does not name appended. A device that already holds every
+ * carried seed keeps its own list unchanged. Pure.
+ */
+export function mergeCarriedPredecessorSeeds(
+  heldB64: readonly string[],
+  carriedB64: readonly string[],
+): string[] {
+  if (carriedB64.every((seed) => heldB64.includes(seed))) return [...heldB64];
+  const out: string[] = [];
+  for (const seed of [...carriedB64, ...heldB64]) if (!out.includes(seed)) out.push(seed);
+  return out;
+}
+
+/**
+ * Sending device: its own predecessor chain for the bundle, oldest first.
+ * A predecessor with no adoption time stored gets one now (the same rule
+ * the mailbox poller applies). `keyHexOfSeed` answers the lower-case hex
+ * account signature key of a 64-byte seed. Seeds are not logged.
+ */
+export async function collectOwnPredecessors(
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+  keyHexOfSeed: (seed: Uint8Array) => string,
+  nowMs: number = Date.now(),
+): Promise<CarriedOwnPredecessor[]> {
+  const state = await getKeyRotationState(accountIdB64, deviceKey);
+  const out: CarriedOwnPredecessor[] = [];
+  for (const seedB64 of state.predecessorSeedsB64) {
+    const seed = base64Decode(seedB64);
+    let keyHex: string;
+    try {
+      keyHex = keyHexOfSeed(seed);
+    } finally {
+      seed.fill(0);
+    }
+    stampPredecessorAdoption(accountIdB64, keyHex, nowMs);
+    out.push({
+      seedB64,
+      adoptedAtMs: readPredecessorAdoptedAtMs(accountIdB64, keyHex) ?? Math.floor(nowMs),
+    });
+  }
+  return out;
+}
+
+/**
+ * Receiving device: store the own predecessors exactly as a kept device
+ * that adopted holds them. The seeds go into the key-rotation row sealed
+ * under the device key (the store `adoptRotatedKeys` writes), so the next
+ * session install binds the device's conversation identity under the OLDEST
+ * one, reads the chain into the own-key resolver, and the predecessor
+ * mailboxes are polled; each mailbox's window counts from the SENDING
+ * device's adoption time (an existing local time is kept).
+ *
+ * Returns how many seeds this device did not hold before. Must run BEFORE
+ * the session's identities are installed; a caller that runs it later must
+ * install them again before any KeyPackage is published.
+ */
+export async function applyOwnPredecessors(
+  bundle: StateBundleV2,
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+  keyHexOfSeed: (seed: Uint8Array) => string,
+): Promise<number> {
+  if (bundle.ownPredecessors.length === 0) return 0;
+  const carried = bundle.ownPredecessors.map((p) => p.seedB64);
+  let added = 0;
+  await updateKeyRotationState(accountIdB64, deviceKey, (state): KeyRotationState => {
+    const next = mergeCarriedPredecessorSeeds(state.predecessorSeedsB64, carried);
+    added = next.filter((seed) => !state.predecessorSeedsB64.includes(seed)).length;
+    return added === 0 ? state : { ...state, predecessorSeedsB64: next };
+  });
+  for (const p of bundle.ownPredecessors) {
+    const seed = base64Decode(p.seedB64);
+    try {
+      stampPredecessorAdoption(accountIdB64, keyHexOfSeed(seed), p.adoptedAtMs);
+    } finally {
+      seed.fill(0);
+    }
+  }
+  return added;
 }
 
 // ---- known group ids (drives the one "Synchronizing..." label) -------------

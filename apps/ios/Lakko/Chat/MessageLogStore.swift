@@ -82,6 +82,25 @@ public final class MessageLogStore {
     /// ADR-0041 — the authoritative copy is written into the App Group
     /// container (NSE-readable), falling back to the old location when
     /// the App Group is unavailable.
+    /// ADR-0065 R.7 case 1 — seal / open bytes under the SAME Keychain wrap
+    /// key the message log uses, for the held-message queue: a held message
+    /// is message plaintext and is at rest under the same protection.
+    public static func sealUnderWrapKey(_ plaintext: Data) throws -> Data {
+        let wrapKey = SymmetricKey(data: KeychainWrapKey.loadOrCreate(
+            service: wrapKeyService, account: wrapKeyAccount))
+        guard let combined = try AES.GCM.seal(plaintext, using: wrapKey).combined else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        return combined
+    }
+
+    /// The inverse of ``sealUnderWrapKey(_:)``.
+    public static func openUnderWrapKey(_ sealed: Data) throws -> Data {
+        let wrapKey = SymmetricKey(data: KeychainWrapKey.loadOrCreate(
+            service: wrapKeyService, account: wrapKeyAccount))
+        return try AES.GCM.open(try AES.GCM.SealedBox(combined: sealed), using: wrapKey)
+    }
+
     public func putLog(accountIdB64: String, payload: MessageLogPayload) {
         guard let target = writeTarget(accountIdB64: accountIdB64) else { return }
         let plaintext: Data

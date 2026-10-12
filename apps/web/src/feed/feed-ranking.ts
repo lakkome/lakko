@@ -12,7 +12,7 @@
  */
 
 import type { Wasm } from "../wasm";
-import type { FeedCandidateRef, FeedInput } from "./feed-model";
+import { feedSourceKey, type FeedCandidateRef, type FeedInput } from "./feed-model";
 
 /** The slice of the wasm module the feed uses. */
 export type FeedCore = Pick<
@@ -56,7 +56,8 @@ export function rankFeedInput(
   const conversations = input.sources.map(
     (s) =>
       new core.FeedConversation(
-        hexToBytes(s.idHex),
+        // The conversation id: what a feed rule's lists name (ADR-0065 R.5).
+        hexToBytes(feedSourceKey(s)),
         s.kind === "channel" ? core.FeedConversationKind.Channel : core.FeedConversationKind.Group,
         s.muted,
         Math.max(0, Math.min(s.audience, 0xffff_ffff)),

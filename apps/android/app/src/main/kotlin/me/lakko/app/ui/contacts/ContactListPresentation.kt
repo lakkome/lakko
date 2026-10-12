@@ -21,10 +21,6 @@ public data class ContactRowModel(
     /** Whether the resolved name is the neutral placeholder — such a row sorts
      *  under `#` rather than under `M`, and matches no search term. */
     val placeholder: Boolean = false,
-    /** ADR-0065 phase 2 / UX 16.1 — the contact reset their account keys and
-     *  the new safety number is not verified on this device: the row keeps
-     *  its place and gains the shield glyph and the muted line. */
-    val keysReset: Boolean = false,
 )
 
 /** A letter section of the alphabetical list: the header and its rows. */

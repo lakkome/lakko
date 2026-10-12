@@ -70,6 +70,8 @@ public fun InviteLandingScreen(
     viewModel: InviteLandingViewModel,
     onDone: () -> Unit,
     onOpenChat: (groupIdHex: String) -> Unit,
+    /** ADR-0065 UX 16.6 — the link's owner is already a contact. */
+    onOpenContact: (routeKey: String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -103,6 +105,11 @@ public fun InviteLandingScreen(
                 onOpenChat = onOpenChat,
                 onDone = onDone,
             )
+            is InviteLandingState.ExistingContact -> {
+                // Nothing to say: the existing contact opens.
+                androidx.compose.runtime.LaunchedEffect(s.routeKey) { onOpenContact(s.routeKey) }
+                LoadingPanel()
+            }
             InviteLandingState.AlreadyAccepted -> InfoPanel(
                 body = t("invite.contact.already_accepted_unnamed"),
                 onDone = onDone,

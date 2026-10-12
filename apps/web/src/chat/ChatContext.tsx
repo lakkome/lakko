@@ -339,7 +339,9 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     intermediatePredecessorIdentities: intermediateIdentities,
     ownPredecessorIdentities: () => {
       const oldest = predecessorIdentity();
-      return oldest === null ? [] : [oldest, ...intermediateIdentities()];
+      // Without a conversation predecessor (a device whose leaves are bound
+      // to the current key, ADR-0066) the earlier keys are still held.
+      return oldest === null ? intermediateIdentities() : [oldest, ...intermediateIdentities()];
     },
     setPredecessorAccountIdentity(next) {
       replacePredecessorIdentity(next);

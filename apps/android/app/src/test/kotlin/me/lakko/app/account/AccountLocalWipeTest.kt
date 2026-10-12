@@ -250,6 +250,24 @@ class AccountLocalWipeTest {
     }
 
     @Test
+    fun `the predecessor seeds and the sent requests go only by their own steps`() {
+        // ADR-0066: both files are named in hex, which the backstop sweep
+        // does not match; the walk names each when its step is left out.
+        val hex = me.lakko.app.auth.KeyRotationFiles.hexOf(a)
+        val predecessors = me.lakko.app.auth.KeyRotationFiles.DIR + "/" + hex +
+            me.lakko.app.auth.KeyRotationFiles.PREDECESSOR_SUFFIX
+        val sent = me.lakko.app.contacts.SentRequestsFiles.DIR + "/" + me.lakko.app.contacts.SentRequestsFiles.nameOf(a)
+        for ((step, path) in listOf("key-rotation-files" to predecessors, "sent-contact-requests" to sent)) {
+            seed(rawA, a, marker = "account-A")
+            AcceptedContactsStore.unbind()
+            AccountLocalWipe.runSteps(context, a, stepsWithPlainChannelPublisherPrefs().filterNot { it.name == step })
+            assertEquals(step, listOf(path), fileLeftovers())
+            AccountLocalWipe.runSteps(context, a, stepsWithPlainChannelPublisherPrefs())
+            assertTrue(step, fileLeftovers().isEmpty())
+        }
+    }
+
+    @Test
     fun `the wipe of one account never touches another account's session record`() {
         SessionStore(context).save(PersistedSession(accountIdB64 = b, username = "bob"))
         AccountLocalWipe.wipeAccountLocalData(context, a)
@@ -332,16 +350,25 @@ class AccountLocalWipeTest {
                 newSignaturePubkeyB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(32)),
             ),
         )
-        // ADR-0065 phase 2: a closed conversation, an eviction record, a
-        // contact's reset record and an orphaned channel.
-        me.lakko.app.chat.ConversationClosedStore.save(
-            context, acct, group,
-            me.lakko.app.chat.ConversationClosed(me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET, 1L, peerAccountIdB64 = "peer"),
+        // ADR-0065 "Phase 2 revised": the reset ledger, a verified binding, a
+        // successor claim, the continuity facts, the lineage mirror; and an
+        // orphaned channel.
+        me.lakko.app.contacts.SharedPrefsResetLedgerStore(context).save(
+            acct, "peer",
+            me.lakko.app.contacts.ResetLedgerRow(acceptedKeyGeneration = 2L, supersededKeysB64 = listOf("prev")),
         )
-        me.lakko.app.chat.EvictionStore.save(context, acct, group, me.lakko.app.chat.EvictionRecord("prev", 1L, false))
-        me.lakko.app.contacts.SharedPrefsContactKeyStateStore(context).save(
-            acct,
-            me.lakko.app.contacts.resetRecordFor("peer", "prev", "next", 1L, 2L),
+        me.lakko.app.contacts.SharedPrefsVerifiedBindingStore(context).record(
+            acct, "peer", me.lakko.app.contacts.VerifiedBinding("key", 1L, 1L),
+        )
+        me.lakko.app.chat.SharedPrefsSuccessorClaimBackend(context).save(
+            acct, group,
+            me.lakko.app.chat.StoredClaims(own = me.lakko.app.chat.OwnClaim("ab".repeat(32), 7L)),
+        )
+        me.lakko.app.chat.SharedPrefsContinuityBackend(context).save(
+            acct, me.lakko.app.chat.ContinuityRow(moved = mapOf(group to 1L)),
+        )
+        me.lakko.app.chat.LineageMirror.save(
+            context, acct, listOf(me.lakko.app.chat.LineageEntry("ab".repeat(32), group, 1UL)),
         )
         me.lakko.app.channels.OrphanedChannelsStore.onDevice(context).add(acct, listOf(CHANNEL))
         // The stores that write for the bound account.
@@ -385,6 +412,12 @@ class AccountLocalWipeTest {
             // ADR-0066: the recall record (sealed under the Keystore wrap
             // key on a device; opaque bytes on disk, named by the id in hex).
             recallRecordPath(raw),
+            // ADR-0066: this account's earlier identities (the predecessor
+            // SEEDS a rotation, or a pairing state bundle, left) and the
+            // sealed list of unanswered outgoing contact requests.
+            me.lakko.app.auth.KeyRotationFiles.DIR + "/" + me.lakko.app.auth.KeyRotationFiles.hexOf(acct) +
+                me.lakko.app.auth.KeyRotationFiles.PREDECESSOR_SUFFIX,
+            me.lakko.app.contacts.SentRequestsFiles.DIR + "/" + me.lakko.app.contacts.SentRequestsFiles.nameOf(acct),
         )) {
             File(nb, path).apply { parentFile?.mkdirs() }.writeText(marker)
         }
@@ -494,7 +527,8 @@ class AccountLocalWipeTest {
             "lakko-profile-requests", "lakko.notifications", "me.lakko.push-routing.v2", "me.lakko.push-routing.v1",
             "me.lakko.push-wake-binding.v1", "lakko-chat-folders", "lakko-group-presentation", "lakko-appearance",
             "lakko.anticensorship", "lakko.release", "lakko.feed", "lakko-key-reset-owed",
-            "lakko-conversation-closed", "lakko-keys-reset-evictions", "lakko-contact-key-state", "lakko-orphaned-channels",
+            "lakko-reset-ledger", "lakko-verified-bindings", "lakko-successor-claims", "lakko-reset-continuity",
+            "lakko-lineage-mirror", "lakko-orphaned-channels",
         )
 
         /** The files [seed] writes a row naming the account into. */
@@ -507,14 +541,15 @@ class AccountLocalWipeTest {
             "me.lakko.push-routing.v2", "me.lakko.push-routing.v1", "lakko-device-sync-pending",
             "lakko-chat-folders", "lakko-media-prefs",
             "lakko-recovery-owed", "lakko-three-words-budget", "lakko-key-reset-owed",
-            "lakko-conversation-closed", "lakko-keys-reset-evictions", "lakko-contact-key-state", "lakko-orphaned-channels",
+            "lakko-reset-ledger", "lakko-verified-bindings", "lakko-successor-claims", "lakko-reset-continuity",
+            "lakko-lineage-mirror", "lakko-orphaned-channels",
             CHANNEL_PUBLISHER_PREFS,
         )
 
         /** Eight Keystore-envelope files, one played-marks file, one recall
          *  record, one commit-outbox entry and one anonymous-token pool per
          *  account. */
-        const val FILES_SEEDED_PER_ACCOUNT = 12
+        const val FILES_SEEDED_PER_ACCOUNT = 14
 
         /** Device-wide rows of builds before 2026-09-30, never read. */
         val RETIRED_ROWS = listOf(

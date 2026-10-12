@@ -440,6 +440,34 @@ impl ConversationOrderRegister {
     }
 }
 
+/// One conversation-lineage register (ADR-0065 R.5): the group
+/// `successorGroupId` continues the conversation `rootConversationId` (the
+/// group id of the first group of the lineage).
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineageRegister {
+    inner: Stamped<core::LineageEntry>,
+}
+
+#[wasm_bindgen]
+impl LineageRegister {
+    /// HLC stamp the register was written at.
+    #[wasm_bindgen(getter)]
+    pub fn hlc(&self) -> u64 {
+        self.inner.hlc
+    }
+    /// MLS group id of the group that continues the conversation.
+    #[wasm_bindgen(getter, js_name = successorGroupId)]
+    pub fn successor_group_id(&self) -> Vec<u8> {
+        self.inner.value.successor_group_id.clone()
+    }
+    /// The conversation id every person-facing store is keyed on.
+    #[wasm_bindgen(getter, js_name = rootConversationId)]
+    pub fn root_conversation_id(&self) -> Vec<u8> {
+        self.inner.value.root_conversation_id.clone()
+    }
+}
+
 /// The folded synced state of this device (ADR-0058 section 3).
 ///
 /// Commutative, associative and idempotent: feed it every DeviceGroup
@@ -458,6 +486,10 @@ impl SyncedState {
             .lock()
             .map_err(|_| JsError::new("internal lock poisoned"))?;
         Ok(f(&mut g))
+    }
+
+    fn lineage_envelopes_inner(&self) -> Result<Vec<Vec<u8>>, JsError> {
+        self.with(|s| s.lineage_envelopes())
     }
 
     fn apply_one(&self, hlc: u64, entry: SyncEntry) -> Result<bool, JsError> {
@@ -671,6 +703,106 @@ impl SyncedState {
         })
     }
 
+    /// Record that `successorGroupId` continues the conversation
+    /// `rootConversationId` (ADR-0065 R.5), stamped `hlc`. **Write-once**:
+    /// when a register is already held for this successor nothing is written
+    /// and `false` is returned, whatever root it names (read it with
+    /// `lineageRoot`). On `true`, send `lineageEnvelopeFor(successorGroupId)`
+    /// to the account's other devices with
+    /// `DeviceGroup.createServiceEnvelopeMessage`. Throws when either id is
+    /// empty or longer than `lineageGroupIdMaxLen()`, or the two are equal.
+    #[wasm_bindgen(js_name = setLineage)]
+    pub fn set_lineage(
+        &self,
+        hlc: u64,
+        successor_group_id: &[u8],
+        root_conversation_id: &[u8],
+    ) -> Result<bool, JsError> {
+        self.with(|s| s.set_lineage(hlc, successor_group_id, root_conversation_id))?
+            .map_err(js)
+    }
+
+    /// The lineage register held for a successor group, or `undefined` (the
+    /// group is a root, or this device knows no lineage for it).
+    #[wasm_bindgen(js_name = lineageRoot)]
+    pub fn lineage_root(
+        &self,
+        successor_group_id: &[u8],
+    ) -> Result<Option<LineageRegister>, JsError> {
+        self.with(|s| {
+            s.lineage_root(successor_group_id)
+                .map(|inner| LineageRegister { inner })
+        })
+    }
+
+    /// The conversation id a group belongs to: the root its lineage register
+    /// names, or `groupId` itself when it holds none.
+    #[wasm_bindgen(js_name = conversationIdOf)]
+    pub fn conversation_id_of(&self, group_id: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.with(|s| s.conversation_id_of(group_id))
+    }
+
+    /// Every successor recorded for one conversation, ordered by `(stamp,
+    /// successor id)`. The root itself is not listed.
+    #[wasm_bindgen(js_name = lineageSuccessors)]
+    pub fn lineage_successors(
+        &self,
+        root_conversation_id: &[u8],
+    ) -> Result<Vec<LineageRegister>, JsError> {
+        self.with(|s| {
+            s.lineage_successors(root_conversation_id)
+                .into_iter()
+                .map(|inner| LineageRegister { inner })
+                .collect()
+        })
+    }
+
+    /// Every lineage register, ascending by successor id.
+    #[wasm_bindgen(js_name = allLineage)]
+    pub fn all_lineage(&self) -> Result<Vec<LineageRegister>, JsError> {
+        self.with(|s| {
+            s.all_lineage()
+                .into_iter()
+                .map(|inner| LineageRegister { inner })
+                .collect()
+        })
+    }
+
+    /// The envelope carrying the one register held for `successorGroupId`
+    /// with its original stamp, or `undefined` when none is held: the live
+    /// send after `setLineage` returned `true`.
+    #[wasm_bindgen(js_name = lineageEnvelopeFor)]
+    pub fn lineage_envelope_for(
+        &self,
+        successor_group_id: &[u8],
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        self.with(|s| s.lineage_envelope_for(successor_group_id))
+    }
+
+    /// Every held lineage register with its original stamp, as service
+    /// envelopes: the catch-up re-send beside `snapshotParts()` (lineage
+    /// registers are NOT in the snapshot parts). Empty when none is held.
+    #[wasm_bindgen(js_name = lineageEnvelopes)]
+    pub fn lineage_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        Ok(self
+            .lineage_envelopes_inner()?
+            .iter()
+            .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+            .collect())
+    }
+
+    /// Decode a lineage envelope received in a DeviceGroup service envelope
+    /// (route on `isLineageEnvelope`) and fold every register in with its
+    /// original stamp. Fail closed: a malformed envelope changes nothing.
+    /// Returns whether anything changed. Throws an `Error` whose message is
+    /// `"<code>: <reason>"` with code `wrongDomain` / `unknownVersion` /
+    /// `truncated` / `trailing` / `count` / `notCanonical` / `bounds`.
+    #[wasm_bindgen(js_name = applyLineageEnvelope)]
+    pub fn apply_lineage_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_lineage_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
     /// The greatest stamp held, or 0. Seed the HLC above it after a restore.
     #[wasm_bindgen(js_name = maxHlc)]
     pub fn max_hlc(&self) -> Result<u64, JsError> {
@@ -708,6 +840,31 @@ pub fn should_send_snapshot(own_leaf: u32, prior_member_leaves: Vec<u32>) -> boo
     core::should_send_snapshot(own_leaf, &prior_member_leaves)
 }
 
+/// `true` when `bytes` open with the lineage envelope domain
+/// (`lakko/sync/lineage/v1`): the routing question for a DeviceGroup service
+/// envelope, asked before the `lakko-contacts` dispatcher. Says nothing
+/// about validity; `SyncedState.applyLineageEnvelope` decides that.
+#[wasm_bindgen(js_name = isLineageEnvelope)]
+#[must_use]
+pub fn is_lineage_envelope(bytes: &[u8]) -> bool {
+    core::is_lineage_envelope(bytes)
+}
+
+/// Longest lineage envelope `SyncedState.lineageEnvelopes()` produces; below
+/// `deviceGroupServiceEnvelopeMaxLen()`.
+#[wasm_bindgen(js_name = lineageEnvelopeMaxLen)]
+#[must_use]
+pub fn lineage_envelope_max_len() -> u32 {
+    u32::try_from(core::LINEAGE_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
+}
+
+/// Longest group id a lineage register accepts (each of the two): 64.
+#[wasm_bindgen(js_name = lineageGroupIdMaxLen)]
+#[must_use]
+pub fn lineage_group_id_max_len() -> u32 {
+    u32::try_from(core::LINEAGE_GROUP_ID_MAX_LEN).unwrap_or(u32::MAX)
+}
+
 /// Whether `name` is an acceptable folder name as it stands (1..=24
 /// characters, at most 96 bytes, the display-name rule, trimmed).
 #[wasm_bindgen(js_name = isValidFolderName)]
@@ -726,6 +883,54 @@ pub fn mint_folder_id() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Success paths only: a `JsError` cannot be built off wasm32, and the
+    /// refusals are pinned in `lakko-sync` and on the UniFFI surface.
+    #[test]
+    fn lineage_is_write_once_travels_by_envelope_and_persists() {
+        let a = SyncedState::new();
+        assert!(a.set_lineage(5, &[1; 32], &[9; 32]).unwrap_or(false));
+        assert!(!a.set_lineage(8, &[1; 32], &[7; 32]).unwrap_or(true));
+        assert!(a.set_lineage(6, &[2; 32], &[9; 32]).unwrap_or(false));
+        let held = a.lineage_root(&[1; 32]).ok().flatten();
+        assert_eq!(held.as_ref().map(LineageRegister::hlc), Some(5));
+        assert_eq!(held.map(|h| h.root_conversation_id()), Some(vec![9; 32]));
+        assert_eq!(
+            a.conversation_id_of(&[2; 32]).unwrap_or_default(),
+            vec![9; 32]
+        );
+        assert_eq!(
+            a.conversation_id_of(&[9; 32]).unwrap_or_default(),
+            vec![9; 32]
+        );
+        assert_eq!(a.lineage_successors(&[9; 32]).unwrap_or_default().len(), 2);
+
+        let b = SyncedState::new();
+        let live = a
+            .lineage_envelope_for(&[1; 32])
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        assert!(is_lineage_envelope(&live));
+        assert!(b.apply_lineage_envelope(&live).unwrap_or(false));
+        for envelope in a.lineage_envelopes_inner().unwrap_or_default() {
+            assert!(envelope.len() <= lineage_envelope_max_len() as usize);
+            let _ = b.apply_lineage_envelope(&envelope);
+        }
+        assert_eq!(
+            b.all_lineage().unwrap_or_default(),
+            a.all_lineage().unwrap_or_default()
+        );
+        assert_eq!(b.all_lineage().unwrap_or_default().len(), 2);
+
+        let parts = a.snapshot_parts().unwrap_or_default();
+        assert_eq!(parts[0].entry_count(), 0);
+        let bytes = a.to_bytes().unwrap_or_default();
+        let back = SyncedState::from_bytes(&bytes).unwrap_or_default();
+        assert_eq!(back.all_lineage().unwrap_or_default().len(), 2);
+        assert!(lineage_envelope_max_len() <= crate::mls::device_group_service_envelope_max_len());
+        assert_eq!(lineage_group_id_max_len(), 64);
+    }
 
     #[test]
     fn a_local_edit_folds_persists_and_snapshots() {

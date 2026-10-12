@@ -46,7 +46,10 @@ import {
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
-import { deleteChat } from "../chat/delete-chat";
+import { deleteConversation } from "../chat/delete-chat";
+import { useLineage } from "../chat/use-lineage";
+import { heldSends, persistHeldSends } from "../chat/held-send-queue";
+import { usePins } from "../chat/PinContext";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
 import {
   loadLeaveRequestedAt,
@@ -59,14 +62,9 @@ import type { IncomingContactRequest, SendResult } from "../contacts/client";
 import { ContactDetailView } from "../contacts/ContactDetailView";
 import { ContactListPane, type AddMode } from "../contacts/ContactListPane";
 import { waitingSentRequests, type SentRequestRecord } from "../contacts/contact-list-model";
-import { loadConversationClosed } from "../chat/conversation-closed";
 import { atLabel, contactsErrorText } from "../contacts/errors";
-import { keysResetOpenContactHref, openContactFor } from "../contacts/keys-reset-open-contact";
 import { InviteLinksPanel } from "../contacts/InviteLinksPanel";
 import {
-  accountIdB64OfHex,
-  confirmKeyReset,
-  keyResetOfContact,
   loadAccepted,
   removeAccepted,
   subscribeAcceptedChanged,
@@ -79,6 +77,7 @@ import {
   loadSentRequests,
   recordSentRequest,
 } from "../contacts/sent-requests";
+import { forgetSentIntro, rememberSentIntro } from "../contacts/sent-request-intros";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
@@ -136,6 +135,8 @@ export default function Contacts(): JSX.Element {
 function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
+  const lineageView = useLineage();
+  const pins = usePins();
   const profiles = useProfiles();
   const navigate = useNavigate();
   // The Show wrapper above guarantees identitySecrets() is non-null on every
@@ -186,6 +187,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     const account = accountIdB64();
     if (account === null) return;
     forgetSentRequest(account, record.recipientAccountIdHex);
+    void forgetSentIntro(account, record.recipientAccountIdHex);
     setSentVersion((v) => v + 1);
   }
 
@@ -195,12 +197,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const [sendBusy, setSendBusy] = createSignal(false);
   const [sendError, setSendError] = createLiveText();
   const [sendNotice, setSendNotice] = createLiveText();
-  // ADR-0065 phase 2 (UX 16.1) — `Open contact` beside a keys-reset refusal
-  // of the request, shown only while the line is that very sentence.
-  const [sendOpenContact, setSendOpenContact] = createSignal<{
-    text: () => string;
-    href: string;
-  } | null>(null);
   // ADR-0048 §4 — no lookup leaves the device for a name that fails the rule.
   const searchCheck = createUsernameCheck(searchInput);
 
@@ -224,6 +220,9 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
           recipientAccountIdHex: syncGroupIdHex(result.recipientAccountId),
           sentAtMs: Date.now(),
         });
+        // Kept under the device key, so a re-send after a rotation of the
+        // account keys carries the same words (ADR-0066 section 3.5a rule 5).
+        void rememberSentIntro(account, syncGroupIdHex(result.recipientAccountId), introInput());
         setSentVersion((v) => v + 1);
       }
       const recipient = `@${result.recipientUsername}`;
@@ -231,10 +230,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       setSearchInput("");
       setIntroInput("");
     } catch (err) {
-      const text = contactsErrorText(err, "contacts.error.send", atLabel(searchInput()));
-      const href = keysResetOpenContactHref(err, loadAccepted());
-      setSendOpenContact(href === null ? null : { text, href });
-      setSendError(text);
+      setSendError(contactsErrorText(err, "contacts.error.send", atLabel(searchInput())));
     } finally {
       setSendBusy(false);
     }
@@ -245,11 +241,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   // dispatches requests into this list, acks into the address book and
   // Welcomes into joined groups, whether or not this route is mounted.
   const [acceptError, setAcceptError] = createLiveText();
-  const [acceptOpenContact, setAcceptOpenContact] = createSignal<{
-    text: () => string;
-    href: string;
-  } | null>(null);
-
   /** Found the 1x1 chat with a contact and link it back to the contact
    *  record (ADR-0021 follow-up). Shared by Accept and by Message on a
    *  contact that has no chat yet. */
@@ -324,15 +315,13 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       await foundChatWith(contact, req.fromAccountId, req.fromPubkey, req.replyGrantB64);
     } catch (err) {
       // Don't unwind the acceptance; just surface the error.
-      const text = contactsErrorText(
-        err,
-        "contacts.error.start_chat",
-        memberNameOf(profiles.resolve(req.fromPubkey)),
+      setAcceptError(
+        contactsErrorText(
+          err,
+          "contacts.error.start_chat",
+          memberNameOf(profiles.resolve(req.fromPubkey)),
+        ),
       );
-      // UX 16.1 — a keys-reset refusal carries `Open contact`.
-      const href = keysResetOpenContactHref(err, loadAccepted());
-      setAcceptOpenContact(href === null ? null : { text, href });
-      setAcceptError(text);
     }
     await sendAck();
   }
@@ -353,26 +342,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
    *  same signature pubkey, so the link + account_id + group id are kept. */
   function onRenameAccepted(contact: AcceptedContact, newName: string): void {
     setAccepted(upsertAccepted({ ...contact, displayName: newName.trim() }));
-  }
-
-  /** ADR-0065 phase 2 (UX 16.1 / 16.2) — the contact's reset record, if the
-   *  contact is `reset-unverified` on this device. Re-read with the list. */
-  const keyResetOf = (c: AcceptedContact): ReturnType<typeof keyResetOfContact> => {
-    accepted();
-    return keyResetOfContact(c);
-  };
-
-  /** UX 16.2 — the person confirmed the new number: re-pin, re-key the row
-   *  (the selection follows the row to its new key), tell nobody. */
-  async function onConfirmKeyReset(contact: AcceptedContact): Promise<"confirmed" | "failed"> {
-    const accountIdB64 = accountIdB64OfHex(contact.accountIdHex);
-    const reset = keyResetOfContact(contact);
-    if (accountIdB64 === null || reset === undefined) return "failed";
-    const result = confirmKeyReset(accountIdB64, Math.floor(Date.now() / 1000));
-    if (result !== "confirmed") return "failed";
-    setAccepted(loadAccepted());
-    setSelectedKey(reset.pendingKeyB64);
-    return "confirmed";
   }
 
   // ---- layout: the list pane + the detail / add pane ----------------
@@ -422,7 +391,13 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   });
   const [filter, setFilter] = createSignal("");
   const selected = (): AcceptedContact | undefined =>
-    accepted().find((c) => c.signaturePubkeyB64 === selectedKey());
+    accepted().find((c) => c.signaturePubkeyB64 === selectedKey()) ??
+    // ADR-0065 R.2 — a contact re-keyed by an accepted reset while its page
+    // is open stays the selected one: found by the key it had.
+    accepted().find((c) => {
+      const key = selectedKey();
+      return key !== null && (c.previousSignaturePubkeysB64 ?? []).includes(key);
+    });
 
   /** The registry row of the 1x1 chat with this contact, if this device
    *  holds one: the id linked at accept when the registry still holds it,
@@ -472,16 +447,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     const g = groupWith(c);
     if (g === undefined) return false;
     const s = auth.state();
-    // ADR-0065 phase 2 (UX 16.4) — the closed one-to-one with the contact's
-    // old keys takes the membership-ended layout here: `Call` and `Video`
-    // go (the call keys would come from a closed chat), `Delete this chat`
-    // arrives in their place.
-    if (
-      s.kind === "session" &&
-      loadConversationClosed(s.account.accountId, g.groupIdB64) !== undefined
-    ) {
-      return true;
-    }
     return membershipHasEnded(
       membershipState({
         isActive: readIsActive(g.group),
@@ -518,12 +483,22 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     setDetailError(null);
     setDetailBusy(true);
     try {
-      await deleteChat({
+      // ADR-0065 R.5 — every group of the conversation, the head last.
+      const view = lineageView.resolve(g.groupIdB64);
+      const held = view?.held ?? [g];
+      await deleteConversation({
         accountIdB64: s.account.accountId,
-        groupIdB64: g.groupIdB64,
-        groupIdHex: syncGroupIdHex(g.group.groupId),
+        segments: held.map((segment) => ({
+          groupIdB64: segment.groupIdB64,
+          groupIdHex: syncGroupIdHex(segment.group.groupId),
+        })),
+        headGroupIdB64: view?.head.groupIdB64 ?? g.groupIdB64,
         chats,
+        afterSegment: (segment) => pins.forgetConversation(segment.groupIdB64),
       });
+      // Nothing held for a conversation that is gone is ever sent.
+      const conversationHex = view?.conversationHex ?? syncGroupIdHex(g.group.groupId);
+      if (heldSends.take(conversationHex).length > 0) void persistHeldSends(s.account.accountId);
       clearSelection();
     } catch (err) {
       setDetailError(contactsErrorText(err, "chat.error.delete_chat", chatLabelOf(c)));
@@ -590,10 +565,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         pending={mailbox.pending}
         pendingBusy={mailbox.busy}
         error={() => acceptError() ?? mailbox.error()}
-        errorOpenContact={() => {
-          const href = openContactFor(acceptError(), acceptOpenContact());
-          return href === null ? null : () => navigate(href);
-        }}
         onAccept={(req) => void onAccept(req)}
         onDecline={onDecline}
         sent={sent}
@@ -633,10 +604,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
                     setIntroInput={setIntroInput}
                     busy={sendBusy}
                     error={sendError}
-                    errorOpenContact={() => {
-                      const href = openContactFor(sendError(), sendOpenContact());
-                      return href === null ? null : () => navigate(href);
-                    }}
                     notice={sendNotice}
                     onSubmit={(e) => void onSend(e)}
                   />
@@ -683,13 +650,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               onDeleteChat={
                 chatMembershipEnded(c()) ? () => void onDeleteChat(c()) : null
               }
-              // ADR-0065 phase 2 — the flagged state and its confirmation.
-              keyReset={((): { pendingKeyB64: string; onConfirm: () => Promise<"confirmed" | "failed"> } | null => {
-                const reset = keyResetOf(c());
-                return reset === undefined
-                  ? null
-                  : { pendingKeyB64: reset.pendingKeyB64, onConfirm: () => onConfirmKeyReset(c()) };
-              })()}
             />
           )}
         </Show>
@@ -710,8 +670,6 @@ interface SendPanelProps {
   readonly setIntroInput: (v: string) => void;
   readonly busy: () => boolean;
   readonly error: () => string | null;
-  /** UX 16.1 — opens the contact a keys-reset refusal names, when it is one. */
-  readonly errorOpenContact: () => (() => void) | null;
   readonly notice: () => string | null;
   readonly onSubmit: (e: SubmitEvent) => void;
 }
@@ -756,16 +714,6 @@ function SendPanel(props: SendPanelProps): JSX.Element {
           {(m) => (
             <div class="form-error">
               {m()}
-              <Show when={props.errorOpenContact()}>
-                {(open) => (
-                  <>
-                    {" "}
-                    <button type="button" class="ghost small" onClick={() => open()()}>
-                      {t("contacts.keys_reset.open_contact")}
-                    </button>
-                  </>
-                )}
-              </Show>
             </div>
           )}
         </Show>

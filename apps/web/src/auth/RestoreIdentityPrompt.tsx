@@ -92,6 +92,11 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   // passkey sign-in) asks for it; the handle is computed locally.
   const [typedUsername, setTypedUsername] = createSignal("");
   let pairingHandle: Uint8Array | null = null;
+  // The anonymous join's own state (its in-memory device seed, the
+  // DeviceGroup snapshot, the history and state bundles), landed under the
+  // device key `completeFromPairing` bootstraps. `null` on the route that
+  // already held a device key: that join wrote as it went.
+  let persistAnonymousJoin: ((deviceKey: CryptoKey) => Promise<void>) | null = null;
   const pairingUsername = (): string => {
     const acct = account();
     if (acct === null) return "";
@@ -190,6 +195,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         loginHandle,
         known: { accountIdBytes, accountIdB64: acct.accountIdB64 },
       });
+      persistAnonymousJoin = (key) => anon.persistTo(key);
       return {
         qrPayload: anon.qrPayload,
         awaitWelcome: (signal) => anon.awaitWelcome(signal),
@@ -200,6 +206,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         dispose: () => anon.dispose(),
       };
     }
+    persistAnonymousJoin = null;
     const session = await prepareJoinFlow({
       accountIdBytes,
       accountIdB64: acct.accountIdB64,
@@ -270,6 +277,9 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                       await auth.completeFromPairing(
                         outcome.phraseEntropy,
                         outcome.session ?? undefined,
+                        // ADR-0066: the state bundle's earlier account keys
+                        // are stored before the session's identities exist.
+                        persistAnonymousJoin ?? undefined,
                       );
                     }}
                     disabled={busy()}

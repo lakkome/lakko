@@ -86,6 +86,11 @@ export interface PinApi {
   setShared(entry: ActiveGroup, messageId: number, pinned: boolean): Promise<void>;
   /** Pin or unpin one message on this device only. */
   setPersonal(groupIdB64: string, messageId: number, pinned: boolean): Promise<void>;
+  /** ADR-0065 R.5 — clear a SHARED pin of an older segment on this device
+   *  alone (`pin-bar.ts` `pinRoute`): nothing is published. The unpin is
+   *  stored with a fresh stamp, so a late re-send of the pin does not
+   *  bring it back. */
+  clearSharedLocally(groupIdB64: string, messageId: number): Promise<void>;
   /** The message was deleted: both records go with it (section 4.1). */
   messageDeleted(groupIdB64: string, messageId: number): Promise<void>;
   /** The conversation was deleted from this device: wipe its pins. */
@@ -323,6 +328,19 @@ export function PinProvider(props: { children: JSX.Element }): JSX.Element {
         if (stored === undefined || wasm.pinIsNewer(stamp, stored.updatedAtMs)) {
           await store.setShared(account, entry.groupIdB64, messageId, { pinned, updatedAtMs: stamp });
         }
+      });
+    },
+    async clearSharedLocally(groupIdB64, messageId) {
+      const account = accountId();
+      if (account === null) return;
+      await withRoutingRowLock(account, groupIdB64, async () => {
+        await opened;
+        const stored = store.getShared(groupIdB64, messageId);
+        if (stored === undefined || !stored.pinned) return;
+        await store.setShared(account, groupIdB64, messageId, {
+          pinned: false,
+          updatedAtMs: freshPinStamp(Date.now(), stored),
+        });
       });
     },
     async setPersonal(groupIdB64, messageId, pinned) {

@@ -132,6 +132,7 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     byId("lakko-device-sync", "rows"),
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|contact|slug1`, ciphertext: ct } },
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|call|slug2`, ciphertext: ct } },
+    byId("lakko-sent-request-intros", "rows"),
     {
       db: "lakko-push-routing",
       store: "secrets",
@@ -196,6 +197,10 @@ function seedAccount(acct: string, acctUrl: string): void {
   markRotatedNotice(local, acct);
   put(`lakko.contacts.predecessor-mailbox.v2.${acct}`, "7");
   put(`lakko.contacts.predecessor-mailbox-adopted.v2.${acct}`, "1700000000000");
+  put(
+    `lakko.contacts.rotation-spend-owed.v1.${acct}`,
+    JSON.stringify({ adoptedAtMs: 1700000000000, links: true, requests: true }),
+  );
   markOwnerMoved(acct, "c0ffee", local);
   put(`lakko.pending-requests.v1.${acct}.${G}`, "{}");
   put(`lakko.unapplied-requests.v1.${acct}.${G}`, "[]");
@@ -203,10 +208,13 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.committer-beacons.v1.${acct}.${G}`, "{}");
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
+  put(`lakko:reset-continuity:${acct}`, JSON.stringify({ keyGeneration: 2, signedAtMs: 1 }));
+  put(`lakko.lineage.unsent.v1.${acct}`, "1");
   put(
-    `lakko.conversation-closed.v1.${acct}.${G}`,
-    JSON.stringify({ reason: "one-to-one-keys-reset", contactAccountIdB64: "x", previousKeyB64: "y", closedAtMs: 1 }),
+    `lakko.contacts.verified-bindings.v1.${acct}`,
+    JSON.stringify({ QUFB: { keyB64: "a2V5", keyGeneration: 1, verifiedAtMs: 1 } }),
   );
+  put(`lakko.reset-continuity.v1.${acct}`, JSON.stringify({ moved: { G: 1 }, resent: {} }));
   put(`lakko.channels.orphaned-by-reset.v1.${acct}`, JSON.stringify(["ch1"]));
   put(`lakko.conversation-kind.v1.${acct}`, JSON.stringify({ [G]: "group" }));
   selectTab(acct, "folder-1");
@@ -491,6 +499,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-call-log": "account",
   "lakko-device-sync": "account",
   "lakko-minted-links": "account",
+  "lakko-sent-request-intros": "account",
   "lakko-push-routing": "account",
   "lakko-anon-tokens": "account",
   "lakko-session-tokens": "account",
@@ -519,6 +528,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:key-rotation-notice:": "account",
   "lakko.contacts.predecessor-mailbox.v2.": "account",
   "lakko.contacts.predecessor-mailbox-adopted.v2.": "account",
+  "lakko.contacts.rotation-spend-owed.v1.": "account",
   "lakko:channel-owner-moved:": "account",
   "lakko.pending-requests.v1": "account",
   "lakko.unapplied-requests.v1": "account",
@@ -526,7 +536,10 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.committer-beacons.v1": "account",
   "lakko.last-observed-owner.v1": "account",
   "lakko.leave-requested.v1": "account",
-  "lakko.conversation-closed.v1": "account",
+  "lakko:reset-continuity:": "account",
+  "lakko.lineage.unsent.v1.": "account",
+  "lakko.contacts.verified-bindings.v1.": "account",
+  "lakko.reset-continuity.v1.": "account",
   "lakko.channels.orphaned-by-reset.v1": "account",
   "lakko.conversation-kind.v1.": "account",
   "lakko.folderTab.": "account",

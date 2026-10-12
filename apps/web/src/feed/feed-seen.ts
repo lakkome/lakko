@@ -99,14 +99,3 @@ export function markSeenInSlot(
     advancedTo,
   };
 }
-
-/** The 8-byte big-endian form a DeviceGroup read cursor carries. */
-export function readCursorBytes(id: bigint): Uint8Array {
-  const out = new Uint8Array(8);
-  let v = id;
-  for (let i = 7; i >= 0; i -= 1) {
-    out[i] = Number(v & 0xffn);
-    v >>= 8n;
-  }
-  return out;
-}

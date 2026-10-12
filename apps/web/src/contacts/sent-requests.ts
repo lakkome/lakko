@@ -6,7 +6,9 @@
  * `localStorage`, so the Contacts pane can show them under "Sent" with a
  * waiting label (docs/ux/client-redesign.md section 5.3) until the
  * recipient's acceptance lands in the address book. Only the username and
- * the account id are kept; the intro text is not.
+ * the account id are kept here; the intro text is kept apart, sealed under
+ * the device key (`sent-request-intros.ts`). A record goes when the request
+ * is answered, when the person dismisses it, and with the account wipe.
  *
  * The rules (dedup, which rows are still waiting) live in
  * `contact-list-model.ts`; this file is the storage.

@@ -19,6 +19,7 @@ import type {
   SyncedState as WasmSyncedState,
 } from "../../../wasm/lakko_ffi_wasm";
 import type { Wasm } from "../../wasm";
+import type { LineageEntry } from "../../chat/lineage";
 import {
   bytesToHex,
   hexToBytes,
@@ -42,6 +43,8 @@ export interface SyncedProjection {
   readonly readCursors: Readonly<Record<string, ReadCursorState>>;
   readonly order: OrderState | null;
   readonly folders: readonly FolderModel[];
+  /** ADR-0065 R.5 — the lineage registers (`successor -> root`). */
+  readonly lineage: readonly LineageEntry[];
 }
 
 function refsOf(list: WasmRef[]): ConversationRef[] {
@@ -100,7 +103,16 @@ export function projectSyncedState(state: WasmSyncedState): SyncedProjection {
     });
     v.free();
   }
-  return { drafts, flags, readCursors, order, folders };
+  const lineage: LineageEntry[] = [];
+  for (const l of state.allLineage()) {
+    lineage.push({
+      successorHex: groupIdHex(l.successorGroupId),
+      rootHex: groupIdHex(l.rootConversationId),
+      hlc: l.hlc,
+    });
+    l.free();
+  }
+  return { drafts, flags, readCursors, order, folders, lineage };
 }
 
 /**

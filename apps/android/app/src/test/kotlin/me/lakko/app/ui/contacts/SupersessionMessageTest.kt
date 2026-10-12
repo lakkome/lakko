@@ -13,7 +13,7 @@ import org.junit.Test
  * copy. Pure mapping — no Compose, no native lib, no `ViewModel`. Mirror of
  * the web `supersession-message` vitest.
  *
- * Asserts the three-way [supersessionRefusedMessage] mapping (verbatim
+ * Asserts the [supersessionRefusedMessage] mapping (verbatim
  * strings, shared cross-platform) + the [atLabel] handle normalisation that
  * feeds its subject.
  */
@@ -46,19 +46,15 @@ class SupersessionMessageTest {
     }
 
     // -----------------------------------------------------------------
-    // supersessionRefusedMessage — the pure 3-way map
+    // supersessionRefusedMessage — the pure map
     // -----------------------------------------------------------------
 
     @Test
-    fun `loggedReset true confirms an owner-initiated reset`() {
-        val msg = supersessionRefusedMessage(true, "@alice").en
-        assertEquals(
-            "@alice reset their secure identity (for example, they lost " +
-                "their device). The transparency log confirms this was an " +
-                "owner-initiated reset. If you trust this is really them, " +
-                "re-verify their safety number out of band before continuing.",
-            msg,
-        )
+    fun `a marker that is not a confirmed absence of a reset reads as unconfirmed`() {
+        // An accepted reset is silent and never reaches this copy; a `true`
+        // marker therefore says nothing more than "not confirmed".
+        assertEquals(supersessionRefusedMessage(null, "@alice"), supersessionRefusedMessage(true, "@alice"))
+        assertEquals("contacts.identity_changed.unconfirmed", supersessionRefusedMessage(true, "@alice").key)
     }
 
     @Test
@@ -88,19 +84,18 @@ class SupersessionMessageTest {
 
     @Test
     fun `null peer label falls back to This contact`() {
-        assertTrue(supersessionRefusedMessage(true, null).en.startsWith("This contact "))
         assertTrue(supersessionRefusedMessage(false, null).en.startsWith("This contact's "))
         assertTrue(supersessionRefusedMessage(null, null).en.startsWith("This contact's "))
     }
 
     @Test
     fun `empty peer label falls back to This contact`() {
-        assertTrue(supersessionRefusedMessage(true, "").en.startsWith("This contact "))
+        assertTrue(supersessionRefusedMessage(false, "").en.startsWith("This contact's "))
     }
 
     @Test
     fun `every branch is a security-critical catalog message`() {
-        assertEquals("contacts.identity_changed.reset", supersessionRefusedMessage(true, "@a").key)
+        assertEquals("contacts.identity_changed.unexplained", supersessionRefusedMessage(false, "@a").key)
         assertEquals("contacts.identity_changed.unexplained_unnamed", supersessionRefusedMessage(false, null).key)
         assertEquals("contacts.identity_changed.unconfirmed", supersessionRefusedMessage(null, "@a").key)
     }

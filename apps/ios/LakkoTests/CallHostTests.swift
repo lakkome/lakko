@@ -172,11 +172,11 @@ final class CallHostTests: XCTestCase {
         XCTAssertEqual(host.activeCall?.state, .ringing)
 
         h.publishFails = true
-        host.conversationClosed(groupIdHex: groupB)
+        host.conversationMoved(groupIdHex: groupB)
         XCTAssertEqual(host.activeCall?.state, .ringing, "another chat closing does not touch this call")
 
         let session = host.activeCall
-        host.conversationClosed(groupIdHex: groupA)
+        host.conversationMoved(groupIdHex: groupA)
         await host.whenPublishesSettle()
         XCTAssertEqual(session?.state, .done)
         XCTAssertFalse(host.hasLiveCall)

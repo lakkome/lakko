@@ -26,7 +26,15 @@ public final class ChatViewModel: ObservableObject {
 
     // MARK: - Constructor inputs
 
-    public let groupIdHex: String
+    /// The group this screen sends into and polls: the conversation's
+    /// CURRENT group (ADR-0065 R.5, the head). It changes, without the screen
+    /// being rebuilt, when the conversation continues in a successor group
+    /// (``followHead(_:)``).
+    @Published public private(set) var groupIdHex: String
+    /// ADR-0065 R.5 — the conversation this screen shows: the key of the
+    /// draft, the read position and every other person-facing store. Never
+    /// changes for the life of the model.
+    public let conversationIdHex: String
 
     // MARK: - Form fields
 
@@ -159,7 +167,7 @@ public final class ChatViewModel: ObservableObject {
     /// failing loudly: the user cannot tell a swallowed action from a slow one.
     /// Those guards stay as the backstop; this is what stops the offer.
     public var messageActionsAvailable: Bool {
-        messageActionsState(membership) == .available && !conversationClosed
+        messageActionsState(membership) == .available
     }
 
     /// §6.2.8 — which one-shot teardown steps have already been claimed. A
@@ -293,7 +301,10 @@ public final class ChatViewModel: ObservableObject {
             }
     ) {
         self.repository = repository
-        self.groupIdHex = groupIdHex
+        // The route may name the conversation or ANY of its groups (a link
+        // minted before the move still opens the conversation).
+        self.conversationIdHex = repository.conversationIdHex(ofGroup: groupIdHex)
+        self.groupIdHex = repository.headGroupIdHex(of: groupIdHex)
         // The composition root passes the app-level host. A view model built
         // without one (previews) gets a host of its own that is NOT attached to
         // the repository's signaling feed, so it can never steal it.
@@ -328,7 +339,7 @@ public final class ChatViewModel: ObservableObject {
         // Group-call record — kept by the repository (so it is fed whichever
         // chat is open); this screen only mirrors its own chat's entry.
         repository.$groupCalls
-            .map { $0[groupIdHex] }
+            .map { [weak self] calls in self.flatMap { calls[$0.groupIdHex] } }
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] record in
@@ -342,9 +353,9 @@ public final class ChatViewModel: ObservableObject {
         // at receipt for every group); seed from it and follow this group's
         // entry so a receipt applied while another chat was open, or before
         // a relaunch, still shows as Read.
-        readWatermarks = repository.readWatermarks(groupIdHex: groupIdHex)
+        readWatermarks = repository.readWatermarks(groupIdHex: self.groupIdHex)
         repository.$readWatermarksByGroup
-            .compactMap { $0[groupIdHex] }
+            .compactMap { [weak self] maps in self.flatMap { maps[$0.groupIdHex] } }
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] map in
@@ -356,8 +367,8 @@ public final class ChatViewModel: ObservableObject {
         // typing state + a monotone read watermark (no bubble). The
         // poll loop already dispatches on @MainActor.
         repository.chatStatusSink = { [weak self] hex, status in
-            guard hex == groupIdHex else { return }
-            Task { @MainActor in
+            guard let self, hex == self.groupIdHex else { return }
+            Task { @MainActor [weak self] in
                 self?.handleChatStatus(status)
             }
         }
@@ -405,14 +416,6 @@ public final class ChatViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
-        // ADR-0065 phase 2 — a contact flagged or verified, a conversation
-        // closed, an eviction applied: the banner, the row annotations, the
-        // bubble warnings and the composer slot all re-render in place.
-        repository.$keyResetRevision
-            .dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cancellables)
     }
 
     /// ADR-0024 — `true` while ``ChatScreen`` is on-screen. The screen
@@ -434,13 +437,6 @@ public final class ChatViewModel: ObservableObject {
                 // ask the group to introduce itself (the core's rule decides,
                 // at most once a day per group; nothing is sent otherwise).
                 requestProfilesIfDue()
-                // ADR-0065 phase 2 (UX 16.3) — "again on open for any group
-                // where it has not yet applied": the silent eviction of a
-                // reset contact's old devices, where this account may propose.
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    await self.repository.proposeKeyResetEvictionsIfDue(groupIdHex: self.groupIdHex)
-                }
             } else {
                 // Left the thread — stop advertising that we're typing.
                 stopTyping()
@@ -593,11 +589,17 @@ public final class ChatViewModel: ObservableObject {
     /// ``ChatScreen``'s long-poll `.task` started: this chat is open and polls
     /// itself, so the foreground receive skips it and what it applies is read.
     func chatScreenOpened() {
+        chatOpenCounted = true
         repository.chatScreenOpened(groupIdHex: groupIdHex)
     }
 
+    /// Whether this model currently counts as an open chat in the
+    /// repository, so ``followHead(_:)`` moves the count with the head.
+    private var chatOpenCounted = false
+
     /// The matching close for ``chatScreenOpened()``.
     func chatScreenClosed() {
+        chatOpenCounted = false
         repository.chatScreenClosed(groupIdHex: groupIdHex)
     }
 
@@ -801,10 +803,7 @@ public final class ChatViewModel: ObservableObject {
     /// What the toolbar call buttons do right now.
     var chatCallAction: GroupCallHostRules.ChatCallAction {
         GroupCallHostRules.chatCallAction(
-            // ADR-0065 phase 2 — a closed conversation has no live call
-            // either (16.4: the call keys would come from a chat that is
-            // closed).
-            membershipEnded: membershipHasEnded || conversationClosed,
+            membershipEnded: membershipHasEnded,
             callInProgress: anyCallInProgress,
             affordance: groupCallAffordance(),
             isGroup: isGroupChat
@@ -1464,245 +1463,6 @@ public final class ChatViewModel: ObservableObject {
                 repository: repository, groupIdHex: groupIdHex))
     }
 
-    // MARK: - ADR-0065 phase 2 — a contact reset their account keys (UX 16)
-
-    /// UX 16.4 / 16.5 — why this conversation is closed on this device, or
-    /// `nil`. Read live; ``ChatRepository/keyResetRevision`` drives the
-    /// re-render.
-    var closedReason: ConversationClosedReason? {
-        repository.closedReason(groupIdHex: groupIdHex)
-    }
-
-    /// Whether the composer, the call buttons and the live affordances are
-    /// withdrawn for a reason of the person's rather than the protocol's.
-    var conversationClosed: Bool { closedReason != nil }
-
-    /// The contact a closed one-to-one was with, by account id.
-    private func closedContact() -> ChatRepository.ContactKeyFacts? {
-        guard case .contactKeysReset(let accountIdB64, _)? = closedReason else { return nil }
-        return repository.contactFacts(accountIdB64: accountIdB64)
-    }
-
-    /// The name the closed shapes use: the contact for a one-to-one (16.4), the
-    /// admin who closed the group (16.5).
-    private var closedName: String? {
-        switch closedReason {
-        case .contactKeysReset?:
-            return closedContact().flatMap { personName(signatureKeyB64: $0.currentKeyB64) }
-        case .groupClosed(let byKeyB64, _, _)?:
-            return byKeyB64.isEmpty ? nil : personName(signatureKeyB64: byKeyB64)
-        case nil:
-            return nil
-        }
-    }
-
-    /// UX 16.4 / 16.5 — the terminal row of a closed conversation, or `nil`.
-    var closedTerminalRowCopy: TerminalRowCopy? {
-        closedReason.map { closedTerminalRow($0, name: closedName) }
-    }
-
-    /// UX 16.4 / 16.5 — what occupies the composer's slot of a closed
-    /// conversation, or `nil` while it is open. `Start a new chat` is enabled
-    /// once the contact is verified; `Open the new group` shown only once
-    /// this device joined the successor.
-    var closedComposer: ClosedComposerSlot? {
-        guard let reason = closedReason else { return nil }
-        let contact = closedContact()
-        let joined: Bool = {
-            guard case .groupClosed(_, _, let successor?) = reason else { return false }
-            return repository.knownGroupIdHexes.contains(successor)
-        }()
-        return closedComposerSlot(
-            reason, draft: draft,
-            contactName: contact.flatMap { personName(signatureKeyB64: $0.currentKeyB64) },
-            contactVerified: contact.map { $0.keyState == .normal } ?? false,
-            joinedSuccessor: joined)
-    }
-
-    /// UX 16.4 — the contact row id behind `Open contact` of a closed
-    /// one-to-one, or `nil`.
-    var closedContactMessageId: Int64? { closedContact()?.messageId }
-
-    /// UX 16.5 — the recreated group `Open the new group` opens, or `nil`.
-    var successorGroupIdHex: String? {
-        guard case .groupClosed(_, _, let successor?)? = closedReason,
-              repository.knownGroupIdHexes.contains(successor) else { return nil }
-        return successor
-    }
-
-    /// UX 16.4 — `Start a new chat`: create a chat with the new keys exactly as
-    /// a first chat is created (the contact-request round trip is not
-    /// repeated). Returns the new chat's id, or `nil` with the error set.
-    func startNewChatAfterReset() async -> String? {
-        guard let contact = closedContact(), contact.keyState == .normal,
-              let accountId = base64Decode(contact.accountIdB64),
-              let key = base64Decode(contact.currentKeyB64)
-        else { return nil }
-        do {
-            return try await repository.startGroupWith(
-                recipientAccountId: accountId, recipientSignaturePubkey: key, kind: .oneToOne)
-        } catch {
-            sendError = Self.errorText(for: error, fallbackKey: "contacts.error.start_chat")
-            return nil
-        }
-    }
-
-    /// UX 16.1 — the warning line under the sender name of a message from a
-    /// flagged contact's NEW keys, or `nil`: never for a verified contact, never
-    /// for a person who was never a contact (no old number to have compared).
-    func keyResetWarning(for message: ChatMessage) -> String? {
-        guard message.direction == .incoming, let author = message.authorKeyB64,
-              let flagged = repository.flaggedContact(pendingKeyB64: author)
-        else { return nil }
-        let name = personName(signatureKeyB64: author)
-            ?? personName(signatureKeyB64: flagged.currentKeyB64)
-            ?? ResolvedDisplayName.placeholderSomeone
-        return Localization.text("chat.keys_reset.bubble_warning", texts: ["name": name])
-    }
-
-    /// UX 16.3 — the sentence of the eviction system row, worded at render
-    /// time and naming the contact by account id, or `nil` for any other row.
-    func keyResetSystemRowText(for message: ChatMessage) -> String? {
-        guard message.direction == .system, let account = KeyResetSystemRow.parse(message.text) else {
-            return nil
-        }
-        let name = repository.contactFacts(accountIdB64: account)
-            .flatMap { personName(signatureKeyB64: $0.currentKeyB64) }
-        return KeyResetSystemRow.sentence(name: name)
-    }
-
-    /// The contact row the bubble warning opens, or `nil`.
-    func keyResetContactMessageId(for message: ChatMessage) -> Int64? {
-        guard let author = message.authorKeyB64 else { return nil }
-        return repository.flaggedContact(pendingKeyB64: author)?.messageId
-    }
-
-    /// UX 16.3 / 16.5 — the secondary line of a roster row whose key a reset
-    /// retired: `Being removed.` where this device proposed the eviction and it
-    /// has not applied, the bare flag otherwise (a plain member, an owned
-    /// group, a group with no roles).
-    func keyResetAnnotation(_ member: GroupMember) -> String? {
-        let keyB64 = base64Encode(member.signaturePublicKey)
-        guard repository.retiredKeyAccountId(keyB64: keyB64) != nil else { return nil }
-        if let record = repository.keyResetEviction(groupIdHex: groupIdHex, memberKeyB64: keyB64),
-           record.proposedAtMs != nil, !record.applied,
-           case .evict? = repository.sharedGroupBranch(groupIdHex: groupIdHex, previousKeyB64: keyB64) {
-            return Localization.text("chat.keys_reset.member_being_removed")
-        }
-        return Localization.text("chat.keys_reset.member_flag")
-    }
-
-    /// UX 16.5 — the owned-group notice, above the pending notice: the two
-    /// sentences, plus `An admin can recreate it.` for a plain member, and
-    /// whether the `Recreate group` button is shown (admin, live membership,
-    /// group not already closed).
-    struct OwnedGroupNotice: Equatable {
-        let text: String
-        let memberLine: String?
-        let canRecreate: Bool
-    }
-
-    var ownedGroupNotice: OwnedGroupNotice? {
-        guard !membershipHasEnded, closedReason == nil,
-              let owner = repository.ownedGroupResetOwner(groupIdHex: groupIdHex)
-        else { return nil }
-        let name = personName(signatureKeyB64: owner.keyB64)
-            ?? repository.contactFacts(accountIdB64: owner.accountIdB64)
-                .flatMap { personName(signatureKeyB64: $0.currentKeyB64) }
-            ?? ResolvedDisplayName.placeholderSomeone
-        let canRecreate: Bool = {
-            guard case .ownedGroup(let can)? =
-                    repository.sharedGroupBranch(groupIdHex: groupIdHex, previousKeyB64: owner.keyB64)
-            else { return false }
-            return can
-        }()
-        return OwnedGroupNotice(
-            text: Localization.text("chat.keys_reset.owned_notice", texts: ["name": name]),
-            memberLine: canRecreate ? nil : Localization.text("chat.keys_reset.owned_notice_member"),
-            canRecreate: canRecreate)
-    }
-
-    /// UX 16.5 — the panel line replacing the owned-group notice once the
-    /// group is closed: `This group was closed. Continue in {name}.`
-    var closedGroupPanelLine: String? {
-        guard case .groupClosed(_, _, let successor)? = closedReason else { return nil }
-        let name = successor.flatMap { repository.groupName(groupIdHex: $0) }
-            ?? Localization.text("chat.group.fallback_name")
-        return Localization.text("group.closed.panel", texts: ["name": name])
-    }
-
-    /// UX 16.5 — the members of this group the recreate sheet pre-fills,
-    /// excluding this device's own person and the old owner, with what the
-    /// add path needs and why a row is disabled.
-    struct RecreateCandidate: Identifiable, Equatable {
-        enum Disabled: Equatable {
-            case resetUnverified
-            case noAccountId
-        }
-        let id: String
-        let signatureKey: Data
-        let accountId: Data?
-        let name: String
-        let disabled: Disabled?
-    }
-
-    func recreateCandidates() -> [RecreateCandidate] {
-        let own = ownLeafIndex
-        let oldOwner = repository.ownedGroupResetOwner(groupIdHex: groupIdHex)
-        let roster = repository.members(groupIdHex: groupIdHex) ?? []
-        var out: [RecreateCandidate] = []
-        for member in roster where member.leafIndex != own {
-            let keyB64 = base64Encode(member.signaturePublicKey)
-            let resolved = ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey)
-            if keyB64 == oldOwner?.keyB64 {
-                // The old identity's row is the NEW identity, listed under the
-                // contact (unticked and disabled while unverified, enabled and
-                // ticked once verified). A person who was never a contact has
-                // no new keys here to invite.
-                guard let accountIdB64 = oldOwner?.accountIdB64,
-                      let contact = repository.contactFacts(accountIdB64: accountIdB64),
-                      let accountId = base64Decode(accountIdB64),
-                      let key = base64Decode(contact.currentKeyB64)
-                else { continue }
-                out.append(RecreateCandidate(
-                    id: keyB64, signatureKey: key, accountId: accountId,
-                    name: personName(signatureKeyB64: contact.currentKeyB64) ?? resolved.name,
-                    disabled: contact.keyState == .resetUnverified ? .resetUnverified : nil))
-                continue
-            }
-            let accountId = ProfileDirectory.shared.accountId(signatureKeyB64: keyB64)
-                ?? repository.contactKeyFacts().first { $0.currentKeyB64 == keyB64 }
-                    .flatMap { base64Decode($0.accountIdB64) }
-            out.append(RecreateCandidate(
-                id: keyB64, signatureKey: member.signaturePublicKey, accountId: accountId,
-                name: resolved.name,
-                disabled: accountId == nil ? .noAccountId : nil))
-        }
-        return out
-    }
-
-    /// UX 16.5 — `Create and close the old group`, through the repository's one
-    /// action. The panel's `membershipBusy` is held so no other membership
-    /// control acts meanwhile.
-    func recreateGroup(
-        name: String,
-        members: [(accountId: Data, signatureKey: Data)]
-    ) async throws -> (groupIdHex: String, failedNames: [String]) {
-        membershipBusy = true
-        defer { membershipBusy = false }
-        return try await repository.recreateGroup(oldGroupIdHex: groupIdHex, name: name, members: members)
-    }
-
-    /// UX 16.1 — `Approve` of a join request from a flagged contact's new keys
-    /// is disabled with the sentence; `Reject` stays live.
-    func approveBlockedReason(proposalRef: Data) -> String? {
-        guard let accountKey = repository.pendingExternalJoinAccountKey(
-            groupIdHex: groupIdHex, joinerSignatureKey: proposalRef),
-              repository.flaggedContact(pendingKeyB64: base64Encode(accountKey)) != nil
-        else { return nil }
-        return Localization.text("contacts.keys_reset.picker_sub")
-    }
-
     // MARK: - ADR-0051 group name
 
     /// The shared group name this device holds, or `nil` (member-derived
@@ -1803,16 +1563,7 @@ public final class ChatViewModel: ObservableObject {
                 _ = outcome
                 refreshMembers()
             } catch {
-                // ADR-0065 phase 2 (UX 16.1) — the add field answers a flagged
-                // contact with the picker row's sentence; any other refusal of
-                // a changed key keeps the identity-changed copy.
-                if let refused = SupersessionRefused.find(in: error),
-                   KeyResetDetection.isReset(reason: refused.reason, loggedReset: refused.loggedReset),
-                   repository.contactFacts(accountIdB64: refused.accountIdB64)?.keyState == .resetUnverified {
-                    membershipError = .key("contacts.keys_reset.picker_sub")
-                } else {
-                    membershipError = Self.addMemberErrorText(for: error, username: username)
-                }
+                membershipError = Self.addMemberErrorText(for: error, username: username)
                 NSLog("onAddMember failed: %@", error.localizedDescription)
             }
         }
@@ -2211,12 +1962,6 @@ public final class ChatViewModel: ObservableObject {
     /// not fire, and the copy says so. Fail-closed on error.
     func onApproveJoin(proposalRef: Data) {
         guard !membershipBusy else { return }
-        // ADR-0065 phase 2 (UX 16.1) — the control is disabled with the
-        // sentence; this is the backstop behind it.
-        if let reason = approveBlockedReason(proposalRef: proposalRef) {
-            membershipError = UiText { reason }
-            return
-        }
         membershipBusy = true
         membershipError = nil
         membershipNotice = nil
@@ -2336,6 +2081,8 @@ public final class ChatViewModel: ObservableObject {
     /// schedules a fresh `ReadCursor` payload only when the
     /// newest visible row's id exceeds this value.
     private var lastBroadcastReadId: Int64 = -1
+    /// ADR-0065 R.5 — the last read position broadcast, in timeline order.
+    private var lastBroadcastReadPosition: LineageRules.TimelinePosition?
     private var readCursorWork: DispatchWorkItem?
 
     /// Bind to the process-scoped
@@ -2358,13 +2105,15 @@ public final class ChatViewModel: ObservableObject {
         // Resolve groupIdBytes lazily — the ChatRepository
         // exposes the per-thread record's groupId; we hex-
         // decode the `groupIdHex` we already carry.
-        groupIdBytes = Self.hexToBytes(groupIdHex)
+        // ADR-0065 R.5 — the draft and the read position belong to the
+        // CONVERSATION, so they follow it into a successor group.
+        groupIdBytes = Self.hexToBytes(conversationIdHex)
         guard let groupIdBytes = groupIdBytes else { return }
 
         // Observe the sync repository's drafts map. On every
         // change, seed locally IF the local composer is
         // empty + we haven't seeded yet.
-        let key = groupIdHex
+        let key = conversationIdHex
         sync.$drafts
             .receive(on: RunLoop.main)
             .sink { [weak self] drafts in
@@ -2413,21 +2162,25 @@ public final class ChatViewModel: ObservableObject {
         for m in messages where m.messageId > 0 {
             if m.messageId > highest { highest = m.messageId }
         }
-        if highest <= lastBroadcastReadId { return }
+        // ADR-0065 R.5 — a successor's message ids restart, so the position
+        // is `(segment, message id)` and "past the last broadcast" is judged
+        // in that order.
+        let segment = repository.segmentIndex(ofGroup: groupIdHex)
+        let position = LineageRules.TimelinePosition(segment: segment, messageId: highest)
+        if highest < 0 { return }
+        if let last = lastBroadcastReadPosition,
+           LineageRules.compareTimeline(position, last) <= 0 { return }
         let target = highest
         readCursorWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self = self,
                   let sync = self.deviceGroupSync else { return }
             self.lastBroadcastReadId = target
-            // 8 big-endian bytes — wire shape stable across
-            // platforms.
-            var idBytes = Data(count: 8)
-            var v = UInt64(bitPattern: target)
-            for i in (0..<8).reversed() {
-                idBytes[i] = UInt8(v & 0xff)
-                v >>= 8
-            }
+            self.lastBroadcastReadPosition = position
+            // `message_id(8 BE)` in the first segment, `message_id(8 BE) ||
+            // segment(4 BE)` in later ones: byte-identical on every client,
+            // since the cursor is synced.
+            let idBytes = LineageRules.encodeReadPosition(position)
             let now = UInt64(Date().timeIntervalSince1970 * 1000)
             Task { @MainActor in
                 do {
@@ -2480,8 +2233,33 @@ public final class ChatViewModel: ObservableObject {
         return bytes
     }
 
+    /// ADR-0065 R.5 — the conversation moved to another group while this
+    /// screen was up (a successor became the head): the same screen, the
+    /// same history above, now sending into the new group. Nothing is shown
+    /// for it.
+    private func followHead(_ headHex: String) {
+        let previous = groupIdHex
+        guard headHex != previous else { return }
+        if chatOpenCounted {
+            repository.chatScreenClosed(groupIdHex: previous)
+            repository.chatScreenOpened(groupIdHex: headHex)
+        }
+        groupIdHex = headHex
+        readWatermarks = repository.readWatermarks(groupIdHex: headHex)
+        ongoingGroupCall = repository.groupCalls[headHex]
+        // A new MLS session: the teardown claims of the old one do not carry.
+        teardownClaimed = []
+        repository.ensurePushRouting(groupIdHex: headHex)
+    }
+
+    /// This conversation's thread in the repository state.
+    private func conversationThread(in state: ChatRepositoryState) -> ChatThread? {
+        state.threads.first { $0.conversationIdHex == conversationIdHex }
+    }
+
     private func sync(state: ChatRepositoryState) {
-        let thread = state.threads.first { $0.groupIdHex == groupIdHex }
+        let thread = conversationThread(in: state)
+        if let thread { followHead(thread.groupIdHex) }
         self.messages = thread?.messages ?? []
         self.threadKnown = thread != nil
         // ADR-0045 UX §6.2 — every poll batch republishes the repository state,
@@ -2703,8 +2481,7 @@ public final class ChatViewModel: ObservableObject {
     private func armPendingReply() {
         guard let id = pendingReplyId else { return }
         pendingReplyId = nil
-        guard let message = repository.state.threads
-            .first(where: { $0.groupIdHex == groupIdHex })?
+        guard let message = conversationThread(in: repository.state)?
             .messages.first(where: { $0.messageId == id && !$0.deleted })
         else { return }
         beginReply(message)
@@ -2858,13 +2635,23 @@ public final class ChatViewModel: ObservableObject {
     /// not the message. `nil` means do nothing and say nothing (section 5: an
     /// explanation would confirm the conversation exists).
     func forwardOriginJump(of forward: ForwardRef) -> (groupIdHex: String, messageId: Int64)? {
-        guard let origin = forward.originGroupIdHex, let messageId = forward.originMessageId,
-              let thread = repository.state.threads.first(where: { $0.groupIdHex == origin }),
+        // ADR-0065 R.5 — the origin names a GROUP; the conversation it
+        // belongs to may have moved on, so the row is looked up under the id
+        // it is drawn under now (its own id in the head, a history id in an
+        // older segment this device holds).
+        guard let origin = forward.originGroupIdHex, let messageId = forward.originMessageId else {
+            return nil
+        }
+        let conversation = repository.conversationIdHex(ofGroup: origin)
+        guard let thread = repository.state.threads.first(where: { $0.conversationIdHex == conversation }),
+              let rowId = LineageViews.forwardJumpRow(
+                originGroupIdB64: origin, messageId: messageId,
+                headGroupIdB64: thread.groupIdHex, heldHistory: thread.historyGroupIdHexes),
               thread.messages.contains(where: {
-                  $0.messageId == messageId && !ChatTimeline.isHiddenSystemRow($0)
+                  $0.messageId == rowId && !ChatTimeline.isHiddenSystemRow($0)
               })
         else { return nil }
-        return (origin, messageId)
+        return (thread.groupIdHex, rowId)
     }
 
     // MARK: - ADR-0052 decision 3 — pin
@@ -2893,10 +2680,30 @@ public final class ChatViewModel: ObservableObject {
     /// stores and the timeline; ``ChatRepository/pinRevision`` and `messages`
     /// drive the re-render.
     var pinnedEntries: [PinnedEntry] {
-        PinnedBar.entries(
-            shared: repository.sharedPins(groupIdHex: groupIdHex),
-            personal: repository.personalPins(groupIdHex: groupIdHex),
-            held: messages)
+        // ADR-0065 R.5 — the pins of every segment this device holds, each
+        // under the id its row is drawn under.
+        let spanned = repository.pinsAcrossSegments(headGroupIdHex: groupIdHex)
+        return PinnedBar.entries(shared: spanned.shared, personal: spanned.personal, held: messages)
+    }
+
+    /// The stored pin an on-screen row id stands for: the row itself in this
+    /// group, or `(older group, original id)` for a row of an older segment.
+    private func pinTarget(ofRow rowId: Int64) -> LineageViews.PinTarget? {
+        LineageViews.pinTargetOfRow(
+            rowId: rowId,
+            headGroupIdB64: groupIdHex,
+            olderGroupIdsB64: repository.olderSegments(headGroupIdHex: groupIdHex))
+    }
+
+    /// The pin state of a row, read from the group that stores it.
+    private func pinState(ofRow rowId: Int64) -> (shared: Bool, personal: Bool, maySetShared: Bool, older: Bool) {
+        guard let target = pinTarget(ofRow: rowId) else { return (false, false, false, false) }
+        // `groupIdB64` carries the hex key here: the function only compares.
+        let shared = repository.sharedPins(groupIdHex: target.groupIdB64)[target.messageId]?.pinned == true
+        let personal = repository.personalPins(groupIdHex: target.groupIdB64)[target.messageId] != nil
+        // An older segment's shared pin is cleared on this device alone, which
+        // every holder may do; a new shared pin there is refused.
+        return (shared, personal, target.older ? true : maySetSharedPin, target.older)
     }
 
     /// The entry the bar shows now, `nil` when there is nothing to show.
@@ -2950,21 +2757,30 @@ public final class ChatViewModel: ObservableObject {
     /// The word the action card shows for `message`: `Pin`, `Unpin`, or no row
     /// (a row that has not landed, a tombstone, or a dead membership).
     func pinMenuState(for message: ChatMessage) -> PinMenuState {
+        if LineageRules.isHistoryRowId(message.messageId) {
+            // ADR-0065 R.5 — a row of an older segment offers Unpin alone,
+            // and only when it is pinned.
+            let state = pinState(ofRow: message.messageId)
+            let row = PinSheet.menuState(
+                sharedPinned: state.shared, personalPinned: state.personal, maySetShared: state.maySetShared)
+            let offers = LineageViews.historyRowOffersUnpin(
+                isHistoryRow: true, pinRow: row == .unpin ? .unpin : .pin)
+            return offers ? .unpin : .unavailable
+        }
         guard messageActionsAvailable, PinnedBar.isPinnable(message) else { return .unavailable }
-        let shared = repository.sharedPins(groupIdHex: groupIdHex)[message.messageId]?.pinned == true
-        let personal = repository.personalPins(groupIdHex: groupIdHex)[message.messageId] != nil
-        return PinSheet.menuState(sharedPinned: shared, personalPinned: personal, maySetShared: maySetSharedPin)
+        let state = pinState(ofRow: message.messageId)
+        return PinSheet.menuState(
+            sharedPinned: state.shared, personalPinned: state.personal, maySetShared: state.maySetShared)
     }
 
     /// The `Pin` / `Unpin` row was chosen: open the sheet, or — an unpin with
     /// one way to do it — act at once.
     func beginPin(_ message: ChatMessage) {
         guard pinMenuState(for: message) != .unavailable else { return }
-        let shared = repository.sharedPins(groupIdHex: groupIdHex)[message.messageId]?.pinned == true
-        let personal = repository.personalPins(groupIdHex: groupIdHex)[message.messageId] != nil
+        let state = pinState(ofRow: message.messageId)
         let options = PinSheet.options(
-            sharedPinned: shared, personalPinned: personal,
-            maySetShared: maySetSharedPin, oneToOne: isOneToOneForPins)
+            sharedPinned: state.shared, personalPinned: state.personal,
+            maySetShared: state.maySetShared, oneToOne: isOneToOneForPins)
         guard !options.isEmpty else { return }
         if let atOnce = PinSheet.actsAtOnce(options) {
             choosePin(atOnce, for: message)
@@ -2983,15 +2799,29 @@ public final class ChatViewModel: ObservableObject {
     /// failed send is said once, in the send-error slot, and changes nothing.
     func choosePin(_ choice: PinChoice, for message: ChatMessage) {
         pinSheet = nil
-        let target = message.messageId
-        guard target > 0 else { return }
+        guard let stored = pinTarget(ofRow: message.messageId), stored.messageId > 0 else { return }
+        let target = stored.messageId
+        let pinned = choice == .pinForMe || choice == .pinForEveryone
+        let scope: LineageViews.PinScope =
+            (choice == .pinForMe || choice == .unpinForMe) ? .personal : .shared
+        // ADR-0065 R.5 — a pin of an older segment can be removed and
+        // nothing else: a personal unpin writes under the older group, a
+        // shared unpin there is recorded on this device alone.
+        switch LineageViews.pinRoute(older: stored.older, pinned: pinned, scope: scope) {
+        case .refused:
+            return
+        case .localOnly:
+            repository.clearSharedPinLocally(groupIdHex: stored.groupIdB64, messageId: target)
+            return
+        case .ordinary:
+            break
+        }
         switch choice {
         case .pinForMe:
-            repository.setPersonalPin(groupIdHex: groupIdHex, messageId: target, pinned: true)
+            repository.setPersonalPin(groupIdHex: stored.groupIdB64, messageId: target, pinned: true)
         case .unpinForMe:
-            repository.setPersonalPin(groupIdHex: groupIdHex, messageId: target, pinned: false)
+            repository.setPersonalPin(groupIdHex: stored.groupIdB64, messageId: target, pinned: false)
         case .pinForEveryone, .unpinForEveryone:
-            let pinned = choice == .pinForEveryone
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
@@ -3599,10 +3429,6 @@ public final class ChatViewModel: ObservableObject {
     /// runtime allows, burning the CPU of the one platform whose poll is
     /// continuous rather than event-driven. So the screen stops iterating too.
     public var pollLoopShouldContinue: Bool {
-        // ADR-0065 phase 2 (UX 16.4) — a closed one-to-one is not polled: no
-        // new message will arrive, by construction. A closed GROUP keeps
-        // polling (its roster is live and its members panel reads it).
-        if case .contactKeysReset? = closedReason { return false }
         return !membershipHasEnded
     }
 

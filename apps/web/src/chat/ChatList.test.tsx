@@ -93,13 +93,12 @@ vi.mock("./GroupNameContext", () => ({
   // No shared name, so a group is titled by the label this file gives it.
   useGroupNames: () => ({ nameOf: () => null, version: () => 0 }),
 }));
-vi.mock("./GroupClosedContext", () => ({
-  // ADR-0065 phase 2 — no group here was closed.
-  useGroupClosed: () => ({ closedOf: () => undefined, version: () => 0 }),
-}));
 vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
   useDeviceGroupSync: () => ({
     flags: () => flags,
+    // ADR-0065 R.5 — no conversation here continued in a successor group, so
+    // every group is its own conversation and its row is keyed on its id.
+    lineage: () => [],
     readCursors: () => ({}),
     folders: () => [],
     pendingFolderSync: () => false,

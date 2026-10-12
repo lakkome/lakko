@@ -127,8 +127,9 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     the same reasons, and ABOVE the mailbox, whose Welcome joins title
  *     from it.
  *
- *   <GroupClosedProvider> — ADR-0065 phase 2 closed groups: the per-group
- *     store of received group-closed notices and the role-gated receive.
+ *   <GroupClosedProvider> — ADR-0065 R.6 successor claims: the per-group
+ *     claim state and the receive rule (first eligible claim wins). No
+ *     surface: nothing reads it to draw anything.
  *     Beside the group-name provider, for the same reasons.
  *
  *   <PinProvider> — ADR-0052 decision 3 pinned messages: the per-conversation

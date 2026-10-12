@@ -3,83 +3,16 @@
 
 package me.lakko.app.chat
 
-import me.lakko.app.l10n.UiText
-import me.lakko.app.push.GroupPushRouting
-
-/**
- * ADR-0065 phase 2 / `docs/ux/identity-recovery.md` 16.5 — the group-closed
- * envelope on the receive side: the verdict and the wire peek.
+/*
+ * ADR-0065 "Phase 2 revised", R.6 — the wire peek of the group-closed
+ * envelope (`lakko-contacts::group_closed`, `lakko/group-closed/v1`).
  *
- * The envelope (`lakko-contacts::group_closed`, `lakko/group-closed/v1`) is
- * the group-name template: a bounded, domain-separated application message
- * carrying the closing stamp and the new group's id, or no id when the group
- * was closed without a successor. It is accepted at receipt ONLY from an owner
- * or admin resolved through the live role table under the per-group lock
- * (C-68, C-62 sub-invariant 5), and ordered by a strictly-greater stamp: the
- * second closed notice to land wins the `Open the new group` target (16.10).
- *
- * Deliberately the same shape as [groupNameVerdict], for the same reason: the
- * decision is readable and testable on the JVM without the native library, and
- * the repository runs it against CURRENT state in the poll's own critical
- * section.
+ * Since the visible flow was removed the envelope has one producer: a device
+ * founding the successor of a conversation that cannot be repaired in place
+ * posts it into the OLD group as its CLAIM. The receive rule is
+ * `SuccessorClaim.kt` ([claimVerdict]); the state it leaves is
+ * `SuccessorClaimStore.kt`. Nothing is drawn for it anywhere (R.0).
  */
-
-/** The decoded envelope as the store keeps it. */
-public data class StoredGroupClosed(
-    val closedAtMs: ULong,
-    /** The successor group id, hex, or `null` when closed without one. */
-    val successorGroupIdHex: String?,
-)
-
-/** The receive-side decision for an incoming group-closed envelope. */
-public enum class GroupClosedVerdict(public val accepts: Boolean) {
-    ACCEPT_IDENTICAL(true),
-    ACCEPT_OWNER(true),
-    ACCEPT_ADMIN(true),
-
-    /** A notice from a plain member, or a key not in the role table. */
-    REJECT_NOT_AUTHORIZED(false),
-
-    /** No role table (a table-less group has no admin to close it), an
-     *  unreadable table, or an unresolvable sender. Fail closed. */
-    REJECT_UNVERIFIABLE(false),
-
-    /** Authorised, but not newer than what is stored. */
-    REJECT_STALE(false),
-}
-
-/**
- * Decide whether [incoming] replaces [stored] for one group.
- *
- * @param senderSignatureKey the sender's account key resolved from the MLS
- *   leaf at receipt, raw bytes — `null` when unresolvable.
- * @param owner the live role table (owner + admins), no table, or unreadable.
- * @param isNewer the canonical order — the FFI `groupClosedIsNewer`.
- */
-public fun groupClosedVerdict(
-    senderSignatureKey: ByteArray?,
-    owner: GroupPushRouting.OwnerLookup,
-    incoming: StoredGroupClosed,
-    stored: StoredGroupClosed?,
-    isNewer: (incomingMs: ULong, storedMs: ULong) -> Boolean,
-): GroupClosedVerdict {
-    if (stored != null && stored == incoming) return GroupClosedVerdict.ACCEPT_IDENTICAL
-    val authorised = when (owner) {
-        is GroupPushRouting.OwnerLookup.Unavailable -> GroupClosedVerdict.REJECT_UNVERIFIABLE
-        // 16.5 is reached only in a role-table group (the owned-group branch);
-        // a notice in a table-less group names an authority that does not exist.
-        is GroupPushRouting.OwnerLookup.NoRoleTable -> GroupClosedVerdict.REJECT_UNVERIFIABLE
-        is GroupPushRouting.OwnerLookup.Known -> when {
-            senderSignatureKey == null -> GroupClosedVerdict.REJECT_UNVERIFIABLE
-            senderSignatureKey.contentEquals(owner.owner) -> GroupClosedVerdict.ACCEPT_OWNER
-            owner.admins.any { it.contentEquals(senderSignatureKey) } -> GroupClosedVerdict.ACCEPT_ADMIN
-            else -> GroupClosedVerdict.REJECT_NOT_AUTHORIZED
-        }
-    }
-    if (!authorised.accepts) return authorised
-    if (stored == null) return authorised
-    return if (isNewer(incoming.closedAtMs, stored.closedAtMs)) authorised else GroupClosedVerdict.REJECT_STALE
-}
 
 /**
  * The frozen group-closed envelope domain separator, `lakko/group-closed/v1`
@@ -102,58 +35,4 @@ internal fun looksLikeGroupClosedEnvelope(bytes: ByteArray): Boolean {
         if (bytes[i] != GROUP_CLOSED_ENVELOPE_DOMAIN[i]) return false
     }
     return true
-}
-
-/** 16.5 — what one press of `Create and close the old group` does. */
-public sealed interface RecreateStep {
-    /** Found the new group, invite, then post the closed notice. */
-    public data object Create : RecreateStep
-
-    /**
-     * An earlier press already founded [successorGroupIdHex] and its closed
-     * notice never reached the old group: post the notice again naming that
-     * SAME group. Nothing is created.
-     */
-    public data class RepostClose(val successorGroupIdHex: String) : RecreateStep
-}
-
-/**
- * 16.5 — `Create and close the old group` is one action made of two writes
- * that cannot be made atomic: the new group is founded, then the closed
- * notice is posted into the old one. When the second fails the old group is
- * still open and still offers `Recreate group`, and a retry that founded
- * again would leave two successors. So the successor is recorded durably the
- * moment it exists ([pendingSuccessorHex]) and a retry only re-posts the
- * notice.
- *
- * The record is honoured only while this device still holds that group: one
- * the person has since deleted is not a successor any more, and the next
- * press founds a fresh one.
- */
-public fun recreateStep(pendingSuccessorHex: String?, joinedGroupIdsHex: Set<String>): RecreateStep {
-    val hex = pendingSuccessorHex?.lowercase()?.takeIf { it.isNotEmpty() } ?: return RecreateStep.Create
-    return if (joinedGroupIdsHex.any { it.lowercase() == hex }) RecreateStep.RepostClose(hex) else RecreateStep.Create
-}
-
-/** 16.5 — the closed group's shapes. */
-public object GroupClosedCopy {
-    public fun terminalHeadline(closerName: String): UiText =
-        UiText("group.closed.system", texts = mapOf("name" to closerName))
-
-    public val COMPOSER: UiText = UiText("group.closed.composer")
-    public val OPEN_NEW: UiText = UiText("group.closed.open_new")
-    public val LIST_ROW: UiText = UiText("group.closed.row")
-
-    public fun panel(newGroupName: String): UiText =
-        UiText("group.closed.panel", texts = mapOf("name" to newGroupName))
-}
-
-/**
- * 16.5 — `Open the new group` is shown only once this device has joined the
- * successor; a device not invited sees the bar alone. The id is the admin's
- * claim; joining is what makes it an opening.
- */
-public fun openNewGroupTarget(successorGroupIdHex: String?, joinedGroupIdsHex: Set<String>): String? {
-    val hex = successorGroupIdHex?.lowercase() ?: return null
-    return if (hex in joinedGroupIdsHex.map { it.lowercase() }) hex else null
 }

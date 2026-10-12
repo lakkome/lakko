@@ -52,19 +52,25 @@ import { groupIdHex } from "../devices/sync/state";
 import { isDsNetworkFailure } from "../ds/client";
 import { journalHex } from "../ds/access";
 import { installAddressRecheck } from "../reach/mailbox-write";
-import { reachSession } from "../reach/reach-service";
+import { reachSession, reachSessionSignal } from "../reach/reach-service";
 import { DiscoveryClient } from "../discovery/client";
 import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import { waitingSentRequests } from "./contact-list-model";
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
-import { forgetMintedLink, mintedLinkFor } from "./minted-links";
-import { loadSentRequests, recordSentRequest } from "./sent-requests";
+import { forgetMintedLink, isInlineLinkSlug, listMintedLinks, mintedLinkFor } from "./minted-links";
+import { forgetSentRequest, loadSentRequests, recordSentRequest } from "./sent-requests";
+import { forgetSentIntro, sentIntroFor } from "./sent-request-intros";
 import {
   installSpentRunners,
   linkRevokeOutcome,
   requestsToResend,
   revocationSeedOrder,
   spentFailureOutcome,
+  localLinkRevokeOutcome,
+  localLinkSpent,
+  readSpendOwed,
+  runOwedSpendRound,
+  type LocalRevokeAttempt,
   type RevokeAttempt,
   type SpentOutcome,
 } from "./rotation-spent";
@@ -79,13 +85,29 @@ import { base64Encode } from "../auth/account-id";
 import {
   ContactsClient,
   ContactsError,
+  SupersessionRefused,
   type IncomingContactRequest,
+  type MailboxRow,
   type IncomingMailboxEvent,
 } from "./client";
 import { useProfiles } from "../profile/ProfileContext";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
-import { loadAccepted, upsertAccepted, type AcceptedContact } from "./local-store";
+import {
+  accountKeysOf,
+  loadAccepted,
+  readPin,
+  upsertAccepted,
+  type AcceptedContact,
+} from "./local-store";
+import {
+  establishedContactOfAccount,
+  knownContactRequestVerdict,
+  pinKeysOf,
+  type KnownRequestCheck,
+} from "./known-contact-request";
+import { subscribeResetAccepted } from "./reset-events";
+import { readVerifiedBinding } from "./verified-binding";
 import {
   decodeNumberByKey,
   predecessorCursorStorageKey,
@@ -195,7 +217,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   // directory client and the contacts client are.
   const spentDiscovery = new DiscoveryClient();
   installSpentRunners({
-    links: async () => {
+    links: async (rotatedAtMs) => {
       const secrets = auth.identitySecrets();
       const current = chats.accountIdentity();
       const predecessors = chats.ownPredecessorIdentities();
@@ -211,14 +233,17 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       } finally {
         currentSeed.fill(0);
       }
-      if (listed.kind !== "list") return [];
+      // A ledger that lists nothing for this owner still leaves the links
+      // this device keeps a row for (below).
+      const listedInvites = listed.kind === "list" ? listed.invites : [];
       // A link is signed by the account key of the moment it was minted: a
       // predecessor's. The current seed is never tried, so a link minted
       // after the rotation is not this step's to revoke.
       const seeds = revocationSeedOrder(predecessors.map((p) => p.ed25519Seed));
       const outcomes: SpentOutcome[] = [];
+      const handled = new Set<string>();
       try {
-        for (const invite of listed.invites) {
+        for (const invite of listedInvites) {
           const blobId = base64UrlDecodeNoPad(invite.blobIdSlug);
           const attempts: RevokeAttempt[] = [];
           for (const seed of seeds) {
@@ -240,6 +265,54 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           if (local !== null) await reachSession()?.revokeLink(local.linkId).catch(() => undefined);
           await forgetMintedLink(accountIdB64, "contact", invite.blobIdSlug);
           forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), invite.blobIdSlug);
+          handled.add(invite.blobIdSlug);
+        }
+        // The links THIS device minted before the keys changed and still
+        // keeps a row for. On the rotating device the pass above has taken
+        // its `/i/` links already; on a kept device the ledger no longer
+        // lists them (the rotating device revoked them), and the local rows
+        // and their reach keys are what is left. `/c/` call links are signed
+        // by the device key and are revoked at the call-invite ledger.
+        const deviceSeed = chats.identity()?.ed25519Seed ?? null;
+        try {
+          for (const link of await listMintedLinks(accountIdB64)) {
+            if (!localLinkSpent(link.mintedAtMs, rotatedAtMs)) continue;
+            if (link.kind === "contact" && handled.has(link.blobIdSlug)) continue;
+            const attempts: LocalRevokeAttempt[] = [];
+            if (!isInlineLinkSlug(link.blobIdSlug)) {
+              const signers = link.kind === "contact" ? seeds : deviceSeed === null ? [] : [deviceSeed];
+              if (link.kind === "call" && deviceSeed === null) attempts.push("unreachable");
+              let blobId: Uint8Array | null = null;
+              try {
+                blobId = base64UrlDecodeNoPad(link.blobIdSlug);
+              } catch {
+                blobId = null;
+              }
+              for (const seed of blobId === null ? [] : signers) {
+                try {
+                  const result =
+                    link.kind === "contact"
+                      ? await spentDiscovery.revokeInvite(blobId as Uint8Array, seed)
+                      : await spentDiscovery.revokeCallInvite(blobId as Uint8Array, seed);
+                  attempts.push(result.kind === "revoked" ? "revoked" : "gone");
+                } catch (err) {
+                  attempts.push(spentFailureOutcome(err) === "unreachable" ? "unreachable" : "gone");
+                }
+                const last = attempts[attempts.length - 1];
+                if (last === "revoked" || last === "unreachable") break;
+              }
+            }
+            const outcome = localLinkRevokeOutcome(attempts);
+            outcomes.push(outcome);
+            if (outcome !== "done") continue;
+            await reachSession()?.revokeLink(link.linkId).catch(() => undefined);
+            await forgetMintedLink(accountIdB64, link.kind, link.blobIdSlug);
+            if (link.kind === "contact") {
+              forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), link.blobIdSlug);
+            }
+          }
+        } finally {
+          deviceSeed?.fill(0);
         }
       } finally {
         for (const seed of seeds) seed.fill(0);
@@ -269,6 +342,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           outcome = await client.resendContactRequestAfterRotation(
             secrets,
             hexToBytes(record.recipientAccountIdHex),
+            // The words the person wrote, kept under the device key.
+            new TextEncoder().encode(await sentIntroFor(accountIdB64, record.recipientAccountIdHex)),
           );
         } catch (err) {
           outcome = spentFailureOutcome(err);
@@ -281,6 +356,21 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     },
   });
   onCleanup(() => installSpentRunners(null));
+
+  // The spend round on a KEPT device (rule 5): a device that adopted keys
+  // rotated elsewhere owes the two steps over its own links and requests.
+  // Tried at each session start, once the reach session of the new key
+  // runs; what is still owed stays in the marker for the next start.
+  createEffect(() => {
+    const session = reachSessionSignal();
+    const own = chats.accountIdentity();
+    const secrets = auth.identitySecrets();
+    if (session === null || own === null || secrets === null) return;
+    const accountIdB64 = base64Encode(secrets.accountId);
+    if (session.accountKeyHex !== journalHex(own.signaturePublicKey)) return;
+    if (readSpendOwed(accountIdB64) === null) return;
+    void runOwedSpendRound(accountIdB64);
+  });
 
   const [pending, setPending] = createSignal<readonly IncomingContactRequest[]>([]);
   const [busy, setBusy] = createSignal(false);
@@ -301,6 +391,113 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   let loopAbort: AbortController | null = null;
   const resume = createWakeLatch();
 
+  /** Requests from existing contacts with no verdict yet (UX 16.6: "the
+   *  request waits, unshown, for the next check"), with the raw row each
+   *  came in. The mailbox cursor has moved past them, so the rows are also
+   *  kept by the inbox store (`holdWaiting`) and decoded again after a
+   *  reload: a request whose verdict was inconclusive is not lost with the
+   *  page. Bounded by the store. */
+  const waitingKnownRequests: { request: IncomingContactRequest; row: MailboxRow }[] = [];
+
+  /**
+   * Returns `true` when `request` came from an account that is already a
+   * contact and was dealt with here (answered, dropped or kept waiting):
+   * the caller then lists nothing. `false` for a stranger's request.
+   */
+  async function handleKnownContactRequest(
+    request: IncomingContactRequest,
+    accountIdB64: string,
+    row: MailboxRow,
+  ): Promise<boolean> {
+    const fromAccountId = request.fromAccountId;
+    if (fromAccountId === null) return false;
+    // "Already a contact" is the pin or a verified binding, read BEFORE the
+    // check below (which may write a first pin): a row whose account id came
+    // only from the peer's own profile establishes nothing, so a member who
+    // claimed this account's id cannot make its request vanish.
+    const fromAccountIdB64 = base64Encode(fromAccountId);
+    const known = establishedContactOfAccount(loadAccepted(accountIdB64), groupIdHex(fromAccountId), {
+      pinKeysB64: pinKeysOf(accountKeysOf(fromAccountIdB64, accountIdB64)),
+      bindingKeyB64: readVerifiedBinding(fromAccountIdB64, accountIdB64)?.keyB64 ?? null,
+    });
+    if (known === undefined) return false;
+    let check: KnownRequestCheck;
+    try {
+      const outcome = await client.checkContactIdentity(fromAccountId);
+      check = outcome === "current" ? "current" : "inconclusive";
+    } catch (err) {
+      check = err instanceof SupersessionRefused ? "refused" : "inconclusive";
+    }
+    const verdict = knownContactRequestVerdict({
+      senderIsContact: true,
+      check,
+      requestKeyB64: base64Encode(request.fromPubkey),
+      trustedKeyB64: readPin(base64Encode(fromAccountId), accountIdB64)?.pinnedSignaturePubkeyB64 ?? null,
+    });
+    if (verdict === "answer") {
+      // The ack is the whole of the answer on this path: the reset the check
+      // just accepted (or accepted earlier) is what moves the conversation.
+      try {
+        await client.sendContactAck(auth.identitySecrets(), request);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("silent ack to an existing contact failed", err instanceof Error ? err.name : "");
+      }
+    } else if (verdict === "wait") {
+      // Kept on disk first: the cursor is about to move past this row.
+      const kept = inbox?.holdWaiting(row) ?? false;
+      if (kept && !waitingKnownRequests.some((w) => w.request.messageId === request.messageId)) {
+        waitingKnownRequests.push({ request, row });
+      }
+      return true;
+    }
+    // Answered or dropped: it waits no longer.
+    inbox?.dropWaiting(request.messageId);
+    return true;
+  }
+
+  /** Judge again the requests that were waiting for a verdict. A sender who
+   *  is no longer a contact by then is an ordinary request and is listed. */
+  async function retryWaitingKnownRequests(): Promise<void> {
+    const s = auth.state();
+    if (s.kind !== "session" || waitingKnownRequests.length === 0) return;
+    const again = waitingKnownRequests.splice(0, waitingKnownRequests.length);
+    for (const w of again) {
+      if (await handleKnownContactRequest(w.request, s.account.accountId, w.row)) continue;
+      inbox?.dropWaiting(w.request.messageId);
+      try {
+        inbox?.addFetched([{ request: w.request, row: w.row }]);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("contacts inbox: a waiting request could not be listed", err);
+      }
+    }
+  }
+
+  /** After a reload: the waiting rows kept on disk, decoded through the
+   *  poller's own verify-and-open path and judged again. */
+  async function restoreWaitingKnownRequests(target: PendingInbox): Promise<void> {
+    const rows = target.waitingRows();
+    if (rows.length === 0) return;
+    const decoded = await client.decodePendingRequestRows(auth.identitySecrets(), rows);
+    if (inbox !== target) return;
+    rows.forEach((row, i) => {
+      const request = decoded[i] ?? null;
+      if (request === null) {
+        target.dropWaiting(row.messageId);
+        return;
+      }
+      if (!waitingKnownRequests.some((w) => w.request.messageId === request.messageId)) {
+        waitingKnownRequests.push({ request, row });
+      }
+    });
+    await retryWaitingKnownRequests();
+  }
+  const unsubscribeResetAccepted = subscribeResetAccepted(() => {
+    void retryWaitingKnownRequests();
+  });
+  onCleanup(unsubscribeResetAccepted);
+
   async function dispatch(events: readonly IncomingMailboxEvent[]): Promise<void> {
     const s = auth.state();
     if (s.kind !== "session") throw new Error("mailbox dispatch without a session");
@@ -308,6 +505,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     const target = inbox;
     if (target === null) throw new Error("mailbox dispatch without an inbox");
     const fresh: FetchedRequest[] = [];
+    await retryWaitingKnownRequests();
     let welcomeAttempted = false;
     let joined = false;
     const joinedGroupIds: string[] = [];
@@ -321,6 +519,11 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           if (ev.request.profile !== null) {
             profiles.ingest(base64Encode(ev.request.fromPubkey), ev.request.profile);
           }
+          // ADR-0065 R.7 case 1 / UX 16.6 - a request from an account that is
+          // ALREADY a contact is never a request row: the R.2 check runs on
+          // the sender's account, and the request is answered silently (the
+          // conversation continues by itself) or dropped.
+          if (await handleKnownContactRequest(ev.request, accountIdB64, ev.row)) continue;
           // ADR-0066 section 3.5a rule 5 - one request per person: a request
           // from the proven successor of a pending request's key replaces
           // it, silently; a stale one from a superseded key is dropped.
@@ -381,6 +584,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             accountIdHex: groupIdHex(ev.ack.accepterAccountId),
           };
           upsertAccepted(accepter, accountIdB64);
+          // Answered: the sent record and the intro kept for a re-send go.
+          const answeredHex = groupIdHex(ev.ack.accepterAccountId);
+          forgetSentRequest(accountIdB64, answeredHex);
+          void forgetSentIntro(accountIdB64, answeredHex);
           setAcceptedVersion(acceptedVersion() + 1);
         }
       }
@@ -520,6 +727,11 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         // eslint-disable-next-line no-console
         console.warn("contacts inbox: restoring pending requests failed", err);
       });
+    // ... and the unshown ones that were waiting for a verdict (UX 16.6).
+    void restoreWaitingKnownRequests(opened).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("contacts inbox: restoring waiting requests failed", err);
+    });
     const controller = new AbortController();
     loopAbort = controller;
     void runLongPollLoop(controller.signal, {
@@ -547,6 +759,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   function stop(): void {
+    waitingKnownRequests.length = 0;
     if (loopAbort !== null) {
       loopAbort.abort();
       loopAbort = null;

@@ -63,9 +63,10 @@ use lakko_contacts::introduction::{
 };
 use lakko_contacts::profile::ACCOUNT_ID_LEN;
 use lakko_contacts::reach::{
-    reach_seed as rust_reach_seed, reach_verifying_key as rust_reach_verifying_key, ReachClass,
-    ReachError, ReachGrant as RustReachGrant, MAX_REACH_SCOPE_ID_LEN, REACH_GRANT_LEN,
-    REACH_SEED_LEN,
+    continuity_reach_seed as rust_continuity_reach_seed, reach_seed as rust_reach_seed,
+    reach_verifying_key as rust_reach_verifying_key, ReachClass, ReachError,
+    ReachGrant as RustReachGrant, CONTINUITY_ACCOUNT_ID_LEN, MAX_REACH_SCOPE_ID_LEN,
+    REACH_GRANT_LEN, REACH_SEED_LEN,
 };
 use lakko_contacts::visibility::{
     compose_reach_state as rust_compose_reach_state, compose_visibility as rust_compose_visibility,
@@ -264,6 +265,42 @@ pub fn reach_seed(
     let account = seed32(&account_seed, "account seed")?;
     let seed = rust_reach_seed(&account, class.into(), &scope_id, version)?;
     Ok(seed.as_bytes().to_vec())
+}
+
+/// The 32-byte **continuity reach seed** of an account at a key generation
+/// (ADR-0065 R.4): `BLAKE3-derive-key("lakko/reach/continuity/v1",
+/// account_id(16) || key_generation(8, BE))`.
+///
+/// After an account key reset the new identity knows none of its former
+/// contacts, and they hold only grants for a mailbox that no longer exists.
+/// Both sides compute this seed instead: the resetting device registers
+/// [`reach_verifying_key`] of it on its new mailbox (with an expiry), and a
+/// peer that accepted the reset signs its Welcome with
+/// `DsProofSigner.forReach(seed)`. `key_generation` is the generation the
+/// reset moved to, as the verified key-reset attestation states it.
+///
+/// No input is secret: anyone who knows the account id and the generation
+/// derives the same seed. It is a reach key, never a credential.
+///
+/// # Errors
+///
+/// [`FfiError::Reach`] `accountIdLength` — `account_id` is not 16 bytes.
+#[uniffi::export]
+pub fn continuity_reach_seed(
+    account_id: Vec<u8>,
+    key_generation: u64,
+) -> Result<Vec<u8>, FfiError> {
+    let id = <[u8; CONTINUITY_ACCOUNT_ID_LEN]>::try_from(account_id.as_slice()).map_err(|_| {
+        reach_arg(
+            "accountIdLength",
+            "account id",
+            CONTINUITY_ACCOUNT_ID_LEN,
+            account_id.len(),
+        )
+    })?;
+    Ok(rust_continuity_reach_seed(&id, key_generation)
+        .as_bytes()
+        .to_vec())
 }
 
 /// [`reach_seed`] wrapped as a grant, ready to hand out.
@@ -1488,6 +1525,33 @@ mod tests {
             hex(&reach_verifying_key(seed.clone()).unwrap()),
             "e7c2e2aa6ff74083318d5f6b1dfa7939c3cc074549376d9e91c5592a67a35e8f"
         );
+    }
+
+    /// The core's continuity golden (ADR-0065 R.4), reproduced through this
+    /// surface; the wasm surface pins the same literals. The seed signs a
+    /// mailbox write through the existing reach signer, with no second one.
+    #[test]
+    fn continuity_reach_seed_reproduces_the_core_golden_and_signs() {
+        let seed = continuity_reach_seed(vec![0x11; 16], 2).unwrap();
+        assert_eq!(
+            hex(&seed),
+            "764a0db71d87bb535affdc9dc1d51df8648a26c8c670fa4708dcc6f31b5cc228"
+        );
+        let vk = reach_verifying_key(seed.clone()).unwrap();
+        assert_eq!(
+            hex(&vk),
+            "c797f30bb7df3eed9ea6a65c183f7d5fc391387022a2a1150adddea3c4caf02c"
+        );
+        assert_ne!(seed, continuity_reach_seed(vec![0x11; 16], 3).unwrap());
+        let signer = crate::ds_proof::DsProofSigner::for_reach(seed).unwrap();
+        assert_eq!(signer.verifying_key(), vk);
+        assert_eq!(signer.epoch(), crate::ds_proof::ds_reach_epoch());
+        for bad in [vec![], vec![0x11; 15], vec![0x11; 17], vec![0x11; 32]] {
+            match continuity_reach_seed(bad, 2) {
+                Err(FfiError::Reach(m)) => assert!(m.starts_with("accountIdLength: "), "{m}"),
+                other => panic!("expected a Reach refusal, got {other:?}"),
+            }
+        }
     }
 
     #[test]

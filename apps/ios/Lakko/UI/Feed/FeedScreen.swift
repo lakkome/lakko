@@ -423,7 +423,7 @@ struct FeedScreen: View {
         }
         Divider()
         Button {
-            model.hide(ref.source.idHex)
+            model.hide(ref.source.key)
         } label: {
             Label(l10n.t("feed.action.hide"), systemImage: "eye.slash")
         }
@@ -663,7 +663,7 @@ private struct HiddenFromFeedsSheet: View {
                             Text(source.title)
                                 .lineLimit(1)
                             Spacer()
-                            Button(l10n.t("feed.hidden.show_again")) { model.showAgain(source.idHex) }
+                            Button(l10n.t("feed.hidden.show_again")) { model.showAgain(source.key) }
                                 .buttonStyle(.borderless)
                         }
                     }

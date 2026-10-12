@@ -104,14 +104,14 @@ struct FeedReading: Equatable {
     static func withoutHidden(_ sources: [FeedSource], hidden: [String]) -> [FeedSource] {
         guard !hidden.isEmpty else { return sources }
         let set = Set(hidden)
-        return sources.filter { !set.contains($0.idHex) }
+        return sources.filter { !set.contains($0.key) }
     }
 
     /// The hidden conversations this device still holds, the most recently
     /// hidden first (the "Hidden from feeds" list; `hidden` is kept in hide
     /// order).
     static func hiddenSources(_ sources: [FeedSource], hidden: [String]) -> [FeedSource] {
-        hidden.reversed().compactMap { id in sources.first { $0.idHex == id } }
+        hidden.reversed().compactMap { id in sources.first { $0.key == id } }
     }
 
     // MARK: - "New" divider and "Show N new"

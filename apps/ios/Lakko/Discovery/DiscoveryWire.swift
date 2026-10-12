@@ -219,17 +219,26 @@ public struct IdentityFetchResponse: Codable, Equatable {
     /// session pair carries (``KeyResetLanding``). Absent in a response of a
     /// scripted test directory, it reads as 1.
     public let keyGeneration: UInt64
+    /// ADR-0065 R.3: standard base64 of the auth-signed key-reset
+    /// attestation of the account's LATEST reset, absent when it never
+    /// reset. Opaque to the server at fetch; verified locally
+    /// (`verifyKeyResetAttestation`). After a later proven rotation it no
+    /// longer binds the fetched key, and that path carries a supersession
+    /// proof instead.
+    public let keyResetAttest: String?
 
     public init(
         signaturePubkey: String,
         x25519Pubkey: String,
         supersessionProof: String? = nil,
-        keyGeneration: UInt64 = 1
+        keyGeneration: UInt64 = 1,
+        keyResetAttest: String? = nil
     ) {
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
         self.supersessionProof = supersessionProof
         self.keyGeneration = keyGeneration
+        self.keyResetAttest = keyResetAttest
     }
 
     public init(from decoder: Decoder) throws {
@@ -238,6 +247,7 @@ public struct IdentityFetchResponse: Codable, Equatable {
         x25519Pubkey = try c.decode(String.self, forKey: .x25519Pubkey)
         supersessionProof = try c.decodeIfPresent(String.self, forKey: .supersessionProof)
         keyGeneration = try c.decodeIfPresent(UInt64.self, forKey: .keyGeneration) ?? 1
+        keyResetAttest = try c.decodeIfPresent(String.self, forKey: .keyResetAttest)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -245,6 +255,7 @@ public struct IdentityFetchResponse: Codable, Equatable {
         case x25519Pubkey = "x25519_pubkey"
         case supersessionProof = "supersession_proof"
         case keyGeneration = "key_generation"
+        case keyResetAttest = "key_reset_attest"
     }
 }
 

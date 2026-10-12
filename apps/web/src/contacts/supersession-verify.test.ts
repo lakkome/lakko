@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { ContactsClient, SupersessionRefused } from "./client";
-import { bindContactsAccount, loadFlaggedContacts, readKeyState, readPin } from "./local-store";
+import { bindContactsAccount, loadSupersededKeys, readPin } from "./local-store";
 import type { IdentityFetchResponse } from "../discovery/wire";
 
 /** In-memory `localStorage` shim (vitest `node` environment has
@@ -195,11 +195,12 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     const pin = readPin(accountIdB64);
     expect(pin?.pinnedSignaturePubkeyB64).toBe(newPeer.signaturePubkeyB64);
     expect(pin?.provenPredecessorsB64).toEqual([oldPeer.signaturePubkeyB64]);
-    // Nothing of the ADR-0065 phase-2 "keys reset" state: a proven rotation
-    // is not a reset.
-    expect(pin?.keyReset).toBeUndefined();
-    expect(readKeyState(accountIdB64)).toBe("normal");
-    expect(loadFlaggedContacts()).toEqual([]);
+    // A proven rotation is not a reset: nothing is superseded, so no row of
+    // the old key's leaves is dropped and nothing is repaired.
+    expect(pin?.supersededKeysB64).toBeUndefined();
+    expect(loadSupersededKeys().size).toBe(0);
+    // The generation baseline is the first pin's; a rotation does not move it.
+    expect(pin?.acceptedKeyGeneration).toBe(1);
   });
 
   it("ADR-0066: a changed key WITHOUT a proof is refused and leaves NO predecessor", async () => {

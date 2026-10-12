@@ -259,6 +259,47 @@ export interface PersistedGroup {
 export interface MessageLogPayload {
   readonly version: number;
   readonly groups: { readonly [groupIdHex: string]: PersistedGroup };
+  /**
+   * ADR-0065 R.7 case 1 — messages composed for a one-to-one whose successor
+   * did not exist yet (`held-send.ts`), kept here so a reload does not lose
+   * them: this is the one store that already holds message plaintext under
+   * the device key. Written only through {@link setHeldInMessageLog}; every
+   * other writer leaves it alone and {@link updateMessageLog} carries it
+   * across their writes. Absent = none held.
+   */
+  readonly held?: readonly PersistedHeldSend[];
+}
+
+/** One held message, as stored. Never sent anywhere in this form. */
+export interface PersistedHeldSend {
+  /** Hex of the conversation id (the lineage root) it was composed for. */
+  readonly conversationHex: string;
+  /** When it was first held, UNIX milliseconds. */
+  readonly heldAtMs: number;
+  readonly text: string;
+  readonly attachments: readonly PersistedAttachment[];
+  readonly reply?: PersistedReply;
+  /** The group (standard base64) the reply's target id belongs to: the
+   *  group it was composed in. */
+  readonly replyGroupIdB64?: string;
+  readonly forward?: PersistedForward;
+}
+
+/**
+ * What a write of the log keeps of the held list: the writer's own, when it
+ * names one (`held` present, even empty); what is on disk otherwise. Pure.
+ */
+export function carryHeld(
+  current: MessageLogPayload | null,
+  next: MessageLogPayload,
+): MessageLogPayload {
+  if (Object.prototype.hasOwnProperty.call(next, "held")) {
+    if (next.held !== undefined && next.held.length > 0) return next;
+    const { held: _empty, ...rest } = next;
+    return rest;
+  }
+  const held = current?.held;
+  return held === undefined || held.length === 0 ? next : { ...next, held };
 }
 
 // ----- IDB plumbing ----------------------------------------------
@@ -427,7 +468,8 @@ export function updateMessageLog(
   const run = prev.then(async () => {
     const current = await loadMessageLog(accountIdB64, deviceKey);
     const next = mutate(current);
-    if (next !== null) await saveMessageLog(accountIdB64, deviceKey, next);
+    // The held sends ride every writer's rewrite of the payload untouched.
+    if (next !== null) await saveMessageLog(accountIdB64, deviceKey, carryHeld(current, next));
   });
   const tail = run.catch(() => undefined);
   writeChains.set(accountIdB64, tail);
@@ -486,7 +528,27 @@ export function withoutGroup(
   for (const [k, v] of Object.entries(payload.groups)) {
     if (k !== groupIdHex) groups[k] = v;
   }
-  return { version: payload.version, groups };
+  return carryHeld(payload, { version: payload.version, groups });
+}
+
+/**
+ * Replace the held sends kept in the log (ADR-0065 R.7 case 1). Serialized
+ * with every other write of the log; creates the payload when none exists.
+ */
+export function setHeldInMessageLog(
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+  held: readonly PersistedHeldSend[],
+): Promise<void> {
+  return updateMessageLog(accountIdB64, deviceKey, (current) => {
+    const before = current?.held ?? [];
+    if (before.length === 0 && held.length === 0) return null;
+    return {
+      version: current?.version ?? MESSAGE_LOG_VERSION,
+      groups: current?.groups ?? {},
+      held,
+    };
+  });
 }
 
 /**

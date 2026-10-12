@@ -215,6 +215,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     orderedRows,
     groupById,
     newestIdFor,
+    conversationIdOf,
+    conversationIdB64Of,
+    readPositionBytes,
   } = createConversationRows();
 
   // ----- chat folders (`docs/ux/chat-folders.md`) ------------------------
@@ -275,21 +278,17 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       if (row.kind === "channel" || !rowHasUnread(row)) continue;
       const g = groupById().get(row.id);
       if (g === undefined) continue;
-      const groupId = g.group.groupId;
-      const newest = newestIdFor(groupId);
+      // ADR-0065 R.5 — the read position and the flags are the
+      // CONVERSATION's; the newest message is the head group's.
+      const conversationId = conversationIdOf(g);
+      const newest = newestIdFor(g.group.groupId);
       try {
         if (newest !== null) {
-          const idBytes = new Uint8Array(8);
-          let v = newest;
-          for (let i = 7; i >= 0; i -= 1) {
-            idBytes[i] = Number(v & 0xffn);
-            v >>= 8n;
-          }
-          await sync.setReadCursor(groupId, idBytes, BigInt(Date.now()));
+          await sync.setReadCursor(conversationId, readPositionBytes(g, newest), BigInt(Date.now()));
         }
-        const f = sync.flags()[syncGroupIdHex(groupId)];
+        const f = sync.flags()[syncGroupIdHex(conversationId)];
         if (f?.unreadOverride === true) {
-          await sync.setFlags(groupId, { ...f, unreadOverride: false });
+          await sync.setFlags(conversationId, { ...f, unreadOverride: false });
         }
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -346,7 +345,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     // All-chats pin is untouched.
     const folder = currentFolder();
     if (field === "pinned" && folder !== null) {
-      const ref = refOfRow(kindOf(g), g.groupIdB64);
+      const ref = refOfRow(kindOf(g), conversationIdB64Of(g));
       if (ref === null) return;
       try {
         await togglePinInFolder(sync, folder, ref);
@@ -356,7 +355,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       }
       return;
     }
-    const groupId = g.group.groupId;
+    const groupId = conversationIdOf(g);
     const key = syncGroupIdHex(groupId);
     const cur = sync.flags()[key];
     const next = {
@@ -403,7 +402,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   /** Routed by the ROW's own kind, not the pane's: one list holds both, so
    *  there is no pane kind left to ask. */
   const hrefOf = (g: ActiveGroup): string => {
-    const slug = base64UrlEncodeNoPad(g.group.groupId);
+    // ADR-0065 R.5 — the route is the CONVERSATION's: it stays the same when
+    // the conversation continues in a successor group.
+    const slug = base64UrlEncodeNoPad(conversationIdOf(g));
     return kindOf(g) === "chat" ? paths.chat(slug) : paths.groupChat(slug);
   };
 
@@ -522,7 +523,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               }
               const g = groupById().get(row.id);
               if (g === undefined) return null;
-              const key = syncGroupIdHex(g.group.groupId);
+              const key = syncGroupIdHex(conversationIdOf(g));
               const flags = (): { pinned: boolean; muted: boolean; archived: boolean } => {
                 const f = sync.flags()[key];
                 return {
@@ -573,7 +574,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     press.swallowClick(e);
                   }}
                 >
-                  <Avatar label={label()} id={g.groupIdB64} />
+                  <Avatar label={label()} id={conversationIdB64Of(g)} />
                   <div class="lk-row-body">
                     <div class="lk-row-line">
                       <span class="lk-row-title" classList={{ unread: unread() > 0 }}>
@@ -735,7 +736,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           const g = (): ActiveGroup | null => m().g;
           const f = (): { muted: boolean; archived: boolean } => {
             const grp = g();
-            const cur = grp === null ? undefined : sync.flags()[syncGroupIdHex(grp.group.groupId)];
+            const cur = grp === null ? undefined : sync.flags()[syncGroupIdHex(conversationIdOf(grp))];
             return { muted: cur?.muted === true, archived: cur?.archived === true };
           };
           const act = (field: Flag): void => {

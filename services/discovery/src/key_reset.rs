@@ -527,6 +527,115 @@ mod route_tests {
     const K3: [u8; 32] = [0x33; 32];
     const K4: [u8; 32] = [0x44; 32];
 
+    /// ADR-0065 R.3: the identity fetch serves the stored key-reset
+    /// attestation to peers, the stored bytes unparsed, and omits the field
+    /// for an account that never reset.
+    #[tokio::test]
+    async fn the_identity_fetch_serves_the_stored_reset_attestation_unparsed() {
+        let Some(pool) = test_pool("the_identity_fetch_serves_the_stored_reset_attestation").await
+        else {
+            return;
+        };
+        let c = Client::new(pool.clone(), true, 0);
+        let acct = fresh_account(0x66);
+        let k3_signing = SigningKey::from_seed(&[0x74; 32]);
+        let k3 = k3_signing.verifying_key().to_bytes();
+
+        // Genesis: no attestation stored, and the field is ABSENT from the
+        // JSON (not null, not empty).
+        let (status, text) = c.publish(&acct, 1, K1, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let fetched = c.fetch(&acct).await;
+        assert!(
+            fetched
+                .as_object()
+                .is_some_and(|o| !o.contains_key("key_reset_attest")),
+            "{fetched}"
+        );
+
+        // After an attested reset the fetch returns exactly what was
+        // uploaded: standard base64 of the 177 stored bytes, which verify
+        // for this account, generation and key under the attest key.
+        let att2 = attestation(&acct, 2, K2);
+        let (status, text) = c
+            .publish(
+                &acct,
+                2,
+                K2,
+                serde_json::json!({ "key_reset_attest": att2 }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let fetched = c.fetch(&acct).await;
+        assert_eq!(fetched["key_reset_attest"], att2);
+        assert_eq!(fetched["signature_pubkey"], B64.encode(K2));
+        assert_eq!(fetched["key_generation"], 2);
+        let served = B64
+            .decode(fetched["key_reset_attest"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(Some(served.clone()), stored_attestation(&pool, &acct).await);
+        // What a peer does with it: the same check discovery ran at upload.
+        let peer_check = |bytes: &[u8], key: &[u8; 32]| {
+            verify_key_reset_binding(
+                bytes,
+                &attest_key().verifying_key(),
+                &key_reset_account_ref(&acct),
+                &lakko_attest::device_group_journal_id(&acct),
+                key,
+            )
+        };
+        assert_eq!(peer_check(&served, &K2).unwrap().key_generation, 2);
+
+        // A routine same-key re-upload without the attestation keeps it.
+        let (status, text) = c.publish(&acct, 2, K2, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(c.fetch(&acct).await["key_reset_attest"], att2);
+
+        // A later reset replaces it: the served attestation is the latest
+        // reset's.
+        let att3 = attestation(&acct, 3, k3);
+        let (status, text) = c
+            .publish(
+                &acct,
+                3,
+                k3,
+                serde_json::json!({ "key_reset_attest": att3 }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(c.fetch(&acct).await["key_reset_attest"], att3);
+
+        // A later PROVEN rotation leaves the stored attestation in place
+        // (still the latest reset's) while the published key moves on, so it
+        // no longer binds the fetched key: that path is the supersession
+        // proof's, served beside it.
+        let proof = B64.encode(rotation_tests::proof(&k3_signing, &K4));
+        let (status, text) = c
+            .publish(
+                &acct,
+                3,
+                K4,
+                serde_json::json!({ "supersession_proof": proof }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let fetched = c.fetch(&acct).await;
+        assert_eq!(fetched["signature_pubkey"], B64.encode(K4));
+        assert_eq!(fetched["supersession_proof"], proof);
+        assert_eq!(fetched["key_reset_attest"], att3);
+        let served = B64
+            .decode(fetched["key_reset_attest"].as_str().unwrap())
+            .unwrap();
+        assert!(peer_check(&served, &K4).is_err());
+        assert_eq!(peer_check(&served, &k3).unwrap().key_generation, 3);
+
+        sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?")
+            .bind(&acct[..])
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn an_attested_reset_rewrites_the_directory_and_the_old_generation_is_gated() {

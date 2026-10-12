@@ -63,10 +63,10 @@ export function adoptOneToOnePeer(
       ? peer.accountIdHex
       : undefined;
   const at = accepted.findIndex((c) => c.signaturePubkeyB64 === peer.signatureKey);
-  // ADR-0065 phase 2 (UX 16.4): the closed one-to-one with a contact's OLD
-  // keys is still that contact's chat. The row was re-keyed to the new key
-  // on verification and remembers the old one; a row for the old key would
-  // be a second contact for one person.
+  // ADR-0065 R.5: an older one-to-one group with a contact's OLD keys is
+  // still that contact's conversation. The row was re-keyed to the new key
+  // at the re-pin and remembers the old one; a row for the old key would be
+  // a second contact for one person.
   if (
     at === -1 &&
     accepted.some((c) => (c.previousSignaturePubkeysB64 ?? []).includes(peer.signatureKey))

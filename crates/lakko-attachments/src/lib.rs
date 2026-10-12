@@ -150,6 +150,12 @@ pub const MAX_FORWARDED_FROM_BYTES: usize = 255;
 /// dropped as a whole (an id that is not one points nowhere).
 pub const MAX_FORWARD_ORIGIN_GROUP_BYTES: usize = 128;
 
+/// ADR-0065 — the longest original conversation id a re-send marker may
+/// carry, in bytes of its base64 form: the same bound as a forward's origin
+/// group, since both name a group id. Over it, the marker is dropped as a
+/// whole on parse and not carried on compose.
+pub const MAX_RESEND_ORIGIN_GROUP_BYTES: usize = MAX_FORWARD_ORIGIN_GROUP_BYTES;
+
 /// ADR-0047 — the wire value of [`AttachmentRef::kind`] for a voice
 /// message.
 pub const MEDIA_KIND_VOICE: &str = "voice";
@@ -1025,6 +1031,29 @@ pub struct Envelope {
         deserialize_with = "lenient"
     )]
     pub forward_origin_message: Option<i64>,
+    /// ADR-0065 — on a message RE-SENT into a successor one-to-one, the
+    /// conversation the original was sent in, as the base64 of its group id.
+    /// A device of the re-sender that already holds the original in the old
+    /// segment's history uses it to show the message once. It is not a
+    /// forward: nothing is drawn for it, and a device that knows no lineage
+    /// between the two conversations ignores it. Rides only inside the
+    /// sealed payload. Meaningful only with [`Self::resend_origin_message`];
+    /// dropped as a pair otherwise, and dropped as a pair when empty or over
+    /// [`MAX_RESEND_ORIGIN_GROUP_BYTES`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub resend_origin_group: Option<String>,
+    /// ADR-0065 — the DS `messageId` of the original inside
+    /// [`Self::resend_origin_group`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub resend_origin_message: Option<i64>,
 }
 
 impl Envelope {
@@ -1049,6 +1078,8 @@ impl Envelope {
             forwarded_from: None,
             forward_origin_group: None,
             forward_origin_message: None,
+            resend_origin_group: None,
+            resend_origin_message: None,
         }
     }
 
@@ -1090,6 +1121,22 @@ impl Envelope {
             return None;
         }
         Some(Forward { author, origin })
+    }
+
+    /// The re-send marker this envelope carries: kept only when BOTH halves
+    /// are present and the group id is non-empty and within its bound.
+    /// `None` otherwise - half a marker names no message.
+    #[must_use]
+    fn resend(&self) -> Option<ResendOrigin> {
+        let group_id_b64 = bounded_snapshot(
+            self.resend_origin_group.as_deref(),
+            MAX_RESEND_ORIGIN_GROUP_BYTES,
+        )?;
+        let message_id = self.resend_origin_message?;
+        Some(ResendOrigin {
+            group_id_b64,
+            message_id,
+        })
     }
 }
 
@@ -1167,6 +1214,20 @@ pub struct Forward {
     pub origin: Option<ForwardOrigin>,
 }
 
+/// ADR-0065 — the marker on a message re-sent into a successor one-to-one:
+/// which message of which earlier conversation this is a second copy of.
+/// It exists so the re-sender's own other devices, which already hold the
+/// original, show it once. Unlike [`ForwardOrigin`] it is never rendered and
+/// never attributes the message to anyone; a receiver that does not hold the
+/// named conversation, or knows no lineage from it to this one, ignores it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResendOrigin {
+    /// Base64 of the ORIGINAL conversation's group id.
+    pub group_id_b64: String,
+    /// DS `messageId` of the original in that conversation.
+    pub message_id: i64,
+}
+
 /// The receiver-side classification of a decoded [`Envelope`]
 /// (ADR-0023). A plain message is [`Self::Chat`]; the three op
 /// variants carry the DS `messageId` of the message they act on.
@@ -1185,6 +1246,10 @@ pub enum MessageBody {
         /// ADR-0052 — the attribution of a forwarded message, if any. Like
         /// `reply`, on the `Chat` classification only.
         forward: Option<Forward>,
+        /// ADR-0065 — the re-send marker, if any: this message is a second
+        /// copy of one sent earlier in another conversation. Like `reply`,
+        /// on the `Chat` classification only.
+        resend: Option<ResendOrigin>,
     },
     /// Replace the target message's body with `text`.
     Edit {
@@ -1263,6 +1328,7 @@ impl Envelope {
         // exclusive with nothing and is simply carried on the Chat exits.
         let reply = self.reply();
         let forward = self.forward();
+        let resend = self.resend();
         let op_count = u8::from(self.edit_of.is_some())
             + u8::from(self.delete_of.is_some())
             + u8::from(self.react_to.is_some())
@@ -1296,6 +1362,7 @@ impl Envelope {
                     attachments: self.attachments,
                     reply,
                     forward,
+                    resend,
                 };
             }
         }
@@ -1304,6 +1371,7 @@ impl Envelope {
             attachments: self.attachments,
             reply,
             forward,
+            resend,
         }
     }
 }
@@ -1328,15 +1396,7 @@ impl Envelope {
 /// [`AttachmentError::WireFormat`] if `serde_json::to_vec` fails
 /// (essentially impossible for valid inputs).
 pub fn compose(text: &str, attachments: Vec<AttachmentRef>) -> Result<Vec<u8>, AttachmentError> {
-    let envelope = Envelope {
-        text: text.to_string(),
-        attachments: attachments
-            .into_iter()
-            .map(AttachmentRef::sanitized)
-            .collect(),
-        ..Envelope::base()
-    };
-    serde_json::to_vec(&envelope).map_err(|e| AttachmentError::WireFormat(format!("compose: {e}")))
+    compose_chat(text, attachments, None, None, None)
 }
 
 /// Encode a REPLY (ADR-0052): an ordinary `(text, attachments)` message that
@@ -1355,19 +1415,7 @@ pub fn compose_reply(
     attachments: Vec<AttachmentRef>,
     reply: &Reply,
 ) -> Result<Vec<u8>, AttachmentError> {
-    let envelope = Envelope {
-        text: text.to_string(),
-        attachments: attachments
-            .into_iter()
-            .map(AttachmentRef::sanitized)
-            .collect(),
-        reply_to: Some(reply.target),
-        reply_author: truncated_snapshot(reply.author.as_deref(), MAX_REPLY_AUTHOR_BYTES),
-        reply_excerpt: truncated_snapshot(reply.excerpt.as_deref(), MAX_REPLY_EXCERPT_BYTES),
-        ..Envelope::base()
-    };
-    serde_json::to_vec(&envelope)
-        .map_err(|e| AttachmentError::WireFormat(format!("compose_reply: {e}")))
+    compose_chat(text, attachments, Some(reply), None, None)
 }
 
 /// Encode a FORWARDED message (ADR-0052): the copied text and the
@@ -1389,8 +1437,39 @@ pub fn compose_forward(
     attachments: Vec<AttachmentRef>,
     forward: &Forward,
 ) -> Result<Vec<u8>, AttachmentError> {
-    let origin = forward.origin.as_ref().filter(|o| {
+    compose_chat(text, attachments, None, Some(forward), None)
+}
+
+/// Encode a chat message with every optional part it may carry beside its
+/// text and attachments: a reply (ADR-0052), a forward attribution
+/// (ADR-0052) and a re-send marker (ADR-0065). [`compose`],
+/// [`compose_reply`] and [`compose_forward`] are this function with one part
+/// set; a message RE-SENT into a successor conversation uses it directly so
+/// it keeps the original's attachments, quote and forward attribution while
+/// also carrying the marker.
+///
+/// Each part follows its own rule: reply snapshots and the forwarded-from
+/// name are trimmed and truncated on a character boundary, a forward origin
+/// or a re-send marker whose group id is empty or over its bound is not
+/// carried. ADR-0047 media metadata on each ref passes through the bounds a
+/// receiver applies.
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] if serialisation fails (essentially
+/// impossible for valid inputs).
+pub fn compose_chat(
+    text: &str,
+    attachments: Vec<AttachmentRef>,
+    reply: Option<&Reply>,
+    forward: Option<&Forward>,
+    resend: Option<&ResendOrigin>,
+) -> Result<Vec<u8>, AttachmentError> {
+    let origin = forward.and_then(|f| f.origin.as_ref()).filter(|o| {
         !o.group_id_b64.is_empty() && o.group_id_b64.len() <= MAX_FORWARD_ORIGIN_GROUP_BYTES
+    });
+    let resend = resend.filter(|r| {
+        !r.group_id_b64.is_empty() && r.group_id_b64.len() <= MAX_RESEND_ORIGIN_GROUP_BYTES
     });
     let envelope = Envelope {
         text: text.to_string(),
@@ -1398,13 +1477,20 @@ pub fn compose_forward(
             .into_iter()
             .map(AttachmentRef::sanitized)
             .collect(),
-        forwarded_from: truncated_snapshot(forward.author.as_deref(), MAX_FORWARDED_FROM_BYTES),
+        reply_to: reply.map(|r| r.target),
+        reply_author: reply
+            .and_then(|r| truncated_snapshot(r.author.as_deref(), MAX_REPLY_AUTHOR_BYTES)),
+        reply_excerpt: reply
+            .and_then(|r| truncated_snapshot(r.excerpt.as_deref(), MAX_REPLY_EXCERPT_BYTES)),
+        forwarded_from: forward
+            .and_then(|f| truncated_snapshot(f.author.as_deref(), MAX_FORWARDED_FROM_BYTES)),
         forward_origin_group: origin.map(|o| o.group_id_b64.clone()),
         forward_origin_message: origin.map(|o| o.message_id),
+        resend_origin_group: resend.map(|r| r.group_id_b64.clone()),
+        resend_origin_message: resend.map(|r| r.message_id),
         ..Envelope::base()
     };
-    serde_json::to_vec(&envelope)
-        .map_err(|e| AttachmentError::WireFormat(format!("compose_forward: {e}")))
+    serde_json::to_vec(&envelope).map_err(|e| AttachmentError::WireFormat(format!("compose: {e}")))
 }
 
 /// Encode an EDIT of the message whose DS `messageId` is `target`,
@@ -1557,6 +1643,7 @@ pub fn parse_body(bytes: &[u8]) -> MessageBody {
             attachments: Vec::new(),
             reply: None,
             forward: None,
+            resend: None,
         },
     }
 }
@@ -1596,10 +1683,11 @@ pub enum AttachmentError {
 #[doc(hidden)]
 pub mod fuzz_api {
     use super::{
-        compose, compose_forward, compose_reply, parse, parse_body, AttachmentRef, MediaKind,
-        MessageBody, MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES, MAX_MEDIA_DIMENSION,
-        MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES, MAX_THUMB_BYTES,
-        MAX_VIDEO_NOTE_DURATION_MS, MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
+        compose, compose_chat, compose_forward, compose_reply, parse, parse_body, AttachmentRef,
+        MediaKind, MessageBody, MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES,
+        MAX_MEDIA_DIMENSION, MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES,
+        MAX_RESEND_ORIGIN_GROUP_BYTES, MAX_THUMB_BYTES, MAX_VIDEO_NOTE_DURATION_MS,
+        MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
     };
 
     /// ADR-0052 property oracle over attacker-controlled bytes.
@@ -1667,6 +1755,42 @@ pub mod fuzz_api {
             return false;
         };
         matches!(parse_body(&recomposed), MessageBody::Chat { forward: Some(again), .. } if again == forward)
+    }
+
+    /// ADR-0065 property oracle for a re-send marker over attacker-controlled
+    /// bytes: a marker that survives [`parse_body`] is whole and its group id
+    /// is non-empty and within its bound, and the bound is idempotent:
+    /// re-composing the parsed chat with the marker (beside whatever reply
+    /// and forward it also carried) and parsing again yields the same marker.
+    /// An envelope without a marker, or one that is not a chat, passes
+    /// trivially.
+    #[must_use]
+    pub fn resend_within_bounds(bytes: &[u8]) -> bool {
+        let MessageBody::Chat {
+            text,
+            attachments,
+            reply,
+            forward,
+            resend: Some(resend),
+        } = parse_body(bytes)
+        else {
+            return true;
+        };
+        if resend.group_id_b64.is_empty()
+            || resend.group_id_b64.len() > MAX_RESEND_ORIGIN_GROUP_BYTES
+        {
+            return false;
+        }
+        let Ok(recomposed) = compose_chat(
+            &text,
+            attachments,
+            reply.as_ref(),
+            forward.as_ref(),
+            Some(&resend),
+        ) else {
+            return false;
+        };
+        matches!(parse_body(&recomposed), MessageBody::Chat { resend: Some(again), .. } if again == resend)
     }
 
     /// ADR-0047 property oracle over attacker-controlled bytes.
@@ -1975,6 +2099,7 @@ mod tests {
                 attachments: Vec::new(),
                 reply: None,
                 forward: None,
+                resend: None,
             }
         );
     }
@@ -2941,6 +3066,198 @@ mod forward_tests {
                 assert_eq!(forward.unwrap().author.as_deref(), Some("Alice"));
             },
             other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod resend_tests {
+    use super::{
+        compose, compose_chat, compose_forward, compose_reply, encrypt_attachment, fuzz_api,
+        parse_body, AttachmentRef, Forward, ForwardOrigin, MessageBody, Reply, ResendOrigin,
+        MAX_RESEND_ORIGIN_GROUP_BYTES,
+    };
+
+    fn chat_resend(bytes: &[u8]) -> Option<ResendOrigin> {
+        match parse_body(bytes) {
+            MessageBody::Chat { resend, .. } => resend,
+            other => panic!("not a chat: {other:?}"),
+        }
+    }
+
+    fn marker() -> ResendOrigin {
+        ResendOrigin {
+            group_id_b64: "b2xkLWdyb3Vw".to_string(),
+            message_id: 17,
+        }
+    }
+
+    #[test]
+    fn a_marker_round_trips() {
+        let bytes = compose_chat("hello", Vec::new(), None, None, Some(&marker())).unwrap();
+        assert_eq!(chat_resend(&bytes), Some(marker()));
+        assert!(fuzz_api::resend_within_bounds(&bytes));
+    }
+
+    #[test]
+    fn the_existing_composers_carry_no_marker() {
+        assert_eq!(chat_resend(&compose("x", Vec::new()).unwrap()), None);
+        let reply = Reply {
+            target: 1,
+            author: None,
+            excerpt: None,
+        };
+        assert_eq!(
+            chat_resend(&compose_reply("x", Vec::new(), &reply).unwrap()),
+            None
+        );
+        let forward = Forward {
+            author: Some("Alice".to_string()),
+            origin: None,
+        };
+        assert_eq!(
+            chat_resend(&compose_forward("x", Vec::new(), &forward).unwrap()),
+            None
+        );
+        // And an unmarked message serialises no marker key at all.
+        let json = String::from_utf8(compose("x", Vec::new()).unwrap()).unwrap();
+        assert!(!json.contains("resend_origin"));
+    }
+
+    #[test]
+    fn half_a_marker_is_dropped_and_the_message_survives() {
+        for json in [
+            br#"{"v":1,"text":"kept","attachments":[],"resend_origin_group":"b2xk"}"#.as_slice(),
+            br#"{"v":1,"text":"kept","attachments":[],"resend_origin_message":3}"#.as_slice(),
+            br#"{"v":1,"text":"kept","attachments":[],"resend_origin_group":"","resend_origin_message":3}"#
+                .as_slice(),
+        ] {
+            match parse_body(json) {
+                MessageBody::Chat { text, resend, .. } => {
+                    assert_eq!(text, "kept");
+                    assert_eq!(resend, None);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_over_long_group_is_dropped_on_parse_and_not_carried_on_compose() {
+        let at_bound = "g".repeat(MAX_RESEND_ORIGIN_GROUP_BYTES);
+        let json = format!(
+            r#"{{"v":1,"text":"x","attachments":[],"resend_origin_group":"{at_bound}","resend_origin_message":3}}"#
+        );
+        assert_eq!(
+            chat_resend(json.as_bytes()).map(|r| r.group_id_b64),
+            Some(at_bound)
+        );
+        let long = "g".repeat(MAX_RESEND_ORIGIN_GROUP_BYTES + 1);
+        let json = format!(
+            r#"{{"v":1,"text":"x","attachments":[],"resend_origin_group":"{long}","resend_origin_message":3}}"#
+        );
+        assert_eq!(chat_resend(json.as_bytes()), None);
+        for group_id_b64 in [long, String::new()] {
+            let over = ResendOrigin {
+                group_id_b64,
+                message_id: 3,
+            };
+            let composed = compose_chat("x", Vec::new(), None, None, Some(&over)).unwrap();
+            assert_eq!(chat_resend(&composed), None);
+            assert!(!String::from_utf8(composed)
+                .unwrap()
+                .contains("resend_origin"));
+        }
+    }
+
+    #[test]
+    fn a_marker_rides_beside_attachments_a_reply_and_a_forward() {
+        let enc = encrypt_attachment(b"media bytes").unwrap();
+        let attachment = AttachmentRef::from_encrypted(
+            &enc,
+            11,
+            Some("image/png".to_string()),
+            Some("a.png".to_string()),
+        );
+        let reply = Reply {
+            target: 5,
+            author: Some("Bob".to_string()),
+            excerpt: Some("what he said".to_string()),
+        };
+        let forward = Forward {
+            author: Some("Alice".to_string()),
+            origin: Some(ForwardOrigin {
+                group_id_b64: "Z3JvdXA=".to_string(),
+                message_id: 41,
+            }),
+        };
+        let bytes = compose_chat(
+            "caption",
+            vec![attachment.clone()],
+            Some(&reply),
+            Some(&forward),
+            Some(&marker()),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_body(&bytes),
+            MessageBody::Chat {
+                text: "caption".to_string(),
+                attachments: vec![attachment],
+                reply: Some(reply),
+                forward: Some(forward),
+                resend: Some(marker()),
+            }
+        );
+        assert!(fuzz_api::resend_within_bounds(&bytes));
+        assert!(fuzz_api::reply_within_bounds(&bytes));
+        assert!(fuzz_api::forward_within_bounds(&bytes));
+    }
+
+    #[test]
+    fn a_marker_is_not_a_forward() {
+        let bytes = compose_chat("x", Vec::new(), None, None, Some(&marker())).unwrap();
+        assert!(matches!(
+            parse_body(&bytes),
+            MessageBody::Chat { forward: None, .. }
+        ));
+    }
+
+    #[test]
+    fn an_operation_with_a_marker_is_still_that_operation() {
+        let json = br#"{"v":1,"text":"","attachments":[],"delete_of":7,"resend_origin_group":"b2xk","resend_origin_message":3}"#;
+        assert_eq!(parse_body(json), MessageBody::Delete { target: 7 });
+        let json = br#"{"v":1,"text":"new","edit_of":9,"resend_origin_group":"b2xk","resend_origin_message":3}"#;
+        assert_eq!(
+            parse_body(json),
+            MessageBody::Edit {
+                target: 9,
+                text: "new".to_string()
+            }
+        );
+        let json =
+            br#"{"v":1,"read_up_to":4,"resend_origin_group":"b2xk","resend_origin_message":3}"#;
+        assert_eq!(parse_body(json), MessageBody::ReadReceipt { up_to: 4 });
+    }
+
+    #[test]
+    fn a_wrong_type_loses_the_marker_alone() {
+        for json in [
+            br#"{"v":1,"text":"still here","attachments":[],"resend_origin_group":42,"resend_origin_message":3}"#
+                .as_slice(),
+            br#"{"v":1,"text":"still here","attachments":[],"resend_origin_group":"b2xk","resend_origin_message":"nine"}"#
+                .as_slice(),
+            br#"{"v":1,"text":"still here","attachments":[],"resend_origin_group":["b2xk"],"resend_origin_message":{"id":3}}"#
+                .as_slice(),
+        ] {
+            match parse_body(json) {
+                MessageBody::Chat { text, resend, .. } => {
+                    assert_eq!(text, "still here");
+                    assert_eq!(resend, None);
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(fuzz_api::resend_within_bounds(json));
         }
     }
 }

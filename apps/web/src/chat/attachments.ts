@@ -479,6 +479,31 @@ export async function composeForwardEnvelope(
   }
 }
 
+/**
+ * ADR-0065 R.7 case 1 — compose a **re-send**: the same chat envelope as
+ * [`composeEnvelope`] (text + refs), also carrying the ORIGINAL group id and
+ * message id of the message it repeats. The marker is never rendered; a
+ * device that already holds the original shows the message once
+ * (`resend-marker.ts`). The core carries the marker only when both halves
+ * are given and within bounds.
+ */
+export async function composeResendEnvelope(
+  text: string,
+  refs: readonly AttachmentRefBytes[],
+  origin: ForwardOrigin,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  const builder = new wasm.EnvelopeBuilder(text);
+  try {
+    addRefsToBuilder(wasm, builder, refs);
+    builder.setResendOrigin(origin.groupIdB64, BigInt(origin.messageId));
+    return builder.build();
+  } catch (err) {
+    builder.free();
+    throw err;
+  }
+}
+
 /** Append every ref to `builder`, ADR-0047 media metadata included. Shared by
  *  the plain and the reply composers so the two cannot drift on what a ref
  *  is. Each wasm handle is freed once the builder has copied it. */
@@ -639,6 +664,10 @@ export type ParsedBodyResult =
        *  original author's name and / or the origin reference, as the
        *  forwarder wrote them. */
       forward?: ForwardRef;
+      /** ADR-0065 R.7 case 1 — set on a message RE-SENT into a successor
+       *  one-to-one: where it was originally sent. Never drawn
+       *  (`resend-marker.ts`). */
+      resendOrigin?: ForwardOrigin;
     }
   | { kind: "edit"; target: number; text: string }
   | { kind: "delete"; target: number }
@@ -762,12 +791,20 @@ export async function parseBodyEnvelope(
           : { origin: { groupIdB64: originGroup, messageId: Number(originMessage) } }),
       };
     }
+    // ADR-0065 R.7 case 1 — the re-send marker: both halves or neither.
+    const resendGroup = parsed.resendOriginGroupB64;
+    const resendMessage = parsed.resendOriginMessageId;
+    const resendOrigin: ForwardOrigin | undefined =
+      resendGroup === undefined || resendMessage === undefined
+        ? undefined
+        : { groupIdB64: resendGroup, messageId: Number(resendMessage) };
     return {
       kind: "chat",
       text: parsed.text,
       attachments,
       ...(reply === undefined ? {} : { reply }),
       ...(forward === undefined ? {} : { forward }),
+      ...(resendOrigin === undefined ? {} : { resendOrigin }),
     };
   } finally {
     parsed.free();

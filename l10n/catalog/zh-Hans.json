@@ -2226,46 +2226,6 @@
       "text": "分享",
       "status": "machine"
     },
-    "chat.keys_reset.bubble_warning": {
-      "text": "自 {name} 重置账号密钥以来尚未核对。",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_being_removed": {
-      "text": "账号密钥已重置。正在移除。",
-      "status": "machine"
-    },
-    "chat.keys_reset.member_flag": {
-      "text": "账号密钥已重置。",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_closed": {
-      "text": "{name} 重置了账号密钥。此聊天已关闭。",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_composer": {
-      "text": "你无法再在此聊天中发送消息。",
-      "status": "machine"
-    },
-    "chat.keys_reset.one_to_one_row": {
-      "text": "聊天已关闭。{name} 重置了账号密钥。",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice": {
-      "text": "此群组的群主 {name} 重置了账号密钥。其旧设备无法从此群组移除，群组也无法更换群主。为了继续安全地聊天，请重建群组。",
-      "status": "machine"
-    },
-    "chat.keys_reset.owned_notice_member": {
-      "text": "管理员可以重建群组。",
-      "status": "machine"
-    },
-    "chat.keys_reset.start_new_chat": {
-      "text": "开始新聊天",
-      "status": "machine"
-    },
-    "chat.keys_reset.system_removed": {
-      "text": "{name} 重置了账号密钥。其旧设备已从此群组移除。",
-      "status": "machine"
-    },
     "chat.leave.action": {
       "text": "退出群组",
       "status": "machine"
@@ -3854,14 +3814,6 @@
       "text": "无法开始聊天。请重试。",
       "status": "machine"
     },
-    "contacts.identity_changed.reset": {
-      "text": "{name} 重置了其安全身份（例如设备丢失）。透明度日志确认此次重置由账号所有者本人发起。如果你确信确实是对方本人，请在继续之前通过其他渠道重新核对安全码。",
-      "status": "machine"
-    },
-    "contacts.identity_changed.reset_unnamed": {
-      "text": "此联系人重置了其安全身份（例如设备丢失）。透明度日志确认此次重置由账号所有者本人发起。如果你确信确实是对方本人，请在继续之前通过其他渠道重新核对安全码。",
-      "status": "machine"
-    },
     "contacts.identity_changed.unconfirmed": {
       "text": "{name} 的安全身份已更改，且无法通过透明度日志确认。在信任之前，请通过其他渠道核实。",
       "status": "machine"
@@ -3884,38 +3836,6 @@
     },
     "contacts.invite_links.title": {
       "text": "邀请链接",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner": {
-      "text": "{name} 重置了账号密钥。再次给对方发消息前，请核对新的安全码。",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_action": {
-      "text": "核对",
-      "status": "machine"
-    },
-    "contacts.keys_reset.banner_unnamed": {
-      "text": "此联系人重置了账号密钥。再次给对方发消息前，请核对新的安全码。",
-      "status": "machine"
-    },
-    "contacts.keys_reset.open_contact": {
-      "text": "打开联系人",
-      "status": "machine"
-    },
-    "contacts.keys_reset.picker_sub": {
-      "text": "账号密钥已重置。请先核对新的安全码。",
-      "status": "machine"
-    },
-    "contacts.keys_reset.row_sub": {
-      "text": "账号密钥已重置。请核对新的安全码。",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first": {
-      "text": "请先核对 {name} 的新安全码。",
-      "status": "machine"
-    },
-    "contacts.keys_reset.verify_first_short": {
-      "text": "请先核对新的安全码。",
       "status": "machine"
     },
     "contacts.list.add": {
@@ -4056,54 +3976,6 @@
     },
     "contacts.safety.number": {
       "text": "安全码",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body": {
-      "text": "{name} 的账号密钥已重置，因此你之前可能核对过的安全码已不再适用。请当面或在通话中与 {name} 核对这个新安全码。",
-      "status": "machine"
-    },
-    "contacts.safety.reset.body_unnamed": {
-      "text": "此联系人的账号密钥已重置，因此你之前可能核对过的安全码已不再适用。请当面或在通话中与对方核对这个新安全码。",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox": {
-      "text": "我已与 {name} 核对新的安全码，并且一致。",
-      "status": "machine"
-    },
-    "contacts.safety.reset.checkbox_unnamed": {
-      "text": "我已与此联系人核对新的安全码，并且一致。",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirm": {
-      "text": "我已核对新的安全码",
-      "status": "machine"
-    },
-    "contacts.safety.reset.confirming": {
-      "text": "正在核对...",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done": {
-      "text": "{name} 已重新通过核对。",
-      "status": "machine"
-    },
-    "contacts.safety.reset.done_unnamed": {
-      "text": "此联系人已重新通过核对。",
-      "status": "machine"
-    },
-    "contacts.safety.reset.save_failed": {
-      "text": "无法保存。请重试。",
-      "status": "machine"
-    },
-    "contacts.safety.reset.title": {
-      "text": "核对新的安全码",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning": {
-      "text": "如果你未经核对就确认，那么接管了 {name} 账号的人在你看来就会是 {name}。",
-      "status": "machine"
-    },
-    "contacts.safety.reset.warning_unnamed": {
-      "text": "如果你未经核对就确认，那么接管了此账号的人在你看来就会是你的联系人。",
       "status": "machine"
     },
     "contacts.safety.row_sub": {
@@ -5778,26 +5650,6 @@
       "text": "{name}，{count, plural, other {# 个未读聊天}}",
       "status": "machine"
     },
-    "group.closed.composer": {
-      "text": "此群组已关闭。",
-      "status": "machine"
-    },
-    "group.closed.open_new": {
-      "text": "打开新群组",
-      "status": "machine"
-    },
-    "group.closed.panel": {
-      "text": "此群组已关闭。请在 {name} 中继续。",
-      "status": "machine"
-    },
-    "group.closed.row": {
-      "text": "群组已关闭",
-      "status": "machine"
-    },
-    "group.closed.system": {
-      "text": "群主的账号密钥被重置后，{name} 关闭了此群组。",
-      "status": "machine"
-    },
     "group.join.needs_account": {
       "text": "你需要一个账号才能申请加入。请注册或登录。",
       "status": "machine"
@@ -5844,38 +5696,6 @@
     },
     "group.join.wait_secondary": {
       "text": "两个步骤都没有时间限制。如果一直没有进展，你可以重新发送请求。",
-      "status": "machine"
-    },
-    "group.recreate.action": {
-      "text": "重建群组",
-      "status": "machine"
-    },
-    "group.recreate.done": {
-      "text": "完成",
-      "status": "machine"
-    },
-    "group.recreate.excluded_reset": {
-      "text": "账号密钥已重置。请核对新的安全码后再将其加入。",
-      "status": "machine"
-    },
-    "group.recreate.members_heading": {
-      "text": "成员（{count}）",
-      "status": "machine"
-    },
-    "group.recreate.note": {
-      "text": "在你关闭之前，旧群组对所有人保持原样。",
-      "status": "machine"
-    },
-    "group.recreate.submit": {
-      "text": "创建并关闭旧群组",
-      "status": "machine"
-    },
-    "group.recreate.title": {
-      "text": "重建群组",
-      "status": "machine"
-    },
-    "group.recreate.working": {
-      "text": "正在创建...",
       "status": "machine"
     },
     "invite.contact.accept_failed": {
@@ -6807,7 +6627,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
-      "text": "你的联系人会看到你的安全码已更改，他们需要重新验证你，才能与你安全地收发消息。",
+      "text": "你的联系人与你的聊天会保留。你的安全码会改变。",
       "status": "machine"
     },
     "recovery_phrase.fresh.sign_in_to_finish": {
@@ -6935,7 +6755,7 @@
       "status": "machine"
     },
     "restore_identity.reset.effect_contacts": {
-      "text": "你的联系人会看到你的安全码已更改，必须重新验证你，才能与你安全地收发消息。",
+      "text": "你的联系人与你的聊天会保留。你的安全码会改变。",
       "status": "machine"
     },
     "restore_identity.reset.effect_devices": {

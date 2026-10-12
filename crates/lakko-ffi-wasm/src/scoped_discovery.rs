@@ -53,8 +53,9 @@ use lakko_contacts::introduction::{
 };
 use lakko_contacts::profile::{ProfileError, ACCOUNT_ID_LEN};
 use lakko_contacts::reach::{
-    reach_seed as rust_reach_seed, reach_verifying_key as rust_reach_verifying_key,
-    ReachClass as RustReachClass, ReachError, ReachGrant as RustReachGrant, MAX_REACH_SCOPE_ID_LEN,
+    continuity_reach_seed as rust_continuity_reach_seed, reach_seed as rust_reach_seed,
+    reach_verifying_key as rust_reach_verifying_key, ReachClass as RustReachClass, ReachError,
+    ReachGrant as RustReachGrant, CONTINUITY_ACCOUNT_ID_LEN, MAX_REACH_SCOPE_ID_LEN,
     REACH_GRANT_LEN, REACH_SEED_LEN,
 };
 use lakko_contacts::visibility::{
@@ -342,6 +343,40 @@ pub fn reach_seed(
     version: u32,
 ) -> Result<Vec<u8>, JsValue> {
     js(reach_seed_inner(account_seed, class, scope_id, version))
+}
+
+fn continuity_reach_seed_inner(account_id: &[u8], key_generation: u64) -> Result<Vec<u8>, Refusal> {
+    let id = <[u8; CONTINUITY_ACCOUNT_ID_LEN]>::try_from(account_id).map_err(|_| {
+        length_refusal(
+            "reachError",
+            "accountIdLength",
+            "account id",
+            CONTINUITY_ACCOUNT_ID_LEN,
+            account_id.len(),
+        )
+    })?;
+    Ok(rust_continuity_reach_seed(&id, key_generation)
+        .as_bytes()
+        .to_vec())
+}
+
+/// The 32-byte **continuity reach seed** of an account at a key generation
+/// (ADR-0065 R.4): `BLAKE3-derive-key("lakko/reach/continuity/v1",
+/// accountId(16) || keyGeneration(8, BE))`.
+///
+/// After an account key reset the resetting device registers
+/// `reachVerifyingKey(seed)` on its new mailbox (with an expiry) and a peer
+/// that accepted the reset signs its Welcome with
+/// `DsProofSigner.forReach(seed)`. `keyGeneration` (a `bigint`) is the
+/// generation the reset moved to, as the verified key-reset attestation
+/// states it. No input is secret: it is a reach key, never a credential.
+///
+/// # Errors
+///
+/// Throws with `reachError` `accountIdLength`.
+#[wasm_bindgen(js_name = continuityReachSeed)]
+pub fn continuity_reach_seed(account_id: &[u8], key_generation: u64) -> Result<Vec<u8>, JsValue> {
+    js(continuity_reach_seed_inner(account_id, key_generation))
 }
 
 fn derive_reach_grant_inner(
@@ -1949,6 +1984,31 @@ mod tests {
             hex(&reach_verifying_key(&seed).unwrap()),
             "e7c2e2aa6ff74083318d5f6b1dfa7939c3cc074549376d9e91c5592a67a35e8f"
         );
+    }
+
+    /// The core's continuity golden (ADR-0065 R.4), reproduced through this
+    /// surface; the UniFFI surface pins the same literals.
+    #[test]
+    fn continuity_reach_seed_reproduces_the_core_golden() {
+        let seed = continuity_reach_seed_inner(&[0x11; 16], 2).unwrap();
+        assert_eq!(
+            hex(&seed),
+            "764a0db71d87bb535affdc9dc1d51df8648a26c8c670fa4708dcc6f31b5cc228"
+        );
+        assert_eq!(
+            hex(&rust_reach_verifying_key(
+                &seed32(&seed, "reach seed").unwrap()
+            )),
+            "c797f30bb7df3eed9ea6a65c183f7d5fc391387022a2a1150adddea3c4caf02c"
+        );
+        assert_ne!(seed, continuity_reach_seed_inner(&[0x11; 16], 3).unwrap());
+        for bad in [&[][..], &[0x11; 15], &[0x11; 17], &[0x11; 32]] {
+            let e = continuity_reach_seed_inner(bad, 2).unwrap_err();
+            assert_eq!(
+                (e.property, e.code.as_str()),
+                ("reachError", "accountIdLength")
+            );
+        }
     }
 
     #[test]

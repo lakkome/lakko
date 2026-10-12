@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 phase 2 (UX 16.5) — recognising a group-closed envelope in an
- * application plaintext. The twin of `group-name-envelope.ts`.
+ * ADR-0065 R.6 — recognising a group-closed envelope (a successor CLAIM) in
+ * an application plaintext. The twin of `group-name-envelope.ts`.
  *
- * The notice rides an MLS application message; without this arm ahead of
+ * The claim rides an MLS application message; without this arm ahead of
  * the chat parser it would reach `parseBodyEnvelope`, and the three
  * background filters must suppress it like every service envelope. Three
  * outcomes, same as the name:
@@ -21,12 +21,22 @@
  */
 
 import { base64Encode } from "../auth/account-id";
-import type { StoredGroupClosed } from "./group-closed-store";
+
+/** A group-closed envelope as decoded off the wire. It carries no author:
+ *  the sender is the MLS-authenticated one, resolved at receipt (C-68). */
+export interface GroupClosedNotice {
+  /** Sender-clock UNIX milliseconds, as stamped in the envelope. Not used
+   *  for ordering: the journal's order decides (R.6). */
+  readonly closedAtMs: bigint;
+  /** base64 of the successor group's id, or `null` when the envelope names
+   *  none (then it is not a claim and is dropped). */
+  readonly successorGroupIdB64: string | null;
+}
 
 export type GroupClosedSniff =
   | { readonly kind: "none" }
   | { readonly kind: "malformed" }
-  | { readonly kind: "closed"; readonly value: StoredGroupClosed };
+  | { readonly kind: "closed"; readonly value: GroupClosedNotice };
 
 /** The one wasm export this needs, structurally. */
 export interface GroupClosedDecoder {
@@ -55,7 +65,7 @@ export function sniffGroupClosed(decoder: GroupClosedDecoder, bytes: Uint8Array)
     return code === undefined || code === "wrongDomain" ? { kind: "none" } : { kind: "malformed" };
   }
   const successor = decoded.successorGroupId;
-  const value: StoredGroupClosed = {
+  const value: GroupClosedNotice = {
     closedAtMs: decoded.closedAtMs,
     successorGroupIdB64:
       successor === undefined || successor.length === 0 ? null : base64Encode(successor),

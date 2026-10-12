@@ -461,9 +461,15 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         hasCamera: Boolean = true,
     ): Boolean {
         if (hasCall || otherCalls.isNotEmpty()) return false
-        // 16.4 — no call is placed into a closed one-to-one.
-        if (groupIdHex.lowercase() in closedGroups) return false
-        send(Event.StartOutgoing(groupIdHex, kind))
+        // ADR-0065 R.12 — a call asked for in a dead one-to-one is placed in
+        // the conversation's successor when this device holds one; otherwise
+        // it does not start, before any signalling ([oneToOneCallTarget]).
+        val target = when (val resolved = callTargetOf(groupIdHex)) {
+            is OneToOneCallTarget.Dial -> resolved.groupIdHex
+            OneToOneCallTarget.Unavailable -> return false
+        }
+        if (target.lowercase() in closedGroups) return false
+        send(Event.StartOutgoing(target, kind))
         // `docs/ux/calls.md` section 3.1 — "Tapping the phone button places the
         // call immediately. No preparation screen." The two events are queued on
         // one channel and handled in order, so the session is built and keyed by
@@ -546,27 +552,45 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     private val closedGroups: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /**
-     * ADR-0065 phase 2 / `docs/ux/identity-recovery.md` 16.4 — the one-to-one
-     * [groupIdHex] has just CLOSED (the peer reset their account keys).
+     * ADR-0065 R.12 — where a one-to-one call asked for in a group is placed
+     * ([oneToOneCallTarget] over the repository's facts). Installed with the
+     * repository; the default dials the group that was asked for.
+     */
+    @Volatile
+    public var callTarget: ((groupIdHex: String) -> OneToOneCallTarget)? = null
+
+    private fun callTargetOf(groupIdHex: String): OneToOneCallTarget =
+        try {
+            callTarget?.invoke(groupIdHex) ?: OneToOneCallTarget.Dial(groupIdHex)
+        } catch (_: Throwable) {
+            OneToOneCallTarget.Dial(groupIdHex)
+        }
+
+    /**
+     * ADR-0065 R.12 / `docs/ux/identity-recovery.md` 16.4 — the one-to-one
+     * [groupIdHex] has just become a dead session (the other person's reset
+     * was accepted) or its conversation MOVED to a successor.
      *
-     * Nothing can be published into a closed one-to-one, so a call of that
-     * chat cannot say goodbye: its `End` frame would be refused at the
-     * repository gate, and its journal is no longer fetched, so the peer's
-     * `End` will never arrive either. The call therefore ends HERE, locally:
+     * Nothing but the claim is published into a dead one-to-one, so a call of
+     * that group cannot say goodbye: its `End` frame would be refused at the
+     * repository gate, and after the move its journal is no longer fetched,
+     * so the peer's `End` will never arrive either. The call therefore ends
+     * HERE, locally, the way a call ends when the other side drops:
      * the session is hung up (media torn down, the screen left on its ended
      * state exactly as after any hang-up), a ring for it stops, a held offer
      * is forgotten, and every frame the group would still emit — the `End`
      * included — is dropped before the publish instead of failing in it.
      *
-     * The group is remembered for the session; a closed one-to-one never
-     * reopens (`Start a new chat` founds a new group), so nothing un-closes it.
+     * The group is remembered for the session; a dead one-to-one never comes
+     * back (the conversation continues in its successor, which is another
+     * group), so nothing un-marks it. The next call uses the successor.
      */
-    public fun conversationClosed(groupIdHex: String) {
+    public fun conversationMoved(groupIdHex: String) {
         val key = groupIdHex.lowercase()
         // Before the event is queued, so a frame the session emits while the
         // event waits its turn is already dropped.
         closedGroups.add(key)
-        send(Event.ConversationClosed(key))
+        send(Event.ConversationMoved(key))
     }
 
     /** Logout / forget device: hang up, forget every call, start clean. */
@@ -593,7 +617,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         data object ClearFinished : Event
         data class Foreground(val foreground: Boolean) : Event
         data object Reset : Event
-        data class ConversationClosed(val groupIdHex: String) : Event
+        data class ConversationMoved(val groupIdHex: String) : Event
         class SessionState(val session: OneToOneCallSession, val state: CallSession.WebCallState) : Event
         class Timeout(val session: OneToOneCallSession, val generation: Long) : Event
     }
@@ -720,7 +744,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 ?.let { clearSlot() }
             is Event.Foreground -> onForeground(event.foreground)
             Event.Reset -> onReset()
-            is Event.ConversationClosed -> onConversationClosed(event.groupIdHex)
+            is Event.ConversationMoved -> onConversationMoved(event.groupIdHex)
             is Event.SessionState -> onSessionState(event)
             is Event.Timeout -> onTimeout(event)
         }
@@ -1084,8 +1108,8 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         closedGroups.clear()
     }
 
-    /** See [conversationClosed]. */
-    private fun onConversationClosed(groupIdHex: String) {
+    /** See [conversationMoved]. */
+    private fun onConversationMoved(groupIdHex: String) {
         // An offer this device only holds: it must never ring in the app.
         val held = deferred?.takeIf { it.groupIdHex.lowercase() == groupIdHex }
         if (held != null) {

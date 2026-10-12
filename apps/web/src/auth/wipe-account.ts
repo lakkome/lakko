@@ -57,6 +57,8 @@ import {
 } from "../contacts/address-resolver";
 import { clearInboxForAccount } from "../contacts/inbox-store";
 import { clearSentRequests } from "../contacts/sent-requests";
+import { deleteSentIntrosForAccount } from "../contacts/sent-request-intros";
+import { clearSpendOwed } from "../contacts/rotation-spent";
 import { clearInviteLinkSecrets } from "../contacts/invite-link-secrets";
 import { deleteMintedLinksForAccount } from "../contacts/minted-links";
 import { deleteMlsSnapshot } from "../chat/mls-store";
@@ -67,7 +69,6 @@ import { clearUnappliedForAccount } from "../chat/unapplied-requests";
 import { clearOwnRequestsForAccount } from "../chat/membership-retry";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { clearLastObservedOwnerForAccount } from "../chat/ownership-transfer";
-import { clearConversationClosedForAccount } from "../chat/conversation-closed";
 import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearKnockCursorsForAccount } from "../chat/knock-cursor";
@@ -89,6 +90,9 @@ import { clearMemberBaselinesForAccount } from "../profile/membership-baseline";
 import { clearProfileRequestsForAccount } from "../profile/profile-request";
 import { clearGrantSignatures } from "../profile/grant-signatures";
 import { deleteReachRows } from "../reach/reach-store";
+import { clearContinuityMarker } from "../reach/continuity";
+import { clearContinuityStateForAccount } from "../chat/continuity-store";
+import { clearVerifiedBindingsForAccount } from "../contacts/verified-binding";
 import { deleteFeedState } from "../feed/feed-store";
 import { deleteFeedMarks } from "../feed/feed-marks-store";
 import { deleteDiscoverRows } from "../discover/discover-store";
@@ -204,6 +208,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "call-log", run: () => deleteCallLogRow(accountIdB64) },
     { name: "device-sync", run: () => deleteSyncState(accountIdB64) },
     { name: "minted-links", run: () => deleteMintedLinksForAccount(accountIdB64) },
+    // The intro text of the unanswered contact requests this device sent,
+    // kept under the device key for a re-send after a key rotation.
+    { name: "sent-request-intros", run: () => deleteSentIntrosForAccount(accountIdB64) },
     { name: "push-routing", run: () => clearGroupRoutingForAccount(accountIdB64) },
     {
       name: "anon-tokens",
@@ -218,6 +225,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "device-group-snapshot", run: () => deleteDeviceGroupSnapshot(accountIdB64) },
     // --- localStorage, keyed by the account --------------------------------
     { name: "contacts", run: () => clearAccountContacts(accountIdB64) },
+    // ADR-0065 R.2: the (account id -> key) bindings this device verified
+    // itself for group members it never pinned.
+    { name: "verified-bindings", run: () => clearVerifiedBindingsForAccount(accountIdB64) },
     { name: "contact-inbox", run: () => clearInboxForAccount(accountIdB64) },
     { name: "sent-requests", run: () => clearSentRequests(accountIdB64) },
     {
@@ -253,6 +263,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "key-rotation-owed", run: () => clearRotation(storage, accountIdB64) },
     { name: "key-rotation-notice", run: () => clearRotatedNotice(storage, accountIdB64) },
     { name: "key-rotation-state", run: () => deleteKeyRotationState(accountIdB64) },
+    // What a kept device still owes after adopting rotated keys (its own
+    // links and requests, ADR-0066 section 3.5a rule 5).
+    { name: "rotation-spend-owed", run: () => clearSpendOwed(accountIdB64, storage) },
     {
       name: "predecessor-mailbox-cursor",
       run: () => removeLocal(predecessorCursorStorageKey(accountIdB64)),
@@ -267,7 +280,15 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "committer-beacons", run: () => clearBeaconObservationsForAccount(accountIdB64) },
     { name: "last-observed-owner", run: () => clearLastObservedOwnerForAccount(accountIdB64) },
     { name: "leave-requested", run: () => clearLeaveRequestedForAccount(accountIdB64) },
-    { name: "conversation-closed", run: () => clearConversationClosedForAccount(accountIdB64) },
+    // ADR-0065 R.4 / R.5: this account's own continuity-key marker, and the
+    // "a lineage register is not confirmed sent" marker.
+    {
+      name: "reset-continuity-marker",
+      run: () => clearContinuityMarker(localStorage, accountIdB64),
+    },
+    { name: "lineage-unsent", run: () => removeLocal(`lakko.lineage.unsent.v1.${accountIdB64}`) },
+    // ADR-0065 R.5 / R.7: when a conversation moved, and that a re-send ran.
+    { name: "reset-continuity-state", run: () => clearContinuityStateForAccount(accountIdB64) },
     // The per-account conversation-kind map of builds before ADR-0062 (the
     // kind now lives in the group); nothing writes it any more.
     {

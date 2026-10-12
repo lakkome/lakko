@@ -91,6 +91,7 @@ import type { IdentitySecrets } from "../auth/AuthContext";
 import {
   parseBodyEnvelope,
   type AttachmentRefBytes,
+  type ForwardOrigin,
   type ForwardRef,
   type ReplyRef,
 } from "./attachments";
@@ -105,8 +106,7 @@ import {
 import { sniffProfile, type ReceivedProfile } from "../profile/profile-envelope";
 import { sniffScopedEnvelope, type ScopedEnvelopeKind } from "../reach/envelope-sniff";
 import { sniffProfileRequest } from "../profile/profile-request";
-import { sniffGroupClosed } from "./group-closed-envelope";
-import type { StoredGroupClosed } from "./group-closed-store";
+import { sniffGroupClosed, type GroupClosedNotice } from "./group-closed-envelope";
 import { sniffGroupName } from "./group-name-envelope";
 import type { StoredGroupName } from "./group-name-store";
 import { sniffPin } from "./pin-envelope";
@@ -189,6 +189,11 @@ export type IncomingChatEvent =
        *  original author's name and / or the origin reference, as the
        *  forwarder wrote them. Absent on a plain message. */
       forward?: ForwardRef;
+      /** ADR-0065 R.7 case 1 — set on a message RE-SENT into a successor
+       *  one-to-one: the original group id and message id. Never drawn; a
+       *  device that holds the original drops this row
+       *  (`resend-marker.ts`). */
+      resendOrigin?: ForwardOrigin;
       /** ADR-0061 section 6 — set when the sender's newer Lakko wrote this
        *  message in a wire version this build cannot read: the envelope's
        *  version. `text` is empty and there are no attachments; every screen
@@ -246,12 +251,7 @@ export type IncomingChatEvent =
        *  ADR-0045 removed `"proposal"` from this set — a membership proposal
        *  is now its own `membershipProposal` event, because it is not something
        *  that happened to the group. */
-      systemKind: "commit" | "external-join-proposal" | "keys-reset-removed";
-      /** ADR-0065 phase 2 (UX 16.3) — for `keys-reset-removed` only: base64
-       *  of the account id of the contact whose old devices this commit
-       *  removed, so the row names them through the contact store on every
-       *  render. A client-side row: nothing on the wire carries it. */
-      contactAccountIdB64?: string;
+      systemKind: "commit" | "external-join-proposal";
       createdAt: string;
     }
   | {
@@ -458,16 +458,16 @@ export type IncomingChatEvent =
       createdAt: string;
     }
   | {
-      /** ADR-0065 phase 2 (UX 16.5) — an admin closed this group after
-       *  recreating it. Never a timeline bubble: the receive loop runs it
-       *  through the role-gated verdict (`chat/group-closed-store.ts`) under
-       *  the per-group lock and the conversation takes the closed shape.
+      /** ADR-0065 R.6 — a successor CLAIM: a device founding the group this
+       *  conversation continues in names it here. Never a timeline bubble:
+       *  the receive loop runs it through the claim rule
+       *  (`chat/successor-claim.ts`) under the per-group lock.
        *
        *  `groupClosed` is `undefined` when the domain matched but the
        *  envelope failed its bounds — dropped, never stored or rendered. */
       kind: "group-closed";
       messageId: number;
-      groupClosed: StoredGroupClosed | undefined;
+      groupClosed: GroupClosedNotice | undefined;
       /** Diagnostic only. */
       senderLeaf: number | undefined;
       /** The sender's ACCOUNT key resolved at receipt (C-68), the key the
@@ -606,6 +606,51 @@ export class ChatClientArgError extends Error {
   override name = "ChatClientArgError";
 }
 
+/**
+ * ADR-0065 R.7 case 1 — nothing is sent into a session only removed devices
+ * can read. Thrown BEFORE anything is sealed by {@link ChatClient.sendMessage}
+ * and {@link ChatClient.broadcastControl} when the installed guard says the
+ * group is a one-to-one whose other person's reset this device accepted (the
+ * group can never be repaired; the conversation continues in a successor).
+ * A caller with something worth keeping holds it for the successor
+ * (`chat/held-send.ts`); everything else simply does not go out.
+ */
+export class HeldForSuccessor extends Error {
+  override name = "HeldForSuccessor";
+  constructor() {
+    super("this session is superseded; the message waits for the conversation's successor");
+  }
+}
+
+/** Whether a publish into `group` is refused as into a dead session. */
+export type DeadSessionGuard = (group: WasmGroup) => boolean;
+
+let deadSessionGuard: DeadSessionGuard | null = null;
+
+/**
+ * Install (or, with `null`, remove) the one guard every `ChatClient` in the
+ * tab consults. Module-level on purpose: a dozen providers each build their
+ * own client, and a guard on one of them would leave the profile, pin, name,
+ * typing, receipt and call-signaling publishers free to write into the dead
+ * session. A guard that throws reads as "not dead" (it must never block a
+ * live conversation).
+ */
+export function installDeadSessionGuard(guard: DeadSessionGuard | null): void {
+  deadSessionGuard = guard;
+}
+
+function refuseDeadSession(group: WasmGroup): void {
+  const guard = deadSessionGuard;
+  if (guard === null) return;
+  let dead = false;
+  try {
+    dead = guard(group) === true;
+  } catch {
+    dead = false;
+  }
+  if (dead) throw new HeldForSuccessor();
+}
+
 /** Wrap any underlying failure (DS, MLS process, etc). */
 export class ChatError extends Error {
   override name = "ChatError";
@@ -661,6 +706,12 @@ export interface BroadcastControlOptions {
    * `calls/call-signaling-wake.ts` names.
    */
   readonly wake?: Exclude<OutboundWake, null | "message">;
+  /**
+   * ADR-0065 R.6 — the ONE frame that is posted into a superseded
+   * one-to-one on purpose: the successor claim, which the person's other
+   * devices read there. Everything else is refused ({@link HeldForSuccessor}).
+   */
+  readonly intoSupersededSession?: boolean;
 }
 
 export class ChatClient {
@@ -810,6 +861,8 @@ export class ChatClient {
     if (plaintext.length === 0) {
       throw new ChatClientArgError("plaintext must be non-empty");
     }
+    // ADR-0065 R.7 case 1 — before anything is sealed.
+    refuseDeadSession(group);
     const myIdentity = await this.resolveIdentity(identity);
 
     // Read BEFORE the lock is keyed and before anything is sealed — a
@@ -1030,6 +1083,7 @@ export class ChatClient {
     if (controlBytes.length === 0) {
       throw new ChatClientArgError("controlBytes must be non-empty");
     }
+    if (options.intoSupersededSession !== true) refuseDeadSession(group);
     const myIdentity = await this.resolveIdentity(identity);
 
     let groupId: Uint8Array;
@@ -1603,7 +1657,7 @@ export async function toEvent(
         };
       }
     }
-    // ADR-0065 phase 2 — the group-closed notice, the group name's twin:
+    // ADR-0065 R.6 — the group-closed envelope (a successor claim), the group name's twin:
     // same reason, same gate shape. A domain match that fails its bounds is
     // dropped here too (`groupClosed: undefined`), never parsed as chat.
     {
@@ -1718,6 +1772,8 @@ export async function toEvent(
         // ADR-0052 decision 2 — the forward attribution rides through
         // unchanged; the name is the forwarder's claim and is never resolved.
         ...(body.forward === undefined ? {} : { forward: body.forward }),
+        // ADR-0065 R.7 case 1 — the re-send marker, for the receive rule.
+        ...(body.resendOrigin === undefined ? {} : { resendOrigin: body.resendOrigin }),
       };
     }
     return {

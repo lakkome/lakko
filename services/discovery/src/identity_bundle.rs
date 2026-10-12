@@ -70,9 +70,10 @@ const MAX_LEAF_AUTH_LEN: usize = 200;
 const MAX_GENESIS_ATTEST_LEN: usize = 256;
 
 /// A fetched `identity_bundles` row: `(signature_pubkey, x25519_pubkey,
-/// supersession_proof?, key_generation)` — the proof column is nullable
-/// (G-4, ADR-0016); the generation is ADR-0065's.
-type IdentityBundleRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, u64);
+/// supersession_proof?, key_generation, key_reset_attest?)` — the proof
+/// column is nullable (G-4, ADR-0016); the generation and the nullable
+/// key-reset attestation are ADR-0065's.
+type IdentityBundleRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, u64, Option<Vec<u8>>);
 
 fn decode_fixed<const N: usize>(
     b64: &str,
@@ -1263,6 +1264,16 @@ pub(crate) struct FetchResponse {
     /// genesis; an attested reset stores its strictly greater value), so a
     /// client can compare the published generation with its own token's.
     pub(crate) key_generation: u64,
+    /// ADR-0065 R.3: standard base64 of the stored key-reset attestation
+    /// (the latest attested reset's), omitted from the JSON when the account
+    /// never reset. The stored bytes unparsed: discovery verified them at
+    /// upload, and at fetch they are an opaque pass-through like
+    /// `supersession_proof` (invariant #2). The peer verifies them locally
+    /// against the pinned attest key, the account id and the fetched key;
+    /// after a later PROVEN rotation the published key no longer equals the
+    /// attested key, and that case carries a supersession proof instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) key_reset_attest: Option<String>,
 }
 
 /// `GET /discovery/identity/{account_id_b64url}` — fetch.
@@ -1296,7 +1307,8 @@ pub(crate) async fn fetch(
     }
 
     let row: Option<IdentityBundleRow> = sqlx::query_as(
-        "SELECT signature_pubkey, x25519_pubkey, supersession_proof, key_generation \
+        "SELECT signature_pubkey, x25519_pubkey, supersession_proof, key_generation, \
+                key_reset_attest \
          FROM identity_bundles WHERE account_id = ?",
     )
     .bind(&bytes[..])
@@ -1310,7 +1322,7 @@ pub(crate) async fn fetch(
         )
     })?;
 
-    let (sig, x25519, proof, key_generation) = row.ok_or((
+    let (sig, x25519, proof, key_generation, key_reset_attest) = row.ok_or((
         StatusCode::NOT_FOUND,
         "identity bundle not found".to_string(),
     ))?;
@@ -1336,6 +1348,8 @@ pub(crate) async fn fetch(
         // without interpreting them; the peer verifies the proof locally.
         supersession_proof: proof.map(|p| B64.encode(&p)),
         key_generation,
+        // The same opaque pass-through (ADR-0065 R.3).
+        key_reset_attest: key_reset_attest.map(|a| B64.encode(&a)),
     }))
 }
 

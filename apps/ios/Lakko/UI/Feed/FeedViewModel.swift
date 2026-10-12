@@ -403,8 +403,11 @@ final class FeedViewModel: ObservableObject {
                     kind: .group,
                     idHex: thread.groupIdHex,
                     title: chatList.title(groupIdHex: thread.groupIdHex),
-                    muted: flags[thread.groupIdHex]?.muted == true,
-                    audience: chatRepository.memberCount(groupIdHex: thread.groupIdHex) ?? 0)
+                    // ADR-0065 R.5 — mute, "hide from feeds" and a rule's
+                    // lists belong to the CONVERSATION.
+                    muted: flags[thread.conversationIdHex]?.muted == true,
+                    audience: chatRepository.memberCount(groupIdHex: thread.groupIdHex) ?? 0,
+                    conversationHex: thread.conversationIdHex)
             }
         let channelSources = channels.channels.map { c in
             FeedSource(
@@ -440,8 +443,10 @@ final class FeedViewModel: ObservableObject {
         let sources = FeedReading.withoutHidden(all, hidden: reading.reading.hidden)
         var groupMessages: [String: [FeedMessage]] = [:]
         for thread in chatRepository.state.threads {
+            // Rows of an older segment (history ids) are not feed
+            // candidates: the feed reads the conversation's current group.
             groupMessages[thread.groupIdHex] = thread.messages
-                .filter { $0.ack == .sent }
+                .filter { $0.ack == .sent && $0.messageId > 0 }
                 .map(Self.feedMessage)
         }
         let username = account.username.isEmpty ? nil : account.username
@@ -665,8 +670,20 @@ final class FeedViewModel: ObservableObject {
         return true
     }
 
+    /// How far the cross-device read position reaches into `groupIdHex`'s
+    /// own message ids. ADR-0065 R.5 — the position is keyed on the
+    /// conversation and carries a segment past the first one.
     private func cursorThrough(_ groupIdHex: String) -> Int64? {
-        deviceGroupSync.readCursors[groupIdHex].flatMap { FeedSeen.readCursorId($0.upToMessageId) }
+        let conversation = chatRepository.conversationIdHex(ofGroup: groupIdHex)
+        guard let cursor = deviceGroupSync.readCursors[conversation] else { return nil }
+        switch LineageRules.readUpToInSegment(
+            LineageRules.decodeReadPosition(cursor.upToMessageId),
+            segment: chatRepository.segmentIndex(ofGroup: groupIdHex)) {
+        case .nothing: return nil
+        case .upTo(let id): return id
+        // Read in a later segment: everything this group holds is read.
+        case .all: return chatRepository.journalCursor(groupIdHex: groupIdHex)
+        }
     }
 
     /// The item was fully on screen for the dwell.
@@ -704,11 +721,13 @@ final class FeedViewModel: ObservableObject {
                 } catch {
                     NSLog("[feed] read receipt failed")
                 }
-                guard let groupId = Data(feedHex: hex) else { return }
+                guard let groupId = Data(feedHex: repo.conversationIdHex(ofGroup: hex)) else { return }
                 do {
                     try await sync.setReadCursor(
                         groupId: groupId,
-                        upToMessageId: FeedSeen.readCursorBytes(upTo),
+                        upToMessageId: LineageRules.encodeReadPosition(
+                            LineageRules.TimelinePosition(
+                                segment: repo.segmentIndex(ofGroup: hex), messageId: upTo)),
                         readAtMs: UInt64(Self.clockMs()))
                 } catch {
                     NSLog("[feed] read cursor failed")

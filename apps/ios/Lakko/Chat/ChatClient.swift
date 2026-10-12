@@ -120,11 +120,16 @@ public final class ChatClient {
         identity: Identity,
         group: Group,
         plaintext: Data,
-        wake: DsWake? = nil
+        wake: DsWake? = nil,
+        intoSupersededSession: Bool = false
     ) async throws -> SendMessageResult {
         guard !plaintext.isEmpty else {
             throw ChatError.argument("plaintext must be non-empty")
         }
+        // ADR-0065 R.7 case 1 — before anything is sealed: nothing goes into
+        // a one-to-one whose other person's reset this device accepted,
+        // except the successor claim.
+        try await refuseDeadSession(group: group, isSuccessorClaim: intoSupersededSession)
 
         // `createApplicationMessage` ADVANCES the MLS sender ratchet: it
         // consumes the current generation N (deriving the AEAD key+nonce
@@ -259,6 +264,8 @@ public final class ChatClient {
         guard !controlBytes.isEmpty else {
             throw ChatError.argument("controlBytes must be non-empty")
         }
+        // ADR-0065 R.7 case 1 — a control broadcast is a publish too.
+        try await refuseDeadSession(group: group, isSuccessorClaim: false)
 
         let wireBytes: Data
         do {
@@ -412,6 +419,18 @@ public final class ChatClient {
     /// `groupIdHex` names the journal the batch came off. It is REQUIRED
     /// because the own-echo filter below is per journal: a DS id identifies a
     /// row only together with the group whose journal assigned it.
+    /// ADR-0065 R.7 case 1 — the re-send marker an application row carries,
+    /// when it is a chat body carrying both halves of one. Read off the same
+    /// authenticated plaintext the event is built from.
+    static func resendOrigin(of processed: ProcessedMessage) -> ResendMarker.Origin? {
+        guard case .application(let data, _, _) = processed else { return nil }
+        let parsed = AttachmentBridge.parseBodyEnvelopeBytes(data)
+        guard parsed.kind == .chat,
+              let groupIdB64 = parsed.resendOriginGroupB64, !groupIdB64.isEmpty,
+              let messageId = parsed.resendOriginMessageId else { return nil }
+        return ResendMarker.Origin(groupIdB64: groupIdB64, messageId: messageId)
+    }
+
     public func applyFetchedMessages(
         identity: Identity,
         group: Group,
@@ -422,6 +441,7 @@ public final class ChatClient {
         var events: [IncomingChatEvent] = []
         var cursor = after
         var touchedMlsState = false
+        var resendOrigins: [Int64: ResendMarker.Origin] = [:]
         for message in raw.messages {
             cursor = message.id
 
@@ -464,6 +484,9 @@ public final class ChatClient {
                 // operations at different points in the batch.
                 continue
             }
+            if let origin = Self.resendOrigin(of: processed) {
+                resendOrigins[message.id] = origin
+            }
             events.append(
                 Self.toEvent(
                     messageId: message.id,
@@ -482,7 +505,8 @@ public final class ChatClient {
             events: events,
             cursor: cursor,
             hasMore: raw.hasMore,
-            touchedMlsState: touchedMlsState
+            touchedMlsState: touchedMlsState,
+            resendOrigins: resendOrigins
         )
     }
 
@@ -616,7 +640,7 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
-            // ADR-0065 phase 2 (UX 16.5) — sniff for a group-closed envelope
+            // ADR-0065 R.6 — sniff for a group-closed envelope (a successor claim)
             // before the chat parser, the group-name arm's twin: the same
             // lossy-UTF-8 fallback would otherwise render it as a bubble
             // reading `lakko/group-closed/v1` plus binary. Never a timeline
@@ -1301,11 +1325,11 @@ public enum IncomingChatEvent: Equatable {
         senderLeaf: UInt32?,
         createdAt: String
     )
-    /// ADR-0065 phase 2 (UX 16.5) — an admin closed this group after the
-    /// owner's keys were reset, naming the recreated group (or none). Never a
-    /// timeline bubble: the receive loop runs the role gate against the LIVE
-    /// group (owner / admin only, a table-less group refused), then the
-    /// strictly-newer order, and on accept the group takes the closed shape.
+    /// ADR-0065 R.6 — a `group_closed` envelope: a successor CLAIM naming
+    /// the group a conversation continues in. Never a timeline bubble and
+    /// never anything a person sees. The receive rule of R.6 (the receiver
+    /// has itself accepted a reset, the sender is eligible, the first such
+    /// claim in journal order) is `ChatRepository.receiveGroupClosed`.
     ///
     /// `senderLeaf` is the MLS-authenticated author, resolved at receipt;
     /// `nil` means unattributable, so only a byte-identical re-send is
@@ -1526,17 +1550,52 @@ public struct PollMessagesResult: Equatable {
     /// The caller must not advance the journal cursor past such a batch until
     /// the provider snapshot has durably landed — see `Chat/DurableCursor.swift`.
     public let touchedMlsState: Bool
+    /// ADR-0065 R.7 case 1 — the re-send marker of each chat row of this
+    /// batch that carries one, by DS message id: the ORIGINAL group and
+    /// message id a founder's re-send names (`ResendMarker.swift`). Never
+    /// drawn; the repository uses it to show a message this device already
+    /// holds in an older segment once.
+    public let resendOrigins: [Int64: ResendMarker.Origin]
 
     public init(
         events: [IncomingChatEvent],
         cursor: Int64,
         hasMore: Bool,
-        touchedMlsState: Bool = false
+        touchedMlsState: Bool = false,
+        resendOrigins: [Int64: ResendMarker.Origin] = [:]
     ) {
         self.events = events
         self.cursor = cursor
         self.hasMore = hasMore
         self.touchedMlsState = touchedMlsState
+        self.resendOrigins = resendOrigins
+    }
+}
+
+// MARK: - ADR-0065 R.7 case 1: the dead-session publish guard
+
+extension ChatClient {
+    /// Whether a publish into `group` is refused as into a dead session.
+    public typealias DeadSessionGuard = @MainActor (Group) -> Bool
+
+    /// The one guard every application publish consults. Process-wide on
+    /// purpose: the profile, pin, name, typing, receipt and call-signaling
+    /// publishers all end in ``sendMessage(identity:group:plaintext:wake:intoSupersededSession:)``,
+    /// and a guard on one caller would leave the others free to write into
+    /// the dead session.
+    nonisolated(unsafe) static var deadSessionGuard: DeadSessionGuard?
+
+    /// Throws ``HeldSend/HeldForSuccessor`` when the guard says `group` is a
+    /// dead session and this is not the successor claim. The guard reads the
+    /// live group on the main actor (this client's sends run off it); a
+    /// group it cannot read is "not dead": it must never block a live
+    /// conversation.
+    func refuseDeadSession(group: Group, isSuccessorClaim: Bool) async throws {
+        guard let check = Self.deadSessionGuard else { return }
+        let dead = await check(group)
+        if HeldSend.publishRefused(isDeadSession: dead, isSuccessorClaim: isSuccessorClaim) {
+            throw HeldSend.HeldForSuccessor()
+        }
     }
 }
 

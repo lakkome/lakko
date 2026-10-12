@@ -312,7 +312,8 @@ public fun FeedScreen(
         val shared = me.lakko.app.discover.aggregateShared(
             sharedRow,
             chatRepository.ownPersonKeyB64(),
-            liveGroups - reading.hidden,
+            // "Hide from feeds" is keyed on the conversation id (R.5).
+            liveGroups.filterTo(HashSet()) { chatRepository.conversationIdOf(it) !in reading.hidden },
         )
         val group = discover.groupCards(
             shared = shared,
@@ -342,17 +343,20 @@ public fun FeedScreen(
     // Every group and channel; the editor and the "Hidden from feeds" list
     // read these. The feed itself reads [sources], without the hidden ones.
     val allSources: List<FeedSource> = remember(chatState, flags, channelList, nameVersion, groupNameVersion, strings) {
-        val groups = chatState.threads
-            .filter { isGroupConversation(chatRepository, it.groupIdHex) }
-            .map { t ->
-                FeedSource(
-                    kind = FeedSourceKind.GROUP,
-                    idHex = t.groupIdHex,
-                    title = conversationTitle(context, chatRepository, directory, t.groupIdHex, strings),
-                    muted = flags[t.groupIdHex]?.muted == true,
-                    audience = chatRepository.memberCount(t.groupIdHex) ?: 0,
-                )
-            }
+        // ADR-0065 R.5 — one source per conversation, drawn from its
+        // current group, keyed for the person's stores on the conversation id.
+        val groups = me.lakko.app.feed.groupFeedSources(
+            chatState.conversations
+                .filter { isGroupConversation(chatRepository, it.groupIdHex) }
+                .map { t ->
+                    me.lakko.app.feed.GroupConversationForFeed(
+                        conversationHex = t.conversationHex,
+                        headHex = t.groupIdHex,
+                        title = conversationTitle(context, chatRepository, directory, t.groupIdHex, strings),
+                        audience = chatRepository.memberCount(t.groupIdHex) ?: 0,
+                    )
+                },
+        ) { conversationHex -> flags[conversationHex]?.muted == true }
         val chans = channelList.map { c ->
             FeedSource(
                 kind = FeedSourceKind.CHANNEL,
@@ -731,7 +735,7 @@ public fun FeedScreen(
     }
 
     fun hide(ref: FeedCandidateRef) {
-        val id = ref.source.idHex
+        val id = me.lakko.app.feed.feedSourceKey(ref.source)
         updateReading { hideFromFeeds(it, id) }
         scope.launch {
             if (showToast(strings["feed.hidden.toast"], strings["common.undo"]) == SnackbarResult.ActionPerformed) {
@@ -1271,7 +1275,7 @@ private fun HiddenFromFeedsScreen(
                     .padding(padding),
             ) {
                 for (s in hidden) {
-                    item(key = s.idHex) {
+                    item(key = me.lakko.app.feed.feedSourceKey(s)) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1285,7 +1289,7 @@ private fun HiddenFromFeedsScreen(
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f),
                             )
-                            TextButton(onClick = { onShowAgain(s.idHex) }) { Text(t("feed.hidden.show_again")) }
+                            TextButton(onClick = { onShowAgain(me.lakko.app.feed.feedSourceKey(s)) }) { Text(t("feed.hidden.show_again")) }
                         }
                     }
                 }
