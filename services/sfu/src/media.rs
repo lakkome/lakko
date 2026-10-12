@@ -183,6 +183,7 @@ use crate::playout_delay::{self, DownlinkBursts, PlayoutDelay, UplinkBursts};
 use crate::protocol::{
     ServerFrame, VideoGiven, VideoQuality, VideoWant, MAX_VIDEO_GIVEN, MAX_VIDEO_WANTS,
 };
+use crate::publish_budget::{self, PublishBudget};
 use crate::stream_map::StreamMap;
 use crate::uplink_estimate::{
     ChangeReason, DetectorState, EstimatorConfig, PacketArrival, PathEstimator, SeqLossCounter,
@@ -782,6 +783,18 @@ pub(crate) struct NeededChange {
     pub(crate) wanted: Wanted,
 }
 
+/// What became of one pass of [`MediaPeer::drive_publish_budget`]: a
+/// budget the publisher is to be told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BudgetChange {
+    /// The two ceilings.
+    pub(crate) budget: publish_budget::Budget,
+    /// Why it is told now.
+    pub(crate) why: publish_budget::Why,
+    /// What it was made from.
+    pub(crate) inputs: publish_budget::Inputs,
+}
+
 /// How long a track that is waiting to begin at a key frame
 /// ([`Forwarding::start_at_key_frame`]) waits before the publisher is
 /// asked again. Chosen, as [`FALLBACK_KEYFRAME_RETRY`] is: a key frame
@@ -1293,6 +1306,9 @@ pub struct MediaPeer {
     /// being sent, what it was told of that, and which of them have gone
     /// idle on the SFU's word ([`crate::video_needed`]).
     needs: SenderNeeds,
+    /// What this publisher was told its camera senders may send
+    /// ([`crate::publish_budget`]).
+    budget: PublishBudget,
 }
 
 /// How many publishers a subscriber's video wants name at each quality
@@ -1647,7 +1663,7 @@ pub const PLAYOUT_DELAY_EXTENSION_ID: u8 = 5;
 /// ([ADR-0070](../../../docs/adr/0070-call-media-through-a-loss-burst.md)
 /// steps 3 and 4), and one switch of the same shape that is not about loss
 /// ([`Self::video_needed`]). The default is everything on.
-// Four independent on/off switches, each an environment variable.
+// Five independent on/off switches, each an environment variable.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LossProtection {
@@ -1677,6 +1693,14 @@ pub struct LossProtection {
     /// decided per peer. Off, no `video-needed` frame is ever sent and
     /// nothing below it is touched.
     pub video_needed: bool,
+    /// Tell a publisher how much its main and its middle camera sender
+    /// may send, in a `publish-budget` frame made from the SFU's estimate
+    /// of its uplink ([`crate::publish_budget`];
+    /// `LAKKO_SFU_PUBLISH_BUDGET`, on unless set to `0`). Only under
+    /// [`BitrateControl::Server`]: without the SFU's own estimate there
+    /// is nothing to make a budget from, and the switch does nothing.
+    /// Off, no such frame is ever sent; REMB is the same either way.
+    pub publish_budget: bool,
 }
 
 impl Default for LossProtection {
@@ -1687,6 +1711,7 @@ impl Default for LossProtection {
             playout_delay: true,
             burst_keyframe: true,
             video_needed: true,
+            publish_budget: true,
         }
     }
 }
@@ -1702,6 +1727,7 @@ impl LossProtection {
             playout_delay: false,
             burst_keyframe: false,
             video_needed: false,
+            publish_budget: false,
         }
     }
 }
@@ -3564,6 +3590,7 @@ impl MediaPeer {
             downlink: downlink_control.then(|| Box::new(Downlink::new(now))),
             track_meters: HashMap::new(),
             needs: SenderNeeds::default(),
+            budget: PublishBudget::new(),
         }
     }
 
@@ -6227,6 +6254,79 @@ impl MediaPeer {
         self.needs.tracker.forget_told();
     }
 
+    /// Whether THIS (publishing) peer is told how much its camera senders
+    /// may send: the switch is on and the SFU decides its bitrate
+    /// ([`BitrateControl::Server`]).
+    #[must_use]
+    pub fn told_publish_budget(&self) -> bool {
+        self.protection.publish_budget && self.uplink.is_some()
+    }
+
+    /// What THIS (publishing) peer was last told its senders may send;
+    /// `None` before the first frame.
+    #[must_use]
+    pub fn publish_budget_told(&self) -> Option<publish_budget::Budget> {
+        self.budget.told()
+    }
+
+    /// The last `publish-budget` frame could not be queued for THIS peer:
+    /// it is produced again at the next pass.
+    pub(crate) fn publish_budget_not_delivered(&mut self) {
+        self.budget.forget_told();
+    }
+
+    /// One pass of the publish budget for THIS (publishing) peer
+    /// ([`crate::publish_budget`]): make the two ceilings from the
+    /// current estimate of its uplink and return them when the publisher
+    /// is to be told.
+    ///
+    /// Nothing until the peer is connected and has sent video: that is
+    /// when its estimate first goes out as REMB too
+    /// ([`Self::drive_uplink`]), and before it the figure is only the
+    /// configured start value. What the rule is made from:
+    ///
+    /// - the estimate, as the REMB carries it;
+    /// - audio: the rate arriving on the peer's audio tracks when
+    ///   downlink control keeps its track meters
+    ///   ([`Self::published_rates`]), otherwise the module's constant;
+    /// - whether the peer declared a light and a middle sender;
+    /// - which of its senders it was last told are needed
+    ///   ([`crate::video_needed`]); a peer that was told nothing is
+    ///   sending everything.
+    ///
+    /// `None`, and nothing done, for a peer that is not told
+    /// ([`Self::told_publish_budget`]).
+    pub(crate) fn drive_publish_budget(&mut self, now: Instant) -> Option<BudgetChange> {
+        if !self.told_publish_budget() || !self.connected {
+            return None;
+        }
+        let estimate_bps = {
+            let uplink = self.uplink.as_ref()?;
+            if uplink.video_ssrcs.is_empty() {
+                return None;
+            }
+            uplink.estimator.estimate_bps()
+        };
+        let audio_bps = self
+            .downlink
+            .is_some()
+            .then(|| self.published_rates(now).audio_bps);
+        let inputs = publish_budget::Inputs {
+            estimate_bps,
+            audio_bps,
+            has_light: self.light_mid.is_some(),
+            has_middle: self.middle_mid.is_some(),
+            main_needed: self.told_needed(TrackRole::Main),
+            middle_needed: self.told_needed(TrackRole::Middle),
+        };
+        let (budget, why) = self.budget.update(inputs, now)?;
+        Some(BudgetChange {
+            budget,
+            why,
+            inputs,
+        })
+    }
+
     /// The role of the heavy camera sender THIS peer publishes on `mid`:
     /// `Middle` for its declared middle track, `Main` for any other
     /// video track of one encoding that is not its light track. `None`
@@ -7444,6 +7544,9 @@ pub struct MediaRouter {
     /// When [`drive_video_needed`] last ran; `None` makes it run at the
     /// next pass whatever the time.
     video_needed_ran: Option<Instant>,
+    /// When [`drive_publish_budget`] last ran; `None` makes it run at the
+    /// next pass whatever the time.
+    publish_budget_ran: Option<Instant>,
 }
 
 impl MediaRouter {
@@ -8600,6 +8703,11 @@ async fn run_media_loop(
         // idle on that word is marked before the resume requests below
         // look at it.
         run_video_needed(&mut router, &peers, now).await;
+        // And how much its main and middle sender may send, from the
+        // estimate of its uplink (ADR-0068, amendment of 2026-10-11; a
+        // no-op unless the SFU decides publishers' bitrate). After the
+        // pass above, so a budget follows a change of need at once.
+        run_publish_budget(&mut router, &peers, now).await;
         let start_requests =
             drive_two_track_delivery(&mut router, now) + drive_video_wants(&mut router, now);
         // A packet written to a peer, or a keyframe request queued on one,
@@ -9295,7 +9403,89 @@ pub(crate) fn drive_video_needed(
             },
         ));
     }
+    if !frames.is_empty() {
+        // Which senders take from a publisher's budget changed: the
+        // budget follows in this same pass.
+        router.publish_budget_ran = None;
+    }
     frames
+}
+
+/// How often the publish budget is looked at. Chosen: what a publisher is
+/// told changes with its bitrate estimate, which moves on the scale of the
+/// REMB interval; a lower budget is therefore at most this late.
+const PUBLISH_BUDGET_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Decide, for every publisher that is told how much its camera senders
+/// may send, whether it is to be told now ([`crate::publish_budget`]), and
+/// return the frames to send. Runs when [`PUBLISH_BUDGET_INTERVAL`] has
+/// passed since the last run, and in the pass after what a publisher was
+/// told of its senders changed. Returns nothing sooner, under
+/// [`BitrateControl::Client`] and with the switch off
+/// ([`LossProtection::publish_budget`]).
+pub(crate) fn drive_publish_budget(
+    router: &mut MediaRouter,
+    now: Instant,
+) -> Vec<(MediaPeerId, ServerFrame)> {
+    let due = router.publish_budget_ran.map_or(true, |at| {
+        now.saturating_duration_since(at) >= PUBLISH_BUDGET_INTERVAL
+    });
+    if !due {
+        return Vec::new();
+    }
+    router.publish_budget_ran = Some(now);
+    let mut frames = Vec::new();
+    for publisher in router.peers_mut() {
+        let Some(change) = publisher.drive_publish_budget(now) else {
+            continue;
+        };
+        metrics::counter!(
+            crate::prom::names::PUBLISH_BUDGET_SENT_TOTAL,
+            "why" => change.why.as_str()
+        )
+        .increment(1);
+        tracing::info!(
+            publisher = %publisher.id(),
+            estimate_kbps = change.inputs.estimate_bps / 1000,
+            main_kbps = change.budget.main_kbps,
+            middle_kbps = change.budget.middle_kbps,
+            main_needed = change.inputs.main_needed,
+            middle_needed = change.inputs.has_middle && change.inputs.middle_needed,
+            why = change.why.as_str(),
+            "media: a publisher was told how much its camera senders may send"
+        );
+        frames.push((
+            publisher.id().clone(),
+            ServerFrame::PublishBudget {
+                main_kbps: change.budget.main_kbps,
+                middle_kbps: change.budget.middle_kbps,
+            },
+        ));
+    }
+    frames
+}
+
+/// One pass of the publish budget in the media loop:
+/// [`drive_publish_budget`], and each frame that came of it sent to its
+/// publisher on its signaling socket. A frame that cannot be queued is
+/// produced again at the next run.
+async fn run_publish_budget(router: &mut MediaRouter, peers: &PeerRegistry, now: Instant) {
+    for (peer_id, frame) in drive_publish_budget(router, now) {
+        let queued = match peers.peer(&peer_id).await {
+            Some(peer) => peer
+                .outbound
+                .as_ref()
+                .is_some_and(|tx| tx.try_send(frame).is_ok()),
+            None => false,
+        };
+        if !queued {
+            // Tried again at the next run, [`PUBLISH_BUDGET_INTERVAL`] on.
+            tracing::trace!(peer = %peer_id, "media: publish-budget frame not queued");
+            if let Some(publisher) = router.peer_mut(&peer_id) {
+                publisher.publish_budget_not_delivered();
+            }
+        }
+    }
 }
 
 /// One pass of "senders nobody watches" in the media loop:
@@ -18696,5 +18886,170 @@ mod tests {
             None,
             "the light sender is always needed and is told nothing"
         );
+    }
+
+    // ------------------------------------------------------------
+    // The publish budget (ADR-0068, amendment of 2026-10-11)
+    // ------------------------------------------------------------
+
+    /// A publisher named `name` under server-side bitrate control with its
+    /// three camera senders declared, `protection` as given.
+    fn budget_publisher(name: &str, protection: LossProtection, t0: Instant) -> MediaPeer {
+        let server = MediaPeer::with_downlink_control(
+            pid(name),
+            t0,
+            None,
+            false,
+            BitrateControl::Server(EstimatorConfig::default()),
+            protection,
+            false,
+        );
+        needed_publisher(name, true, server)
+    }
+
+    /// Make `name` look connected and sending video, with the estimate of
+    /// its uplink at `estimate_bps`.
+    fn publishing_at(router: &mut MediaRouter, name: &str, estimate_bps: u64) {
+        let publisher = router.peer_mut(&pid(name)).expect("there");
+        publisher.connected = true;
+        let uplink = publisher.uplink.as_mut().expect("server-side");
+        if uplink.video_ssrcs.is_empty() {
+            uplink.video_ssrcs.push(0x1000.into());
+        }
+        uplink.estimator.force_estimate(estimate_bps);
+    }
+
+    /// Run [`drive_publish_budget`] at `at`, whatever the time since it
+    /// last ran, and return what each publisher is told.
+    fn budget_at(router: &mut MediaRouter, at: Instant) -> Vec<(MediaPeerId, u32, u32)> {
+        router.publish_budget_ran = None;
+        drive_publish_budget(router, at)
+            .into_iter()
+            .map(|(id, frame)| match frame {
+                ServerFrame::PublishBudget {
+                    main_kbps,
+                    middle_kbps,
+                } => (id, main_kbps, middle_kbps),
+                other => panic!("expected publish-budget, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_publisher_is_told_its_budget_once_it_sends_video_and_a_cut_at_once() {
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        router.add_peer(budget_publisher("pub", LossProtection::default(), t0));
+        // Not connected, no video yet: the start value is not a budget.
+        assert_eq!(budget_at(&mut router, t0), vec![]);
+        publishing_at(&mut router, "pub", 3_000_000);
+        // 3000 - 64 - 150, over 1.15: 2422 for video; middle 500.
+        assert_eq!(budget_at(&mut router, t0), vec![(pid("pub"), 1922, 500)]);
+        assert_eq!(
+            find_peer(&router, "pub").publish_budget_told(),
+            Some(publish_budget::Budget {
+                main_kbps: 1922,
+                middle_kbps: 500
+            })
+        );
+        // Every frame the rule makes is one the wire format accepts.
+        for (_, frame) in {
+            router.peer_mut(&pid("pub")).expect("there").budget = PublishBudget::new();
+            router.publish_budget_ran = None;
+            drive_publish_budget(&mut router, t0)
+        } {
+            assert!(lakko_sfu_proto::encode_server_frame(&frame).is_ok());
+        }
+        // Nothing while nothing changes.
+        assert_eq!(budget_at(&mut router, t0 + Duration::from_secs(30)), vec![]);
+        // The estimate is cut: told in the same pass, no interval.
+        let cut = t0 + Duration::from_secs(30) + Duration::from_millis(1);
+        publishing_at(&mut router, "pub", 1_000_000);
+        assert_eq!(budget_at(&mut router, cut), vec![(pid("pub"), 200, 483)]);
+        // It climbs back: not before the interval.
+        publishing_at(&mut router, "pub", 3_000_000);
+        let soon = cut + publish_budget::RAISE_INTERVAL.saturating_sub(Duration::from_millis(1));
+        assert_eq!(budget_at(&mut router, soon), vec![]);
+        assert_eq!(
+            budget_at(&mut router, cut + publish_budget::RAISE_INTERVAL),
+            vec![(pid("pub"), 1922, 500)]
+        );
+    }
+
+    #[test]
+    fn the_budget_runs_on_its_interval_and_an_undelivered_frame_comes_again() {
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        router.add_peer(budget_publisher("pub", LossProtection::default(), t0));
+        publishing_at(&mut router, "pub", 2_000_000);
+        assert_eq!(drive_publish_budget(&mut router, t0).len(), 1);
+        // A cut right after: seen at the next run, not sooner.
+        publishing_at(&mut router, "pub", 1_000_000);
+        let soon = t0 + PUBLISH_BUDGET_INTERVAL.saturating_sub(Duration::from_millis(1));
+        assert_eq!(drive_publish_budget(&mut router, soon).len(), 0);
+        let due = t0 + PUBLISH_BUDGET_INTERVAL;
+        assert_eq!(drive_publish_budget(&mut router, due).len(), 1);
+        // The frame could not be queued: the same content again.
+        router
+            .peer_mut(&pid("pub"))
+            .expect("there")
+            .publish_budget_not_delivered();
+        assert_eq!(budget_at(&mut router, due), vec![(pid("pub"), 200, 483)]);
+    }
+
+    #[test]
+    fn a_sender_nobody_watches_gives_its_share_to_the_other_in_the_same_pass() {
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        router.add_peer(budget_publisher("pub", LossProtection::default(), t0));
+        router.add_peer(needed_subscriber("sub", "pub", true));
+        publishing_at(&mut router, "pub", 2_000_000);
+        // Told nothing of its senders yet: both take from the budget.
+        assert_eq!(budget_at(&mut router, t0), vec![(pid("pub"), 1053, 500)]);
+        // The subscriber shows the main picture; the middle sender is
+        // told off after the delay.
+        set_wants(&mut router, "sub", &[want("pub", VideoQuality::Main)]);
+        assert_eq!(needed_at(&mut router, t0), vec![(pid("pub"), true, true)]);
+        let off = t0 + video_needed::UNNEEDED_AFTER;
+        router.publish_budget_ran = Some(off);
+        assert_eq!(needed_at(&mut router, off), vec![(pid("pub"), true, false)]);
+        // The frame above makes the budget run in this pass, interval or
+        // not, and the main sender gets the middle sender's share: a rise
+        // told at once because the need changed.
+        assert_eq!(router.publish_budget_ran, None);
+        assert_eq!(
+            drive_publish_budget(&mut router, off)
+                .into_iter()
+                .map(|(_, frame)| frame)
+                .collect::<Vec<_>>(),
+            vec![ServerFrame::PublishBudget {
+                main_kbps: 1553,
+                middle_kbps: 500
+            }]
+        );
+    }
+
+    #[test]
+    fn no_budget_is_told_with_the_switch_off_or_when_the_client_decides() {
+        let t0 = Instant::now();
+        // The switch off, the SFU deciding the bitrate.
+        let mut router = MediaRouter::new();
+        let off = LossProtection {
+            publish_budget: false,
+            ..LossProtection::default()
+        };
+        router.add_peer(budget_publisher("pub", off, t0));
+        publishing_at(&mut router, "pub", 2_000_000);
+        assert!(!find_peer(&router, "pub").told_publish_budget());
+        assert_eq!(budget_at(&mut router, t0), vec![]);
+        // The switch on, the client deciding its own bitrate: no estimate
+        // to make a budget from.
+        let mut router = MediaRouter::new();
+        let mut client = needed_publisher("pub", true, peer_in_call("pub", "call"));
+        client.connected = true;
+        assert!(client.uplink.is_none());
+        assert!(!client.told_publish_budget());
+        router.add_peer(client);
+        assert_eq!(budget_at(&mut router, t0), vec![]);
     }
 }

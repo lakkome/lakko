@@ -28,8 +28,13 @@
  * transform, key and stream index as they are: no renegotiation.
  *
  * Pure apart from {@link SenderActivity}, which touches only the sender it is
- * handed: no DOM, no Solid, no timers.
+ * handed: no DOM, no Solid, no timers. Its write goes through the sender's
+ * one queue of parameter writes (`sender-parameters.ts`), shared with the
+ * bitrate ceiling (`publish-budget.ts`) and the sender's set-up
+ * (`camera-sender.ts`).
  */
+
+import { queueParameterWrite } from "./sender-parameters";
 
 /** One of this device's camera senders. */
 export type CameraSenderKind = "main" | "middle" | "light";
@@ -281,7 +286,7 @@ export class SenderActivity {
     const active = this.wanted;
     if (sender === null || active === null) return;
     if (!active && this.offRefused) return;
-    const outcome = await applyEncodingActive(sender, active);
+    const outcome = await queueParameterWrite(sender, () => applyEncodingActive(sender, active));
     // The sender was replaced while the browser answered: the new one is
     // asked by the caller's next `want`.
     if (this.sender !== sender) return;

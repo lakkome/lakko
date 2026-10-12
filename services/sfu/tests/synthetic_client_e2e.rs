@@ -9858,6 +9858,9 @@ async fn a_sender_nobody_watches_is_switched_off_and_comes_back_at_a_key_frame()
     ];
     // What the publisher was told, in order: (when, main, middle).
     let mut told: Vec<(Instant, bool, bool)> = Vec::new();
+    // The `publish-budget` frames the publisher got (ADR-0068, amendment
+    // of 2026-10-11): when, and the two ceilings.
+    let mut budgets: Vec<(Instant, u32, u32)> = Vec::new();
     // Whether the "client" is sending its main and its middle sender.
     let mut sending = [true, true];
 
@@ -9906,6 +9909,14 @@ async fn a_sender_nobody_watches_is_switched_off_and_comes_back_at_a_key_frame()
         // with the frame. A sender that is switched back on goes on from
         // its next delta frame.
         while let Ok(frame) = a_rx.try_recv() {
+            if let ServerFrame::PublishBudget {
+                main_kbps,
+                middle_kbps,
+            } = frame
+            {
+                budgets.push((Instant::now(), main_kbps, middle_kbps));
+                continue;
+            }
             if let ServerFrame::VideoNeeded { main, middle } = frame {
                 told.push((Instant::now(), main, middle));
                 if sending[0] && !main {
@@ -10121,6 +10132,34 @@ async fn a_sender_nobody_watches_is_switched_off_and_comes_back_at_a_key_frame()
         ms(to_middle_at),
         ms(to_main_at),
     );
+
+    // The publisher was also told how much its senders may send (the SFU
+    // decides its bitrate here): at least once, over the same socket, and
+    // every budget within the rule's floors and plan maxima.
+    eprintln!(
+        "publish-budget: the publisher was told (ms from the first frame, main kbit/s, middle \
+         kbit/s): {:?}",
+        budgets
+            .iter()
+            .map(|(at, m, d)| (ms(*at), *m, *d))
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        !budgets.is_empty(),
+        "a publisher under server-side bitrate control got no publish-budget frame"
+    );
+    for (_, main_kbps, middle_kbps) in &budgets {
+        use lakko_svc_sfu::publish_budget::{
+            MAIN_FLOOR_BPS, MAIN_PLAN_BPS, MIDDLE_FLOOR_BPS, MIDDLE_PLAN_BPS,
+        };
+        let main = u64::from(*main_kbps) * 1000;
+        let middle = u64::from(*middle_kbps) * 1000;
+        assert!((MAIN_FLOOR_BPS..=MAIN_PLAN_BPS).contains(&main), "{main}");
+        assert!(
+            (MIDDLE_FLOOR_BPS..=MIDDLE_PLAN_BPS).contains(&middle),
+            "{middle}"
+        );
+    }
 
     // What the publisher was told, and when.
     assert_eq!(

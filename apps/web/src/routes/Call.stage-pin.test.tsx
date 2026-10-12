@@ -475,7 +475,7 @@ describe("a peer whose audio arrives after their video, in a later track event",
     const [streams, setStreams] = createSignal<ReadonlyMap<string, MediaStream>>(
       new Map([["peer-Ben", stream], ["peer-Anna", fakeStream()]]),
     );
-    const receivers = new Map<string, { getSynchronizationSources(): unknown[]; getStats(): Promise<never> }>();
+    const receivers = new Map<string, { getStats(): Promise<unknown> }>();
     callActions.setParticipants([
       person("local", { isLocal: true, displayName: "Me", camOn: false, micOn: false }),
       person("peer-Anna", { displayName: "Anna" }),
@@ -508,13 +508,21 @@ describe("a peer whose audio arrives after their video, in a later track event",
     expect(stageName()).toBe("Anna");
 
     // Ben's audio track event: the receiver exists, the map is replaced.
-    let stamp = 0;
+    // The level is what this device decoded: the growth of the receiver's
+    // audio energy over the growth of its duration (an RMS of 0.4 here). No
+    // analyser exists in this environment, so the statistics path serves.
+    let seconds = 0;
     receivers.set("peer-Ben", {
-      getSynchronizationSources: () => {
-        stamp += 20;
-        return [{ audioLevel: 0.4, timestamp: stamp }];
+      getStats: () => {
+        seconds += 0.1;
+        const stat = {
+          type: "inbound-rtp",
+          kind: "audio",
+          totalAudioEnergy: 0.16 * seconds,
+          totalSamplesDuration: seconds,
+        };
+        return Promise.resolve({ forEach: (f: (s: unknown) => void) => f(stat) });
       },
-      getStats: () => Promise.reject(new Error("the source path never asks")),
     });
     setStreams(new Map(streams()));
     // Real time: the ring needs 200 ms of sound, the floor 1.5 s.

@@ -215,6 +215,41 @@ pub fn video_given_problem(given: &[VideoGiven]) -> Option<&'static str> {
     None
 }
 
+/// The highest ceiling one field of a [`ServerFrame::PublishBudget`] may
+/// carry, kilobits per second. A bound of the wire format, far above any
+/// rate a Lakko camera sender is planned at; chosen, not measured.
+pub const MAX_PUBLISH_BUDGET_KBPS: u32 = 20_000;
+
+/// Why the two ceilings of a [`ServerFrame::PublishBudget`] are out of
+/// bounds, or `None` when they are within them: each is at least 1 and at
+/// most [`MAX_PUBLISH_BUDGET_KBPS`]. Zero is refused because a ceiling of
+/// zero would say "send nothing", and switching a sender off is
+/// [`ServerFrame::VideoNeeded`]'s word, not this frame's.
+#[must_use]
+pub const fn publish_budget_problem(main_kbps: u32, middle_kbps: u32) -> Option<&'static str> {
+    if main_kbps == 0 || middle_kbps == 0 {
+        return Some("publish-budget has a ceiling of zero");
+    }
+    if main_kbps > MAX_PUBLISH_BUDGET_KBPS || middle_kbps > MAX_PUBLISH_BUDGET_KBPS {
+        return Some("publish-budget has a ceiling above what the protocol allows");
+    }
+    None
+}
+
+/// Deserialize one ceiling of a [`ServerFrame::PublishBudget`], refusing
+/// a value outside its bounds ([`publish_budget_problem`]; the bounds are
+/// the same for both fields, so each is checked on its own).
+fn deserialize_publish_budget_kbps<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let kbps = u32::deserialize(deserializer)?;
+    match publish_budget_problem(kbps, kbps) {
+        Some(problem) => Err(serde::de::Error::custom(problem)),
+        None => Ok(kbps),
+    }
+}
+
 /// A sequence read with its entry count checked as it is read, so an
 /// over-long list is refused without being collected, and then checked as
 /// a whole by `problem`.
@@ -478,6 +513,31 @@ pub enum ServerFrame {
         /// publisher that declared no middle sender.
         middle: bool,
     },
+
+    /// How much the receiving publisher's **own** camera senders may send
+    /// (ADR-0068, amendment of 2026-10-11): the SFU estimates the
+    /// publisher's uplink and tells it here, over Lakko's own signaling,
+    /// the ceiling for its main and its middle sender, in kilobits per
+    /// second. The client sets each as that sender's maximum bitrate. The
+    /// light sender keeps its fixed ceiling and audio is never limited;
+    /// neither is in the frame. A ceiling is given for a sender whether or
+    /// not it is needed ([`Self::VideoNeeded`] switches senders on and
+    /// off; this frame only bounds them). Sent once an estimate exists and
+    /// then when the budget changes; never sent by an SFU that does not
+    /// decide a publisher's bitrate. Both fields are required, each at
+    /// least 1 and at most [`MAX_PUBLISH_BUDGET_KBPS`]
+    /// ([`publish_budget_problem`]); a client that ignores the frame keeps
+    /// its own ceilings, as before.
+    PublishBudget {
+        /// The ceiling of the main (full size) camera sender, kbit/s.
+        #[serde(deserialize_with = "deserialize_publish_budget_kbps")]
+        main_kbps: u32,
+        /// The ceiling of the middle (half size) camera sender, kbit/s.
+        /// Given also to a publisher that has no middle sender, which
+        /// has nothing to apply it to.
+        #[serde(deserialize_with = "deserialize_publish_budget_kbps")]
+        middle_kbps: u32,
+    },
 }
 
 impl ServerFrame {
@@ -499,6 +559,7 @@ impl ServerFrame {
             Self::SdpOffer { .. } => "sdp-offer",
             Self::VideoGiven { .. } => "video-given",
             Self::VideoNeeded { .. } => "video-needed",
+            Self::PublishBudget { .. } => "publish-budget",
         }
     }
 }
@@ -769,13 +830,21 @@ pub fn decode_server_frame(json: &str) -> Result<ServerFrame, SfuProtoError> {
 ///
 /// [`SfuProtoError::Json`] when the frame cannot be serialised, or when
 /// the `given` of a [`ServerFrame::VideoGiven`] is outside its bounds
-/// ([`video_given_problem`]): a client would refuse that frame, so it is
+/// ([`video_given_problem`]) or the ceilings of a
+/// [`ServerFrame::PublishBudget`] are outside theirs
+/// ([`publish_budget_problem`]): a client would refuse that frame, so it is
 /// not composed.
 pub fn encode_server_frame(frame: &ServerFrame) -> Result<String, SfuProtoError> {
-    if let ServerFrame::VideoGiven { given } = frame {
-        if let Some(problem) = video_given_problem(given) {
-            return Err(SfuProtoError::Json(serde::ser::Error::custom(problem)));
-        }
+    let problem = match frame {
+        ServerFrame::VideoGiven { given } => video_given_problem(given),
+        ServerFrame::PublishBudget {
+            main_kbps,
+            middle_kbps,
+        } => publish_budget_problem(*main_kbps, *middle_kbps),
+        _ => None,
+    };
+    if let Some(problem) = problem {
+        return Err(SfuProtoError::Json(serde::ser::Error::custom(problem)));
     }
     Ok(serde_json::to_string(frame)?)
 }
@@ -1356,6 +1425,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn publish_budget_round_trips_in_the_wire_shape() {
+        for (main_kbps, middle_kbps, wire) in [
+            (
+                2500,
+                500,
+                r#"{"kind":"publish-budget","main_kbps":2500,"middle_kbps":500}"#,
+            ),
+            (
+                1,
+                1,
+                r#"{"kind":"publish-budget","main_kbps":1,"middle_kbps":1}"#,
+            ),
+            (
+                MAX_PUBLISH_BUDGET_KBPS,
+                150,
+                r#"{"kind":"publish-budget","main_kbps":20000,"middle_kbps":150}"#,
+            ),
+        ] {
+            let frame = ServerFrame::PublishBudget {
+                main_kbps,
+                middle_kbps,
+            };
+            assert_eq!(encode_server_frame(&frame).expect("encode"), wire);
+            assert_eq!(decode_server_frame(wire).expect("decode"), frame);
+        }
+    }
+
+    #[test]
+    fn publish_budget_is_bounded_and_requires_both_ceilings() {
+        // A missing field, a field of another type, a null, a fraction, a
+        // negative number, zero and a value above the bound are refused: a
+        // client must never have to guess a ceiling.
+        for bad in [
+            r#"{"kind":"publish-budget"}"#,
+            r#"{"kind":"publish-budget","main_kbps":2500}"#,
+            r#"{"kind":"publish-budget","middle_kbps":500}"#,
+            r#"{"kind":"publish-budget","main_kbps":"2500","middle_kbps":500}"#,
+            r#"{"kind":"publish-budget","main_kbps":2500,"middle_kbps":null}"#,
+            r#"{"kind":"publish-budget","main_kbps":2500.5,"middle_kbps":500}"#,
+            r#"{"kind":"publish-budget","main_kbps":-1,"middle_kbps":500}"#,
+            r#"{"kind":"publish-budget","main_kbps":0,"middle_kbps":500}"#,
+            r#"{"kind":"publish-budget","main_kbps":2500,"middle_kbps":0}"#,
+            r#"{"kind":"publish-budget","main_kbps":20001,"middle_kbps":500}"#,
+            r#"{"kind":"publish-budget","main_kbps":2500,"middle_kbps":20001}"#,
+            r#"{"kind":"publish-budget","main_kbps":4294967296,"middle_kbps":500}"#,
+            r#"{"kind":"publish-budget","main_kbps":true,"middle_kbps":500}"#,
+        ] {
+            assert!(decode_server_frame(bad).is_err(), "accepted {bad}");
+        }
+        // The frame is a server frame only.
+        assert!(decode_client_frame(
+            r#"{"kind":"publish-budget","main_kbps":2500,"middle_kbps":500}"#
+        )
+        .is_err());
+        // The encoder refuses what a client would.
+        let frame = |main_kbps, middle_kbps| ServerFrame::PublishBudget {
+            main_kbps,
+            middle_kbps,
+        };
+        assert!(encode_server_frame(&frame(0, 500)).is_err());
+        assert!(encode_server_frame(&frame(2500, 0)).is_err());
+        assert!(encode_server_frame(&frame(MAX_PUBLISH_BUDGET_KBPS + 1, 500)).is_err());
+        assert!(encode_server_frame(&frame(2500, MAX_PUBLISH_BUDGET_KBPS + 1)).is_err());
+        assert_eq!(publish_budget_problem(1, MAX_PUBLISH_BUDGET_KBPS), None);
+    }
+
     // -- kind_str() drift guards (metric labels must match serde tags) -----
 
     /// `ServerFrame::kind_str()` must equal the serialized `kind` tag for
@@ -1398,6 +1534,10 @@ mod tests {
             ServerFrame::VideoNeeded {
                 main: false,
                 middle: true,
+            },
+            ServerFrame::PublishBudget {
+                main_kbps: 1200,
+                middle_kbps: 500,
             },
         ];
         for frame in &frames {

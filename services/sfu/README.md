@@ -964,6 +964,114 @@ one is covered in the SFU's own books by unit tests only. With
 looked at. The estimate being put back was exercised by a unit test (a
 forced cut), not by a cut on a real path.
 
+## The publish budget (`publish-budget`, 2026-10-11)
+
+`publish_budget.rs` holds the rule, `media::drive_publish_budget` and
+`MediaPeer::drive_publish_budget` act on it
+([ADR-0068](../../docs/adr/0068-server-side-bitrate-control.md), amendment
+of 2026-10-11). Only under `LAKKO_SFU_BITRATE_CONTROL=server`, and on unless
+`LAKKO_SFU_PUBLISH_BUDGET=0` (unset, empty or `1`: on; anything else refuses
+to start). Off, or with the client deciding its own bitrate, no
+`publish-budget` frame is ever sent. REMB is the same either way. The
+startup line `media: UDP socket bound; ...` carries `publish_budget=true`
+only when the frame will actually be sent (the switch on **and** the SFU
+deciding the bitrate).
+
+**Why.** Measured on live calls (2026-10-11): with the estimate held at
+1000 kbit/s one browser's main sender followed the REMB (720 kbit/s) and
+another's did not (a flat 1537 kbit/s), while that same browser kept its
+light sender under the ceiling the client had set on it. A publisher that
+sends more than its path carries stands a queue in front of its own audio.
+So the estimate also goes out in a form every browser obeys: a ceiling per
+sender.
+
+### The frame
+
+```json
+{"kind":"publish-budget","main_kbps":1922,"middle_kbps":500}
+```
+
+`lakko_sfu_proto::ServerFrame::PublishBudget`. Both fields are required
+unsigned integers, kilobits per second, each from 1 to 20000
+(`MAX_PUBLISH_BUDGET_KBPS`); anything else is refused on decode, and the
+encoder refuses to compose it. The ceiling of the publisher's **main** and
+**middle** camera sender. The light sender keeps its fixed ceiling and audio
+is never limited. A client sets each figure as that sender's maximum
+bitrate; one that ignores the frame behaves as before.
+
+### The rule
+
+All of it is the SFU's; a client has no allocation rule.
+
+| Step | What | Figure |
+|---|---|---|
+| headroom, audio | the rate arriving on the publisher's audio tracks where it is metered (downlink control on), kept within 32 to 128 kbit/s; otherwise a constant | `AUDIO_RESERVE_BPS` 64 kbit/s |
+| headroom, light | a constant, when the publisher declared a light sender | `LIGHT_RESERVE_BPS` 150 kbit/s |
+| retransmissions and FEC | what is left is divided by 1.15 | `PROTECTION_PERCENT` 15 |
+| middle | its plan rate when needed; gives way only to the main floor | `MIDDLE_PLAN_BPS` 500 kbit/s |
+| main | the rest when needed | up to `MAIN_PLAN_BPS` 2500 kbit/s |
+| floors | never below | `MAIN_FLOOR_BPS` 200, `MIDDLE_FLOOR_BPS` 100 kbit/s |
+
+A sender the publisher was told nobody watches (`video-needed`) takes
+nothing from the budget and is given its ceiling anyway: the one it would
+have if it were switched on now. A publisher that was told nothing of its
+senders is taken to send them all. Every constant is chosen, not measured.
+
+Examples (a light sender declared, audio not metered): an estimate of
+3000 kbit/s gives `main 1922, middle 500`; 1000 kbit/s gives
+`main 200, middle 483` with both needed and `main 683` with the middle
+sender off.
+
+### When a publisher is told
+
+- **First**: once it is connected and has sent video (when its estimate
+  first goes out as REMB).
+- **Lower**: at once, when a ceiling is under 97% of what was told
+  (`DROP_PERCENT`).
+- **Senders**: at once, when which senders are needed changed and a
+  ceiling with it. A `video-needed` frame makes the budget run in the same
+  pass.
+- **Higher**: no sooner than 2 s after the last frame (`RAISE_INTERVAL`),
+  and only when a ceiling differs by 10% of what was told
+  (`RAISE_SHARE_PERCENT`) or reaches its plan maximum.
+
+The rule is looked at every 100 ms (`PUBLISH_BUDGET_INTERVAL`), so a lower
+budget is at most that late. A frame that cannot be queued on the
+publisher's signaling socket is produced again at the next run.
+
+### Visible
+
+One INFO line per frame sent:
+
+```
+media: a publisher was told how much its camera senders may send publisher=<peer id> estimate_kbps=1000 main_kbps=200 middle_kbps=483 main_needed=true middle_needed=true why=lower
+```
+
+`why` is `first`, `lower`, `senders` or `higher`. Counter:
+`lakko_sfu_publish_budget_sent_total{why}`.
+
+### Tests
+
+- `publish_budget.rs` (14): the headroom, the shares, the bounds over a
+  sweep of estimates and needs, monotonicity, and each of the four reasons
+  a frame is sent, with the interval and the share.
+- `media.rs` (4): told only once connected and sending video, a cut at
+  once, the interval, an undelivered frame, the share following a
+  `video-needed` change in the same pass, nothing with the switch off or
+  under client-side control.
+- `config.rs`: the switch.
+- `tests/synthetic_client_e2e.rs`,
+  `a_sender_nobody_watches_is_switched_off_and_comes_back_at_a_key_frame`:
+  the publisher receives the frame on its signaling socket from the live
+  media loop, within the bounds.
+
+### Not verified
+
+Nothing here was seen on a call, and nothing was run against a browser.
+Whether a browser's main sender obeys the ceiling is the client's side
+(`apps/web/src/calls/publish-budget.ts`); iOS and Android do not read the
+frame yet. A modified client can ignore the frame, as it could ignore REMB.
+
 ## Carrying the light picture through a burst of loss (ADR-0070 steps 3 and 4)
 
 [ADR-0070](../../docs/adr/0070-call-media-through-a-loss-burst.md). The

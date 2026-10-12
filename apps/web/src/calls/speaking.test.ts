@@ -5,9 +5,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   FLOOR_ONSET_MS,
+  NOISE_EVIDENCE_MIN,
+  NoiseGate,
   RING_OFF_MS,
   RING_ON_MS,
   SPEAKING_LEVEL,
+  SPEAKING_LEVEL_MAX,
+  SPEAKING_LEVEL_MIN,
+  SPEECH_OVER_NOISE,
   SpeakingTracker,
   rmsLevel,
 } from "./speaking";
@@ -157,6 +162,130 @@ describe("several people", () => {
     expect(run({}, RING_OFF_MS + 200)).toBeNull();
     const last = t.snapshot(order, now).lastSpokeAtMs;
     expect(last.c).toBeGreaterThan(last.b ?? 0);
+  });
+});
+
+describe("what counts as sound", () => {
+  /** Feed one level every 100 ms for `ms`, starting at `from`. */
+  function hold(gate: NoiseGate, level: number, from: number, ms: number): number {
+    let now = from;
+    for (; now < from + ms; now += 100) gate.update(level, now);
+    return now;
+  }
+
+  it("starts at the fixed level before anything is known", () => {
+    expect(new NoiseGate().threshold).toBeCloseTo(SPEAKING_LEVEL, 9);
+    expect(new SpeakingTracker().thresholdOf("nobody")).toBe(SPEAKING_LEVEL);
+  });
+
+  it("follows a quiet room down, to a bound", () => {
+    const gate = new NoiseGate();
+    hold(gate, 0.002, 0, 1_000);
+    expect(gate.threshold).toBeCloseTo(0.002 * SPEECH_OVER_NOISE, 9);
+    hold(gate, 0.0002, 1_000, 2_000);
+    expect(gate.threshold).toBe(SPEAKING_LEVEL_MIN);
+  });
+
+  it("does not empty the floor on one torn reading", () => {
+    const gate = new NoiseGate();
+    hold(gate, 0.006, 0, 1_000);
+    const before = gate.threshold;
+    gate.update(0.0002, 1_000);
+    expect(gate.threshold).toBeCloseTo(before / 2, 9);
+  });
+
+  it("learns nothing from digital silence or from a reading that is not a number", () => {
+    const gate = new NoiseGate();
+    hold(gate, 0.01, 0, 20_000);
+    const before = gate.threshold;
+    hold(gate, 0, 20_000, 5_000);
+    hold(gate, NOISE_EVIDENCE_MIN / 2, 25_000, 5_000);
+    gate.update(Number.NaN, 30_000);
+    expect(gate.threshold).toBe(before);
+  });
+
+  it("climbs slowly towards steady sound and never past the bound or the sound itself", () => {
+    const gate = new NoiseGate();
+    // Three seconds of speech barely move it.
+    hold(gate, 0.2, 0, 3_000);
+    expect(gate.threshold).toBeLessThan(SPEAKING_LEVEL * 1.4);
+    // A minute of the same steady sound stops at the bound.
+    hold(gate, 0.2, 3_000, 60_000);
+    expect(gate.threshold).toBe(SPEAKING_LEVEL_MAX);
+    // A steady hum settles the floor at the hum, not above it.
+    const hum = new NoiseGate();
+    hold(hum, 0.01, 0, 60_000);
+    expect(hum.threshold).toBeCloseTo(0.01 * SPEECH_OVER_NOISE, 9);
+  });
+
+  it("does not take a long gap between readings for a long rise", () => {
+    const gate = new NoiseGate();
+    gate.update(0.2, 0);
+    gate.update(0.2, 3_600_000);
+    expect(gate.threshold).toBeLessThan(SPEAKING_LEVEL * 1.2);
+  });
+});
+
+describe("one scale for a loud room and a quiet microphone", () => {
+  /** Speech as a call delivers it: syllables around `level`, never steady. */
+  function talk(t: SpeakingTracker, id: string, level: number, from: number, ms: number): number {
+    let now = from;
+    for (let i = 0; now < from + ms; now += 100, i += 1) {
+      t.sample(id, level * (i % 3 === 0 ? 0.6 : 1), now);
+    }
+    return now;
+  }
+
+  it("draws the ring for speech at 0.03 over a room at 0.002, which the fixed level missed", () => {
+    // The 2026-10-11 call: a phone whose speech peaked at 0.03 to 0.05.
+    const t = new SpeakingTracker();
+    let now = 0;
+    for (; now < 3_000; now += 100) t.sample("a", 0.002, now);
+    expect(t.snapshot(ORDER, now).speakingIds.has("a")).toBe(false);
+    // 0.6 * 0.03 = 0.018 is under the old fixed 0.02 every third reading.
+    now = talk(t, "a", 0.03, now, FLOOR_ONSET_MS + 500);
+    const snap = t.snapshot(ORDER, now);
+    expect(snap.speakingIds.has("a")).toBe(true);
+    expect(snap.activeSpeakerId).toBe("a");
+  });
+
+  it("does not draw it for a room that idles at 0.015, and does for speech over that room", () => {
+    const t = new SpeakingTracker();
+    let now = 0;
+    for (; now < 10_000; now += 100) {
+      t.sample("a", 0.015, now);
+      expect(t.snapshot(ORDER, now).speakingIds.has("a")).toBe(false);
+    }
+    now = talk(t, "a", 0.15, now, 1_000);
+    expect(t.snapshot(ORDER, now).speakingIds.has("a")).toBe(true);
+  });
+
+  it("stops counting a steady noise that came on, within seconds", () => {
+    const t = new SpeakingTracker();
+    let now = 0;
+    for (; now < 1_000; now += 100) t.sample("a", 0.03, now);
+    expect(t.snapshot(ORDER, now).speakingIds.has("a")).toBe(true);
+    for (; now < 7_000; now += 100) t.sample("a", 0.03, now);
+    expect(t.snapshot(ORDER, now).speakingIds.has("a")).toBe(false);
+  });
+
+  it("keeps what it learned about the room across a mute", () => {
+    const t = new SpeakingTracker();
+    let now = 0;
+    for (; now < 3_000; now += 100) t.sample("a", 0.002, now);
+    const learned = t.thresholdOf("a");
+    t.silence("a");
+    expect(t.thresholdOf("a")).toBe(learned);
+  });
+
+  it("treats a level that could not be read as silence and learns nothing from it", () => {
+    const t = new SpeakingTracker();
+    feed(t, "a", LOUD, 0, 500);
+    expect(t.snapshot(ORDER, 500).speakingIds.has("a")).toBe(true);
+    const before = t.thresholdOf("a");
+    for (let now = 600; now <= 600 + RING_OFF_MS; now += 100) t.sample("a", null, now);
+    expect(t.snapshot(ORDER, 600 + RING_OFF_MS).speakingIds.has("a")).toBe(false);
+    expect(t.thresholdOf("a")).toBe(before);
   });
 });
 

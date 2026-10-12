@@ -181,6 +181,21 @@ pub enum SfuServerFrame {
         /// The middle (half size) camera sender.
         middle: bool,
     },
+    /// How much this publisher's own camera senders may send (ADR-0068,
+    /// amendment of 2026-10-11): the ceiling the SFU sets for the main
+    /// and the middle sender, in kilobits per second, each at least 1
+    /// and at most 20000. The client sets each as that sender's maximum
+    /// bitrate. The light sender and audio are not limited and are not
+    /// here. A ceiling is given whether or not the sender is needed
+    /// (`VideoNeeded` switches senders on and off).
+    ///
+    /// Appended last: UniFFI lowers a variant as its ordinal.
+    PublishBudget {
+        /// The ceiling of the main (full size) camera sender, kbit/s.
+        main_kbps: u32,
+        /// The ceiling of the middle (half size) camera sender, kbit/s.
+        middle_kbps: u32,
+    },
 }
 
 /// One entry of [`SfuServerFrame::VideoGiven`]: the picture of one
@@ -242,6 +257,13 @@ impl From<ServerFrame> for SfuServerFrame {
                     .collect(),
             },
             ServerFrame::VideoNeeded { main, middle } => Self::VideoNeeded { main, middle },
+            ServerFrame::PublishBudget {
+                main_kbps,
+                middle_kbps,
+            } => Self::PublishBudget {
+                main_kbps,
+                middle_kbps,
+            },
         }
     }
 }
@@ -568,6 +590,30 @@ mod tests {
             r#"{"kind":"video-needed","main":1,"middle":0}"#.to_owned()
         )
         .is_err());
+    }
+
+    #[test]
+    fn publish_budget_parses_into_typed_frame() {
+        for (main, middle) in [(2500_u32, 500_u32), (1, 1), (20_000, 150)] {
+            let json =
+                format!(r#"{{"kind":"publish-budget","main_kbps":{main},"middle_kbps":{middle}}}"#);
+            match parse_sfu_server_frame(json).expect("parses") {
+                SfuServerFrame::PublishBudget {
+                    main_kbps,
+                    middle_kbps,
+                } => assert_eq!((main_kbps, middle_kbps), (main, middle)),
+                _ => panic!("expected PublishBudget"),
+            }
+        }
+        // Both ceilings are required, non-zero and within the bound.
+        for bad in [
+            r#"{"kind":"publish-budget","main_kbps":2500}"#,
+            r#"{"kind":"publish-budget","main_kbps":0,"middle_kbps":500}"#,
+            r#"{"kind":"publish-budget","main_kbps":2500,"middle_kbps":20001}"#,
+            r#"{"kind":"publish-budget","main_kbps":"2500","middle_kbps":500}"#,
+        ] {
+            assert!(parse_sfu_server_frame(bad.to_owned()).is_err(), "{bad}");
+        }
     }
 
     #[test]

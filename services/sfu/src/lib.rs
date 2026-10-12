@@ -34,6 +34,7 @@ pub mod peer;
 pub mod playout_delay;
 pub mod prom;
 pub mod protocol;
+pub mod publish_budget;
 pub mod router;
 pub mod signaling;
 pub mod stream_map;

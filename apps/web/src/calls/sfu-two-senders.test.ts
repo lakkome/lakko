@@ -102,6 +102,7 @@ vi.mock("../wasm", async () => {
     middleSenderWanted: (people: number): boolean => real.middleSenderWanted(people),
     parseSfuVideoGiven: (json: string): string[] => real.parseSfuVideoGiven(json),
     parseSfuVideoNeeded: (json: string): Uint8Array => real.parseSfuVideoNeeded(json),
+    parseSfuPublishBudget: (json: string): Uint32Array => real.parseSfuPublishBudget(json),
     composeSfuSdpAnswer: (sdp: string): string => JSON.stringify({ kind: "sdp-answer", sdp }),
     composeSfuIceCandidate: (): string => "{}",
     composeSfuPing: (): string => "{}",
@@ -815,9 +816,9 @@ describe("the media counters", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       const lines = info.mock.calls.map((c) => String(c[0]));
       expect(lines.filter((l) => l.includes(" send video "))).toEqual([
-        "call media interval send video mode=L1T3 size=1280x720 fps=30 limited_by=- sender=main needed=- active=yes",
-        "call media interval send video mode=- size=640x360 fps=30 limited_by=- sender=middle needed=- active=no",
-        "call media interval send video mode=- size=320x180 fps=30 limited_by=- sender=light needed=- active=yes",
+        "call media interval send video mode=L1T3 size=1280x720 fps=30 limited_by=- sender=main needed=- active=yes ceiling=-",
+        "call media interval send video mode=- size=640x360 fps=30 limited_by=- sender=middle needed=- active=no ceiling=500",
+        "call media interval send video mode=- size=320x180 fps=30 limited_by=- sender=light needed=- active=yes ceiling=150",
       ]);
       const senderLine = lines.find((l) => l.includes(" sender encoded="));
       expect(senderLine).toContain("sender encoded=180 pkts=700");
@@ -1831,9 +1832,201 @@ describe("senders nobody watches", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       const lines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes(" send video "));
       expect(lines).toEqual([
-        "call media interval send video mode=- size=640x360 fps=30 limited_by=- sender=middle needed=yes active=yes",
-        "call media interval send video mode=- size=320x180 fps=30 limited_by=- sender=light needed=- active=yes",
-        "call media interval send video mode=- size=- fps=- limited_by=- sender=main needed=no active=no",
+        "call media interval send video mode=- size=640x360 fps=30 limited_by=- sender=middle needed=yes active=yes ceiling=500",
+        "call media interval send video mode=- size=320x180 fps=30 limited_by=- sender=light needed=- active=yes ceiling=150",
+        "call media interval send video mode=- size=- fps=- limited_by=- sender=main needed=no active=no ceiling=-",
+      ]);
+      session.hangUp();
+    } finally {
+      info.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ---- The publish budget (`publish-budget`) ---------------------------------
+
+/** The SFU says how much this device's main and middle sender may send. */
+function publishBudget(mainKbps: number, middleKbps: number): void {
+  sockets[0]?.onmessage?.({
+    data: JSON.stringify({ kind: "publish-budget", main_kbps: mainKbps, middle_kbps: middleKbps }),
+  });
+}
+
+/** The ceiling a sender's one encoding holds now, bits a second. */
+function encodingCeiling(t: FakeTransceiver | undefined): unknown {
+  return t?.sender.params.encodings[0]?.["maxBitrate"];
+}
+
+describe("the publish budget", () => {
+  async function inCallOfThree(): Promise<{ session: SfuCallSession; pc: FakePc }> {
+    hooks.welcomeRoster = ["a", "b"];
+    const call = await connected();
+    await answer();
+    return call;
+  }
+
+  it("leaves every sender the ceiling it was created with until the SFU says something", async () => {
+    const { pc } = await inCallOfThree();
+    expect(encodingCeiling(pc.main())).toBeUndefined();
+    expect(encodingCeiling(pc.middles()[0])).toBe(500_000);
+    expect(encodingCeiling(pc.lights()[0])).toBe(150_000);
+  });
+
+  it("sets the main and the middle sender's ceiling with setParameters alone, and never the light one's", async () => {
+    const { pc } = await inCallOfThree();
+    const main = pc.main();
+    const transceivers = [...pc.getTransceivers()];
+    const offers = hooks.offers.length;
+    const seals = hooks.attaches.length;
+    const lightCalls = pc.lights()[0]?.sender.setParametersCalls.length;
+
+    publishBudget(1200, 483);
+    await flush();
+    expect(encodingCeiling(main)).toBe(1_200_000);
+    expect(encodingCeiling(pc.middles()[0])).toBe(483_000);
+    expect(encodingCeiling(pc.lights()[0])).toBe(150_000);
+    expect(pc.lights()[0]?.sender.setParametersCalls).toHaveLength(lightCalls ?? -1);
+
+    // Nothing else of the encodings moved, and nothing was renegotiated.
+    expect(main?.sender.params.encodings[0]?.["scalabilityMode"]).toBe("L1T3");
+    expect(pc.middles()[0]?.sender.params.encodings[0]?.["scaleResolutionDownBy"]).toBe(2);
+    expect(encodingActive(pc.middles()[0])).toBe(true);
+    expect(pc.getTransceivers()).toEqual(transceivers);
+    expect(hooks.offers).toHaveLength(offers);
+    expect(hooks.attaches).toHaveLength(seals);
+  });
+
+  it("ends at the last word under rapid frames", async () => {
+    const { pc } = await inCallOfThree();
+    publishBudget(2000, 500);
+    publishBudget(900, 400);
+    publishBudget(1500, 500);
+    await flush();
+    expect(encodingCeiling(pc.main())).toBe(1_500_000);
+    expect(encodingCeiling(pc.middles()[0])).toBe(500_000);
+  });
+
+  it("applies beside the SFU's word on which senders are needed, neither undoing the other", async () => {
+    const { pc } = await inCallOfThree();
+    videoNeeded(false, true);
+    publishBudget(700, 500);
+    videoNeeded(true, false);
+    publishBudget(1553, 500);
+    await flush();
+    expect(encodingActive(pc.main()) ?? true).toBe(true);
+    expect(encodingActive(pc.middles()[0])).toBe(false);
+    expect(encodingCeiling(pc.main())).toBe(1_553_000);
+    // A sender that is switched off holds its ceiling too.
+    expect(encodingCeiling(pc.middles()[0])).toBe(500_000);
+    expect(pc.main()?.sender.params.encodings[0]?.["scalabilityMode"]).toBe("L1T3");
+  });
+
+  it("puts the ceiling back after a renegotiation or a device switch that reset it", async () => {
+    const { session, pc } = await inCallOfThree();
+    publishBudget(800, 300);
+    await flush();
+    const main = pc.main();
+    const middle = pc.middles()[0];
+    if (main !== undefined) main.sender.params = { encodings: [{}] };
+    await negotiate(pc);
+    await answer();
+    expect(encodingCeiling(main)).toBe(800_000);
+    if (main !== undefined) main.sender.params = { encodings: [{}] };
+    if (middle !== undefined) middle.sender.params = { encodings: [{}] };
+    await session.switchVideoInput("back-camera");
+    await flush();
+    expect(encodingCeiling(main)).toBe(800_000);
+    expect(encodingCeiling(middle)).toBe(300_000);
+  });
+
+  it("gives a camera turned on mid-call the ceiling in force, not the one its senders are created with", async () => {
+    const { session, pc } = await connected({ media: { audio: true, video: false } });
+    await answer();
+    welcome(["a", "b"]);
+    await flush();
+    publishBudget(600, 250);
+    await session.publishVideo();
+    await flush();
+    expect(encodingCeiling(pc.main())).toBe(600_000);
+    expect(encodingCeiling(pc.middles()[0])).toBe(250_000);
+    expect(encodingCeiling(pc.lights()[0])).toBe(150_000);
+    // The mid-call sender still got its temporal layers.
+    expect(pc.main()?.sender.params.encodings[0]?.["scalabilityMode"]).toBe("L1T3");
+  });
+
+  it("ignores a malformed frame with one warning, and keeps the ceilings it had", async () => {
+    const { pc } = await inCallOfThree();
+    publishBudget(900, 400);
+    await flush();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      publishBudget(0, 400);
+      sockets[0]?.onmessage?.({ data: '{"kind":"publish-budget","main_kbps":900}' });
+      await flush();
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes("malformed publish-budget"))).toHaveLength(2);
+      expect(encodingCeiling(pc.main())).toBe(900_000);
+      expect(encodingCeiling(pc.middles()[0])).toBe(400_000);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("touches no sender once the call has ended, and the next call starts from nothing", async () => {
+    const first = await inCallOfThree();
+    publishBudget(900, 400);
+    await flush();
+    const main = first.pc.main();
+    const calls = main?.sender.setParametersCalls.length;
+    const socket = sockets[0];
+    first.session.hangUp();
+    // A frame that was already on its way.
+    expect(() =>
+      socket?.onmessage?.({
+        data: JSON.stringify({ kind: "publish-budget", main_kbps: 300, middle_kbps: 200 }),
+      }),
+    ).not.toThrow();
+    await flush();
+    expect(main?.sender.setParametersCalls).toHaveLength(calls ?? -1);
+    // A later call's senders are not written before that call's first frame.
+    pcs.length = 0;
+    sockets.length = 0;
+    const next = await inCallOfThree();
+    expect(encodingCeiling(next.pc.main())).toBeUndefined();
+    expect(encodingCeiling(next.pc.middles()[0])).toBe(500_000);
+  });
+
+  it("says one line on each change and names the ceiling in the send lines", async () => {
+    vi.useFakeTimers();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      hooks.welcomeRoster = ["a", "b"];
+      const session = new SfuCallSession(config({ nowMs: () => 0 }));
+      const connecting = session.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      await connecting;
+      const pc = pcs[0];
+      if (pc === undefined) throw new Error("no peer connection");
+      const budgetLines = (): string[] =>
+        info.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("call publish budget"));
+
+      publishBudget(1922, 500);
+      publishBudget(1922, 500);
+      publishBudget(200, 483);
+      expect(budgetLines()).toEqual([
+        "call publish budget main=1922 middle=500",
+        "call publish budget main=200 middle=483",
+      ]);
+
+      pc.stats = new Map<string, Record<string, unknown>>([
+        ["OM", { id: "OM", type: "outbound-rtp", kind: "video", frameWidth: 1280, frameHeight: 720, framesPerSecond: 30 }],
+      ]);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const lines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes(" send video "));
+      expect(lines).toEqual([
+        "call media interval send video mode=- size=1280x720 fps=30 limited_by=- sender=main needed=- active=yes ceiling=200",
+        "call media interval send video mode=- size=- fps=- limited_by=- sender=middle needed=- active=yes ceiling=483",
+        "call media interval send video mode=- size=- fps=- limited_by=- sender=light needed=- active=yes ceiling=150",
       ]);
       session.hangUp();
     } finally {

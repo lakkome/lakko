@@ -238,3 +238,102 @@ are each cut to 0.85 of their own arriving rate; nothing divides the
 path between them. Not built. The log of that call does not show the
 Firefox publisher ignoring REMB (what arrived followed its estimate
 within about a quarter).
+
+## Amendment, 2026-10-11: the estimate also goes out as a per-sender ceiling
+
+### What was measured
+
+On live calls, packet capture at the SFU:
+
+- With the SFU's estimate held at 1000 kbit/s, Chrome sent its main video
+  at 720 kbit/s (1031 in total) and Firefox sent its main video at a flat
+  1537 kbit/s (1837 in total). Firefox's main sender did not follow the
+  server's REMB. Its light sender, which carries a ceiling the client set
+  (150 kbit/s), stayed at 125 kbit/s: Firefox does obey a per-sender
+  ceiling. (The note above, that an earlier call did not show a Firefox
+  publisher ignoring REMB, stands for that call; this one does show it.)
+- On a Wi-Fi publisher, lowering what it sent from about 3.2 to about
+  1.1 Mbit/s cut the late tail of its own audio at the SFU: the 99th
+  percentile of lateness went from 264 ms to 93 ms, and the half-second
+  intervals with audio 200 ms late or more from 27 to 2.
+- Audio and video lateness of one publisher correlate at 0.91 to 1.00:
+  they wait in the same queue. The receiving browser sizes its audio
+  buffer to that tail and holds the main video to it, so a publisher's
+  standing queue is the conversation's delay.
+
+So the estimate the SFU already computes has to reach every browser in a
+form every browser obeys. REMB is a hint a browser's own controller
+weighs; a sender's maximum bitrate is a setting.
+
+### Decision
+
+The server decides, the client executes.
+
+- **A frame.** `ServerFrame::PublishBudget { main_kbps, middle_kbps }`,
+  serde kind `publish-budget`, on Lakko's own signaling: the ceiling for
+  the receiving publisher's main and middle camera sender, kilobits per
+  second, each from 1 to 20000 (`MAX_PUBLISH_BUDGET_KBPS`; a frame outside
+  the bounds is refused on decode and never composed). The light sender
+  keeps its fixed ceiling and audio is never limited; neither is in the
+  frame.
+- **The rule is the SFU's alone** (`services/sfu/src/publish_budget.rs`,
+  pure: no I/O, no clock of its own). There is no allocation rule in any
+  client, so three clients cannot drift. From the estimate it takes a
+  headroom for audio (the rate arriving on the publisher's audio tracks
+  where the SFU already meters it, that is under downlink control, kept
+  within 32 to 128 kbit/s; otherwise 64 kbit/s, a constant) and for the
+  light sender (150 kbit/s, its ceiling, a constant, when the publisher
+  declared one), and divides the rest by 1.15 for retransmissions and
+  FEC, which ride on top of an encoder's ceiling (a constant share;
+  nothing new is measured). The middle sender gets its plan rate
+  (500 kbit/s) when it is needed, giving way only to the main sender's
+  floor; the main sender gets the rest when it is needed. Never below a
+  floor (main 200 kbit/s, middle 100 kbit/s), never above the plan
+  maximum (main 2500 kbit/s, middle 500 kbit/s). A sender `video-needed`
+  says nobody watches takes nothing from the budget and is given its
+  ceiling anyway, the one it would have if it were switched on now.
+- **When.** The first budget as soon as the publisher is connected and
+  has sent video (when its estimate first goes out as REMB too). A lower
+  one at once (a ceiling under 97% of what was told). A change of which
+  senders are needed at once. A higher one no sooner than 2 s after the
+  last frame and only when a ceiling differs by 10% of what was told, or
+  reaches its plan maximum. The rule is looked at every 100 ms.
+- **Who.** Every publisher whose bitrate the SFU decides
+  (`LAKKO_SFU_BITRATE_CONTROL=server`), behind `LAKKO_SFU_PUBLISH_BUDGET`
+  (on unless `0`). With the client deciding its own bitrate there is no
+  estimate and no frame.
+- **REMB goes on exactly as before.** The frame is beside it, not in
+  place of it.
+- **The client** sets each figure as `encodings[0].maxBitrate` of that
+  sender with `setParameters`, serialised with every other write to the
+  sender's parameters, the last frame winning; before the first frame a
+  sender keeps the ceiling it was created with. Web is built
+  (`apps/web/src/calls/publish-budget.ts`); iOS and Android follow and
+  until then ignore the frame.
+
+Every constant is chosen, not measured.
+
+### Limits
+
+- **The client must cooperate.** A modified client can ignore the frame,
+  as it could ignore REMB. Nothing here polices what a publisher sends;
+  it makes the well-behaved clients behave alike.
+- **The floors can exceed the path.** Below about 560 kbit/s of estimate
+  with both senders needed, the two floors, the light sender and audio
+  add up to more than the estimate. The alternative is no picture.
+- **The ceiling bounds the encoder, not the wire.** Retransmissions and
+  FEC are allowed for by a constant share, not counted.
+- **The first budget is made from the start value** of the estimate
+  (1500 kbit/s by default: a main ceiling of 618 kbit/s with a middle
+  sender needed), and the next higher one comes 2 s later at the
+  earliest.
+- **The estimate now sees what it limited.** A ceiling holds what arrives
+  under the estimate, and the estimate's rise is capped at 1.5 times what
+  arrived. The headroom is well inside that factor, so the climb goes on;
+  this was reasoned, not observed.
+- **Nothing here was seen on a call yet.** Host tests only: the rule, the
+  frame on both FFI surfaces, the frame arriving over the SFU's signaling
+  in the synthetic-client test, and the web client against a fake
+  `RTCRtpSender`. Not run against any browser. That Firefox obeys
+  `maxBitrate` on its main sender is inferred from its light sender; that
+  Safari does is not known.

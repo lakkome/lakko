@@ -19,7 +19,14 @@
  * client's and the SFU's decision, never a browser's layer allocator's.
  *
  * Microphone tracks are added as before.
+ *
+ * Every write to a sender's parameters made here goes through the sender's
+ * one queue (`sender-parameters.ts`), so it never overlaps the writes of
+ * `sender-activity.ts` (the encoding's `active` flag) and `publish-budget.ts`
+ * (its bitrate ceiling) on the same sender.
  */
+
+import { queueParameterWrite } from "./sender-parameters";
 
 /** The camera's encoding: one spatial layer, three temporal layers. */
 export const CAMERA_SCALABILITY_MODE = "L1T3";
@@ -42,16 +49,18 @@ export const CAMERA_DEGRADATION_PREFERENCE: RTCDegradationPreference = "maintain
  * Tell a camera sender to keep its frame rate under a bitrate shortfall.
  * Best effort: a browser that refuses keeps its default.
  */
-export async function preferCameraFramerate(sender: RTCRtpSender): Promise<void> {
-  try {
-    const params = sender.getParameters();
-    if (params.degradationPreference === CAMERA_DEGRADATION_PREFERENCE) return;
-    params.degradationPreference = CAMERA_DEGRADATION_PREFERENCE;
-    await sender.setParameters(params);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("camera sender: frame-rate preference refused", err);
-  }
+export function preferCameraFramerate(sender: RTCRtpSender): Promise<void> {
+  return queueParameterWrite(sender, async () => {
+    try {
+      const params = sender.getParameters();
+      if (params.degradationPreference === CAMERA_DEGRADATION_PREFERENCE) return;
+      params.degradationPreference = CAMERA_DEGRADATION_PREFERENCE;
+      await sender.setParameters(params);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("camera sender: frame-rate preference refused", err);
+    }
+  });
 }
 
 /** The one encoding of the main camera sender. */
@@ -254,22 +263,24 @@ export function addLightSender(
  * that refused them with the transceiver). Resolves `false` when the browser
  * refuses this too, or when the sender has no encoding to set them on.
  */
-export async function configureCopySender(
+export function configureCopySender(
   sender: RTCRtpSender,
   kind: CameraCopyKind,
   active?: boolean,
 ): Promise<boolean> {
-  try {
-    const params = sender.getParameters();
-    const first = params.encodings[0];
-    if (first === undefined) return false;
-    params.encodings[0] = { ...first, ...cameraCopyEncoding(kind, active) };
-    params.degradationPreference = CAMERA_DEGRADATION_PREFERENCE;
-    await sender.setParameters(params);
-    return true;
-  } catch {
-    return false;
-  }
+  return queueParameterWrite(sender, async () => {
+    try {
+      const params = sender.getParameters();
+      const first = params.encodings[0];
+      if (first === undefined) return false;
+      params.encodings[0] = { ...first, ...cameraCopyEncoding(kind, active) };
+      params.degradationPreference = CAMERA_DEGRADATION_PREFERENCE;
+      await sender.setParameters(params);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /** {@link configureCopySender} for the light sender. */
@@ -283,19 +294,21 @@ export function configureLightSender(sender: RTCRtpSender): Promise<boolean> {
  * browser refuses or the sender has no encoding; `true` also when the
  * encoding already says so.
  */
-export async function setCopySenderActive(sender: RTCRtpSender, active: boolean): Promise<boolean> {
-  try {
-    const params = sender.getParameters();
-    const first = params.encodings[0];
-    if (first === undefined) return false;
-    // An encoding that does not say is active.
-    if ((first.active ?? true) === active) return true;
-    params.encodings[0] = { ...first, active };
-    await sender.setParameters(params);
-    return true;
-  } catch {
-    return false;
-  }
+export function setCopySenderActive(sender: RTCRtpSender, active: boolean): Promise<boolean> {
+  return queueParameterWrite(sender, async () => {
+    try {
+      const params = sender.getParameters();
+      const first = params.encodings[0];
+      if (first === undefined) return false;
+      // An encoding that does not say is active.
+      if ((first.active ?? true) === active) return true;
+      params.encodings[0] = { ...first, active };
+      await sender.setParameters(params);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -349,21 +362,23 @@ export function addGroupCallSender(
  * browser that refuses keeps one layer, and the media counters log which
  * mode the sender actually uses.
  */
-export async function requestCameraLayers(sender: RTCRtpSender): Promise<void> {
-  try {
-    const params = sender.getParameters();
-    const first = params.encodings[0] as LayeredEncoding | undefined;
-    const layersSet = first === undefined || first.scalabilityMode === CAMERA_SCALABILITY_MODE;
-    const framerateSet = params.degradationPreference === CAMERA_DEGRADATION_PREFERENCE;
-    if (layersSet && framerateSet) return;
-    if (!layersSet && first !== undefined) {
-      const layered: LayeredEncoding = { ...first, scalabilityMode: CAMERA_SCALABILITY_MODE };
-      params.encodings[0] = layered;
+export function requestCameraLayers(sender: RTCRtpSender): Promise<void> {
+  return queueParameterWrite(sender, async () => {
+    try {
+      const params = sender.getParameters();
+      const first = params.encodings[0] as LayeredEncoding | undefined;
+      const layersSet = first === undefined || first.scalabilityMode === CAMERA_SCALABILITY_MODE;
+      const framerateSet = params.degradationPreference === CAMERA_DEGRADATION_PREFERENCE;
+      if (layersSet && framerateSet) return;
+      if (!layersSet && first !== undefined) {
+        const layered: LayeredEncoding = { ...first, scalabilityMode: CAMERA_SCALABILITY_MODE };
+        params.encodings[0] = layered;
+      }
+      params.degradationPreference = CAMERA_DEGRADATION_PREFERENCE;
+      await sender.setParameters(params);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("camera sender: temporal layers refused, sending one layer", err);
     }
-    params.degradationPreference = CAMERA_DEGRADATION_PREFERENCE;
-    await sender.setParameters(params);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("camera sender: temporal layers refused, sending one layer", err);
-  }
+  });
 }

@@ -132,6 +132,15 @@ import {
   type VideoNeeded,
 } from "./sender-activity";
 import {
+  BUDGETED_SENDER_KINDS,
+  describePublishBudgetChange,
+  readEncodingCeiling,
+  SenderCeiling,
+  senderCeiling,
+  type BudgetedSenderKind,
+  type PublishBudget,
+} from "./publish-budget";
+import {
   deltaOf,
   describeDeltas,
   describeOutboundSenders,
@@ -429,6 +438,23 @@ export class SfuCallSession {
     middle: new SenderActivity("middle"),
     light: new SenderActivity("light"),
   };
+  /**
+   * The SFU's last `publish-budget` frame (`publish-budget.ts`): how much
+   * this device's main and middle camera senders may send. `null` before
+   * the first frame, which means each sender keeps the ceiling it was
+   * created with.
+   */
+  private publishBudget: PublishBudget | null = null;
+  /**
+   * Keeps the main and the middle camera sender's one encoding under the
+   * ceiling the SFU last gave. Its writes share each sender's one queue of
+   * parameter writes with {@link senderActivity} and the sender's set-up
+   * (`sender-parameters.ts`), so they never overlap.
+   */
+  private readonly senderCeilings: Record<BudgetedSenderKind, SenderCeiling> = {
+    main: new SenderCeiling("main"),
+    middle: new SenderCeiling("middle"),
+  };
 
   /** The shared rules, once loaded (`connect()`). */
   private wasm: Awaited<ReturnType<typeof loadWasm>> | null = null;
@@ -654,6 +680,47 @@ export class SfuCallSession {
       const activity = this.senderActivity[kind];
       if (activity.bound) activity.want(active[kind]);
     }
+    // Every moment that can reset what a sender's encoding holds is also a
+    // moment its bitrate ceiling may have been lost.
+    this.syncSenderCeilings(main ?? null);
+  }
+
+  /**
+   * Put the main and the middle camera sender's encoding under the ceiling
+   * the SFU last gave (`publish-budget.ts`). `setParameters` only. A no-op
+   * before the first `publish-budget` frame and for a sender whose encoding
+   * already holds the ceiling; a write the browser refused is asked again
+   * here, at the latest at the next counters tick. A sender that was added
+   * again gets the ceiling in force, not the one it was created with.
+   */
+  private syncSenderCeilings(main: RTCRtpSender | null): void {
+    this.senderCeilings.main.bind(main);
+    this.senderCeilings.middle.bind(this.copies.middle.sender?.sender ?? null);
+    for (const kind of BUDGETED_SENDER_KINDS) {
+      const ceiling = this.senderCeilings[kind];
+      if (ceiling.bound) ceiling.want(senderCeiling(kind, this.publishBudget));
+    }
+  }
+
+  /**
+   * A `publish-budget` frame: the SFU's whole word replaces the last one,
+   * the senders follow at once, and one line says so when it changed.
+   */
+  private onPublishBudgetFrame(budget: PublishBudget): void {
+    const line = describePublishBudgetChange(this.publishBudget, budget);
+    this.publishBudget = budget;
+    if (line !== null) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    this.syncSenderCeilings(this.mainCameraSender() ?? null);
+  }
+
+  /** The bitrate ceiling one camera sender's encoding holds now, bits a
+   *  second, for the `send video` line; `null` for none. */
+  private senderCeilingNow(kind: CameraSenderKind): number | null {
+    const sender = kind === "main" ? this.mainCameraSender() : this.copies[kind].sender?.sender;
+    return sender === undefined ? null : readEncodingCeiling(sender);
   }
 
   /**
@@ -744,6 +811,7 @@ export class SfuCallSession {
         onSdpOffer: (f): void => this.onSdpOffer(f),
         onVideoGiven: (given): void => this.onVideoGivenFrame(given),
         onVideoNeeded: (needed): void => this.onVideoNeededFrame(needed),
+        onPublishBudget: (budget): void => this.onPublishBudgetFrame(budget),
         onPong: (): void => {
           this.lastInboundMs = this.nowMs();
         },
@@ -1381,6 +1449,7 @@ export class SfuCallSession {
       reading.outboundVideoSenders,
       (kind) => this.senderActivityNote(kind),
       CAMERA_SENDER_KINDS.filter((kind) => this.senderActivity[kind].bound),
+      (kind) => this.senderCeilingNow(kind),
     )) {
       // eslint-disable-next-line no-console
       console.info(line);
@@ -1489,6 +1558,8 @@ export class SfuCallSession {
     }
     this.videoNeeded = null;
     for (const kind of CAMERA_SENDER_KINDS) this.senderActivity[kind].reset();
+    this.publishBudget = null;
+    for (const kind of BUDGETED_SENDER_KINDS) this.senderCeilings[kind].reset();
     // Nothing more is asked of the SFU, and the tiles of a later call start
     // from nothing.
     this.wantsSender.reset();

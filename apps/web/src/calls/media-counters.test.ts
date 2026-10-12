@@ -126,6 +126,28 @@ describe("the log lines", () => {
     );
     expect(line).toContain("mode=L1T3");
   });
+
+  it("end the camera sender's line with the ceiling its encoding holds, when given one", () => {
+    const out = readMedia([{ id: "OT", type: "outbound-rtp", kind: "video" }]).outboundVideo;
+    // Not given: the line is as it was.
+    expect(describeOutbound("call media", out)).not.toContain("ceiling=");
+    expect(describeOutbound("call media", out, undefined, 1_200_000)).toMatch(/ sender=main ceiling=1200$/);
+    expect(describeOutbound("call media", out, undefined, null)).toMatch(/ sender=main ceiling=-$/);
+    expect(describeOutbound("call media", out, { needed: true, active: true }, 483_000)).toMatch(
+      / sender=main needed=yes active=yes ceiling=483$/,
+    );
+    const lines = describeOutboundSenders(
+      "call media",
+      [],
+      () => ({ needed: null, active: true }),
+      ["main", "light"],
+      (kind) => (kind === "light" ? 150_000 : null),
+    );
+    expect(lines).toEqual([
+      "call media send video mode=- size=- fps=- limited_by=- sender=main needed=- active=yes ceiling=-",
+      "call media send video mode=- size=- fps=- limited_by=- sender=light needed=- active=yes ceiling=150",
+    ]);
+  });
 });
 
 describe("the camera's two senders", () => {

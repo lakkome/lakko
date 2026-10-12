@@ -411,6 +411,12 @@ the only thing it can measure. So its spoken and tooltip text is
 - **Timing**: on after 200 ms of speech, off after 800 ms of silence (chosen, not
   measured). This smoothing is separate from the 1.5-second promotion onset of
   5.2: the ring may flicker on for a cough, a tile never moves for one.
+- **What counts as speech**: a level well above that person's own noise floor
+  (three times it, within fixed bounds), not above one number for everyone. A
+  quiet microphone in a quiet room and a loud one in a noisy room both light the
+  ring for a voice and neither lights it for the room. Every level is on one
+  scale whatever it was read from: the root mean square of the decoded samples
+  over about a tenth of a second (web: `apps/web/src/calls/speaking.ts`).
 - **Latency is expected**: the level is computed from audio that has already been
   received, decrypted and decoded, so the ring trails the voice by a few hundred
   milliseconds. That is acceptable and must not be "fixed" by using a level the
@@ -615,7 +621,7 @@ camera off with a bad signal, which is the confusion 7.4 exists to prevent.
 
 | Need | Why |
 |---|---|
-| A **local speaking level** per remote participant, computed on the receiving device from decoded (post-decryption) audio, at ≥ 10 samples a second | Sections 5 and 7.3. Candidates: the inbound audio `audioLevel` in `getStats`, or an audio analyser on the decoded track; either is local |
+| A **local speaking level** per remote participant, computed on the receiving device from decoded (post-decryption) audio, at ≥ 10 samples a second | Sections 5 and 7.3. Web: an audio analyser on the played stream, then the growth of `totalAudioEnergy` over `totalSamplesDuration` in the receiver's statistics; both are of decoded audio and on one scale, and a path with no reading, or stuck at exactly zero, falls through to the other. Not the level on a receiver's synchronization sources (where the header extension below is negotiated it is the sender's byte, readable and writable by the call server) and not the statistics' `audioLevel` (an engine-defined peak, not on that scale); both are only printed in the call log |
 | The **same level for this device's own microphone** | 5.3: your own ring, and `You're muted` |
 | **No audio-level RTP header extension** (RFC 6464) negotiated in either direction, and a check that keeps it out | It carries the speaking level in clear to the call server, which would hand the server exactly what section 1 says it never learns |
 | A **per-participant receive quality** from inbound stats (loss, jitter, freeze counts per person) | 7.2. Until it exists the remote connection glyph is absent — and the constant `good` of today is removed |

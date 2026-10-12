@@ -44,6 +44,12 @@ import {
   VIDEO_NEEDED_MALFORMED_WARNING,
   type VideoNeeded,
 } from "./sender-activity";
+import {
+  claimsPublishBudget,
+  PUBLISH_BUDGET_MALFORMED_WARNING,
+  readPublishBudgetFrame,
+  type PublishBudget,
+} from "./publish-budget";
 
 // ---- Typed server frames ------------------------------------------
 
@@ -151,6 +157,13 @@ export interface SfuSignalingCallbacks {
    * this.
    */
   onVideoNeeded?(needed: VideoNeeded): void;
+  /**
+   * How much this device's own main and middle camera senders may send
+   * (`publish-budget.ts`; ADR-0068, amendment of 2026-10-11): the whole
+   * state each time, the last frame wins. Sent only by an SFU that decides
+   * publishers' bitrate. A malformed frame never reaches this.
+   */
+  onPublishBudget?(budget: PublishBudget): void;
   onPong?(frame: SfuPong): void;
   onServerError?(frame: SfuErrorFrame): void;
   /** A malformed / unknown-kind frame the shared validator rejected.
@@ -365,6 +378,12 @@ export class SfuSignalingClient {
         // warning. The senders stay as the last good frame left them.
         // eslint-disable-next-line no-console
         console.warn(VIDEO_NEEDED_MALFORMED_WARNING);
+      } else if (claimsPublishBudget(raw)) {
+        // A `publish-budget` frame without both ceilings, or with one out
+        // of bounds: ignored, with one warning. The senders keep the
+        // ceilings the last good frame gave them.
+        // eslint-disable-next-line no-console
+        console.warn(PUBLISH_BUDGET_MALFORMED_WARNING);
       }
       this.callbacks.onParseError?.(raw, err);
       return;
@@ -395,6 +414,21 @@ export class SfuSignalingClient {
       }
       try {
         this.callbacks.onVideoNeeded?.(needed);
+      } catch {
+        // A handler's failure never reaches the socket's message handler.
+      }
+      return;
+    }
+    if (kind === "publish-budget") {
+      // Read through the shared helper, not from the untrusted `JSON.parse`.
+      const budget = readPublishBudgetFrame(wasm, raw);
+      if (budget === null) {
+        // eslint-disable-next-line no-console
+        console.warn(PUBLISH_BUDGET_MALFORMED_WARNING);
+        return;
+      }
+      try {
+        this.callbacks.onPublishBudget?.(budget);
       } catch {
         // A handler's failure never reaches the socket's message handler.
       }

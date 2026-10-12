@@ -185,6 +185,13 @@ pub struct Config {
     /// told in a `video-needed` frame which of its camera senders
     /// somebody is being sent, so it can stop the others
     /// ([`crate::video_needed`]). Off, no such frame is ever sent.
+    ///
+    /// And another, `LAKKO_SFU_PUBLISH_BUDGET` (on unless set to `0`):
+    /// under `LAKKO_SFU_BITRATE_CONTROL=server` a publisher is told in a
+    /// `publish-budget` frame how much its main and its middle camera
+    /// sender may send, from the SFU's estimate of its uplink
+    /// ([`crate::publish_budget`]). Off, or with the client deciding its
+    /// own bitrate, no such frame is ever sent.
     pub protection: LossProtection,
     /// Who decides a publisher's bitrate (`LAKKO_SFU_BITRATE_CONTROL`,
     /// ADR-0068): unset, empty or `client` is the client's own
@@ -280,6 +287,7 @@ impl Config {
             playout_delay: parse_switch_default_on("LAKKO_SFU_PLAYOUT_DELAY")?,
             burst_keyframe: parse_switch_default_on("LAKKO_SFU_BURST_KEYFRAME")?,
             video_needed: parse_switch_default_on("LAKKO_SFU_VIDEO_NEEDED")?,
+            publish_budget: parse_switch_default_on("LAKKO_SFU_PUBLISH_BUDGET")?,
             ..LossProtection::default()
         };
         let bitrate_control = parse_bitrate_control()?;
@@ -661,6 +669,20 @@ mod tests {
             assert!(!cfg.video_needed && cfg.burst_keyframe && cfg.light_duplicate);
         });
         with_env(&[jwks, ("LAKKO_SFU_VIDEO_NEEDED", "off")], || {
+            assert!(Config::from_env().is_err());
+        });
+        // And telling a publisher how much its senders may send.
+        with_env(&[jwks], || {
+            assert!(Config::from_env().unwrap().protection.publish_budget);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_PUBLISH_BUDGET", "1")], || {
+            assert!(Config::from_env().unwrap().protection.publish_budget);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_PUBLISH_BUDGET", "0")], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(!cfg.publish_budget && cfg.video_needed && cfg.burst_keyframe);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_PUBLISH_BUDGET", "off")], || {
             assert!(Config::from_env().is_err());
         });
     }

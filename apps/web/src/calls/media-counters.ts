@@ -16,6 +16,7 @@
  */
 
 import { describeSenderActivity, type SenderActivityNote } from "./sender-activity";
+import { describeSenderCeiling } from "./publish-budget";
 import type { LayerDisplayCounters, TileFrameCounts } from "./layer-display";
 
 /**
@@ -374,11 +375,14 @@ function activityTail(activity: OutboundActivity | undefined): string {
  *  names which sender it is (`sender=main`, `sender=middle` or
  *  `sender=light`) and, when `activity` is given, ends with the SFU's last
  *  word for it and whether its encoding is active: `needed=yes|no|-
- *  active=yes|no`. */
+ *  active=yes|no`. When `ceiling` is given (`publish-budget.ts`: the bitrate
+ *  ceiling the sender's encoding holds, bits a second, `null` for none) the
+ *  line ends with `ceiling=N` in kbit/s, or `ceiling=-`. */
 export function describeOutbound(
   label: string,
   out: OutboundVideo | null,
   activity?: OutboundActivity,
+  ceiling?: number | null,
 ): string | null {
   if (out === null) return null;
   const size = out.frameWidth !== null && out.frameHeight !== null ? `${out.frameWidth}x${out.frameHeight}` : "-";
@@ -386,7 +390,8 @@ export function describeOutbound(
     `${label} send video mode=${out.scalabilityMode ?? "-"} size=${size}` +
     ` fps=${fixed(out.framesPerSecond, 0)} limited_by=${out.qualityLimitationReason ?? "-"}` +
     ` sender=${out.sender}` +
-    activityTail(activity)
+    activityTail(activity) +
+    describeSenderCeiling(ceiling)
   );
 }
 
@@ -395,18 +400,25 @@ export function describeOutbound(
  *  (`-`). `activityOf` adds each line's `needed=` and `active=`. A sender
  *  named in `existing` that the browser reports no outbound stream for (some
  *  engines drop the entry of an inactive encoding) still has its line, all
- *  dashes, so a sender that was switched off does not vanish from the log. */
+ *  dashes, so a sender that was switched off does not vanish from the log.
+ *  `ceilingOf` adds each line's `ceiling=` (as {@link describeOutbound}). */
 export function describeOutboundSenders(
   label: string,
   senders: readonly OutboundVideo[],
   activityOf?: (sender: CameraSenderName) => OutboundActivity | undefined,
   existing: readonly CameraSenderName[] = [],
+  ceilingOf?: (sender: CameraSenderName) => number | null | undefined,
 ): string[] {
   const lines: string[] = [];
   const reported = new Set<CameraSenderName>();
   for (const sender of senders) {
     reported.add(sender.sender);
-    const line = describeOutbound(label, sender, activityOf?.(sender.sender));
+    const line = describeOutbound(
+      label,
+      sender,
+      activityOf?.(sender.sender),
+      ceilingOf?.(sender.sender),
+    );
     if (line !== null) lines.push(line);
   }
   for (const name of existing) {
@@ -423,6 +435,7 @@ export function describeOutboundSenders(
         bytesSent: 0,
       },
       activityOf?.(name),
+      ceilingOf?.(name),
     );
     if (line !== null) lines.push(line);
   }

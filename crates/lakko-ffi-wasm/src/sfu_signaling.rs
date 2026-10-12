@@ -41,7 +41,10 @@ fn to_err(e: lakko_sfu_proto::SfuProtoError) -> JsError {
 /// WebSocket and return its `kind` discriminator (kebab-case:
 /// `"welcome"`, `"peer-joined"`, `"peer-left"`, `"signal-relay"`,
 /// `"error"`, `"pong"`, `"sdp-answer"`, `"sdp-offer"`, `"video-given"`,
-/// `"video-needed"`).
+/// `"video-needed"`, `"publish-budget"`).
+/// A `publish-budget` frame carries two required integers, `main_kbps`
+/// and `middle_kbps`: the ceiling the SFU sets for this publisher's own
+/// main and middle camera senders (`parseSfuPublishBudget`).
 /// A `video-needed` frame carries two required booleans, `main` and
 /// `middle`: which of this publisher's own camera senders somebody is
 /// being sent (`parseSfuVideoNeeded`).
@@ -65,6 +68,7 @@ pub fn validate_sfu_server_frame(json: &str) -> Result<String, JsError> {
         ServerFrame::SdpOffer { .. } => "sdp-offer",
         ServerFrame::VideoGiven { .. } => "video-given",
         ServerFrame::VideoNeeded { .. } => "video-needed",
+        ServerFrame::PublishBudget { .. } => "publish-budget",
     };
     Ok(kind.to_string())
 }
@@ -87,6 +91,35 @@ fn video_needed_flags(json: &str) -> Result<Vec<u8>, String> {
         ServerFrame::VideoNeeded { main, middle } => Ok(vec![u8::from(main), u8::from(middle)]),
         other => Err(format!(
             "expected a video-needed frame, got {}",
+            other.kind_str()
+        )),
+    }
+}
+
+/// The two ceilings of a `publish-budget` server frame (ADR-0068,
+/// amendment of 2026-10-11) as a two-element `Uint32Array`
+/// `[main_kbps, middle_kbps]`: the most this publisher's own main and
+/// middle camera sender may send, in kilobits per second, each at least 1
+/// and at most `MAX_PUBLISH_BUDGET_KBPS` (20000). The client sets each as
+/// that sender's maximum bitrate (`maxBitrate` is in bits per second:
+/// multiply by 1000). The light sender and audio are not in the frame and
+/// are not limited by it. Throws when the JSON is not a valid
+/// `publish-budget` frame.
+#[wasm_bindgen(js_name = "parseSfuPublishBudget")]
+pub fn parse_sfu_publish_budget(json: &str) -> Result<Vec<u32>, JsError> {
+    publish_budget_ceilings(json).map_err(|e| JsError::new(&e))
+}
+
+/// [`parse_sfu_publish_budget`] without the `JsError`, so a host test can
+/// run it.
+fn publish_budget_ceilings(json: &str) -> Result<Vec<u32>, String> {
+    match decode_server_frame(json).map_err(|e| e.to_string())? {
+        ServerFrame::PublishBudget {
+            main_kbps,
+            middle_kbps,
+        } => Ok(vec![main_kbps, middle_kbps]),
+        other => Err(format!(
+            "expected a publish-budget frame, got {}",
             other.kind_str()
         )),
     }
@@ -289,6 +322,34 @@ mod tests {
             r#"{"kind":"video-given","given":[{"peer":"","quality":"main"}]}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn publish_budget_validates_and_flattens() {
+        let frame = |main: &str, middle: &str| {
+            format!(r#"{{"kind":"publish-budget","main_kbps":{main},"middle_kbps":{middle}}}"#)
+        };
+        assert_eq!(
+            validate_sfu_server_frame(&frame("2500", "500")).expect("valid"),
+            "publish-budget"
+        );
+        assert_eq!(
+            publish_budget_ceilings(&frame("2500", "500")).expect("ok"),
+            [2500, 500]
+        );
+        assert_eq!(
+            publish_budget_ceilings(&frame("1", "20000")).expect("ok"),
+            [1, 20000]
+        );
+        // Another frame, a missing field, zero, above the bound, not an
+        // integer.
+        assert!(publish_budget_ceilings(r#"{"kind":"pong","nonce":1}"#).is_err());
+        assert!(publish_budget_ceilings(r#"{"kind":"publish-budget","main_kbps":900}"#).is_err());
+        assert!(publish_budget_ceilings(&frame("0", "500")).is_err());
+        assert!(publish_budget_ceilings(&frame("900", "0")).is_err());
+        assert!(publish_budget_ceilings(&frame("20001", "500")).is_err());
+        assert!(publish_budget_ceilings(&frame("900.5", "500")).is_err());
+        assert!(publish_budget_ceilings(&frame("\"900\"", "500")).is_err());
     }
 
     #[test]

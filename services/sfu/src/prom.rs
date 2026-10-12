@@ -112,6 +112,13 @@ pub mod names {
     /// publisher per REMB round. Flat with publishers sending video means
     /// no publisher is being told a bitrate. See `crate::uplink_estimate`.
     pub const BITRATE_REMB_SENT_TOTAL: &str = "lakko_sfu_bitrate_remb_sent_total";
+    /// Cumulative count of `publish-budget` frames sent to publishers
+    /// (ADR-0068, amendment of 2026-10-11), labelled `why` (`first`,
+    /// `lower`, `senders`, `higher`; see `crate::publish_budget::Why`).
+    /// Only under `LAKKO_SFU_BITRATE_CONTROL=server` with
+    /// `LAKKO_SFU_PUBLISH_BUDGET` on. A `lower` count that climbs steadily
+    /// for one call is a publisher whose uplink keeps being cut.
+    pub const PUBLISH_BUDGET_SENT_TOTAL: &str = "lakko_sfu_publish_budget_sent_total";
     /// Cumulative count of uplink fallback state changes, one per publisher
     /// video track per change, labelled `direction` (`fallback`: the
     /// publisher's uplink is in trouble and its subscribers were moved to
@@ -263,6 +270,10 @@ impl MetricsExporter {
         metrics::describe_counter!(
             names::BITRATE_REMB_SENT_TOTAL,
             "REMB requests toward publishers under server-side bitrate control"
+        );
+        metrics::describe_counter!(
+            names::PUBLISH_BUDGET_SENT_TOTAL,
+            "publish-budget frames sent to publishers under server-side bitrate control"
         );
         // Described and not pre-initialised: it only appears once a
         // simulcast publisher has a subscriber.

@@ -296,9 +296,9 @@ export interface ChosenLevel {
  *
  *  - A path with no reading is skipped.
  *  - A path that has read exactly zero for `STUCK_ZERO_MS` is skipped while
- *    a later path has a reading that is not itself stuck at zero.
- *  - When every path that has a reading is stuck at zero, the first of them
- *    answers: that is silence.
+ *    a later path reads above zero.
+ *  - When no later path does, the first path that has a reading answers:
+ *    that is silence, and the path named does not flap while it lasts.
  *
  * Pure: the caller supplies the time.
  */
@@ -324,7 +324,13 @@ export class PathChooser {
     const readable = readings.filter(
       (r): r is PathReading & { level: number } => r.level !== null && Number.isFinite(r.level),
     );
-    const chosen = readable.find((r) => !this.stuck(r.path, nowMs)) ?? readable[0];
-    return chosen === undefined ? { path: "none", level: null } : chosen;
+    const first = readable[0];
+    if (first === undefined) return { path: "none", level: null };
+    // A later path takes over from a stuck one only by hearing something: a
+    // zero of its own says nothing the first zero did not.
+    const chosen = readable.find(
+      (r) => !this.stuck(r.path, nowMs) && (r === first || r.level > ZERO_LEVEL),
+    );
+    return chosen ?? first;
   }
 }
