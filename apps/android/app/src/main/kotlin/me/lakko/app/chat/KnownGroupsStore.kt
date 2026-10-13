@@ -64,9 +64,12 @@ public class KnownGroupsStore(context: Context) {
     /** Atomically add [groupIdHex] to the set for [accountIdB64].
      *  No-op when already present. */
     public fun add(accountIdB64: String, groupIdHex: String) {
-        val current = load(accountIdB64).toMutableSet()
-        if (!current.add(groupIdHex)) return
-        prefs.edit().putStringSet(keyFor(accountIdB64), current).apply()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val current = load(accountIdB64).toMutableSet()
+            if (!current.add(groupIdHex)) return
+            prefs.edit().putStringSet(keyFor(accountIdB64), current).apply()
+    
+        }
     }
 
     /**
@@ -77,9 +80,12 @@ public class KnownGroupsStore(context: Context) {
      * whole-account `forgetDevice` wipe.
      */
     public fun remove(accountIdB64: String, groupIdHex: String) {
-        val current = load(accountIdB64).toMutableSet()
-        if (!current.remove(groupIdHex)) return
-        prefs.edit().putStringSet(keyFor(accountIdB64), current).apply()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val current = load(accountIdB64).toMutableSet()
+            if (!current.remove(groupIdHex)) return
+            prefs.edit().putStringSet(keyFor(accountIdB64), current).apply()
+    
+        }
     }
 
     /** Wipe the entire set for [accountIdB64]. Called from

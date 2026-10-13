@@ -489,7 +489,10 @@ public object CommitOutboxStore {
      * @throws java.io.IOException on disk-write failure.
      */
     public fun putEntry(context: Context, entry: PendingCommitEntry) {
-        putEntryIn(dir(context), entry)
+        me.lakko.app.account.AccountStoreGate.writeOrEnd(entry.accountId) {
+            putEntryIn(dir(context), entry)
+    
+        }
     }
 
     /** Load every entry for `(accountIdB64, groupIdB64)`. The store is tiny (one

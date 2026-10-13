@@ -273,8 +273,11 @@ public object PinStore {
     }
 
     public fun saveShared(context: Context, accountIdB64: String, groupIdHex: String, value: Map<Long, StoredPin>) {
-        prefs(context).edit().putString(sharedKey(accountIdB64, groupIdHex), encodeSharedPins(value)).apply()
-        mutableVersion.value += 1
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs(context).edit().putString(sharedKey(accountIdB64, groupIdHex), encodeSharedPins(value)).apply()
+            mutableVersion.value += 1
+    
+        }
     }
 
     /** This device's personal pins in the conversation, `messageId -> pinnedAtMs`. */
@@ -284,17 +287,23 @@ public object PinStore {
     }
 
     public fun savePersonal(context: Context, accountIdB64: String, groupIdHex: String, value: Map<Long, ULong>) {
-        prefs(context).edit().putString(personalKey(accountIdB64, groupIdHex), encodePersonalPins(value)).apply()
-        mutableVersion.value += 1
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs(context).edit().putString(personalKey(accountIdB64, groupIdHex), encodePersonalPins(value)).apply()
+            mutableVersion.value += 1
+    
+        }
     }
 
     /** Forget every pin of one conversation (delete this chat). */
     public fun deleteGroup(context: Context, accountIdB64: String, groupIdHex: String) {
-        prefs(context).edit()
-            .remove(sharedKey(accountIdB64, groupIdHex))
-            .remove(personalKey(accountIdB64, groupIdHex))
-            .apply()
-        mutableVersion.value += 1
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs(context).edit()
+                .remove(sharedKey(accountIdB64, groupIdHex))
+                .remove(personalKey(accountIdB64, groupIdHex))
+                .apply()
+            mutableVersion.value += 1
+    
+        }
     }
 
     /** Forget every pin held for [accountIdB64] (forget device). */

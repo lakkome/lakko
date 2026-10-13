@@ -282,10 +282,13 @@ public object BackupRestoreStore {
     /** Drop one id: the device joined the group, the chat was deleted, or the
      *  local group ended. No-op when absent. */
     public fun removeRestoredGroup(context: Context, accountIdB64: String, groupIdHex: String) {
-        val current = restoredGroups(context, accountIdB64)
-        val id = groupIdHex.lowercase()
-        if (id !in current) return
-        saveGroups(context, accountIdB64, current - id)
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val current = restoredGroups(context, accountIdB64)
+            val id = groupIdHex.lowercase()
+            if (id !in current) return
+            saveGroups(context, accountIdB64, current - id)
+    
+        }
     }
 
     /**

@@ -143,10 +143,13 @@ public class SharedPreferencesGroupCallStore(context: Context) : GroupCallStore 
     }
 
     override fun save(accountIdB64: String, groupIdHex: String, record: GroupCallRecordRow?) {
-        val key = groupCallKey(accountIdB64, groupIdHex)
-        val editor = prefs.edit()
-        if (record == null) editor.remove(key) else editor.putString(key, encodeGroupCallRow(record))
-        editor.apply()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val key = groupCallKey(accountIdB64, groupIdHex)
+            val editor = prefs.edit()
+            if (record == null) editor.remove(key) else editor.putString(key, encodeGroupCallRow(record))
+            editor.apply()
+    
+        }
     }
 
     override fun deleteAccount(accountIdB64: String) {

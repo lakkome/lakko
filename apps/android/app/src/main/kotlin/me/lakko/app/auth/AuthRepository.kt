@@ -178,10 +178,17 @@ public class AuthRepository(
 
     /** Record which account is bound; a change ends the previous binding. */
     private fun rebindAccount(accountIdB64: String?) {
-        synchronized(boundAccountLock) {
+        // Its stores are written again from here: a sign-out or a forget
+        // sealed them ([me.lakko.app.account.AccountStoreGate]), and every
+        // landing passes through this function.
+        accountIdB64?.let(me.lakko.app.account.AccountStoreGate::open)
+        val replaced = synchronized(boundAccountLock) {
             if (boundAccountIdB64 == accountIdB64) return
-            boundAccountIdB64 = accountIdB64
+            boundAccountIdB64.also { boundAccountIdB64 = accountIdB64 }
         }
+        // The account that was on the device is not any more: no write of
+        // its session starts from here on.
+        replaced?.let(me.lakko.app.account.AccountStoreGate::seal)
         accountBinding.advance()
     }
 
@@ -1116,7 +1123,13 @@ public class AuthRepository(
 
                 override suspend fun setPassword(phrase: String, password: ByteArray, username: String) {
                     bound.ensureCurrent()
-                    recover(mnemonicPhrase = phrase, newPassword = password, username = username)
+                    recover(
+                        mnemonicPhrase = phrase,
+                        newPassword = password,
+                        username = username,
+                        // Read from the guest's own store; never shown.
+                        phraseHeldByPerson = false,
+                    )
                 }
 
                 override fun owePhrase(phrase: String) {
@@ -1227,12 +1240,23 @@ public class AuthRepository(
         if (!isSignupPhraseOwed(phraseOwedMarkers, accountIdB64)) return
         val phrase = readOwedPhrase(accountIdB64) ?: return
         try {
-            provideRecoveryPhrase(phrase)
+            // Not typed: the person has not seen this phrase, and the landing
+            // shows it.
+            restoreFromPhrase(phrase, phraseHeldByPerson = false)
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (cause: Throwable) {
             Log.w("lakko-auth", "the owed recovery phrase did not restore the identity; staying parked", cause)
         }
+    }
+
+    /**
+     * The person signed in by typing the recovery phrase of [accountIdB64],
+     * and it was accepted: they hold it, so the phrase screen is not owed
+     * (and is not shown back to them).
+     */
+    private fun acknowledgePhraseTyped(accountIdB64: String) {
+        clearSignupPhraseOwed(phraseOwedMarkers, accountIdB64)
     }
 
     /** The phrase [accountIdB64] is owed, when it is and this device can read it. */
@@ -1514,6 +1538,13 @@ public class AuthRepository(
         mnemonicPhrase: String,
         newPassword: ByteArray,
         username: String? = null,
+        /**
+         * The person typed [mnemonicPhrase] themselves (every screen does).
+         * `false` when the device supplied it from a store the person has
+         * never been shown (a guest account being kept): a phrase still owed
+         * to them stays owed.
+         */
+        phraseHeldByPerson: Boolean = true,
     ) {
         if (mnemonicPhrase.isBlank()) {
             throw AuthClientArgError("recovery phrase must be non-empty")
@@ -1693,6 +1724,7 @@ public class AuthRepository(
                     // — do NOT wipe it in the `finally`.
                     seedHandedOff = true
                     // A phrase this device still owes the account is shown first.
+                    if (phraseHeldByPerson) acknowledgePhraseTyped(accountIdB64)
                     restoreOwedSignupPhrase(accountIdB64)
                     landedState = AuthState.Session(
                         account = SessionAccount(
@@ -2178,7 +2210,17 @@ public class AuthRepository(
      *         [RecoveryMnemonic.fromPhrase] when the BIP39 checksum
      *         fails.
      */
-    public suspend fun provideRecoveryPhrase(mnemonicPhrase: String) {
+    public suspend fun provideRecoveryPhrase(mnemonicPhrase: String): Unit =
+        restoreFromPhrase(mnemonicPhrase, phraseHeldByPerson = true)
+
+    /**
+     * [provideRecoveryPhrase], with who supplied the phrase: the person, on
+     * the restore prompt, or this device, from a phrase it still owes them
+     * ([completeParkFromOwedPhrase]). Typing the phrase proves the person
+     * holds it, so it is no longer owed; a phrase they have not seen is still
+     * shown first.
+     */
+    private suspend fun restoreFromPhrase(mnemonicPhrase: String, phraseHeldByPerson: Boolean) {
         val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
         // A sign-out while the checks below are out wins: it wiped `pending`
@@ -2267,6 +2309,7 @@ public class AuthRepository(
             seedHandedOff = true
             pendingRecovery.set(null)
             // A phrase this device still owes the account is shown first.
+            if (phraseHeldByPerson) acknowledgePhraseTyped(pending.accountIdB64)
             restoreOwedSignupPhrase(pending.accountIdB64)
             landedState = AuthState.Session(
                 account = SessionAccount(
@@ -2335,6 +2378,7 @@ public class AuthRepository(
                 Log.w("lakko-auth", "fresh identity refused: the new phrase could not be stored on this device", cause)
                 throw AuthClientArgError(
                     "The new recovery phrase could not be stored on this device. Nothing was changed.",
+                    me.lakko.app.l10n.UiText("restore_identity.lost.error.phrase_not_stored"),
                 )
             }
             try {
@@ -3201,6 +3245,10 @@ public class AuthRepository(
         // app's delivered notifications.
         me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
         val cached = sessionStore.load()
+        // No write of the session that is ending starts from here on, and
+        // one in flight on another thread has finished. Nothing is deleted:
+        // the account's stores stay for its next sign-in, which opens them.
+        (signedInAccountIdB64() ?: cached?.accountIdB64)?.let(me.lakko.app.account.AccountStoreGate::seal)
         // Drop the persisted bearer token FIRST and synchronously. A relaunch
         // silently restores any session whose token is still on disk
         // (decideSessionRestore), so a logout that left it behind would be
@@ -3258,7 +3306,13 @@ public class AuthRepository(
         val accountIdB64 = identitySecrets.value?.let { base64Encode(it.accountId) }
             ?: sessionStore.load()?.accountIdB64
         if (accountIdB64 != null) {
-            me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
+            // Inside the store gate: the wipe waits for a write of this
+            // account still in flight on another thread, and none can start
+            // while it deletes or after it, so nothing of a forgotten account
+            // is written back.
+            me.lakko.app.account.AccountStoreGate.seal(accountIdB64) {
+                me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
+            }
         }
         // The signed-in pointer goes whatever account it names: this device is
         // no longer signed in to anything.

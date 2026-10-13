@@ -6814,6 +6814,12 @@ public class ChatRepository(
         // First: everything launched for this account stops at its next
         // suspension, and a bootstrap still restoring it stands down.
         sessionBinding.advance()
+        // Then the stores: a write already past its "which account?" read on
+        // another thread finishes before this returns, and none starts after
+        // it (a thread race the binding cannot see). Before any other lock
+        // is taken here; it waits for disk writes in flight, never for the
+        // network, so it is safe on the main thread this is called from.
+        currentAccountIdB64.get()?.let { me.lakko.app.account.AccountStoreGate.seal(it) }
         introductionTicker?.cancel()
         introductionTicker = null
         me.lakko.app.reach.ReachManager.peek()?.clear()
@@ -7109,14 +7115,27 @@ public class ChatRepository(
      *  Best-effort: a failure here just leaves the entry un-acked, so the next
      *  restart sweep re-publishes it idempotently (peers drop the wrong-epoch
      *  duplicate; the committer's echo filter is re-armed). */
+    /**
+     * A write to an outbox entry named by its id alone (ack, discard): made
+     * for the signed-in account and inside its store gate, so it neither
+     * starts after the session ended nor rewrites an entry the forget-device
+     * wipe is deleting.
+     */
+    private inline fun outboxWrite(write: () -> Unit) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) { write() }
+    }
+
     private fun ackCommitBestEffort(id: String, commitMessageId: Long?, secondMessageId: Long?) {
         try {
-            CommitOutboxStore.markAcked(
-                applicationContext,
-                id,
-                commitMessageId,
-                secondMessageId,
-            )
+            outboxWrite {
+                CommitOutboxStore.markAcked(
+                    applicationContext,
+                    id,
+                    commitMessageId,
+                    secondMessageId,
+                )
+            }
         } catch (_: Throwable) {
             // best-effort — the next sweep reconciles.
         }
@@ -7140,7 +7159,7 @@ public class ChatRepository(
      */
     private fun onCommitPersistAbort(groupIdHex: String, entryId: String) {
         try {
-            CommitOutboxStore.deleteEntry(applicationContext, entryId)
+            outboxWrite { CommitOutboxStore.deleteEntry(applicationContext, entryId) }
         } catch (_: Throwable) {
             // best-effort — the restart sweep DISCARDs a torn orphan entry anyway.
         }
@@ -9680,11 +9699,15 @@ public class ChatRepository(
                     // the sweep still sees the failure and takes its non-fatal
                     // branch.
                     try {
-                        CommitOutboxStore.markWelcomesOwed(
-                            applicationContext,
-                            id,
-                            commitMessageId,
-                        )
+                        // Refused when the session has ended, which the
+                        // sweep must hear as "not recorded".
+                        me.lakko.app.account.AccountStoreGate.writeOrEnd(accountIdB64) {
+                            CommitOutboxStore.markWelcomesOwed(
+                                applicationContext,
+                                id,
+                                commitMessageId,
+                            )
+                        }
                     } catch (cause: Throwable) {
                         android.util.Log.w(
                             "ChatRepository",
@@ -9747,7 +9770,7 @@ public class ChatRepository(
 
                 override suspend fun discard(id: String) {
                     try {
-                        CommitOutboxStore.deleteEntry(applicationContext, id)
+                        outboxWrite { CommitOutboxStore.deleteEntry(applicationContext, id) }
                     } catch (_: Throwable) {
                         // best-effort — the next sweep retries.
                     }
@@ -9992,7 +10015,7 @@ public class ChatRepository(
                 onAck = { id, commitId, secondId -> ackCommitBestEffort(id, commitId, secondId) },
                 onDiscard = { id ->
                     try {
-                        CommitOutboxStore.deleteEntry(applicationContext, id)
+                        outboxWrite { CommitOutboxStore.deleteEntry(applicationContext, id) }
                     } catch (_: Throwable) {
                         // best-effort GC / discard — the next sweep retries.
                     }

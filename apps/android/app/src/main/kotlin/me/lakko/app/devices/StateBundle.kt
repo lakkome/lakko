@@ -323,15 +323,18 @@ public object StateBundle {
         RETIRED_RESTORED_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
 
     public fun saveKnownGroupIds(context: Context, accountIdB64: String, idsHex: Collection<String>) {
-        try {
-            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            if (idsHex.isEmpty()) {
-                prefs.edit().remove(knownKey(accountIdB64)).apply()
-            } else {
-                prefs.edit().putStringSet(knownKey(accountIdB64), idsHex.toSet()).apply()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                if (idsHex.isEmpty()) {
+                    prefs.edit().remove(knownKey(accountIdB64)).apply()
+                } else {
+                    prefs.edit().putStringSet(knownKey(accountIdB64), idsHex.toSet()).apply()
+                }
+            } catch (_: Throwable) {
+                // storage unavailable: the label falls back to "no chats yet"
             }
-        } catch (_: Throwable) {
-            // storage unavailable: the label falls back to "no chats yet"
+    
         }
     }
 

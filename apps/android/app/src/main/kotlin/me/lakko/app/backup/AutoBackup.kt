@@ -133,11 +133,14 @@ public object AutoBackupStore {
     }
 
     public fun save(context: Context, accountIdB64: String, state: AutoBackup.State) {
-        val o = JSONObject()
-            .put("lastUploadAtMs", state.lastUploadAtMs)
-            .put("dirtySinceMs", state.dirtySinceMs ?: JSONObject.NULL)
-            .put("lastGroupsKey", state.lastGroupsKey ?: JSONObject.NULL)
-        prefs(context).edit().putString(accountIdB64, o.toString()).apply()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val o = JSONObject()
+                .put("lastUploadAtMs", state.lastUploadAtMs)
+                .put("dirtySinceMs", state.dirtySinceMs ?: JSONObject.NULL)
+                .put("lastGroupsKey", state.lastGroupsKey ?: JSONObject.NULL)
+            prefs(context).edit().putString(accountIdB64, o.toString()).apply()
+    
+        }
     }
 
     public fun clear(context: Context, accountIdB64: String) {

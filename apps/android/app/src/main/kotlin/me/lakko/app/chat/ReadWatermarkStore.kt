@@ -81,15 +81,20 @@ public class SharedPreferencesReadWatermarkStore(context: Context) : ReadWaterma
         accountIdB64: String,
         groupIdHex: String,
         watermarks: Map<MemberIdentity, Long>,
-    ): Map<MemberIdentity, Long> = synchronized(WRITE_LOCK) {
-        val k = key(accountIdB64, groupIdHex)
-        val stored = decodeReadWatermarks(prefs.getString(k, null))
-        val merged = mergeReadWatermarks(stored, watermarks)
-        if (merged != stored) {
-            prefs.edit().putString(k, encodeReadWatermarks(merged)).apply()
-        }
-        merged
-    }
+    ): Map<MemberIdentity, Long> =
+        // The gate outside the store's own lock (its order with the wipe).
+        // Refused (the account's session has ended): nothing is stored.
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            synchronized(WRITE_LOCK) {
+                val k = key(accountIdB64, groupIdHex)
+                val stored = decodeReadWatermarks(prefs.getString(k, null))
+                val merged = mergeReadWatermarks(stored, watermarks)
+                if (merged != stored) {
+                    prefs.edit().putString(k, encodeReadWatermarks(merged)).apply()
+                }
+                merged
+            }
+        } ?: watermarks
 
     override fun deleteAccount(accountIdB64: String): Unit = synchronized(WRITE_LOCK) {
         val prefix = accountPrefix(accountIdB64)

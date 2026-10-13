@@ -124,7 +124,14 @@ public object FeedSealedStore {
     }
 
     /** Seal and write [text] under [dir]; `false` on any failure. */
-    internal fun write(context: Context, dir: String, accountIdB64: String, text: String): Boolean {
+    internal fun write(context: Context, dir: String, accountIdB64: String, text: String): Boolean =
+        // `false` as well when the account's session has ended. The gate is
+        // taken outside this store's own lock (its order with the wipe).
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            writeWhileOpen(context, dir, accountIdB64, text)
+        } ?: false
+
+    private fun writeWhileOpen(context: Context, dir: String, accountIdB64: String, text: String): Boolean {
         synchronized(lock) {
         try {
             val cipher = Cipher.getInstance(AES_GCM_NOPAD)

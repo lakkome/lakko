@@ -705,10 +705,13 @@ internal class SharedPrefsLastObservedOwnerStore(context: Context) : LastObserve
     }
 
     override fun save(accountIdB64: String, groupIdHex: String, ownerKeyB64: String) {
-        try {
-            prefs().edit().putString(rowKey(accountIdB64, groupIdHex), ownerKeyB64).apply()
-        } catch (_: Throwable) {
-            // best-effort — losing it costs one notice
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                prefs().edit().putString(rowKey(accountIdB64, groupIdHex), ownerKeyB64).apply()
+            } catch (_: Throwable) {
+                // best-effort — losing it costs one notice
+            }
+    
         }
     }
 

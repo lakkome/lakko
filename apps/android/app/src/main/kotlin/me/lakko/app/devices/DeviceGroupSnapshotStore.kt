@@ -131,23 +131,26 @@ public object DeviceGroupSnapshotStore {
         snapshotBytes: ByteArray,
         dir: String = ENVELOPE_DIR,
     ) {
-        if (snapshotBytes.isEmpty()) {
-            throw IllegalArgumentException("snapshotBytes must be non-empty")
-        }
-        val wrap = getOrCreateWrapKey()
-        val cipher = Cipher.getInstance(AES_GCM_NOPAD)
-        cipher.init(Cipher.ENCRYPT_MODE, wrap)
-        val iv = cipher.iv
-        check(iv.size == GCM_IV_LEN) {
-            "unexpected GCM IV length from Keystore: ${iv.size}"
-        }
-        val ciphertext = cipher.doFinal(snapshotBytes)
+        me.lakko.app.account.AccountStoreGate.writeOrEnd(accountIdB64) {
+            if (snapshotBytes.isEmpty()) {
+                throw IllegalArgumentException("snapshotBytes must be non-empty")
+            }
+            val wrap = getOrCreateWrapKey()
+            val cipher = Cipher.getInstance(AES_GCM_NOPAD)
+            cipher.init(Cipher.ENCRYPT_MODE, wrap)
+            val iv = cipher.iv
+            check(iv.size == GCM_IV_LEN) {
+                "unexpected GCM IV length from Keystore: ${iv.size}"
+            }
+            val ciphertext = cipher.doFinal(snapshotBytes)
 
-        val out = ByteArray(GCM_IV_LEN + ciphertext.size)
-        System.arraycopy(iv, 0, out, 0, GCM_IV_LEN)
-        System.arraycopy(ciphertext, 0, out, GCM_IV_LEN, ciphertext.size)
+            val out = ByteArray(GCM_IV_LEN + ciphertext.size)
+            System.arraycopy(iv, 0, out, 0, GCM_IV_LEN)
+            System.arraycopy(ciphertext, 0, out, GCM_IV_LEN, ciphertext.size)
 
-        envelopeFile(context, accountIdB64, dir).writeBytes(out)
+            envelopeFile(context, accountIdB64, dir).writeBytes(out)
+    
+        }
     }
 
     /**

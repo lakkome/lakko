@@ -686,17 +686,20 @@ internal class SharedPrefsPendingRequestStore(context: Context) : PendingRequest
         groupIdHex: String,
         observations: Map<String, RequestObservation>,
     ) {
-        try {
-            val key = rowKey(accountIdB64, groupIdHex)
-            val editor = prefs().edit()
-            if (observations.isEmpty()) {
-                editor.remove(key)
-            } else {
-                editor.putString(key, encodeRow(observations))
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                val key = rowKey(accountIdB64, groupIdHex)
+                val editor = prefs().edit()
+                if (observations.isEmpty()) {
+                    editor.remove(key)
+                } else {
+                    editor.putString(key, encodeRow(observations))
+                }
+                editor.apply()
+            } catch (_: Throwable) {
+                // the quiet window is best-effort
             }
-            editor.apply()
-        } catch (_: Throwable) {
-            // the quiet window is best-effort
+    
         }
     }
 

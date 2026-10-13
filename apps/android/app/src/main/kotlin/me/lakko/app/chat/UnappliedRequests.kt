@@ -268,13 +268,16 @@ internal class SharedPrefsUnappliedRequestStore(context: Context) : UnappliedReq
         groupIdHex: String,
         rows: Map<String, UnappliedRow>,
     ) {
-        try {
-            val key = rowKey(accountIdB64, groupIdHex)
-            val editor = prefs().edit()
-            if (rows.isEmpty()) editor.remove(key) else editor.putString(key, encodeRow(rows))
-            editor.apply()
-        } catch (_: Throwable) {
-            // best-effort
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                val key = rowKey(accountIdB64, groupIdHex)
+                val editor = prefs().edit()
+                if (rows.isEmpty()) editor.remove(key) else editor.putString(key, encodeRow(rows))
+                editor.apply()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+    
         }
     }
 
@@ -293,10 +296,13 @@ internal class SharedPrefsUnappliedRequestStore(context: Context) : UnappliedReq
     }
 
     override fun clearForGroup(accountIdB64: String, groupIdHex: String) {
-        try {
-            prefs().edit().remove(rowKey(accountIdB64, groupIdHex)).apply()
-        } catch (_: Throwable) {
-            // best-effort
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                prefs().edit().remove(rowKey(accountIdB64, groupIdHex)).apply()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+    
         }
     }
 

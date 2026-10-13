@@ -609,18 +609,24 @@ internal class SharedPrefsLeaveRecordStore(context: Context) : LeaveRecordStore 
         }
 
     override fun save(accountIdB64: String, groupIdHex: String, atMs: Long) {
-        try {
-            prefs().edit().putString(rowKey(accountIdB64, groupIdHex), atMs.toString()).apply()
-        } catch (_: Throwable) {
-            // best-effort — see [recordLeaveRequested]
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                prefs().edit().putString(rowKey(accountIdB64, groupIdHex), atMs.toString()).apply()
+            } catch (_: Throwable) {
+                // best-effort — see [recordLeaveRequested]
+            }
+    
         }
     }
 
     override fun clear(accountIdB64: String, groupIdHex: String) {
-        try {
-            prefs().edit().remove(rowKey(accountIdB64, groupIdHex)).apply()
-        } catch (_: Throwable) {
-            // best-effort
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                prefs().edit().remove(rowKey(accountIdB64, groupIdHex)).apply()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+    
         }
     }
 
