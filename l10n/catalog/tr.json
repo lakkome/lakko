@@ -2,6 +2,10 @@
   "format": 1,
   "language": "tr",
   "messages": {
+    "account.keys_changed.finishing": {
+      "text": "Hesabınızın yeni anahtarları var. Değişikliği tamamlıyoruz.",
+      "status": "machine"
+    },
     "app.not_found.body": {
       "text": "Bu adreste hiçbir şey yok.",
       "status": "machine"
@@ -6186,6 +6190,58 @@
       "text": "Grubun sahibi siz olacaksınız. Daha sonra başka kişiler ekleyebilirsiniz.",
       "status": "machine"
     },
+    "notice.email_added": {
+      "text": "Hesabınıza bir kurtarma e-postası eklendi.",
+      "status": "machine"
+    },
+    "notice.email_removed": {
+      "text": "Kurtarma e-postanız kaldırıldı.",
+      "status": "machine"
+    },
+    "notice.email_replaced": {
+      "text": "Kurtarma e-postanız değiştirildi.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.body": {
+      "text": "{date}, başka bir cihazda.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.title": {
+      "text": "Hesabınız kurtarma e-postanızla açıldı",
+      "status": "machine"
+    },
+    "notice.password_by_email.body": {
+      "text": "{date} tarihinde biri kurtarma e-postanızı kullanarak yeni bir şifre seçti.",
+      "status": "machine"
+    },
+    "notice.password_by_email.title": {
+      "text": "Şifreniz değiştirildi",
+      "status": "machine"
+    },
+    "notice.phrase_saved": {
+      "text": "Hesabınız için bir kurtarma ifadesi kaydedildi.",
+      "status": "machine"
+    },
+    "notice.secure.new_keys": {
+      "text": "Bu, hesabınıza yeni anahtarlar verir; böylece hesabı açan kişi erişimini kaybeder.",
+      "status": "machine"
+    },
+    "notice.secure.password_saved": {
+      "text": "Şifreniz değiştirildi.",
+      "status": "machine"
+    },
+    "notice.secure.title": {
+      "text": "Hesabınızı güvenceye alın",
+      "status": "machine"
+    },
+    "notice.was_me": {
+      "text": "Bendim",
+      "status": "machine"
+    },
+    "notice.was_not_me": {
+      "text": "Ben değildim",
+      "status": "machine"
+    },
     "notification.channel.messages": {
       "text": "Mesajlar",
       "status": "machine"
@@ -6282,6 +6338,10 @@
       "text": "Bunun yerine şifrenizi kullanın",
       "status": "machine"
     },
+    "proof.recovery_email.help": {
+      "text": "Kurtarma e-postanızı değiştirmek için şifrenizi girin.",
+      "status": "machine"
+    },
     "proof.remove_device.cancelled": {
       "text": "İptal edildi. Cihaz kaldırılmadı.",
       "status": "machine"
@@ -6326,6 +6386,134 @@
       "text": "Yapabilecekleriniz:",
       "status": "machine"
     },
+    "proof.save_phrase.help": {
+      "text": "Kurtarma ifadesi kaydetmek için şifrenizi girin.",
+      "status": "machine"
+    },
+    "proof.username.help": {
+      "text": "Kullanıcı adınızı değiştirmek için şifrenizi girin.",
+      "status": "machine"
+    },
+    "protect.banner.action": {
+      "text": "Koru",
+      "status": "machine"
+    },
+    "protect.banner.none": {
+      "text": "Bu hesaba geri dönmenin bir yolu yok.",
+      "status": "machine"
+    },
+    "protect.body": {
+      "text": "Şifrenizi unutursanız veya bu telefonu kaybederseniz hesabınıza böyle geri dönersiniz.",
+      "status": "machine"
+    },
+    "protect.continue": {
+      "text": "Devam",
+      "status": "machine"
+    },
+    "protect.done": {
+      "text": "Tamamlandı",
+      "status": "machine"
+    },
+    "protect.email.badge": {
+      "text": "Önerilen",
+      "status": "machine"
+    },
+    "protect.email.body": {
+      "text": "Bu adrese bir kod göndeririz. O posta kutusunu okuyabilen herkes hesabınıza girebilir.",
+      "status": "machine"
+    },
+    "protect.email.title": {
+      "text": "E-posta ekle",
+      "status": "machine"
+    },
+    "protect.passkey.body": {
+      "text": "Parmak iziniz, yüzünüz veya ekran kilidinizle giriş yapın. Hatırlanacak şifre yok.",
+      "status": "machine"
+    },
+    "protect.passkey.title": {
+      "text": "Geçiş anahtarı oluştur",
+      "status": "machine"
+    },
+    "protect.phrase.body": {
+      "text": "Yalnızca sizin sakladığınız 12 kelime. Daha güçlüdür ve e-postayla ilgisi yoktur.",
+      "status": "machine"
+    },
+    "protect.phrase.save.body": {
+      "text": "Yalnızca sizin sakladığınız 12 kelime. Bundan sonra e-postayla gelen bir kod şifrenizi değiştirebilir ama hesabınızı açamaz.",
+      "status": "machine"
+    },
+    "protect.phrase.save.effect": {
+      "text": "Bu, hesabınıza yeni anahtarlar verir. Kişileriniz ve sohbetleriniz olduğu gibi kalır. Diğer cihazlarınızda oturum açık kalır.",
+      "status": "machine"
+    },
+    "protect.phrase.save.failed": {
+      "text": "Tamamlanamadı. Hiçbir şey değişmedi.",
+      "status": "machine"
+    },
+    "protect.phrase.save.finishing": {
+      "text": "Hesabınızın yeni anahtarları var. Tamamlanıyor.",
+      "status": "machine"
+    },
+    "protect.phrase.save.progress": {
+      "text": "Hesabınızın anahtarları değiştiriliyor",
+      "status": "machine"
+    },
+    "protect.phrase.save.show": {
+      "text": "12 kelimemi göster",
+      "status": "machine"
+    },
+    "protect.phrase.title": {
+      "text": "Kurtarma ifadesi kaydet",
+      "status": "machine"
+    },
+    "protect.skip": {
+      "text": "Şimdi değil",
+      "status": "machine"
+    },
+    "protect.skip.confirm.body": {
+      "text": "Şifrenizi unutursanız veya bu telefonu kaybederseniz bu hesaba geri dönemezsiniz.",
+      "status": "machine"
+    },
+    "protect.skip.confirm.continue": {
+      "text": "Korumasız devam et",
+      "status": "machine"
+    },
+    "protect.skip.confirm.title": {
+      "text": "Korumasız devam edilsin mi?",
+      "status": "machine"
+    },
+    "protect.status.email": {
+      "text": "E-postanızla korunuyor",
+      "status": "machine"
+    },
+    "protect.status.none": {
+      "text": "Korunmuyor",
+      "status": "machine"
+    },
+    "protect.status.phrase": {
+      "text": "Kurtarma ifadenizle korunuyor",
+      "status": "machine"
+    },
+    "protect.title": {
+      "text": "Hesabınızı koruyun",
+      "status": "machine"
+    },
+    "recall.phrase.changed": {
+      "text": "Bu hesabın anahtarları {date} tarihinde değiştirildi. Bunu siz mi yaptınız?",
+      "status": "machine"
+    },
+    "recall.phrase.take_back": {
+      "text": "Hesabı geri al",
+      "status": "machine"
+    },
+    "recall.phrase.use": {
+      "text": "Bunun yerine kurtarma ifademi kullan",
+      "status": "machine"
+    },
+    "recall.phrase.wrong": {
+      "text": "Bu kelimeler bu hesabın kurtarma ifadesi değil.",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "Kimlik doğrulayıcı kodu giriş yapmanızı sağlar. Bu hesabın daha önce hiç bulunmadığı bir cihazda, ardından yine de başka bir cihaza, bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olur.",
       "status": "machine"
@@ -6348,6 +6536,50 @@
     },
     "recovery.device.restoring": {
       "text": "Geri yükleniyor: {username}",
+      "status": "machine"
+    },
+    "recovery.email.check.body": {
+      "text": "Bu kullanıcı adı ve adres birbirine aitse bir kod yolda. Kod 10 dakika geçerlidir.",
+      "status": "machine"
+    },
+    "recovery.email.check.title": {
+      "text": "E-postanızı kontrol edin",
+      "status": "machine"
+    },
+    "recovery.email.failed": {
+      "text": "Hesabınız geri getirilemedi. Tekrar deneyin veya başka bir yol seçin.",
+      "status": "machine"
+    },
+    "recovery.email.restoring": {
+      "text": "Hesabınız geri getiriliyor",
+      "status": "machine"
+    },
+    "recovery.email.row.body": {
+      "text": "Kurtarma e-postanıza gönderilen bir kod.",
+      "status": "machine"
+    },
+    "recovery.email.row.title": {
+      "text": "E-posta kodu",
+      "status": "machine"
+    },
+    "recovery.email.save": {
+      "text": "Kaydet ve giriş yap",
+      "status": "machine"
+    },
+    "recovery.email.start.body": {
+      "text": "Kullanıcı adınızı ve kurtarma e-postanızı yazın.",
+      "status": "machine"
+    },
+    "recovery.email.totp.body": {
+      "text": "Kimlik doğrulayıcı uygulamanızdaki 6 haneli kodu yazın.",
+      "status": "machine"
+    },
+    "recovery.email.totp.lost": {
+      "text": "Kimlik doğrulayıcınızı mı kaybettiniz? Hesabınıza geri dönmek için başka bir yol kullanın.",
+      "status": "machine"
+    },
+    "recovery.email.totp.title": {
+      "text": "Kimlik doğrulayıcı kodu",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6560,6 +6792,118 @@
     },
     "recovery.words.tries_left": {
       "text": "15 dakikalık aradan önce {count, plural, one {# deneme kaldı} other {# deneme kaldı}}.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.body": {
+      "text": "Hesabınızın anahtarları değişti. E-postayla gelen bir kodun hesabınızı geri getirebilmesi için adresinizi yeniden yazın.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.title": {
+      "text": "E-postanızı yeniden ekleyin",
+      "status": "machine"
+    },
+    "recovery_email.body": {
+      "text": "Şifrenizi unutursanız hesabınıza geri dönebilmeniz için bu adrese bir kod göndeririz.",
+      "status": "machine"
+    },
+    "recovery_email.code.expired": {
+      "text": "Bu kodun süresi doldu.",
+      "status": "machine"
+    },
+    "recovery_email.code.other_address": {
+      "text": "Farklı bir adres kullan",
+      "status": "machine"
+    },
+    "recovery_email.code.resend": {
+      "text": "Tekrar gönder",
+      "status": "machine"
+    },
+    "recovery_email.code.resend_in": {
+      "text": "{time} sonra tekrar gönder",
+      "status": "machine"
+    },
+    "recovery_email.code.sent_to": {
+      "text": "Şu adrese 6 haneli bir kod gönderdik: {address}",
+      "status": "machine"
+    },
+    "recovery_email.code.title": {
+      "text": "Kodu girin",
+      "status": "machine"
+    },
+    "recovery_email.code.used_up": {
+      "text": "Çok fazla deneme yapıldı. Yeni bir kod gönderin.",
+      "status": "machine"
+    },
+    "recovery_email.code.wrong": {
+      "text": "Bu kod doğru değil.",
+      "status": "machine"
+    },
+    "recovery_email.field": {
+      "text": "E-posta",
+      "status": "machine"
+    },
+    "recovery_email.invalid": {
+      "text": "Tam bir e-posta adresi yazın.",
+      "status": "machine"
+    },
+    "recovery_email.mailbox_warning": {
+      "text": "Bu posta kutusunu okuyabilen herkes hesabınıza girebilir. Bunu değiştirmek için bir kurtarma ifadesi kaydedin.",
+      "status": "machine"
+    },
+    "recovery_email.needs_username": {
+      "text": "Önce bir kullanıcı adı seçin.",
+      "status": "machine"
+    },
+    "recovery_email.not_kept": {
+      "text": "Lakko adresinizi saklamaz. Bir koda ihtiyacınız olduğunda adresi kullanıcı adınızla birlikte yeniden yazarsınız.",
+      "status": "machine"
+    },
+    "recovery_email.remove": {
+      "text": "Kaldır",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.body": {
+      "text": "Hesabınıza e-postayla geri dönemezsiniz.",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.title": {
+      "text": "Kurtarma e-postası kaldırılsın mı?",
+      "status": "machine"
+    },
+    "recovery_email.replace": {
+      "text": "Değiştir",
+      "status": "machine"
+    },
+    "recovery_email.send": {
+      "text": "Kod gönder",
+      "status": "machine"
+    },
+    "recovery_email.send_failed": {
+      "text": "E-posta gönderilemedi. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery_email.status.off": {
+      "text": "Kapalı",
+      "status": "machine"
+    },
+    "recovery_email.status.on": {
+      "text": "Açık",
+      "status": "machine"
+    },
+    "recovery_email.title": {
+      "text": "Kurtarma e-postası",
+      "status": "machine"
+    },
+    "recovery_email.totp_warning": {
+      "text": "Kimlik doğrulayıcı uygulamanızdan bir kod da gerekecek. Uygulama kaybettiğiniz telefondaysa e-posta yeterli olmaz.",
+      "status": "machine"
+    },
+    "recovery_email.unavailable": {
+      "text": "E-posta kodları şu anda kullanılamıyor.",
+      "status": "machine"
+    },
+    "recovery_email.username_change": {
+      "text": "Kullanıcı adınızı değiştirmek kurtarma e-postanızı kapatır. Sonrasında yeniden ekleyebilirsiniz.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -7708,6 +8052,50 @@
     },
     "username.a11y_hint": {
       "text": "Kullanıcı adı: {message}",
+      "status": "machine"
+    },
+    "username.change.body": {
+      "text": "İnsanlar sizi artık şu adla bulamaz: {old}. 30 gün boyunca başka kimse bu adı alamaz.",
+      "status": "machine"
+    },
+    "username.change.next_change": {
+      "text": "Bundan sonra 30 gün sonra yeniden değiştirebilirsiniz.",
+      "status": "machine"
+    },
+    "username.change.other_devices": {
+      "text": "Diğer cihazlarınız bir sonraki çevrimiçi olduklarında yeni kullanıcı adını alır.",
+      "status": "machine"
+    },
+    "username.change.save": {
+      "text": "Değiştir",
+      "status": "machine"
+    },
+    "username.change.title": {
+      "text": "Kullanıcı adını değiştir",
+      "status": "machine"
+    },
+    "username.change.too_soon": {
+      "text": "Kullanıcı adınızı {date} tarihinde yeniden değiştirebilirsiniz.",
+      "status": "machine"
+    },
+    "username.claim.body": {
+      "text": "Kullanıcı adı ve şifreyle başka bir cihazda giriş yapabilir, kurtarma e-postası ekleyebilirsiniz ve insanlar sizi bulabilir.",
+      "status": "machine"
+    },
+    "username.claim.done": {
+      "text": "Kullanıcı adınız: {username}",
+      "status": "machine"
+    },
+    "username.claim.password_help": {
+      "text": "Giriş için bir şifre seçin. Şimdiye kadar bir şifreniz yoktu.",
+      "status": "machine"
+    },
+    "username.claim.save": {
+      "text": "Kaydet",
+      "status": "machine"
+    },
+    "username.claim.title": {
+      "text": "Bir kullanıcı adı seçin",
       "status": "machine"
     },
     "username.error.bind_limited_later": {

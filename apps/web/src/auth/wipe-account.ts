@@ -46,6 +46,8 @@ import { clearRotatedNotice, clearRotation } from "../devices/key-rotation";
 import { clearSignupPhraseOwed } from "./phrase-gate";
 import { clearProtectionFacts } from "./protect/account-protection";
 import { clearNoticeStores } from "./protect/notices";
+import { clearFirstPasswordOwed } from "./username-claim";
+import { clearRenameStores } from "./username-change";
 import { clearPersistedAccountFor } from "./persisted-account";
 import { deleteDeviceGroupSnapshot } from "../devices/device-group-snapshot-store";
 import { deleteSyncState } from "../devices/sync/sync-state-idb";
@@ -297,6 +299,21 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       run: () => clearContinuityMarker(localStorage, accountIdB64),
     },
     { name: "lineage-unsent", run: () => removeLocal(`lakko.lineage.unsent.v1.${accountIdB64}`) },
+    // ADR-0067: the "recovery-email register is not confirmed sent" marker
+    // (the address itself is in the synced state, deleted with it), and the
+    // "first password owed" marker of a guest that chose a username.
+    {
+      name: "recovery-email-unsent",
+      run: () => removeLocal(`lakko.recovery-email.unsent.v1.${accountIdB64}`),
+    },
+    { name: "first-password-owed", run: () => clearFirstPasswordOwed(storage, accountIdB64) },
+    // ADR-0068: the "own-username register is not confirmed sent" marker,
+    // and an unfinished rename with the stamp of the last one.
+    {
+      name: "own-username-unsent",
+      run: () => removeLocal(`lakko.own-username.unsent.v1.${accountIdB64}`),
+    },
+    { name: "username-change", run: () => clearRenameStores(storage, accountIdB64) },
     // ADR-0065 R.5 / R.7: when a conversation moved, and that a re-send ran.
     { name: "reset-continuity-state", run: () => clearContinuityStateForAccount(accountIdB64) },
     // The per-account conversation-kind map of builds before ADR-0062 (the

@@ -56,6 +56,12 @@ class RecoveryEmailCatalogTest {
             "recovery.email.failed", "recovery_email.totp_warning",
             "protect.passkey.title", "protect.passkey.body", "protect.done", "protect.continue",
             "account.keys_changed.finishing",
+            "username.claim.title", "username.claim.body", "username.claim.password_help",
+            "username.claim.save", "username.claim.done", "auth.signup.error.username_taken",
+            "username.change.title", "username.change.body", "username.change.next_change",
+            "username.change.save", "username.change.too_soon", "username.change.other_devices",
+            "proof.username.help", "recovery_email.username_change",
+            "auth.password.new.label", "auth.password.new_confirm.label", "auth.signup.username.hint",
         )
         for (key in keys) assertTrue("missing catalog key $key", catalog.contains("\"$key\": {"))
     }

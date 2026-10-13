@@ -1514,6 +1514,42 @@ public class AuthClient(
         return res.vault
     }
 
+    /**
+     * `PUT /recovery-email/vault` (bearer, no fresh-auth grant): install the
+     * email vault for the address the account already confirmed. Every
+     * well-formed request spends one of ten a day: never call it in a loop.
+     *
+     * @throws AuthHttpError `409 vault-exists` / `phrase-saved` /
+     *   `no-recovery-email` / `username-required` / `handle-mismatch`, `403
+     *   address-mismatch`, `400 address-invalid`, `429 too-many-attempts`,
+     *   `503 recovery-email-disabled`.
+     */
+    public suspend fun recoveryEmailVaultPut(
+        sessionToken: String,
+        handle: ByteArray,
+        address: String,
+        vaultSalt: ByteArray,
+        sealedEntropy: ByteArray,
+    ) {
+        requireSession(sessionToken)
+        requireHandle(handle)
+        if (vaultSalt.size != EMAIL_VAULT_SALT_LEN) throw AuthClientArgError("the vault salt must be $EMAIL_VAULT_SALT_LEN bytes")
+        if (sealedEntropy.size != EMAIL_VAULT_SEALED_LEN) {
+            throw AuthClientArgError("the email vault must be $EMAIL_VAULT_SEALED_LEN bytes")
+        }
+        sendJson<RecoveryEmailVaultPutRequest, RecoveryEmailVaultPutResponse>(
+            HttpMethod.Put,
+            "/recovery-email/vault",
+            RecoveryEmailVaultPutRequest(
+                handle = base64UrlEncodeNoPad(handle),
+                address = address,
+                vault_salt = base64Encode(vaultSalt),
+                sealed_entropy = base64Encode(sealedEntropy),
+            ),
+            bearer = sessionToken,
+        )
+    }
+
     /** `DELETE /recovery-email` (bearer + fresh-auth grant): remove the
      *  recovery email and the vault. */
     public suspend fun recoveryEmailRemove(sessionToken: String, freshGrant: String?) {
@@ -1846,22 +1882,62 @@ public class AuthClient(
      * @throws AuthHttpError on any other refusal (`503
      *   login-by-name-disabled` included).
      */
-    public suspend fun bindLoginHandle(sessionToken: String, handle: ByteArray): LoginHandleBinding {
+    public suspend fun bindLoginHandle(
+        sessionToken: String,
+        handle: ByteArray,
+        /** ADR-0068: needed when the bind CHANGES the account's handle
+         *  (`403 fresh-auth-required` otherwise). */
+        freshGrant: String? = null,
+        /** The handle the account holds now; with [recoveryEmail]. */
+        previousHandle: ByteArray? = null,
+        /** Re-key the recovery email to [handle] instead of dropping it. */
+        recoveryEmail: LoginHandleRecoveryEmail? = null,
+    ): LoginHandleBinding {
         if (sessionToken.isEmpty()) {
             throw AuthClientArgError("sessionToken must be non-empty")
         }
         requireHandle(handle)
+        previousHandle?.let { requireHandle(it) }
         return try {
             sendJson<LoginHandleRequest, LoginHandleBoundResponse>(
                 HttpMethod.Put,
                 LOGIN_HANDLE_PATH,
-                LoginHandleRequest(handle = base64UrlEncodeNoPad(handle)),
+                LoginHandleRequest(
+                    handle = base64UrlEncodeNoPad(handle),
+                    fresh_grant = freshGrant,
+                    previous_handle = previousHandle?.let { base64UrlEncodeNoPad(it) },
+                    recovery_email = recoveryEmail,
+                ),
                 bearer = sessionToken,
             )
             LoginHandleBinding.Bound
         } catch (e: AuthHttpError) {
-            if (e.status == HTTP_CONFLICT) LoginHandleBinding.Taken else throw e
+            // `409 handle-taken` (or the older bodiless 409); a
+            // `409 handle-mismatch` is a refusal of its own.
+            if (e.status == HTTP_CONFLICT && (e.code == null || e.code == "handle-taken")) {
+                LoginHandleBinding.Taken
+            } else {
+                throw e
+            }
         }
+    }
+
+    /**
+     * `POST /auth/login-handle/check` (bearer, ADR-0068 section 2): whether
+     * the account holds [handle], another handle, or none. An answer this
+     * build does not know reads as "other": nothing is bound on a guess.
+     */
+    public suspend fun checkLoginHandle(sessionToken: String, handle: ByteArray): LoginHandleState {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        requireHandle(handle)
+        val res: LoginHandleCheckResponse = post(
+            "$LOGIN_HANDLE_PATH/check",
+            LoginHandleCheckRequest(handle = base64UrlEncodeNoPad(handle)),
+            bearer = sessionToken,
+        )
+        return LoginHandleState.ofWire(res.state) ?: LoginHandleState.Other
     }
 
     /** `DELETE /auth/login-handle` - remove the signed-in account's handle.

@@ -2,6 +2,10 @@
   "format": 1,
   "language": "he",
   "messages": {
+    "account.keys_changed.finishing": {
+      "text": "לחשבון שלכם יש מפתחות חדשים. אנחנו משלימים את השינוי.",
+      "status": "machine"
+    },
     "app.not_found.body": {
       "text": "אין כלום בכתובת הזו.",
       "status": "machine"
@@ -6186,6 +6190,58 @@
       "text": "אתם תהיו הבעלים של הקבוצה. אפשר להוסיף עוד אנשים מאוחר יותר.",
       "status": "machine"
     },
+    "notice.email_added": {
+      "text": "אימייל לשחזור נוסף לחשבון שלכם.",
+      "status": "machine"
+    },
+    "notice.email_removed": {
+      "text": "האימייל לשחזור שלכם הוסר.",
+      "status": "machine"
+    },
+    "notice.email_replaced": {
+      "text": "האימייל לשחזור שלכם הוחלף.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.body": {
+      "text": "{date}, במכשיר אחר.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.title": {
+      "text": "החשבון שלכם נפתח באמצעות האימייל לשחזור",
+      "status": "machine"
+    },
+    "notice.password_by_email.body": {
+      "text": "ב-{date} מישהו השתמש באימייל לשחזור שלכם כדי לבחור סיסמה חדשה.",
+      "status": "machine"
+    },
+    "notice.password_by_email.title": {
+      "text": "הסיסמה שלכם שונתה",
+      "status": "machine"
+    },
+    "notice.phrase_saved": {
+      "text": "ביטוי שחזור נשמר עבור החשבון שלכם.",
+      "status": "machine"
+    },
+    "notice.secure.new_keys": {
+      "text": "זה נותן לחשבון שלכם מפתחות חדשים, כך שמי שפתח אותו מאבד אותו.",
+      "status": "machine"
+    },
+    "notice.secure.password_saved": {
+      "text": "הסיסמה שלכם שונתה.",
+      "status": "machine"
+    },
+    "notice.secure.title": {
+      "text": "אבטחו את החשבון",
+      "status": "machine"
+    },
+    "notice.was_me": {
+      "text": "זה הייתי אני",
+      "status": "machine"
+    },
+    "notice.was_not_me": {
+      "text": "זה לא הייתי אני",
+      "status": "machine"
+    },
     "notification.channel.messages": {
       "text": "הודעות",
       "status": "machine"
@@ -6282,6 +6338,10 @@
       "text": "שימוש בסיסמה במקום",
       "status": "machine"
     },
+    "proof.recovery_email.help": {
+      "text": "הזינו את הסיסמה כדי לשנות את האימייל לשחזור.",
+      "status": "machine"
+    },
     "proof.remove_device.cancelled": {
       "text": "בוטל. המכשיר לא הוסר.",
       "status": "machine"
@@ -6326,6 +6386,134 @@
       "text": "מה אפשר לעשות:",
       "status": "machine"
     },
+    "proof.save_phrase.help": {
+      "text": "הזינו את הסיסמה כדי לשמור ביטוי שחזור.",
+      "status": "machine"
+    },
+    "proof.username.help": {
+      "text": "הזינו את הסיסמה כדי לשנות את שם המשתמש.",
+      "status": "machine"
+    },
+    "protect.banner.action": {
+      "text": "הגנה",
+      "status": "machine"
+    },
+    "protect.banner.none": {
+      "text": "לחשבון הזה אין דרך חזרה.",
+      "status": "machine"
+    },
+    "protect.body": {
+      "text": "אם תשכחו את הסיסמה או תאבדו את הטלפון הזה, כך תחזרו לחשבון.",
+      "status": "machine"
+    },
+    "protect.continue": {
+      "text": "המשך",
+      "status": "machine"
+    },
+    "protect.done": {
+      "text": "בוצע",
+      "status": "machine"
+    },
+    "protect.email.badge": {
+      "text": "מומלץ",
+      "status": "machine"
+    },
+    "protect.email.body": {
+      "text": "אנחנו שולחים אליו קוד. כל מי שיכול לקרוא את תיבת הדואר הזו יכול להיכנס לחשבון שלכם.",
+      "status": "machine"
+    },
+    "protect.email.title": {
+      "text": "הוספת אימייל",
+      "status": "machine"
+    },
+    "protect.passkey.body": {
+      "text": "התחברו עם טביעת אצבע, פנים או נעילת המסך. אין סיסמה שצריך לזכור.",
+      "status": "machine"
+    },
+    "protect.passkey.title": {
+      "text": "יצירת מפתח גישה",
+      "status": "machine"
+    },
+    "protect.phrase.body": {
+      "text": "12 מילים שרק אתם שומרים. חזק יותר, וללא קשר לאימייל.",
+      "status": "machine"
+    },
+    "protect.phrase.save.body": {
+      "text": "12 מילים שרק אתם שומרים. אחרי זה, קוד באימייל יכול לשנות את הסיסמה אבל לא יכול לפתוח את החשבון.",
+      "status": "machine"
+    },
+    "protect.phrase.save.effect": {
+      "text": "זה נותן לחשבון שלכם מפתחות חדשים. אנשי הקשר והצ׳אטים נשארים כמו שהם. המכשירים האחרים שלכם נשארים מחוברים.",
+      "status": "machine"
+    },
+    "protect.phrase.save.failed": {
+      "text": "לא הצלחנו לסיים. דבר לא השתנה.",
+      "status": "machine"
+    },
+    "protect.phrase.save.finishing": {
+      "text": "לחשבון שלכם יש מפתחות חדשים. מסיימים.",
+      "status": "machine"
+    },
+    "protect.phrase.save.progress": {
+      "text": "משנים את מפתחות החשבון שלכם",
+      "status": "machine"
+    },
+    "protect.phrase.save.show": {
+      "text": "הצגת 12 המילים שלי",
+      "status": "machine"
+    },
+    "protect.phrase.title": {
+      "text": "שמירת ביטוי שחזור",
+      "status": "machine"
+    },
+    "protect.skip": {
+      "text": "לא עכשיו",
+      "status": "machine"
+    },
+    "protect.skip.confirm.body": {
+      "text": "אם תשכחו את הסיסמה או תאבדו את הטלפון הזה, לא תוכלו לחזור לחשבון הזה.",
+      "status": "machine"
+    },
+    "protect.skip.confirm.continue": {
+      "text": "המשך ללא הגנה",
+      "status": "machine"
+    },
+    "protect.skip.confirm.title": {
+      "text": "להמשיך ללא הגנה?",
+      "status": "machine"
+    },
+    "protect.status.email": {
+      "text": "מוגן באמצעות האימייל שלכם",
+      "status": "machine"
+    },
+    "protect.status.none": {
+      "text": "לא מוגן",
+      "status": "machine"
+    },
+    "protect.status.phrase": {
+      "text": "מוגן באמצעות ביטוי השחזור שלכם",
+      "status": "machine"
+    },
+    "protect.title": {
+      "text": "הגנו על החשבון שלכם",
+      "status": "machine"
+    },
+    "recall.phrase.changed": {
+      "text": "מפתחות החשבון הזה שונו ב-{date}. זה הייתם אתם?",
+      "status": "machine"
+    },
+    "recall.phrase.take_back": {
+      "text": "קבלת החשבון בחזרה",
+      "status": "machine"
+    },
+    "recall.phrase.use": {
+      "text": "שימוש בביטוי השחזור במקום",
+      "status": "machine"
+    },
+    "recall.phrase.wrong": {
+      "text": "המילים האלה אינן ביטוי השחזור של החשבון הזה.",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "קוד מאפליקציית האימות מחבר אתכם. במכשיר שהחשבון הזה מעולם לא היה בו, תצטרכו אחר כך גם מכשיר אחר, מפתח גישה או את ביטוי השחזור.",
       "status": "machine"
@@ -6348,6 +6536,50 @@
     },
     "recovery.device.restoring": {
       "text": "משחזרים את {username}",
+      "status": "machine"
+    },
+    "recovery.email.check.body": {
+      "text": "אם שם המשתמש והכתובת האלה שייכים זה לזה, קוד נמצא בדרך. הוא תקף ל-10 דקות.",
+      "status": "machine"
+    },
+    "recovery.email.check.title": {
+      "text": "בדקו את האימייל",
+      "status": "machine"
+    },
+    "recovery.email.failed": {
+      "text": "לא הצלחנו להחזיר את החשבון שלכם. נסו שוב או בחרו דרך אחרת.",
+      "status": "machine"
+    },
+    "recovery.email.restoring": {
+      "text": "מחזירים את החשבון שלכם",
+      "status": "machine"
+    },
+    "recovery.email.row.body": {
+      "text": "קוד שנשלח לאימייל לשחזור שלכם.",
+      "status": "machine"
+    },
+    "recovery.email.row.title": {
+      "text": "קוד באימייל",
+      "status": "machine"
+    },
+    "recovery.email.save": {
+      "text": "שמירה והתחברות",
+      "status": "machine"
+    },
+    "recovery.email.start.body": {
+      "text": "הקלידו את שם המשתמש ואת האימייל לשחזור.",
+      "status": "machine"
+    },
+    "recovery.email.totp.body": {
+      "text": "הקלידו את הקוד בן 6 הספרות מאפליקציית האימות שלכם.",
+      "status": "machine"
+    },
+    "recovery.email.totp.lost": {
+      "text": "איבדתם את אפליקציית האימות? השתמשו בדרך אחרת לחזור לחשבון.",
+      "status": "machine"
+    },
+    "recovery.email.totp.title": {
+      "text": "קוד מאפליקציית האימות",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6560,6 +6792,118 @@
     },
     "recovery.words.tries_left": {
       "text": "{count, plural, one {נותר ניסיון אחד} two {נותרו שני ניסיונות} other {נותרו # ניסיונות}} לפני השהיה של 15 דקות.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.body": {
+      "text": "מפתחות החשבון שלכם השתנו. הקלידו שוב את הכתובת כדי שקוד באימייל יוכל להחזיר את החשבון.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.title": {
+      "text": "הוסיפו שוב את האימייל",
+      "status": "machine"
+    },
+    "recovery_email.body": {
+      "text": "אם תשכחו את הסיסמה, נשלח קוד לכתובת הזו כדי שתוכלו לחזור לחשבון.",
+      "status": "machine"
+    },
+    "recovery_email.code.expired": {
+      "text": "תוקף הקוד הזה פג.",
+      "status": "machine"
+    },
+    "recovery_email.code.other_address": {
+      "text": "שימוש בכתובת אחרת",
+      "status": "machine"
+    },
+    "recovery_email.code.resend": {
+      "text": "שליחה חוזרת",
+      "status": "machine"
+    },
+    "recovery_email.code.resend_in": {
+      "text": "שליחה חוזרת בעוד {time}",
+      "status": "machine"
+    },
+    "recovery_email.code.sent_to": {
+      "text": "שלחנו קוד בן 6 ספרות אל {address}.",
+      "status": "machine"
+    },
+    "recovery_email.code.title": {
+      "text": "הזינו את הקוד",
+      "status": "machine"
+    },
+    "recovery_email.code.used_up": {
+      "text": "יותר מדי ניסיונות. שלחו קוד חדש.",
+      "status": "machine"
+    },
+    "recovery_email.code.wrong": {
+      "text": "הקוד הזה אינו נכון.",
+      "status": "machine"
+    },
+    "recovery_email.field": {
+      "text": "אימייל",
+      "status": "machine"
+    },
+    "recovery_email.invalid": {
+      "text": "הקלידו כתובת אימייל מלאה.",
+      "status": "machine"
+    },
+    "recovery_email.mailbox_warning": {
+      "text": "כל מי שיכול לקרוא את תיבת הדואר הזו יכול להיכנס לחשבון שלכם. שמרו ביטוי שחזור כדי לשנות זאת.",
+      "status": "machine"
+    },
+    "recovery_email.needs_username": {
+      "text": "בחרו קודם שם משתמש.",
+      "status": "machine"
+    },
+    "recovery_email.not_kept": {
+      "text": "Lakko לא שומרת את הכתובת שלכם. תקלידו אותה שוב, יחד עם שם המשתמש, כשתצטרכו קוד.",
+      "status": "machine"
+    },
+    "recovery_email.remove": {
+      "text": "הסרה",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.body": {
+      "text": "לא תוכלו לחזור לחשבון באמצעות אימייל.",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.title": {
+      "text": "להסיר את האימייל לשחזור?",
+      "status": "machine"
+    },
+    "recovery_email.replace": {
+      "text": "החלפה",
+      "status": "machine"
+    },
+    "recovery_email.send": {
+      "text": "שליחת קוד",
+      "status": "machine"
+    },
+    "recovery_email.send_failed": {
+      "text": "לא הצלחנו לשלוח את ההודעה. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "recovery_email.status.off": {
+      "text": "כבוי",
+      "status": "machine"
+    },
+    "recovery_email.status.on": {
+      "text": "פועל",
+      "status": "machine"
+    },
+    "recovery_email.title": {
+      "text": "אימייל לשחזור",
+      "status": "machine"
+    },
+    "recovery_email.totp_warning": {
+      "text": "תצטרכו גם קוד מאפליקציית האימות שלכם. אם היא נמצאת בטלפון שתאבדו, האימייל לא יספיק.",
+      "status": "machine"
+    },
+    "recovery_email.unavailable": {
+      "text": "קודים באימייל לא זמינים כרגע.",
+      "status": "machine"
+    },
+    "recovery_email.username_change": {
+      "text": "שינוי שם המשתמש מכבה את האימייל לשחזור. אפשר להוסיף אותו שוב אחר כך.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -7708,6 +8052,50 @@
     },
     "username.a11y_hint": {
       "text": "שם משתמש: {message}",
+      "status": "machine"
+    },
+    "username.change.body": {
+      "text": "אנשים כבר לא ימצאו אתכם לפי {old}. אף אחד אחר לא יוכל לקחת אותו במשך 30 יום.",
+      "status": "machine"
+    },
+    "username.change.next_change": {
+      "text": "אחרי זה תוכלו לשנות אותו שוב בעוד 30 יום.",
+      "status": "machine"
+    },
+    "username.change.other_devices": {
+      "text": "המכשירים האחרים שלכם יקבלו את שם המשתמש החדש בפעם הבאה שיהיו מחוברים לרשת.",
+      "status": "machine"
+    },
+    "username.change.save": {
+      "text": "שינוי",
+      "status": "machine"
+    },
+    "username.change.title": {
+      "text": "שינוי שם משתמש",
+      "status": "machine"
+    },
+    "username.change.too_soon": {
+      "text": "תוכלו לשנות שוב את שם המשתמש ב-{date}.",
+      "status": "machine"
+    },
+    "username.claim.body": {
+      "text": "עם שם משתמש וסיסמה תוכלו להתחבר במכשיר אחר, להוסיף אימייל לשחזור, ואנשים יוכלו למצוא אתכם.",
+      "status": "machine"
+    },
+    "username.claim.done": {
+      "text": "שם המשתמש שלכם הוא {username}.",
+      "status": "machine"
+    },
+    "username.claim.password_help": {
+      "text": "בחרו סיסמה להתחברות. עד עכשיו לא הייתה לכם סיסמה.",
+      "status": "machine"
+    },
+    "username.claim.save": {
+      "text": "שמירה",
+      "status": "machine"
+    },
+    "username.claim.title": {
+      "text": "בחרו שם משתמש",
       "status": "machine"
     },
     "username.error.bind_limited_later": {

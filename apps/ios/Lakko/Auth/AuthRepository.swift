@@ -281,6 +281,25 @@ public final class AuthRepository: ObservableObject {
     /// no request leaves it.
     var onProtectedSessionLanded: (@MainActor (_ accountIdB64: String) -> Void)?
 
+    /// A guest account chose a username on this device: the composition
+    /// root fetches the username certificate and re-publishes the profile.
+    var onUsernameClaimed: (@MainActor (_ account: SessionAccount) -> Void)?
+
+    /// ADR-0068 — the account's username changed (renamed here, or a newer
+    /// name arrived from the account's other devices): the composition root
+    /// replaces the cached username certificate (`certificate`, or a fetch
+    /// when `nil`) and re-publishes the profile, the Everyone record and
+    /// terms, the introduction offer and the member cards.
+    var onUsernameRenamed: (@MainActor (_ account: SessionAccount, _ certificate: Data?) -> Void)?
+
+    /// Write the own-username register (the synced state). `false` when the
+    /// state is not loaded yet. Wired by the composition root.
+    var storeOwnUsername: (@MainActor (_ username: String) async -> Bool)?
+
+    /// The recovery address this account's devices keep, or `nil`. Wired by
+    /// the composition root.
+    var heldRecoveryAddress: (@MainActor () -> String?)?
+
     /// ADR-0067 — this device changed the account's protection (it saved a
     /// phrase): the composition root re-reads the status.
     var onProtectionChanged: (@MainActor () -> Void)?
@@ -361,6 +380,9 @@ public final class AuthRepository: ObservableObject {
     /// When `It was not me` was answered on an account notice (UX 19.6). In
     /// memory only.
     private var noticeAnsweredAtMs: Int64?
+
+    /// A resume of an owed rename is running.
+    private var renameResumeInFlight = false
 
     /// Whether the account behind `sessionToken` has a passkey, or `nil`
     /// when it could not be read. Injectable for tests.
@@ -1297,7 +1319,19 @@ public final class AuthRepository: ObservableObject {
         let handle = name.handle
         Task {
             do {
-                try await client.bindLoginHandle(handle: handle, sessionToken: sessionToken)
+                // ADR-0068 section 2 — never a blind bind: a device with a
+                // stale name would revert a rename made elsewhere. Ask
+                // first; bind only when the account has no handle at all.
+                switch HandleSync.action(
+                    try await client.checkLoginHandle(handle: handle, sessionToken: sessionToken)) {
+                case .nothing:
+                    await self.handleConfirmed(canonical: name.canonical, sessionToken: sessionToken)
+                case .bind:
+                    try await client.bindLoginHandle(handle: handle, sessionToken: sessionToken)
+                    await self.handleConfirmed(canonical: name.canonical, sessionToken: sessionToken)
+                case .waitForRegister:
+                    NSLog("[auth] the account is bound to another name (\(context)); waiting for it from the other devices")
+                }
             } catch let error as AuthClientError {
                 switch error {
                 case .http(let status, _, _):
@@ -1767,7 +1801,335 @@ public final class AuthRepository: ObservableObject {
             context: "replacePassword"
         )
         newPasswordOwed = false
+        // The account has a password the person chose.
+        protectionStore.setFirstPasswordOwed(false, accountIdB64: account.accountIdB64)
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "replace password")
+    }
+
+    // MARK: - ADR-0068: the own-username register
+
+    /// The name whose handle auth confirmed for the account, and the
+    /// session it was confirmed in. In memory only: a new session asks again.
+    private var confirmedHandle: (canonical: String, sessionToken: String)?
+
+    /// The register as last read (`.none` until the synced state loaded).
+    private var lastOwnUsernameRegister: String??
+
+    /// The own-username register was read (the synced state loaded) or
+    /// changed (this device or a sibling wrote it): seed it once from the
+    /// local marker, finish this device's own owed write, or adopt a name
+    /// written elsewhere (``OwnUsernameRule``).
+    public func ownUsernameRegisterChanged(_ register: String?) async {
+        guard case .session(let account) = state else { return }
+        let accountIdB64 = account.accountIdB64
+        lastOwnUsernameRegister = .some(register)
+        // A rename this device has not finished decides the name, not the
+        // register (which still holds the name being replaced).
+        guard protectionStore.renameOwed(accountIdB64: accountIdB64) == nil else { return }
+        let pending = protectionStore.usernameRegisterOwed(accountIdB64: accountIdB64)
+        let confirmed = confirmedHandle.map {
+            $0.canonical == account.username && $0.sessionToken == identitySecrets?.sessionToken
+        } ?? false
+        switch OwnUsernameRule.action(
+            local: account.username, register: register, pending: pending, handleConfirmed: confirmed) {
+        case .nothing:
+            if pending != nil { protectionStore.setUsernameRegisterOwed(nil, accountIdB64: accountIdB64) }
+        case .seed(let name), .writePending(let name):
+            if await storeOwnUsername?(name) == true {
+                protectionStore.setUsernameRegisterOwed(nil, accountIdB64: accountIdB64)
+            }
+        case .adopt(let name):
+            adoptUsernameFromRegister(name, accountIdB64: accountIdB64)
+        }
+    }
+
+    /// Auth confirmed in this session that the account is bound to
+    /// `canonical`'s handle (the check answered `same`, or this device made
+    /// the first bind). Only now may an empty register be seeded from the
+    /// local marker; a register already read as empty is looked at again.
+    private func handleConfirmed(canonical: String, sessionToken: String) async {
+        confirmedHandle = (canonical, sessionToken)
+        if case .some(let register) = lastOwnUsernameRegister {
+            await ownUsernameRegisterChanged(register)
+        }
+    }
+
+    /// A newer name arrived from the account's other devices: the local
+    /// marker and the live session take it, the handle state of this
+    /// session is known (the account is bound to this name's handle, so no
+    /// sync runs for it), and what derives from the name is re-published.
+    private func adoptUsernameFromRegister(_ name: String, accountIdB64: String) {
+        guard case .session(let account) = state, account.accountIdB64 == accountIdB64,
+              let secrets = identitySecrets,
+              let canonical = try? requireValidUsername(name, emptyError: SessionNotReady()) else { return }
+        NSLog("[auth] the account's username changed on another device; adopting it")
+        _ = loginHandleBinds.claim(sessionToken: secrets.sessionToken, canonical: canonical)
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: canonical))
+        let named = SessionAccount(accountIdB64: accountIdB64, username: canonical)
+        state = .session(named)
+        onUsernameRenamed?(named, nil)
+    }
+
+    /// Record a name this device just wrote locally as owed to the
+    /// register, and try the write.
+    private func writeOwnUsernameRegister(_ name: String, accountIdB64: String) async {
+        protectionStore.setUsernameRegisterOwed(name, accountIdB64: accountIdB64)
+        if await storeOwnUsername?(name) == true {
+            protectionStore.setUsernameRegisterOwed(nil, accountIdB64: accountIdB64)
+        }
+    }
+
+    // MARK: - ADR-0068: changing the username
+
+    /// When the next username change is possible by this device's own stamp
+    /// (unix ms), or `nil`. The server's `429` is the authority.
+    public var renameTooSoonUntilMs: Int64? {
+        guard case .session(let account) = state else { return nil }
+        return UsernameRename.tooSoonUntilMs(
+            lastChangeAtMs: protectionStore.lastRenameAtMs(accountIdB64: account.accountIdB64),
+            nowMs: grantNowMs())
+    }
+
+    /// The `recovery_email` part of a handle change towards `handle`: the
+    /// address this device holds and, while no phrase is saved, the email
+    /// vault sealed (off the main thread) under THAT handle with a fresh
+    /// salt. `nil` when the account has no recovery email or this device
+    /// does not hold the address: the change then drops the recovery email.
+    private func recoveryEmailCarry(
+        to handle: Data, accountIdB64: String
+    ) async throws -> LoginHandleRecoveryEmail? {
+        let status = protectionStore.status(accountIdB64: accountIdB64)
+        let address = heldRecoveryAddress?()
+        switch UsernameRename.emailCarry(
+            recoveryEmailEnabled: status?.enabled == true, addressHeld: address != nil,
+            phraseSaved: protectionStore.phraseSaved(accountIdB64: accountIdB64)) {
+        case .none:
+            return nil
+        case .addressOnly:
+            return address.map { LoginHandleRecoveryEmail(address: $0) }
+        case .addressAndVault:
+            guard let address, let phrase = heldPhraseForEmailVault() else { throw SessionNotReady() }
+            var rng = SystemRandomNumberGenerator()
+            let salt = Data((0..<16).map { _ in UInt8.random(in: UInt8.min...UInt8.max, using: &rng) })
+            let sealed = try await EmailVaultWork.seal(
+                phrase: phrase, handle: handle, address: address, vaultSalt: salt)
+            return LoginHandleRecoveryEmail(address: address, vaultSalt: salt, sealedEntropy: sealed)
+        }
+    }
+
+    /// Change the signed-in account's username (ADR-0068 section 4). One
+    /// resumable operation; the owed record is written before the first
+    /// request.
+    ///
+    ///   a. the rule, the new handle;
+    ///   b. `PUT /auth/login-handle` with the grant, the previous handle
+    ///      and, when this device holds the address, the recovery email
+    ///      re-keyed (the vault re-sealed under the NEW handle);
+    ///   c. discovery's `username/replace`; on a refusal the old handle is
+    ///      bound back with the same re-key and the cause is thrown;
+    ///   d. the certificate, the local marker, the session, the register;
+    ///   e. the re-publish (``onUsernameRenamed``).
+    ///
+    /// Throws ``FreshAuthRequired`` (no live proof; nothing was sent) or
+    /// ``UsernameRenameFailed``. Returns the canonical new name.
+    public func renameUsername(to typed: String) async throws -> String {
+        guard case .session(let account) = state, let secrets = identitySecrets,
+              !UsernameClaim.offered(username: account.username) else {
+            throw SessionNotReady()
+        }
+        let accountIdB64 = account.accountIdB64
+        let new: LoginName
+        let old: LoginName
+        do {
+            new = try LoginName.make(typed, emptyError: UsernameRenameFailed(.rule))
+            old = try LoginName.make(account.username, emptyError: SessionNotReady())
+        } catch is UsernameRuleViolation {
+            throw UsernameRenameFailed(.rule)
+        }
+        guard new.canonical != old.canonical else { throw UsernameRenameFailed(.sameName) }
+        if let until = renameTooSoonUntilMs { throw UsernameRenameFailed(.tooSoon(untilMs: until)) }
+        guard let grant = liveFreshGrant() else { throw FreshAuthRequired() }
+
+        // b. The handle. The record first: a crash from here is resumed.
+        let carry = try await recoveryEmailCarry(to: new.handle, accountIdB64: accountIdB64)
+        var record = UsernameRename.Record(
+            oldName: old.canonical, newName: new.canonical, phase: .binding, startedAtMs: grantNowMs())
+        protectionStore.setRenameOwed(record, accountIdB64: accountIdB64)
+        let client = authClientFactory()
+        do {
+            try await client.changeLoginHandle(
+                handle: new.handle, previousHandle: old.handle, freshGrant: grant,
+                recoveryEmail: carry, sessionToken: secrets.sessionToken)
+        } catch {
+            if case .network = error as? AuthClientError {
+                // Unknown whether it landed: the next landing asks.
+                throw UsernameRenameFailed(.offline)
+            }
+            protectionStore.setRenameOwed(nil, accountIdB64: accountIdB64)
+            if FreshAuthRefusal.isRequired(error) {
+                dropFreshAuth()
+                throw FreshAuthRequired()
+            }
+            if let err = error as? AuthClientError, let refusal = AuthRateLimit.refusal(in: err) {
+                throw UsernameRenameFailed(.bindLimited(retryAfterSecs: refusal.retryAfterSecs))
+            }
+            if case .http(409, _, let body) = error as? AuthClientError, body.contains(handleTakenCode) {
+                throw UsernameRenameFailed(.taken)
+            }
+            throw UsernameRenameFailed(.failed)
+        }
+        record.phase = .bound
+        protectionStore.setRenameOwed(record, accountIdB64: accountIdB64)
+
+        // c. Discovery.
+        return try await replaceAtDiscovery(record: record, old: old, new: new, grant: grant)
+    }
+
+    /// Steps c to e for a rename whose handle is already the new one.
+    private func replaceAtDiscovery(
+        record: UsernameRename.Record, old: LoginName, new: LoginName, grant: String?
+    ) async throws -> String {
+        guard case .session(let account) = state, let secrets = identitySecrets else { throw SessionNotReady() }
+        let accountIdB64 = account.accountIdB64
+        var record = record
+        var replaced: ReplacedUsername?
+        var failure: Error?
+        do {
+            replaced = try await accountDirectory.replaceUsername(
+                accountId: secrets.accountId, username: new.canonical, sessionToken: secrets.sessionToken)
+        } catch {
+            failure = error
+        }
+        let outcome = UsernameRename.ReplaceOutcome.of(failure)
+        switch UsernameRename.afterReplace(outcome) {
+        case .keepOwed:
+            throw UsernameRenameFailed(.offline)
+        case .rollBack:
+            // The old handle back, the recovery email re-keyed back.
+            guard let grant, UsernameRename.canRollBack(holdsGrant: true) else {
+                // No proof in hand (a landing): the record stays; the
+                // rename screen finishes the rollback after the next proof.
+                throw UsernameRenameFailed(UsernameRename.failure(outcome, nowMs: grantNowMs()))
+            }
+            do {
+                try await authClientFactory().changeLoginHandle(
+                    handle: old.handle, previousHandle: new.handle, freshGrant: grant,
+                    recoveryEmail: try await recoveryEmailCarry(to: old.handle, accountIdB64: accountIdB64),
+                    sessionToken: secrets.sessionToken)
+                protectionStore.setRenameOwed(nil, accountIdB64: accountIdB64)
+            } catch {
+                NSLog("[auth] WARN the old username's handle could not be bound back; retried at the next landing")
+            }
+            throw UsernameRenameFailed(UsernameRename.failure(outcome, nowMs: grantNowMs()))
+        case .finalize:
+            break
+        }
+        record.phase = .replaced
+        protectionStore.setRenameOwed(record, accountIdB64: accountIdB64)
+        await finalizeRename(record: record, certificate: replaced?.certificate)
+        return new.canonical
+    }
+
+    /// Steps d and e: the marker, the session, the register, the re-publish.
+    private func finalizeRename(record: UsernameRename.Record, certificate: Data?) async {
+        guard case .session(let account) = state, let secrets = identitySecrets else { return }
+        let accountIdB64 = account.accountIdB64
+        // The handle of the new name is the bound one: no sync runs for it.
+        _ = loginHandleBinds.claim(sessionToken: secrets.sessionToken, canonical: record.newName)
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: record.newName))
+        protectionStore.setLastRenameAtMs(grantNowMs(), accountIdB64: accountIdB64)
+        // The register is owed BEFORE the record goes: until it is written
+        // the register still holds the old name and must not be adopted.
+        protectionStore.setUsernameRegisterOwed(record.newName, accountIdB64: accountIdB64)
+        protectionStore.setRenameOwed(nil, accountIdB64: accountIdB64)
+        let named = SessionAccount(accountIdB64: accountIdB64, username: record.newName)
+        state = .session(named)
+        await writeOwnUsernameRegister(record.newName, accountIdB64: accountIdB64)
+        onUsernameRenamed?(named, certificate)
+        // The recovery email was re-keyed, or dropped: read it again.
+        onProtectionChanged?()
+    }
+
+    /// At a landing: finish (or roll back) a rename this device started.
+    func resumeOwedRename() async {
+        guard case .session(let account) = state, let secrets = identitySecrets,
+              var record = protectionStore.renameOwed(accountIdB64: account.accountIdB64) else { return }
+        let accountIdB64 = account.accountIdB64
+        guard let old = try? LoginName.make(record.oldName, emptyError: SessionNotReady()),
+              let new = try? LoginName.make(record.newName, emptyError: SessionNotReady()) else {
+            protectionStore.setRenameOwed(nil, accountIdB64: accountIdB64)
+            return
+        }
+        var step = UsernameRename.resume(record)
+        if step == .checkHandle {
+            guard let state = try? await authClientFactory().checkLoginHandle(
+                handle: new.handle, sessionToken: secrets.sessionToken) else { return }
+            step = UsernameRename.afterBindingCheck(newHandle: state)
+            if step == .nothing {
+                // The bind never landed: nothing changed.
+                protectionStore.setRenameOwed(nil, accountIdB64: accountIdB64)
+                return
+            }
+            record.phase = .bound
+            protectionStore.setRenameOwed(record, accountIdB64: accountIdB64)
+        }
+        switch step {
+        case .replace:
+            _ = try? await replaceAtDiscovery(record: record, old: old, new: new, grant: liveFreshGrant())
+        case .finalize:
+            await finalizeRename(record: record, certificate: nil)
+        case .nothing, .checkHandle:
+            break
+        }
+    }
+
+    // MARK: - A guest chooses a username (ADR-0067 pass A, part 2)
+
+    /// Whether the signed-in account chose a username here and still owes
+    /// its first password.
+    public var firstPasswordOwed: Bool {
+        guard case .session(let account) = state else { return false }
+        return protectionStore.firstPasswordOwed(accountIdB64: account.accountIdB64)
+    }
+
+    /// "Choose a username" for a guest account: the sign-up claim, run
+    /// later, in the same order.
+    ///
+    ///   1. The username rule, locally.
+    ///   2. `PUT /auth/login-handle` (``UsernameTaken`` on `409`,
+    ///      ``UsernameBindLimited`` on `429 handle-bind-limited`).
+    ///   3. The name in discovery; on a failure the handle is released
+    ///      (`DELETE /auth/login-handle`) and nothing is saved.
+    ///   4. The name in the local account marker and the live session; the
+    ///      handle is marked bound for this session.
+    ///
+    /// The account's first password is owed from here
+    /// (``replacePassword(newPassword:)`` runs without a proof until it is
+    /// set). The profile and the username certificate are the composition
+    /// root's (``onUsernameClaimed``). Returns the canonical name.
+    public func claimUsername(_ typed: String) async throws -> String {
+        guard case .session(let account) = state, let secrets = identitySecrets,
+              UsernameClaim.offered(username: account.username) else {
+            throw SessionNotReady()
+        }
+        let bound = try await claimSignupUsername(
+            accountId: secrets.accountId,
+            username: typed,
+            sessionToken: secrets.sessionToken,
+            directory: accountDirectory,
+            binder: authClientFactory()
+        )
+        // The claim bound the handle with this session: the landing hook
+        // must not bind it a second time.
+        _ = loginHandleBinds.claim(sessionToken: secrets.sessionToken, canonical: bound)
+        protectionStore.setFirstPasswordOwed(true, accountIdB64: account.accountIdB64)
+        sessionStore.save(PersistedSession(accountIdB64: account.accountIdB64, username: bound))
+        let named = SessionAccount(accountIdB64: account.accountIdB64, username: bound)
+        state = .session(named)
+        // ADR-0068 — the account's other devices learn the name.
+        await writeOwnUsernameRegister(bound, accountIdB64: account.accountIdB64)
+        onUsernameClaimed?(named)
+        return bound
     }
 
     /// The 64-byte length of the AccountIdentity seed.
@@ -2587,6 +2949,15 @@ public final class AuthRepository: ObservableObject {
         pruneKeyRotationPending(accountIdB64: accountIdB64)
         keysRotatedNotice = rotatedNotice.isOwed(accountIdB64: accountIdB64)
         if case .session = state { onProtectedSessionLanded?(accountIdB64) }
+        // ADR-0068 — a rename this device started and did not finish.
+        if case .session = state,
+           protectionStore.renameOwed(accountIdB64: accountIdB64) != nil, !renameResumeInFlight {
+            renameResumeInFlight = true
+            Task { [weak self] in
+                await self?.resumeOwedRename()
+                self?.renameResumeInFlight = false
+            }
+        }
         Task { [weak self] in
             guard let self else { return }
             await self.bindSessionDeviceIfNeeded(accountIdB64: accountIdB64, context: "landing")
@@ -4161,7 +4532,10 @@ public final class AuthRepository: ObservableObject {
     /// live fresh-auth proof, or the local three-word check passed within
     /// the last ten minutes.
     public var passwordChangeAllowed: Bool {
-        PasswordChangeGate.allowed(
+        // A guest who just chose a username has a random password nobody
+        // knows: its first password needs no proof.
+        if firstPasswordOwed { return true }
+        return PasswordChangeGate.allowed(
             holdsLiveProof: holdsLiveFreshAuth(),
             threeWordsPassedAtMs: threeWordsPassedAtMs,
             noticeAnsweredAtMs: noticeAnsweredAtMs,
@@ -4425,6 +4799,9 @@ public final class AuthRepository: ObservableObject {
             freshPublishPending = false
         }
         freshPublishNeedsSignIn = false
+        // ADR-0067 — the new keys are published: a device that holds the
+        // recovery address can put the email vault back now.
+        onProtectionChanged?()
         // Not phrase-protected: there are no words to confirm, so the
         // session lands now.
         if let pending = pendingFreshPhrase, pending.accountIdB64 == accountIdB64, !pending.showsWords {

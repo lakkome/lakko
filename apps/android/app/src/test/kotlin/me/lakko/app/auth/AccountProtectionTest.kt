@@ -264,4 +264,111 @@ class AccountProtectionTest {
         // Only flags and times were ever written.
         assertTrue(storage.rows.values.all { it == "1" || it.toLongOrNull() != null })
     }
+
+    // ---- the devices keep the address (amended 2026-10-13) -----------------
+
+    @Test
+    fun `the re-seal runs only with an address value, no vault, no phrase and a held address`() {
+        assertTrue(resealNeeded(enabled = true, vault = false, phraseSaved = false, addressHeld = true))
+        assertFalse(resealNeeded(enabled = false, vault = false, phraseSaved = false, addressHeld = true))
+        assertFalse(resealNeeded(enabled = true, vault = true, phraseSaved = false, addressHeld = true))
+        assertFalse(resealNeeded(enabled = true, vault = false, phraseSaved = true, addressHeld = true))
+        assertFalse(resealNeeded(enabled = true, vault = false, phraseSaved = false, addressHeld = false))
+    }
+
+    @Test
+    fun `add your email again is shown only where no held address can re-seal`() {
+        assertTrue(addAgainShown(enabled = true, vault = false, phraseSaved = false, addressHeld = false))
+        assertFalse(addAgainShown(enabled = true, vault = false, phraseSaved = false, addressHeld = true))
+        assertFalse(addAgainShown(enabled = false, vault = false, phraseSaved = false, addressHeld = false))
+        // Exactly one of the two holds in the dropped-vault state.
+        for (held in listOf(true, false)) {
+            assertTrue(resealNeeded(true, false, false, held) != addAgainShown(true, false, false, held))
+        }
+        val dropped = status(enabled = true, vault = false, phraseSaved = false)
+        assertEquals(RecoveryEmailRow.AddAgain, recoveryEmailRow(dropped, addressHeld = false))
+        assertEquals(RecoveryEmailRow.On, recoveryEmailRow(dropped, addressHeld = true))
+        assertEquals(ProtectPrompt("protect.banner.none", null), protectPrompt(dropped, addressHeld = true))
+    }
+
+    @Test
+    fun `the add form is pre-filled after a recall and empty for a replacement`() {
+        // After a recall the server dropped the stored value (`enabled` false).
+        assertEquals("name@example.com", enrolPrefill(enabled = false, heldAddress = "name@example.com"))
+        assertEquals("", enrolPrefill(enabled = false, heldAddress = null))
+        // Replace: a new address is being typed.
+        assertEquals("", enrolPrefill(enabled = true, heldAddress = "name@example.com"))
+    }
+
+    @Test
+    fun `a re-seal answer settles, clears a stale address, or waits for the next landing`() {
+        fun http(status: Int, code: String) = AuthHttpError(status, "/recovery-email/vault", "", code = code)
+        assertEquals(ResealOutcome.Settled, resealOutcomeOf(null))
+        assertEquals(ResealOutcome.Settled, resealOutcomeOf(http(409, "vault-exists")))
+        assertEquals(ResealOutcome.Settled, resealOutcomeOf(http(409, "phrase-saved")))
+        assertEquals(ResealOutcome.AddressStale, resealOutcomeOf(http(403, "address-mismatch")))
+        for (code in listOf("too-many-attempts", "no-recovery-email", "handle-mismatch", "recovery-email-disabled")) {
+            assertEquals(code, ResealOutcome.RetryLater, resealOutcomeOf(http(429, code)))
+        }
+        assertEquals(ResealOutcome.RetryLater, resealOutcomeOf(AuthNetworkError("/x", java.io.IOException("down"))))
+    }
+
+    @Test
+    fun `the held address never prints`() {
+        val text = RecoveryAddressState(ready = true, address = "name@example.com").toString()
+        assertFalse(text.contains("name@example.com"))
+    }
+
+    // ---- a guest chooses a username ----------------------------------------
+
+    @Test
+    fun `choose a username is offered only to an account without one`() {
+        assertTrue(usernameClaimOffered(hasUsername = false))
+        assertFalse(usernameClaimOffered(hasUsername = true))
+        // The name was saved and the first password is still owed.
+        assertTrue(usernameClaimOffered(hasUsername = true, passwordOwed = true))
+    }
+
+    @Test
+    fun `the claim opens on the name, on the owed password, or is done`() {
+        assertEquals(UsernameClaimStep.Name, usernameClaimStep(hasUsername = false, passwordOwed = false))
+        assertEquals(UsernameClaimStep.Password, usernameClaimStep(hasUsername = true, passwordOwed = true))
+        assertEquals(UsernameClaimStep.Done, usernameClaimStep(hasUsername = true, passwordOwed = false))
+    }
+
+    @Test
+    fun `a failed password after a saved name keeps the name and retries only the password`() {
+        val line = me.lakko.app.l10n.UiText("recovery.new_password.error.generic")
+        var state = UsernameClaimState(step = UsernameClaimStep.Name, busy = true)
+        // A failed name step changes nothing: the field is editable again.
+        val nameFailed = afterUsernameClaimFailure(state, me.lakko.app.l10n.UiText("auth.signup.error.username_taken"))
+        assertEquals(UsernameClaimStep.Name, nameFailed.step)
+        assertTrue(nameFailed.nameEditable)
+        // The name lands, the password fails.
+        state = afterUsernameSaved(state)
+        assertEquals(UsernameClaimStep.Password, state.step)
+        state = afterUsernameClaimFailure(state, line)
+        assertEquals(UsernameClaimStep.Password, state.step)
+        assertEquals(line, state.error)
+        assertFalse("the saved name is not typed again", state.nameEditable)
+        assertFalse(state.busy)
+        // The retry lands.
+        state = afterFirstPasswordSaved(state.copy(busy = true))
+        assertEquals(UsernameClaimStep.Done, state.step)
+        assertNull(state.error)
+    }
+
+    @Test
+    fun `the first-password debt survives a restart and goes with the account`() {
+        val storage = MapStorage()
+        AccountProtectionStore(storage).setFirstPasswordOwed("a", true)
+        val store = AccountProtectionStore(storage)
+        assertTrue(store.firstPasswordOwed("a"))
+        assertFalse(store.firstPasswordOwed("b"))
+        store.setFirstPasswordOwed("a", false)
+        assertFalse(store.firstPasswordOwed("a"))
+        store.setFirstPasswordOwed("a", true)
+        store.clearAccount("a")
+        assertFalse(store.firstPasswordOwed("a"))
+    }
 }

@@ -218,10 +218,20 @@ pub(crate) enum Scope {
     /// `POST /recovery-email/recover/open`, keyed on the account: how often
     /// its email vault may leave the server.
     EmailVaultOpen = 20,
+    /// `PUT /recovery-email/vault`, keyed on the signed-in account (ADR-0067,
+    /// amended 2026-10-13). Charged before the typed address is compared
+    /// with the stored key: without it a session could test addresses
+    /// against the account as fast as it can send them.
+    EmailVaultStore = 21,
+    /// `POST /auth/login-handle/check`, keyed on the signed-in account
+    /// (ADR-0068 section 2). Its own counter, not [`Self::HandleBind`]'s:
+    /// every device asks at every session landing, and the bind's five a day
+    /// would be spent by the question.
+    HandleCheck = 22,
 }
 
 impl Scope {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 18] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
@@ -238,6 +248,8 @@ impl Scope {
         Self::EmailLetterAccount,
         Self::EmailVerify,
         Self::EmailVaultOpen,
+        Self::EmailVaultStore,
+        Self::HandleCheck,
     ];
 
     /// Position in [`Self::ALL`] (the stored discriminants have a gap, so
@@ -260,6 +272,8 @@ impl Scope {
             Self::EmailLetterAccount => 13,
             Self::EmailVerify => 14,
             Self::EmailVaultOpen => 15,
+            Self::EmailVaultStore => 16,
+            Self::HandleCheck => 17,
         }
     }
 
@@ -281,6 +295,8 @@ impl Scope {
             Self::EmailLetterAccount => "LAKKO_AUTH_LIMIT_EMAIL_LETTER_ACCOUNT",
             Self::EmailVerify => "LAKKO_AUTH_LIMIT_EMAIL_VERIFY",
             Self::EmailVaultOpen => "LAKKO_AUTH_LIMIT_EMAIL_VAULT_OPEN",
+            Self::EmailVaultStore => "LAKKO_AUTH_LIMIT_EMAIL_VAULT_STORE",
+            Self::HandleCheck => "LAKKO_AUTH_LIMIT_HANDLE_CHECK",
         }
     }
 
@@ -304,8 +320,11 @@ impl Scope {
             // day per account; fifteen code guesses an hour per name (three
             // challenges' worth).
             Self::EmailLetterHandle => Window::new(5, 3600),
-            Self::EmailLetterAccount => Window::new(10, 86_400),
+            // Ten vault stores a day per account share the letter figure.
+            Self::EmailLetterAccount | Self::EmailVaultStore => Window::new(10, 86_400),
             Self::EmailVerify => Window::new(15, 3600),
+            // One question per device per landing, with room to spare.
+            Self::HandleCheck => Window::new(120, 3600),
         }
     }
 
@@ -322,7 +341,9 @@ impl Scope {
             | Self::Recall
             | Self::KeyRotate
             | Self::EmailVerify
-            | Self::EmailVaultOpen => CODE_TOO_MANY_ATTEMPTS,
+            | Self::EmailVaultOpen
+            | Self::EmailVaultStore
+            | Self::HandleCheck => CODE_TOO_MANY_ATTEMPTS,
             Self::EmailLetterHandle | Self::EmailLetterAccount => CODE_EMAIL_RATE_LIMITED,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
@@ -1026,7 +1047,7 @@ mod tests {
         // key rotation.
         assert_eq!(
             pinned,
-            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 20]
+            vec![1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 14, 16, 17, 18, 19, 20, 21, 22]
         );
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);

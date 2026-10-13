@@ -6390,6 +6390,10 @@
       "text": "Введите пароль, чтобы сохранить фразу восстановления.",
       "status": "machine"
     },
+    "proof.username.help": {
+      "text": "Введите пароль, чтобы сменить имя пользователя.",
+      "status": "machine"
+    },
     "protect.banner.action": {
       "text": "Защитить",
       "status": "machine"
@@ -8048,6 +8052,50 @@
     },
     "username.a11y_hint": {
       "text": "Имя пользователя: {message}",
+      "status": "machine"
+    },
+    "username.change.body": {
+      "text": "Вас больше не смогут найти по имени {old}. В течение 30 дней его никто другой не сможет занять.",
+      "status": "machine"
+    },
+    "username.change.next_change": {
+      "text": "После этого сменить имя снова можно будет через 30 дней.",
+      "status": "machine"
+    },
+    "username.change.other_devices": {
+      "text": "Другие ваши устройства узнают новое имя, когда выйдут в сеть.",
+      "status": "machine"
+    },
+    "username.change.save": {
+      "text": "Сменить",
+      "status": "machine"
+    },
+    "username.change.title": {
+      "text": "Сменить имя пользователя",
+      "status": "machine"
+    },
+    "username.change.too_soon": {
+      "text": "Сменить имя пользователя снова можно будет {date}.",
+      "status": "machine"
+    },
+    "username.claim.body": {
+      "text": "С именем пользователя и паролем вы сможете войти на другом устройстве, добавить почту для восстановления, и вас смогут найти.",
+      "status": "machine"
+    },
+    "username.claim.done": {
+      "text": "Ваше имя пользователя: {username}.",
+      "status": "machine"
+    },
+    "username.claim.password_help": {
+      "text": "Задайте пароль для входа. До сих пор его у вас не было.",
+      "status": "machine"
+    },
+    "username.claim.save": {
+      "text": "Сохранить",
+      "status": "machine"
+    },
+    "username.claim.title": {
+      "text": "Выберите имя пользователя",
       "status": "machine"
     },
     "username.error.bind_limited_later": {

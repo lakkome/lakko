@@ -398,7 +398,35 @@ data class TotpRecoverResponse(
 data class LoginHandleRequest(
     /** base64url (no padding) of the 32-byte login handle. */
     val handle: String,
+    /** ADR-0068: the fresh-auth grant; needed only when the bind CHANGES
+     *  the account's handle. */
+    val fresh_grant: String? = null,
+    /** The handle the account holds now (base64url, no padding); with
+     *  [recovery_email]. */
+    val previous_handle: String? = null,
+    /** Keep the recovery email across the change by re-keying it. */
+    val recovery_email: LoginHandleRecoveryEmail? = null,
 )
+
+/** The recovery email carried across a handle change (ADR-0068 section 2). */
+@Serializable
+data class LoginHandleRecoveryEmail(
+    val address: String,
+    /** Standard base64 of the 16-byte salt of the vault sealed under the NEW
+     *  handle; with [sealed_entropy], or neither. */
+    val vault_salt: String? = null,
+    val sealed_entropy: String? = null,
+) {
+    /** The address never reaches a log line. */
+    override fun toString(): String = "LoginHandleRecoveryEmail(<redacted>)"
+}
+
+/** `POST /auth/login-handle/check`. */
+@Serializable
+data class LoginHandleCheckRequest(val handle: String)
+
+@Serializable
+data class LoginHandleCheckResponse(val state: String)
 
 /** `PUT /auth/login-handle` 200 body. */
 @Serializable
@@ -702,6 +730,24 @@ data class RecoveryEmailEnrolFinishRequest(
 
 @Serializable
 data class RecoveryEmailEnrolFinishResponse(val enabled: Boolean = false, val vault: Boolean = false)
+
+/** `PUT /recovery-email/vault` (bearer, no grant): install the vault for the
+ *  address the account already confirmed (the automatic re-seal). */
+@Serializable
+data class RecoveryEmailVaultPutRequest(
+    val handle: String,
+    val address: String,
+    /** Standard base64 of 16 random bytes chosen by this device. */
+    val vault_salt: String,
+    /** Standard base64 of the 44-byte sealed entropy. */
+    val sealed_entropy: String,
+) {
+    /** The address never reaches a log line. */
+    override fun toString(): String = "RecoveryEmailVaultPutRequest(<redacted>)"
+}
+
+@Serializable
+data class RecoveryEmailVaultPutResponse(val vault: Boolean = false)
 
 /** Body of `DELETE /recovery-email`. */
 @Serializable

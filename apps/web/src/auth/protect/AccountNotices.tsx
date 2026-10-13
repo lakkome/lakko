@@ -16,6 +16,10 @@
  * told about its own action (one notice per marker, within ten minutes). A
  * device with no cursor yet asks for the last thirty days.
  *
+ * It also runs the automatic re-seal of the email vault (`reseal.ts`): a
+ * device that holds the address puts the vault back by itself after the
+ * account's keys changed.
+ *
  * Whole-session, beside `OwedKeyRotation`. Nothing is shown while a guard
  * step is up (new words, the protect step) or the device is signed out;
  * when the keys were reset after the change the "Was it you?" screen of
@@ -44,8 +48,13 @@ import {
   type AccountNotice,
   type SecureAction,
 } from "./notices";
+import { base64Encode } from "../account-id";
+import { loginHandleFor } from "../login-handle";
+import { heldAddress, rememberAddress } from "./address-register";
+import { runEmailVault } from "./email-vault";
 import { protectionStatus, refreshProtection } from "./protection-state";
-import { RecoveryEmailClient } from "./recovery-email-client";
+import { answerOf, RecoveryEmailClient } from "./recovery-email-client";
+import { RESEAL_SALT_LEN, resealAttemptKey, resealNeeded, runReseal } from "./reseal";
 import { RemoveRecoveryEmail } from "./RemoveRecoveryEmail";
 import { SavePhrasePanel } from "./SavePhrasePanel";
 
@@ -143,6 +152,62 @@ export function AccountNotices(): JSX.Element {
     if (readFor === key) return;
     readFor = key;
     void read(l.accountIdB64, l.token);
+  });
+
+  // ADR-0067 (amended 2026-10-13): the automatic re-seal. Whenever the
+  // status or the held address changes, a device that holds the address of
+  // an account whose vault is gone puts the vault back, silently. One
+  // attempt in flight, and one per (account, key generation, address) in a
+  // page: every request spends one of ten a day.
+  const resealTried = new Set<string>();
+  let resealing = false;
+  async function reseal(l: { accountIdB64: string; token: string }, username: string, address: string) {
+    const client = new RecoveryEmailClient();
+    const outcome = await runReseal(
+      {
+        phrase: () => auth.devicePhrase(),
+        handle: () => loginHandleFor(username),
+        randomSalt: () => crypto.getRandomValues(new Uint8Array(RESEAL_SALT_LEN)),
+        seal: runEmailVault,
+        put: async (body) => {
+          try {
+            await client.putVault({
+              sessionToken: l.token,
+              handle: body.handle,
+              address: body.address,
+              vaultSalt: base64Encode(body.vaultSalt),
+              sealedEntropy: base64Encode(body.sealed),
+            });
+            return { status: 200, errorCode: null };
+          } catch (err) {
+            const answer = answerOf(err);
+            return { status: answer?.status ?? null, errorCode: answer?.errorCode ?? null };
+          }
+        },
+      },
+      address,
+    );
+    if (outcome === "clear-address") rememberAddress(l.accountIdB64, null);
+    if (outcome === "done" || outcome === "reread" || outcome === "clear-address") {
+      await refreshProtection(l.accountIdB64, l.token);
+    }
+  }
+  createEffect(() => {
+    const l = landed();
+    const s = auth.state();
+    if (l === null || s.kind !== "session") return;
+    const status = protectionStatus(l.accountIdB64);
+    const address = heldAddress(l.accountIdB64);
+    const username = s.account.username.trim();
+    if (status === null || address === null || username.length === 0) return;
+    if (!resealNeeded(status.enabled, status.vault, status.phraseSaved, true)) return;
+    const key = resealAttemptKey(l.accountIdB64, l.generation, address);
+    if (resealing || resealTried.has(key)) return;
+    resealTried.add(key);
+    resealing = true;
+    void reseal(l, username, address).finally(() => {
+      resealing = false;
+    });
   });
 
   const current = (): AccountNotice | null => (quiet() ? null : (queue()[0] ?? null));

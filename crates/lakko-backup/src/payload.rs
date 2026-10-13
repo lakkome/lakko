@@ -576,12 +576,19 @@ mod tests {
         // bytes, so a restore learns which conversation a successor group
         // continues.
         assert!(state.set_lineage(8, &[1; 32], &[2; 32]).unwrap());
+        // So does the account's recovery email register (ADR-0067, amended
+        // 2026-10-13): a restore brings the address back.
+        assert!(state.set_recovery_email(9, Some("a@b.example")).unwrap());
+        // And its own-username register (ADR-0068 section 3).
+        assert!(state.set_own_username(10, Some("bob_42")).unwrap());
         let mut payload = sample_payload();
         payload.synced_state = state.to_bytes();
         let decoded = BackupPayload::decode(&payload.encode().unwrap()).unwrap();
         let restored = SyncedState::from_bytes(&decoded.synced_state).unwrap();
         assert_eq!(restored, state);
         assert_eq!(restored.conversation_id_of(&[1; 32]), vec![2; 32]);
+        assert_eq!(restored.recovery_email().as_deref(), Some("a@b.example"));
+        assert_eq!(restored.own_username().as_deref(), Some("bob_42"));
 
         payload.synced_state = vec![9, 9, 9];
         assert!(payload.encode().is_err());

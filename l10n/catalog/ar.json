@@ -2,6 +2,10 @@
   "format": 1,
   "language": "ar",
   "messages": {
+    "account.keys_changed.finishing": {
+      "text": "لحسابك مفاتيح جديدة. نُكمل التغيير الآن.",
+      "status": "machine"
+    },
     "app.not_found.body": {
       "text": "لا يوجد شيء في هذا العنوان.",
       "status": "machine"
@@ -6186,6 +6190,58 @@
       "text": "ستكون مالك المجموعة. يمكنك إضافة أشخاص آخرين لاحقًا.",
       "status": "machine"
     },
+    "notice.email_added": {
+      "text": "أُضيف بريد استرداد إلى حسابك.",
+      "status": "machine"
+    },
+    "notice.email_removed": {
+      "text": "أُزيل بريد الاسترداد الخاص بك.",
+      "status": "machine"
+    },
+    "notice.email_replaced": {
+      "text": "استُبدل بريد الاسترداد الخاص بك.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.body": {
+      "text": "{date}، على جهاز آخر.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.title": {
+      "text": "فُتح حسابك باستخدام بريد الاسترداد",
+      "status": "machine"
+    },
+    "notice.password_by_email.body": {
+      "text": "استخدم شخص ما بريد الاسترداد الخاص بك لاختيار كلمة مرور جديدة في {date}.",
+      "status": "machine"
+    },
+    "notice.password_by_email.title": {
+      "text": "تغيّرت كلمة مرورك",
+      "status": "machine"
+    },
+    "notice.phrase_saved": {
+      "text": "حُفظت عبارة استرداد لحسابك.",
+      "status": "machine"
+    },
+    "notice.secure.new_keys": {
+      "text": "يمنح هذا حسابك مفاتيح جديدة، فيفقد من فتحه الوصول إليه.",
+      "status": "machine"
+    },
+    "notice.secure.password_saved": {
+      "text": "تغيّرت كلمة مرورك.",
+      "status": "machine"
+    },
+    "notice.secure.title": {
+      "text": "أمّن حسابك",
+      "status": "machine"
+    },
+    "notice.was_me": {
+      "text": "كنت أنا",
+      "status": "machine"
+    },
+    "notice.was_not_me": {
+      "text": "لم أكن أنا",
+      "status": "machine"
+    },
     "notification.channel.messages": {
       "text": "الرسائل",
       "status": "machine"
@@ -6282,6 +6338,10 @@
       "text": "استخدام كلمة المرور بدلًا من ذلك",
       "status": "machine"
     },
+    "proof.recovery_email.help": {
+      "text": "أدخل كلمة مرورك لتغيير بريد الاسترداد.",
+      "status": "machine"
+    },
     "proof.remove_device.cancelled": {
       "text": "أُلغي. لم يُزَل الجهاز.",
       "status": "machine"
@@ -6326,6 +6386,134 @@
       "text": "ما يمكنك فعله:",
       "status": "machine"
     },
+    "proof.save_phrase.help": {
+      "text": "أدخل كلمة مرورك لحفظ عبارة استرداد.",
+      "status": "machine"
+    },
+    "proof.username.help": {
+      "text": "أدخل كلمة مرورك لتغيير اسم المستخدم.",
+      "status": "machine"
+    },
+    "protect.banner.action": {
+      "text": "حماية",
+      "status": "machine"
+    },
+    "protect.banner.none": {
+      "text": "لا توجد طريقة للعودة إلى هذا الحساب.",
+      "status": "machine"
+    },
+    "protect.body": {
+      "text": "إذا نسيت كلمة مرورك أو فقدت هذا الهاتف، فهكذا تعود إلى حسابك.",
+      "status": "machine"
+    },
+    "protect.continue": {
+      "text": "متابعة",
+      "status": "machine"
+    },
+    "protect.done": {
+      "text": "تم",
+      "status": "machine"
+    },
+    "protect.email.badge": {
+      "text": "مُوصى به",
+      "status": "machine"
+    },
+    "protect.email.body": {
+      "text": "نرسل رمزًا إليه. أي شخص يستطيع قراءة صندوق البريد هذا يستطيع الدخول إلى حسابك.",
+      "status": "machine"
+    },
+    "protect.email.title": {
+      "text": "إضافة بريد إلكتروني",
+      "status": "machine"
+    },
+    "protect.passkey.body": {
+      "text": "سجّل الدخول ببصمة إصبعك أو وجهك أو قفل الشاشة. لا كلمة مرور تحتاج إلى تذكّرها.",
+      "status": "machine"
+    },
+    "protect.passkey.title": {
+      "text": "إنشاء مفتاح مرور",
+      "status": "machine"
+    },
+    "protect.phrase.body": {
+      "text": "12 كلمة تحتفظ بها أنت وحدك. أقوى، ولا علاقة لها بالبريد الإلكتروني.",
+      "status": "machine"
+    },
+    "protect.phrase.save.body": {
+      "text": "12 كلمة تحتفظ بها أنت وحدك. بعد ذلك، يمكن لرمز عبر البريد الإلكتروني تغيير كلمة مرورك لكنه لا يستطيع فتح حسابك.",
+      "status": "machine"
+    },
+    "protect.phrase.save.effect": {
+      "text": "يمنح هذا حسابك مفاتيح جديدة. تبقى جهات اتصالك ودردشاتك كما هي. تبقى أجهزتك الأخرى مسجّلة الدخول.",
+      "status": "machine"
+    },
+    "protect.phrase.save.failed": {
+      "text": "تعذّر الإكمال. لم يتغيّر شيء.",
+      "status": "machine"
+    },
+    "protect.phrase.save.finishing": {
+      "text": "لحسابك مفاتيح جديدة. جارٍ الإنهاء.",
+      "status": "machine"
+    },
+    "protect.phrase.save.progress": {
+      "text": "جارٍ تغيير مفاتيح حسابك",
+      "status": "machine"
+    },
+    "protect.phrase.save.show": {
+      "text": "عرض كلماتي الـ 12",
+      "status": "machine"
+    },
+    "protect.phrase.title": {
+      "text": "حفظ عبارة استرداد",
+      "status": "machine"
+    },
+    "protect.skip": {
+      "text": "ليس الآن",
+      "status": "machine"
+    },
+    "protect.skip.confirm.body": {
+      "text": "إذا نسيت كلمة مرورك أو فقدت هذا الهاتف، فلن تتمكن من العودة إلى هذا الحساب.",
+      "status": "machine"
+    },
+    "protect.skip.confirm.continue": {
+      "text": "متابعة بدون حماية",
+      "status": "machine"
+    },
+    "protect.skip.confirm.title": {
+      "text": "المتابعة بدون حماية؟",
+      "status": "machine"
+    },
+    "protect.status.email": {
+      "text": "محمي ببريدك الإلكتروني",
+      "status": "machine"
+    },
+    "protect.status.none": {
+      "text": "غير محمي",
+      "status": "machine"
+    },
+    "protect.status.phrase": {
+      "text": "محمي بعبارة الاسترداد",
+      "status": "machine"
+    },
+    "protect.title": {
+      "text": "احمِ حسابك",
+      "status": "machine"
+    },
+    "recall.phrase.changed": {
+      "text": "تغيّرت مفاتيح هذا الحساب في {date}. هل كنت أنت؟",
+      "status": "machine"
+    },
+    "recall.phrase.take_back": {
+      "text": "استرجاع الحساب",
+      "status": "machine"
+    },
+    "recall.phrase.use": {
+      "text": "استخدام عبارة الاسترداد بدلًا من ذلك",
+      "status": "machine"
+    },
+    "recall.phrase.wrong": {
+      "text": "هذه الكلمات ليست عبارة الاسترداد لهذا الحساب.",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "رمز تطبيق المصادقة يسجّل دخولك. على جهاز لم يحمل هذا الحساب من قبل، ستحتاج بعدها إلى جهاز آخر أو مفتاح مرور أو عبارة الاسترداد.",
       "status": "machine"
@@ -6348,6 +6536,50 @@
     },
     "recovery.device.restoring": {
       "text": "جارٍ استعادة {username}",
+      "status": "machine"
+    },
+    "recovery.email.check.body": {
+      "text": "إذا كان اسم المستخدم والعنوان هذان مرتبطين، فالرمز في طريقه إليك. يعمل لمدة 10 دقائق.",
+      "status": "machine"
+    },
+    "recovery.email.check.title": {
+      "text": "تحقّق من بريدك الإلكتروني",
+      "status": "machine"
+    },
+    "recovery.email.failed": {
+      "text": "تعذّرت استعادة حسابك. حاول مجددًا أو اختر طريقة أخرى.",
+      "status": "machine"
+    },
+    "recovery.email.restoring": {
+      "text": "جارٍ استعادة حسابك",
+      "status": "machine"
+    },
+    "recovery.email.row.body": {
+      "text": "رمز يُرسل إلى بريد الاسترداد الخاص بك.",
+      "status": "machine"
+    },
+    "recovery.email.row.title": {
+      "text": "رمز عبر البريد الإلكتروني",
+      "status": "machine"
+    },
+    "recovery.email.save": {
+      "text": "حفظ وتسجيل الدخول",
+      "status": "machine"
+    },
+    "recovery.email.start.body": {
+      "text": "اكتب اسم المستخدم وبريد الاسترداد.",
+      "status": "machine"
+    },
+    "recovery.email.totp.body": {
+      "text": "اكتب الرمز المكوّن من 6 أرقام من تطبيق المصادقة.",
+      "status": "machine"
+    },
+    "recovery.email.totp.lost": {
+      "text": "فقدت تطبيق المصادقة؟ استخدم طريقة أخرى للعودة إلى حسابك.",
+      "status": "machine"
+    },
+    "recovery.email.totp.title": {
+      "text": "رمز تطبيق المصادقة",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6560,6 +6792,118 @@
     },
     "recovery.words.tries_left": {
       "text": "{count, plural, zero {لم تبقَ أي محاولة} one {بقيت محاولة واحدة} two {بقيت محاولتان} few {بقيت # محاولات} many {بقيت # محاولة} other {بقيت # محاولة}} قبل توقف لمدة 15 دقيقة.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.body": {
+      "text": "تغيّرت مفاتيح حسابك. اكتب عنوانك مجددًا ليتمكّن رمز عبر البريد الإلكتروني من استعادة حسابك.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.title": {
+      "text": "أضف بريدك الإلكتروني مجددًا",
+      "status": "machine"
+    },
+    "recovery_email.body": {
+      "text": "إذا نسيت كلمة مرورك، نرسل رمزًا إلى هذا العنوان لتتمكن من العودة إلى حسابك.",
+      "status": "machine"
+    },
+    "recovery_email.code.expired": {
+      "text": "انتهت صلاحية هذا الرمز.",
+      "status": "machine"
+    },
+    "recovery_email.code.other_address": {
+      "text": "استخدام عنوان آخر",
+      "status": "machine"
+    },
+    "recovery_email.code.resend": {
+      "text": "إعادة الإرسال",
+      "status": "machine"
+    },
+    "recovery_email.code.resend_in": {
+      "text": "إعادة الإرسال بعد {time}",
+      "status": "machine"
+    },
+    "recovery_email.code.sent_to": {
+      "text": "أرسلنا رمزًا مكوّنًا من 6 أرقام إلى {address}.",
+      "status": "machine"
+    },
+    "recovery_email.code.title": {
+      "text": "أدخل الرمز",
+      "status": "machine"
+    },
+    "recovery_email.code.used_up": {
+      "text": "محاولات كثيرة جدًا. أرسل رمزًا جديدًا.",
+      "status": "machine"
+    },
+    "recovery_email.code.wrong": {
+      "text": "هذا الرمز غير صحيح.",
+      "status": "machine"
+    },
+    "recovery_email.field": {
+      "text": "البريد الإلكتروني",
+      "status": "machine"
+    },
+    "recovery_email.invalid": {
+      "text": "اكتب عنوان بريد إلكتروني كاملًا.",
+      "status": "machine"
+    },
+    "recovery_email.mailbox_warning": {
+      "text": "أي شخص يستطيع قراءة صندوق البريد هذا يستطيع الدخول إلى حسابك. احفظ عبارة استرداد لتغيير ذلك.",
+      "status": "machine"
+    },
+    "recovery_email.needs_username": {
+      "text": "اختر اسم مستخدم أولًا.",
+      "status": "machine"
+    },
+    "recovery_email.not_kept": {
+      "text": "لا يحتفظ Lakko بعنوانك. ستكتبه مجددًا مع اسم المستخدم عندما تحتاج إلى رمز.",
+      "status": "machine"
+    },
+    "recovery_email.remove": {
+      "text": "إزالة",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.body": {
+      "text": "لن تتمكن من العودة إلى حسابك عبر البريد الإلكتروني.",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.title": {
+      "text": "إزالة بريد الاسترداد؟",
+      "status": "machine"
+    },
+    "recovery_email.replace": {
+      "text": "استبدال",
+      "status": "machine"
+    },
+    "recovery_email.send": {
+      "text": "إرسال الرمز",
+      "status": "machine"
+    },
+    "recovery_email.send_failed": {
+      "text": "تعذّر إرسال الرسالة. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "recovery_email.status.off": {
+      "text": "إيقاف",
+      "status": "machine"
+    },
+    "recovery_email.status.on": {
+      "text": "تشغيل",
+      "status": "machine"
+    },
+    "recovery_email.title": {
+      "text": "بريد الاسترداد",
+      "status": "machine"
+    },
+    "recovery_email.totp_warning": {
+      "text": "ستحتاج أيضًا إلى رمز من تطبيق المصادقة. إذا كان على الهاتف الذي تفقده، فلن يكفي البريد الإلكتروني.",
+      "status": "machine"
+    },
+    "recovery_email.unavailable": {
+      "text": "الرموز عبر البريد الإلكتروني غير متاحة حاليًا.",
+      "status": "machine"
+    },
+    "recovery_email.username_change": {
+      "text": "تغيير اسم المستخدم يوقف بريد الاسترداد. يمكنك إضافته مجددًا بعد ذلك.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -7708,6 +8052,50 @@
     },
     "username.a11y_hint": {
       "text": "اسم المستخدم: {message}",
+      "status": "machine"
+    },
+    "username.change.body": {
+      "text": "لن يعثر عليك الآخرون بالاسم {old} بعد الآن. لا يستطيع أحد غيرك أخذه لمدة 30 يومًا.",
+      "status": "machine"
+    },
+    "username.change.next_change": {
+      "text": "بعد ذلك يمكنك تغييره مجددًا بعد 30 يومًا.",
+      "status": "machine"
+    },
+    "username.change.other_devices": {
+      "text": "تحصل أجهزتك الأخرى على اسم المستخدم الجديد عند اتصالها بالإنترنت في المرة القادمة.",
+      "status": "machine"
+    },
+    "username.change.save": {
+      "text": "تغيير",
+      "status": "machine"
+    },
+    "username.change.title": {
+      "text": "تغيير اسم المستخدم",
+      "status": "machine"
+    },
+    "username.change.too_soon": {
+      "text": "يمكنك تغيير اسم المستخدم مجددًا في {date}.",
+      "status": "machine"
+    },
+    "username.claim.body": {
+      "text": "باسم مستخدم وكلمة مرور يمكنك تسجيل الدخول على جهاز آخر وإضافة بريد استرداد، ويستطيع الآخرون العثور عليك.",
+      "status": "machine"
+    },
+    "username.claim.done": {
+      "text": "اسم المستخدم الخاص بك هو {username}.",
+      "status": "machine"
+    },
+    "username.claim.password_help": {
+      "text": "اختر كلمة مرور لتسجيل الدخول. لم تكن لديك واحدة حتى الآن.",
+      "status": "machine"
+    },
+    "username.claim.save": {
+      "text": "حفظ",
+      "status": "machine"
+    },
+    "username.claim.title": {
+      "text": "اختر اسم مستخدم",
       "status": "machine"
     },
     "username.error.bind_limited_later": {

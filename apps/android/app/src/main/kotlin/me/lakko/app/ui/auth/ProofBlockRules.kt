@@ -35,6 +35,9 @@ public enum class ProofSurface {
 
     /** ADR-0067 / UX 19.5 - save a recovery phrase (a key rotation). */
     SavePhrase,
+
+    /** ADR-0068 - change the username. */
+    ChangeUsername,
 }
 
 /** The per-surface lines of the block (UX 17.2-17.4). */
@@ -102,6 +105,12 @@ public fun proofCopy(surface: ProofSurface): ProofCopy = when (surface) {
         wrongPassword = "restore_identity.reset.error.wrong_password",
         cancelled = "chat.record.cancelled",
         generic = "protect.phrase.save.failed",
+    )
+    ProofSurface.ChangeUsername -> ProofCopy(
+        helper = "proof.username.help",
+        wrongPassword = "restore_identity.reset.error.wrong_password",
+        cancelled = "chat.record.cancelled",
+        generic = "common.error.unavailable",
     )
     // UX 18.6.
     ProofSurface.RemoveDevice -> ProofCopy(

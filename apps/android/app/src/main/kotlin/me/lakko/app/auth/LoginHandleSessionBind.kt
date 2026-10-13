@@ -66,8 +66,37 @@ public class LoginHandleSessionRebinder(
     private val launch: (suspend () -> Unit) -> Unit,
     /** Diagnostic sink (status only, never a token, never a handle). */
     private val log: (String) -> Unit,
+    /** Told when auth confirmed a handle in this session (ADR-0068). */
+    private val onConfirmed: () -> Unit = {},
 ) {
     private val spent: MutableSet<String> = HashSet()
+
+    /** Digests of the handles auth confirmed as the account's in this
+     *  session: the check answered `same`, or this device bound the handle
+     *  itself. Only then may a device seed the own-username register. */
+    private val confirmed: MutableSet<String> = HashSet()
+
+    /** Whether auth confirmed [username]'s handle in this session. */
+    public fun isConfirmed(username: String): Boolean {
+        val handle = handleOrNull(username) ?: return false
+        val key = handleDigest(handle)
+        handle.fill(0)
+        return synchronized(confirmed) { key in confirmed }
+    }
+
+    /** The session ended: what it confirmed is forgotten. */
+    public fun forgetConfirmed() {
+        synchronized(confirmed) { confirmed.clear() }
+    }
+
+    private fun confirm(handle: ByteArray) {
+        val key = handleDigest(handle)
+        val added = synchronized(confirmed) { confirmed.add(key) }
+        if (added) onConfirmed()
+    }
+
+    private fun handleDigest(handle: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(handle).joinToString("") { "%02x".format(it) }
 
     /** A session with a known username is available: bind its handle unless
      *  this (session, username) pair was already bound in this process. */
@@ -85,8 +114,19 @@ public class LoginHandleSessionRebinder(
         }
         launch {
             try {
-                if (binder.bind(sessionToken, handle) == LoginHandleBinding.Taken) {
-                    log("login-handle bind: status $HTTP_CONFLICT")
+                // ADR-0068 section 2 - never a blind PUT: the account may
+                // have been renamed on another device, and a bind here would
+                // revert it at auth. Bind only when the account holds none.
+                when (handleSyncAction(binder.check(sessionToken, handle))) {
+                    HandleSyncAction.Nothing -> confirm(handle)
+                    HandleSyncAction.WaitForRegister ->
+                        log("login-handle sync: the account holds another handle; waiting for the name")
+                    HandleSyncAction.Bind ->
+                        if (binder.bind(sessionToken, handle) == LoginHandleBinding.Taken) {
+                            log("login-handle bind: status $HTTP_CONFLICT")
+                        } else {
+                            confirm(handle)
+                        }
                 }
             } catch (cause: CancellationException) {
                 throw cause
@@ -107,6 +147,8 @@ public class LoginHandleSessionRebinder(
     public fun markBound(sessionToken: String, username: String) {
         val handle = handleOrNull(username) ?: return
         claim(sessionToken, handle)
+        // This device bound it itself, or adopted the account's name.
+        confirm(handle)
         handle.fill(0)
     }
 

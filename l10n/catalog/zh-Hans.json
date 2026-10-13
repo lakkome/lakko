@@ -2,6 +2,10 @@
   "format": 1,
   "language": "zh-Hans",
   "messages": {
+    "account.keys_changed.finishing": {
+      "text": "你的账号已有新的密钥。我们正在完成更改。",
+      "status": "machine"
+    },
     "app.not_found.body": {
       "text": "此地址没有任何内容。",
       "status": "machine"
@@ -6186,6 +6190,58 @@
       "text": "你将成为群主。之后可以再添加更多人。",
       "status": "machine"
     },
+    "notice.email_added": {
+      "text": "你的账号已添加恢复邮箱。",
+      "status": "machine"
+    },
+    "notice.email_removed": {
+      "text": "你的恢复邮箱已移除。",
+      "status": "machine"
+    },
+    "notice.email_replaced": {
+      "text": "你的恢复邮箱已更换。",
+      "status": "machine"
+    },
+    "notice.opened_by_email.body": {
+      "text": "{date}，在另一台设备上。",
+      "status": "machine"
+    },
+    "notice.opened_by_email.title": {
+      "text": "有人用你的恢复邮箱打开了你的账号",
+      "status": "machine"
+    },
+    "notice.password_by_email.body": {
+      "text": "{date}，有人用你的恢复邮箱设置了新密码。",
+      "status": "machine"
+    },
+    "notice.password_by_email.title": {
+      "text": "你的密码已更改",
+      "status": "machine"
+    },
+    "notice.phrase_saved": {
+      "text": "已为你的账号保存恢复短语。",
+      "status": "machine"
+    },
+    "notice.secure.new_keys": {
+      "text": "这会为你的账号更换新密钥，打开它的人将失去访问权。",
+      "status": "machine"
+    },
+    "notice.secure.password_saved": {
+      "text": "你的密码已更改。",
+      "status": "machine"
+    },
+    "notice.secure.title": {
+      "text": "保护你的账号安全",
+      "status": "machine"
+    },
+    "notice.was_me": {
+      "text": "是我本人",
+      "status": "machine"
+    },
+    "notice.was_not_me": {
+      "text": "不是我本人",
+      "status": "machine"
+    },
     "notification.channel.messages": {
       "text": "消息",
       "status": "machine"
@@ -6282,6 +6338,10 @@
       "text": "改用密码",
       "status": "machine"
     },
+    "proof.recovery_email.help": {
+      "text": "输入密码以更改恢复邮箱。",
+      "status": "machine"
+    },
     "proof.remove_device.cancelled": {
       "text": "已取消。设备未移除。",
       "status": "machine"
@@ -6326,6 +6386,134 @@
       "text": "你可以：",
       "status": "machine"
     },
+    "proof.save_phrase.help": {
+      "text": "输入密码以保存恢复短语。",
+      "status": "machine"
+    },
+    "proof.username.help": {
+      "text": "输入密码以更改用户名。",
+      "status": "machine"
+    },
+    "protect.banner.action": {
+      "text": "保护",
+      "status": "machine"
+    },
+    "protect.banner.none": {
+      "text": "此账号没有任何找回方式。",
+      "status": "machine"
+    },
+    "protect.body": {
+      "text": "如果你忘记密码或丢失这部手机，可以通过这种方式重新登录。",
+      "status": "machine"
+    },
+    "protect.continue": {
+      "text": "继续",
+      "status": "machine"
+    },
+    "protect.done": {
+      "text": "已完成",
+      "status": "machine"
+    },
+    "protect.email.badge": {
+      "text": "推荐",
+      "status": "machine"
+    },
+    "protect.email.body": {
+      "text": "我们会向它发送验证码。任何能读取该邮箱的人都能进入你的账号。",
+      "status": "machine"
+    },
+    "protect.email.title": {
+      "text": "添加邮箱",
+      "status": "machine"
+    },
+    "protect.passkey.body": {
+      "text": "使用指纹、面容或屏幕锁登录。无需记住密码。",
+      "status": "machine"
+    },
+    "protect.passkey.title": {
+      "text": "创建通行密钥",
+      "status": "machine"
+    },
+    "protect.phrase.body": {
+      "text": "只有你保管的 12 个词。更安全，且与邮箱无关。",
+      "status": "machine"
+    },
+    "protect.phrase.save.body": {
+      "text": "只有你保管的 12 个词。此后，邮件验证码可以更改你的密码，但无法打开你的账号。",
+      "status": "machine"
+    },
+    "protect.phrase.save.effect": {
+      "text": "这会为你的账号更换新密钥。你的联系人和聊天保持不变。你的其他设备保持登录。",
+      "status": "machine"
+    },
+    "protect.phrase.save.failed": {
+      "text": "无法完成。没有任何更改。",
+      "status": "machine"
+    },
+    "protect.phrase.save.finishing": {
+      "text": "你的账号已有新的密钥。即将完成。",
+      "status": "machine"
+    },
+    "protect.phrase.save.progress": {
+      "text": "正在更换账号密钥",
+      "status": "machine"
+    },
+    "protect.phrase.save.show": {
+      "text": "显示我的 12 个词",
+      "status": "machine"
+    },
+    "protect.phrase.title": {
+      "text": "保存恢复短语",
+      "status": "machine"
+    },
+    "protect.skip": {
+      "text": "暂不",
+      "status": "machine"
+    },
+    "protect.skip.confirm.body": {
+      "text": "如果你忘记密码或丢失这部手机，将无法重新登录此账号。",
+      "status": "machine"
+    },
+    "protect.skip.confirm.continue": {
+      "text": "不保护并继续",
+      "status": "machine"
+    },
+    "protect.skip.confirm.title": {
+      "text": "不保护就继续吗？",
+      "status": "machine"
+    },
+    "protect.status.email": {
+      "text": "由你的邮箱保护",
+      "status": "machine"
+    },
+    "protect.status.none": {
+      "text": "未受保护",
+      "status": "machine"
+    },
+    "protect.status.phrase": {
+      "text": "由你的恢复短语保护",
+      "status": "machine"
+    },
+    "protect.title": {
+      "text": "保护你的账号",
+      "status": "machine"
+    },
+    "recall.phrase.changed": {
+      "text": "此账号的密钥已于 {date} 更改。是你本人操作的吗？",
+      "status": "machine"
+    },
+    "recall.phrase.take_back": {
+      "text": "取回账号",
+      "status": "machine"
+    },
+    "recall.phrase.use": {
+      "text": "改用我的恢复短语",
+      "status": "machine"
+    },
+    "recall.phrase.wrong": {
+      "text": "这些词不是此账号的恢复短语。",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "身份验证器验证码可让你登录。在从未保存过此账号的设备上，之后你仍需要另一台设备、通行密钥或恢复短语。",
       "status": "machine"
@@ -6348,6 +6536,50 @@
     },
     "recovery.device.restoring": {
       "text": "正在恢复 {username}",
+      "status": "machine"
+    },
+    "recovery.email.check.body": {
+      "text": "如果该用户名和地址相互对应，验证码已在发送途中。有效期为 10 分钟。",
+      "status": "machine"
+    },
+    "recovery.email.check.title": {
+      "text": "查看你的邮箱",
+      "status": "machine"
+    },
+    "recovery.email.failed": {
+      "text": "无法恢复你的账号。请重试，或选择其他方式。",
+      "status": "machine"
+    },
+    "recovery.email.restoring": {
+      "text": "正在恢复你的账号",
+      "status": "machine"
+    },
+    "recovery.email.row.body": {
+      "text": "发送到你恢复邮箱的验证码。",
+      "status": "machine"
+    },
+    "recovery.email.row.title": {
+      "text": "邮件验证码",
+      "status": "machine"
+    },
+    "recovery.email.save": {
+      "text": "保存并登录",
+      "status": "machine"
+    },
+    "recovery.email.start.body": {
+      "text": "输入你的用户名和恢复邮箱。",
+      "status": "machine"
+    },
+    "recovery.email.totp.body": {
+      "text": "输入身份验证器应用中的 6 位验证码。",
+      "status": "machine"
+    },
+    "recovery.email.totp.lost": {
+      "text": "身份验证器丢失了？请使用其他方式重新登录。",
+      "status": "machine"
+    },
+    "recovery.email.totp.title": {
+      "text": "身份验证器验证码",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6560,6 +6792,118 @@
     },
     "recovery.words.tries_left": {
       "text": "还剩 {count, plural, other {# 次尝试机会}}，之后将暂停 15 分钟。",
+      "status": "machine"
+    },
+    "recovery_email.add_again.body": {
+      "text": "你的账号密钥已更改。请重新输入你的地址，以便邮件验证码能恢复你的账号。",
+      "status": "machine"
+    },
+    "recovery_email.add_again.title": {
+      "text": "重新添加你的邮箱",
+      "status": "machine"
+    },
+    "recovery_email.body": {
+      "text": "如果你忘记密码，我们会向这个地址发送验证码，方便你重新登录。",
+      "status": "machine"
+    },
+    "recovery_email.code.expired": {
+      "text": "该验证码已过期。",
+      "status": "machine"
+    },
+    "recovery_email.code.other_address": {
+      "text": "使用其他地址",
+      "status": "machine"
+    },
+    "recovery_email.code.resend": {
+      "text": "重新发送",
+      "status": "machine"
+    },
+    "recovery_email.code.resend_in": {
+      "text": "{time} 后可重新发送",
+      "status": "machine"
+    },
+    "recovery_email.code.sent_to": {
+      "text": "我们已向 {address} 发送 6 位验证码。",
+      "status": "machine"
+    },
+    "recovery_email.code.title": {
+      "text": "输入验证码",
+      "status": "machine"
+    },
+    "recovery_email.code.used_up": {
+      "text": "尝试次数过多。请发送新的验证码。",
+      "status": "machine"
+    },
+    "recovery_email.code.wrong": {
+      "text": "该验证码不正确。",
+      "status": "machine"
+    },
+    "recovery_email.field": {
+      "text": "邮箱",
+      "status": "machine"
+    },
+    "recovery_email.invalid": {
+      "text": "请输入完整的邮箱地址。",
+      "status": "machine"
+    },
+    "recovery_email.mailbox_warning": {
+      "text": "任何能读取此邮箱的人都能进入你的账号。保存恢复短语即可改变这一点。",
+      "status": "machine"
+    },
+    "recovery_email.needs_username": {
+      "text": "请先选择用户名。",
+      "status": "machine"
+    },
+    "recovery_email.not_kept": {
+      "text": "Lakko 不会保存你的地址。需要验证码时，你要连同用户名一起重新输入。",
+      "status": "machine"
+    },
+    "recovery_email.remove": {
+      "text": "移除",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.body": {
+      "text": "你将无法通过邮箱重新登录。",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.title": {
+      "text": "移除恢复邮箱？",
+      "status": "machine"
+    },
+    "recovery_email.replace": {
+      "text": "更换",
+      "status": "machine"
+    },
+    "recovery_email.send": {
+      "text": "发送验证码",
+      "status": "machine"
+    },
+    "recovery_email.send_failed": {
+      "text": "无法发送邮件。请稍后再试。",
+      "status": "machine"
+    },
+    "recovery_email.status.off": {
+      "text": "关",
+      "status": "machine"
+    },
+    "recovery_email.status.on": {
+      "text": "开",
+      "status": "machine"
+    },
+    "recovery_email.title": {
+      "text": "恢复邮箱",
+      "status": "machine"
+    },
+    "recovery_email.totp_warning": {
+      "text": "你还需要身份验证器应用中的验证码。如果它就在丢失的那部手机上，仅有邮箱是不够的。",
+      "status": "machine"
+    },
+    "recovery_email.unavailable": {
+      "text": "邮件验证码暂时不可用。",
+      "status": "machine"
+    },
+    "recovery_email.username_change": {
+      "text": "更改用户名会关闭你的恢复邮箱。之后可以重新添加。",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -7708,6 +8052,50 @@
     },
     "username.a11y_hint": {
       "text": "用户名：{message}",
+      "status": "machine"
+    },
+    "username.change.body": {
+      "text": "别人将无法再通过 {old} 找到你。30 天内其他人无法占用它。",
+      "status": "machine"
+    },
+    "username.change.next_change": {
+      "text": "此后需等 30 天才能再次更改。",
+      "status": "machine"
+    },
+    "username.change.other_devices": {
+      "text": "你的其他设备会在下次联网时获得新用户名。",
+      "status": "machine"
+    },
+    "username.change.save": {
+      "text": "更改",
+      "status": "machine"
+    },
+    "username.change.title": {
+      "text": "更改用户名",
+      "status": "machine"
+    },
+    "username.change.too_soon": {
+      "text": "你可以在 {date} 再次更改用户名。",
+      "status": "machine"
+    },
+    "username.claim.body": {
+      "text": "有了用户名和密码，你可以在其他设备上登录、添加恢复邮箱，别人也能找到你。",
+      "status": "machine"
+    },
+    "username.claim.done": {
+      "text": "你的用户名是 {username}。",
+      "status": "machine"
+    },
+    "username.claim.password_help": {
+      "text": "请设置登录密码。此前你还没有密码。",
+      "status": "machine"
+    },
+    "username.claim.save": {
+      "text": "保存",
+      "status": "machine"
+    },
+    "username.claim.title": {
+      "text": "选择用户名",
       "status": "machine"
     },
     "username.error.bind_limited_later": {

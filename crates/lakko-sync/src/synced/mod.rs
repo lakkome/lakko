@@ -20,27 +20,45 @@
 //!   encoding (the tie-break and the persistence element).
 //! - [`lineage`] — the envelope the conversation-lineage register
 //!   (ADR-0065 R.5) travels in between the account's devices.
+//! - [`recovery_email`] — the envelope the account's recovery email register
+//!   (ADR-0067) travels in between the account's devices.
+//! - [`own_username`] — the envelope the account's own username register
+//!   (ADR-0068) travels in between the account's devices.
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 
 pub mod entry;
 pub mod lineage;
+pub mod own_username;
+pub mod recovery_email;
 pub mod state;
 
 pub use entry::{
-    check_folder_name, folder_id_from_slice, BoundsError, CodecError, ConversationEntry,
-    ConversationOrderEntry, ConversationRef, ConversationRefKind, DraftEntry, FlagsEntry,
-    FolderChanges, FolderId, FolderMember, FolderMeta, FolderOrder, FolderPins, LineageEntry,
-    MemberState, ReadCursorEntry, RegisterKey, Stamped, StateSnapshot, SyncEntry,
-    CONVERSATION_REF_ID_MAX_LEN, EXCLUDE_ARCHIVED, EXCLUDE_MUTED, EXCLUDE_READ,
-    FOLDER_CHANGES_MAX_REGISTERS, FOLDER_ID_LEN, FOLDER_NAME_MAX_BYTES, FOLDER_NAME_MAX_CHARS,
-    FOLDER_ORDER_MAX, FOLDER_PINS_MAX, INCLUDE_CHANNELS, INCLUDE_GROUPS, INCLUDE_ONE_TO_ONE,
-    KNOWN_BITS, LINEAGE_GROUP_ID_MAX_LEN, SNAPSHOT_MAX_PARTS,
+    check_folder_name, check_own_username, check_recovery_email_address, folder_id_from_slice,
+    BoundsError, CodecError, ConversationEntry, ConversationOrderEntry, ConversationRef,
+    ConversationRefKind, DraftEntry, FlagsEntry, FolderChanges, FolderId, FolderMember, FolderMeta,
+    FolderOrder, FolderPins, LineageEntry, MemberState, ReadCursorEntry, RecoveryEmailEntry,
+    RegisterKey, Stamped, StateSnapshot, SyncEntry, CONVERSATION_REF_ID_MAX_LEN, EXCLUDE_ARCHIVED,
+    EXCLUDE_MUTED, EXCLUDE_READ, FOLDER_CHANGES_MAX_REGISTERS, FOLDER_ID_LEN,
+    FOLDER_NAME_MAX_BYTES, FOLDER_NAME_MAX_CHARS, FOLDER_ORDER_MAX, FOLDER_PINS_MAX,
+    INCLUDE_CHANNELS, INCLUDE_GROUPS, INCLUDE_ONE_TO_ONE, KNOWN_BITS, LINEAGE_GROUP_ID_MAX_LEN,
+    RECOVERY_EMAIL_MAX_LEN, RECOVERY_EMAIL_MIN_LEN, SNAPSHOT_MAX_PARTS,
 };
+pub use entry::{OwnUsernameEntry, OWN_USERNAME_MAX_LEN};
 pub use lineage::{
     compose_lineage_envelope, decode_lineage_envelope, is_lineage_envelope, LineageEnvelopeError,
     LINEAGE_ENVELOPE_DOMAIN_V1, LINEAGE_ENVELOPE_MAX_ENTRIES, LINEAGE_ENVELOPE_MAX_LEN,
     LINEAGE_ENVELOPE_MIN_LEN, LINEAGE_ENVELOPE_VERSION_V1,
+};
+pub use own_username::{
+    compose_own_username_envelope, decode_own_username_envelope, is_own_username_envelope,
+    OwnUsernameEnvelopeError, OWN_USERNAME_ENVELOPE_DOMAIN_V1, OWN_USERNAME_ENVELOPE_MAX_LEN,
+    OWN_USERNAME_ENVELOPE_MIN_LEN, OWN_USERNAME_ENVELOPE_VERSION_V1,
+};
+pub use recovery_email::{
+    compose_recovery_email_envelope, decode_recovery_email_envelope, is_recovery_email_envelope,
+    RecoveryEmailEnvelopeError, RECOVERY_EMAIL_ENVELOPE_DOMAIN_V1, RECOVERY_EMAIL_ENVELOPE_MAX_LEN,
+    RECOVERY_EMAIL_ENVELOPE_MIN_LEN, RECOVERY_EMAIL_ENVELOPE_VERSION_V1,
 };
 pub use state::{should_send_snapshot, ApplyOutcome, FolderView, SyncedState};
 

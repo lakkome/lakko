@@ -8,6 +8,7 @@ import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.discovery.DiscoveryNetworkError
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -183,6 +184,77 @@ class AccountDirectoryTest {
     @Test
     fun `the directory offers no lookup, so no sign-in can resolve a name before a session`() {
         val methods = AccountDirectory::class.java.declaredMethods.map { it.name }.toSet()
-        assertEquals(setOf("registerUsername"), methods)
+        // Two ways to register (the second also hands back the certificate
+        // the register call returned), and still no lookup.
+        assertEquals(
+            // ADR-0068 added the rename; it writes, it resolves nothing.
+            setOf("registerUsername", "registerUsernameWithCertificate", "replaceUsername"),
+            methods.filterNot { it.contains('$') }.toSet(),
+        )
+        assertTrue(methods.none { it.contains("lookup", ignoreCase = true) })
+    }
+
+    // ---- the claim run later by a guest ("Choose a username") --------------
+
+    private inner class CertDirectory(private val certificate: ByteArray?, private val fail: Throwable? = null) :
+        AccountDirectory {
+        override suspend fun registerUsername(sessionToken: String, accountId: ByteArray, username: String): String =
+            registerUsernameWithCertificate(sessionToken, accountId, username).username
+
+        override suspend fun registerUsernameWithCertificate(
+            sessionToken: String,
+            accountId: ByteArray,
+            username: String,
+        ): ClaimedUsername {
+            calls += "register"
+            fail?.let { throw it }
+            return ClaimedUsername(username.lowercase(), certificate)
+        }
+    }
+
+    @Test
+    fun `the claim keeps the certificate the register call returned`() = runTest {
+        val certificate = ByteArray(153) { 7 }
+        val claimed = claimUsername(CertDirectory(certificate), FakeBinder(), handles, "tok", accountId, "Alice")
+        assertEquals("alice", claimed.username)
+        assertTrue(certificate.contentEquals(claimed.certificate))
+        assertEquals(listOf("handle:Alice", "bind", "register"), calls)
+    }
+
+    @Test
+    fun `a directory that returns no certificate still claims the name`() = runTest {
+        val claimed = claimUsername(FakeDirectory(onRegister = { "alice" }), FakeBinder(), handles, "tok", accountId, "alice")
+        assertEquals("alice", claimed.username)
+        assertNull(claimed.certificate)
+    }
+
+    @Test
+    fun `a later claim that discovery refuses gives the handle back and stops`() = runTest {
+        val binder = FakeBinder()
+        try {
+            claimUsername(CertDirectory(null, IllegalStateException("down")), binder, handles, "tok", accountId, "alice")
+            fail("the claim must not succeed")
+        } catch (_: IllegalStateException) {
+            assertEquals(1, binder.unbinds)
+            assertEquals(listOf("handle:alice", "bind", "register", "unbind"), calls)
+        }
+    }
+
+    @Test
+    fun `the JSON 409 of a taken name is the taken line, and already-set is not`() = runTest {
+        val takenDirectory = CertDirectory(null, DiscoveryHttpError(409, "/discovery/register", """{"error":"username-taken"}"""))
+        try {
+            claimUsername(takenDirectory, FakeBinder(), handles, "tok", accountId, "alice")
+            fail("a taken name must not be claimed")
+        } catch (err: AuthClientArgError) {
+            assertEquals("auth.signup.error.username_taken", err.text?.key)
+        }
+        val alreadySet = CertDirectory(null, DiscoveryHttpError(409, "/discovery/register", """{"error":"username-already-set"}"""))
+        try {
+            claimUsername(alreadySet, FakeBinder(), handles, "tok", accountId, "alice")
+            fail("an account that holds a name must not claim another")
+        } catch (err: DiscoveryHttpError) {
+            assertEquals("username-already-set", err.code)
+        }
     }
 }

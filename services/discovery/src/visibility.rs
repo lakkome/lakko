@@ -191,16 +191,15 @@ pub(crate) struct CertificateResponse {
 
 /// `GET /discovery/username-certificate` - the caller's certificate, signed
 /// now. Session-gated; the account comes from the token. `404` when the
-/// account has no username.
+/// account has no current username (ADR-0068: never a retired one).
 pub(crate) async fn get_certificate(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<AuthenticatedAccount>,
 ) -> Result<Json<CertificateResponse>, HandlerError> {
-    // An account registers at most one username in practice; the order makes
-    // the answer stable if it ever has several.
+    // The CURRENT name only (ADR-0068): an account holds at most one, and a
+    // name it renamed away from is never certified again.
     let row: Option<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT oprf_hash FROM usernames WHERE account_id = ? \
-         ORDER BY created_at ASC, oprf_hash ASC LIMIT 1",
+        "SELECT oprf_hash FROM usernames WHERE account_id = ? AND retired_at IS NULL",
     )
     .bind(&authed.0[..])
     .fetch_optional(&state.db)
@@ -330,7 +329,8 @@ pub(crate) async fn put_visibility(
     let mut tx = sqlx::Connection::begin(&mut *conn)
         .await
         .map_err(db_err("begin visibility"))?;
-    sqlx::query("UPDATE usernames SET is_public = ? WHERE account_id = ?")
+    // The current name only (ADR-0068): a retired row stays hidden.
+    sqlx::query("UPDATE usernames SET is_public = ? WHERE account_id = ? AND retired_at IS NULL")
         .bind(req.public)
         .bind(account)
         .execute(&mut *tx)
@@ -339,12 +339,13 @@ pub(crate) async fn put_visibility(
     if req.public {
         // `rows_affected` counts changed rows only, so an idempotent repeat
         // reads 0; ask whether a username exists instead.
-        let has_username: Option<(i32,)> =
-            sqlx::query_as("SELECT 1 FROM usernames WHERE account_id = ? LIMIT 1")
-                .bind(account)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_err("check username"))?;
+        let has_username: Option<(i32,)> = sqlx::query_as(
+            "SELECT 1 FROM usernames WHERE account_id = ? AND retired_at IS NULL LIMIT 1",
+        )
+        .bind(account)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err("check username"))?;
         if has_username.is_none() {
             return Err((
                 StatusCode::CONFLICT,
@@ -430,7 +431,8 @@ pub(crate) async fn name_lookup(
          JOIN public_records p ON p.account_id = d.account_id \
          WHERE d.oprf_hash = ? \
            AND EXISTS (SELECT 1 FROM usernames u \
-                       WHERE u.account_id = d.account_id AND u.is_public = TRUE) \
+                       WHERE u.account_id = d.account_id AND u.is_public = TRUE \
+                         AND u.retired_at IS NULL) \
          ORDER BY d.account_id ASC LIMIT ?",
     )
     .bind(&hash[..])

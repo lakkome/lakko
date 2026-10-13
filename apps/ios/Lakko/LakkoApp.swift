@@ -323,7 +323,7 @@ struct LakkoApp: App {
             keyRotation: KeyRotationRunner(
                 ports: .live(
                     auth: auth, chat: chat, contacts: contacts, sync: sync, removal: deviceRemoval)),
-            accountProtection: AccountProtectionCenter(ports: .live(auth))
+            accountProtection: AccountProtectionCenter(ports: .live(auth, sync: sync))
         )
         self.services = services
         // ADR-0067 — at every landing of a session with keys: what protects
@@ -336,6 +336,74 @@ struct LakkoApp: App {
         auth.onProtectionChanged = {
             Task { await accountProtection.refresh() }
         }
+        // A guest chose a username: the profile directory learns it, the
+        // username certificate is fetched, and the profile (username +
+        // certificate) goes out through the existing publishers.
+        auth.onUsernameClaimed = { [weak auth, weak chat] account in
+            ProfileDirectory.shared.activate(accountIdB64: account.accountIdB64, username: account.username)
+            guard let token = auth?.identitySecrets?.sessionToken else { return }
+            Task { @MainActor in
+                do {
+                    let cert = try await DiscoveryClient(sessionToken: token).fetchUsernameCertificate()
+                    ReachCenter.shared.setOwnUsernameCertificate(cert)
+                } catch {
+                    NSLog("ADR-0060: username certificate not fetched after the claim")
+                }
+                ReachCenter.shared.sync()
+                await chat?.publishOwnProfileToAllGroups()
+                await chat?.sendIntroductions()
+                await accountProtection.refresh()
+            }
+        }
+        // ADR-0067 (amended 2026-10-13) — the account's devices keep the
+        // recovery address in the synced state: a write that waited for the
+        // state runs once it is loaded, and every change of the register
+        // (this device, a sibling, a restored backup) re-evaluates the
+        // automatic re-seal.
+        sync.onSyncedStateReady = { [weak auth, weak sync] in
+            accountProtection.syncedStateReady()
+            // ADR-0068 — the own-username register: seeded once from the
+            // local name, or a name written elsewhere adopted.
+            Task { await auth?.ownUsernameRegisterChanged(sync?.ownUsername) }
+        }
+        auth.storeOwnUsername = { [weak sync] name in await sync?.setOwnUsername(name) ?? false }
+        auth.heldRecoveryAddress = { [weak sync] in sync?.recoveryEmail }
+        accountProtection.usernameWatch = sync.$ownUsername
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak auth] name in
+                Task { await auth?.ownUsernameRegisterChanged(name) }
+            }
+        // ADR-0068 — the username changed (here, or on another device):
+        // the profile directory takes the name, the cached certificate is
+        // replaced (the one the rename answered, else a fetch of the
+        // current name's), and what carries the name goes out again: the
+        // profile, the Everyone record and terms, the introduction offer,
+        // the member cards (the reach sync's inputs changed).
+        auth.onUsernameRenamed = { [weak auth, weak chat] account, certificate in
+            ProfileDirectory.shared.activate(accountIdB64: account.accountIdB64, username: account.username)
+            ReachCenter.shared.setOwnUsernameCertificate(certificate)
+            let token = auth?.identitySecrets?.sessionToken
+            Task { @MainActor in
+                if certificate == nil, let token {
+                    do {
+                        let cert = try await DiscoveryClient(sessionToken: token).fetchUsernameCertificate()
+                        ReachCenter.shared.setOwnUsernameCertificate(cert)
+                    } catch {
+                        NSLog("ADR-0068: the new username's certificate was not fetched")
+                    }
+                }
+                ReachCenter.shared.sync()
+                await chat?.publishOwnProfileToAllGroups()
+                await chat?.sendIntroductions()
+            }
+        }
+        accountProtection.addressWatch = sync.$recoveryEmail
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { _ in accountProtection.addressChanged() }
         // ADR-0066 section 3.3 — a kept device: the account's own
         // `key-rotation` envelope arrives in the DeviceGroup and nowhere
         // else, and is kept as pending until the server side shows its key
@@ -888,7 +956,8 @@ struct AppRoot: View, Equatable {
                     repository: authRepository,
                     username: account.username,
                     accountIdB64: account.accountIdB64,
-                    noteOwnAction: { [center = services.accountProtection] in center.noteOwnAction($0) }
+                    noteOwnAction: { [center = services.accountProtection] in center.noteOwnAction($0) },
+                    keepAddress: { [center = services.accountProtection] in center.keepAddress($0) }
                 )
             )
             .id(account.accountIdB64)
@@ -964,6 +1033,11 @@ enum TabRoute: Hashable {
     case savePhrase
     /// `It was not me` on an account notice.
     case secureAccount
+    /// "Choose a username": a guest account gets a username and its first
+    /// password.
+    case chooseUsername
+    /// "Change username" (ADR-0068).
+    case changeUsername
     /// Settings > Security > Password: choose a new password from a device
     /// that holds the account's keys.
     case password
@@ -1773,7 +1847,11 @@ private struct SessionRoot: View, Equatable {
                         ReachCenter.shared.sync()
                         await chatRepository.sendIntroductions()
                     }
-                )
+                ),
+                onChooseUsername: UsernameClaim.offered(username: account.username)
+                    ? { push(.chooseUsername, on: tab) } : nil,
+                onChangeUsername: UsernameClaim.offered(username: account.username)
+                    ? nil : { push(.changeUsername, on: tab) }
             )
         case .passkeys:
             PasskeysView(
@@ -1800,6 +1878,7 @@ private struct SessionRoot: View, Equatable {
         case .addDevice:
             AddDeviceScreen(
                 authRepository: authRepository,
+                onChooseUsername: { push(.chooseUsername, on: tab) },
                 onDeviceAdded: { deviceKey in
                     // UX 17.5 — this device let it in: no notice about it here.
                     NewDeviceNoticeCenter.shared.letIn(
@@ -1835,13 +1914,15 @@ private struct SessionRoot: View, Equatable {
                 hasUsername: !account.username.isEmpty,
                 onAddEmail: { push(.recoveryEmail(remove: false), on: tab) },
                 onAddPasskey: { push(.passkeys, on: tab) },
-                onSavePhrase: { push(.savePhrase, on: tab) }
+                onSavePhrase: { push(.savePhrase, on: tab) },
+                onChooseUsername: { push(.chooseUsername, on: tab) }
             )
         case .recoveryEmail(let remove):
             RecoveryEmailScreen(
                 authRepository: authRepository,
                 center: services.accountProtection,
                 startsRemoving: remove,
+                onChooseUsername: { push(.chooseUsername, on: tab) },
                 onDone: { pop(.recoveryEmail(remove: remove), from: tab) }
             )
         case .savePhrase:
@@ -1850,6 +1931,23 @@ private struct SessionRoot: View, Equatable {
                 center: services.accountProtection,
                 rotation: services.keyRotation,
                 onDone: { pop(.savePhrase, from: tab) }
+            )
+        case .changeUsername:
+            ChangeUsernameScreen(
+                authRepository: authRepository,
+                center: services.accountProtection,
+                currentUsername: account.username,
+                onDone: { pop(.changeUsername, from: tab) }
+            )
+        case .chooseUsername:
+            ChooseUsernameScreen(
+                authRepository: authRepository,
+                onDone: {
+                    // Back to where the person came from, and the "Protect
+                    // your account" step once: a guest never saw it.
+                    pop(.chooseUsername, from: tab)
+                    push(.protectAccount, on: tab)
+                }
             )
         case .secureAccount:
             SecureAccountScreen(
@@ -2118,7 +2216,8 @@ private struct AnonRoot: View {
             wrappedValue: RecoverViewModel(
                 repository: repository,
                 cachedUsername: cachedUsername,
-                noteOwnAction: { [weak accountProtection] in accountProtection?.noteOwnAction($0) }
+                noteOwnAction: { [weak accountProtection] in accountProtection?.noteOwnAction($0) },
+                keepAddress: { [weak accountProtection] in accountProtection?.keepAddress($0) }
             )
         )
         // A returning user lands on Log in; a fresh device on Welcome.

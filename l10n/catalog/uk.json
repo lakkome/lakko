@@ -2,6 +2,10 @@
   "format": 1,
   "language": "uk",
   "messages": {
+    "account.keys_changed.finishing": {
+      "text": "Обліковий запис має нові ключі. Завершуємо зміну.",
+      "status": "machine"
+    },
     "app.not_found.body": {
       "text": "За цією адресою нічого немає.",
       "status": "machine"
@@ -6186,6 +6190,58 @@
       "text": "Ви будете власником групи. Пізніше можна додати ще людей.",
       "status": "machine"
     },
+    "notice.email_added": {
+      "text": "До вашого облікового запису додано пошту для відновлення.",
+      "status": "machine"
+    },
+    "notice.email_removed": {
+      "text": "Пошту для відновлення видалено.",
+      "status": "machine"
+    },
+    "notice.email_replaced": {
+      "text": "Пошту для відновлення замінено.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.body": {
+      "text": "{date}, на іншому пристрої.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.title": {
+      "text": "Ваш обліковий запис відкрито за допомогою пошти для відновлення",
+      "status": "machine"
+    },
+    "notice.password_by_email.body": {
+      "text": "{date} хтось вибрав новий пароль за допомогою вашої пошти для відновлення.",
+      "status": "machine"
+    },
+    "notice.password_by_email.title": {
+      "text": "Ваш пароль змінено",
+      "status": "machine"
+    },
+    "notice.phrase_saved": {
+      "text": "Для вашого облікового запису збережено фразу відновлення.",
+      "status": "machine"
+    },
+    "notice.secure.new_keys": {
+      "text": "Обліковий запис отримає нові ключі, і той, хто його відкрив, втратить доступ.",
+      "status": "machine"
+    },
+    "notice.secure.password_saved": {
+      "text": "Ваш пароль змінено.",
+      "status": "machine"
+    },
+    "notice.secure.title": {
+      "text": "Убезпечте обліковий запис",
+      "status": "machine"
+    },
+    "notice.was_me": {
+      "text": "Це я",
+      "status": "machine"
+    },
+    "notice.was_not_me": {
+      "text": "Це не я",
+      "status": "machine"
+    },
     "notification.channel.messages": {
       "text": "Повідомлення",
       "status": "machine"
@@ -6282,6 +6338,10 @@
       "text": "Використати пароль",
       "status": "machine"
     },
+    "proof.recovery_email.help": {
+      "text": "Введіть пароль, щоб змінити пошту для відновлення.",
+      "status": "machine"
+    },
     "proof.remove_device.cancelled": {
       "text": "Скасовано. Пристрій не видалено.",
       "status": "machine"
@@ -6326,6 +6386,134 @@
       "text": "Що можна зробити:",
       "status": "machine"
     },
+    "proof.save_phrase.help": {
+      "text": "Введіть пароль, щоб зберегти фразу відновлення.",
+      "status": "machine"
+    },
+    "proof.username.help": {
+      "text": "Введіть пароль, щоб змінити ім’я користувача.",
+      "status": "machine"
+    },
+    "protect.banner.action": {
+      "text": "Захистити",
+      "status": "machine"
+    },
+    "protect.banner.none": {
+      "text": "Цей обліковий запис не має способу повернутися.",
+      "status": "machine"
+    },
+    "protect.body": {
+      "text": "Якщо ви забудете пароль або втратите цей телефон, так ви повернетеся в обліковий запис.",
+      "status": "machine"
+    },
+    "protect.continue": {
+      "text": "Продовжити",
+      "status": "machine"
+    },
+    "protect.done": {
+      "text": "Готово",
+      "status": "machine"
+    },
+    "protect.email.badge": {
+      "text": "Рекомендовано",
+      "status": "machine"
+    },
+    "protect.email.body": {
+      "text": "Ми надішлемо на неї код. Будь-хто, хто може читати цю скриньку, зможе увійти у ваш обліковий запис.",
+      "status": "machine"
+    },
+    "protect.email.title": {
+      "text": "Додати пошту",
+      "status": "machine"
+    },
+    "protect.passkey.body": {
+      "text": "Вхід за відбитком пальця, обличчям або блокуванням екрана. Пароль пам’ятати не потрібно.",
+      "status": "machine"
+    },
+    "protect.passkey.title": {
+      "text": "Створити ключ доступу",
+      "status": "machine"
+    },
+    "protect.phrase.body": {
+      "text": "12 слів, які зберігаєте лише ви. Надійніше і не пов’язано з поштою.",
+      "status": "machine"
+    },
+    "protect.phrase.save.body": {
+      "text": "12 слів, які зберігаєте лише ви. Після цього код із листа зможе змінити пароль, але не відкриє обліковий запис.",
+      "status": "machine"
+    },
+    "protect.phrase.save.effect": {
+      "text": "Обліковий запис отримає нові ключі. Контакти й чати залишаться як є. Інші ваші пристрої залишаться в обліковому записі.",
+      "status": "machine"
+    },
+    "protect.phrase.save.failed": {
+      "text": "Не вдалося завершити. Нічого не змінилося.",
+      "status": "machine"
+    },
+    "protect.phrase.save.finishing": {
+      "text": "Обліковий запис має нові ключі. Завершуємо.",
+      "status": "machine"
+    },
+    "protect.phrase.save.progress": {
+      "text": "Змінюємо ключі облікового запису",
+      "status": "machine"
+    },
+    "protect.phrase.save.show": {
+      "text": "Показати мої 12 слів",
+      "status": "machine"
+    },
+    "protect.phrase.title": {
+      "text": "Зберегти фразу відновлення",
+      "status": "machine"
+    },
+    "protect.skip": {
+      "text": "Не зараз",
+      "status": "machine"
+    },
+    "protect.skip.confirm.body": {
+      "text": "Якщо ви забудете пароль або втратите цей телефон, повернутися в цей обліковий запис буде неможливо.",
+      "status": "machine"
+    },
+    "protect.skip.confirm.continue": {
+      "text": "Продовжити без захисту",
+      "status": "machine"
+    },
+    "protect.skip.confirm.title": {
+      "text": "Продовжити без захисту?",
+      "status": "machine"
+    },
+    "protect.status.email": {
+      "text": "Захищено вашою поштою",
+      "status": "machine"
+    },
+    "protect.status.none": {
+      "text": "Не захищено",
+      "status": "machine"
+    },
+    "protect.status.phrase": {
+      "text": "Захищено фразою відновлення",
+      "status": "machine"
+    },
+    "protect.title": {
+      "text": "Захистіть обліковий запис",
+      "status": "machine"
+    },
+    "recall.phrase.changed": {
+      "text": "Ключі цього облікового запису змінено {date}. Це були ви?",
+      "status": "machine"
+    },
+    "recall.phrase.take_back": {
+      "text": "Повернути обліковий запис",
+      "status": "machine"
+    },
+    "recall.phrase.use": {
+      "text": "Ввести фразу відновлення натомість",
+      "status": "machine"
+    },
+    "recall.phrase.wrong": {
+      "text": "Ці слова не є фразою відновлення цього облікового запису.",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "Код з автентифікатора дає змогу увійти. На пристрої, де цього облікового запису ніколи не було, після цього все одно знадобиться інший пристрій, ключ доступу або фраза відновлення.",
       "status": "machine"
@@ -6348,6 +6536,50 @@
     },
     "recovery.device.restoring": {
       "text": "Відновлення {username}",
+      "status": "machine"
+    },
+    "recovery.email.check.body": {
+      "text": "Якщо це ім’я користувача й адреса пов’язані, код уже в дорозі. Він діє 10 хвилин.",
+      "status": "machine"
+    },
+    "recovery.email.check.title": {
+      "text": "Перевірте пошту",
+      "status": "machine"
+    },
+    "recovery.email.failed": {
+      "text": "Не вдалося повернути обліковий запис. Спробуйте ще раз або виберіть інший спосіб.",
+      "status": "machine"
+    },
+    "recovery.email.restoring": {
+      "text": "Повертаємо ваш обліковий запис",
+      "status": "machine"
+    },
+    "recovery.email.row.body": {
+      "text": "Код, надісланий на вашу пошту для відновлення.",
+      "status": "machine"
+    },
+    "recovery.email.row.title": {
+      "text": "Код із листа",
+      "status": "machine"
+    },
+    "recovery.email.save": {
+      "text": "Зберегти й увійти",
+      "status": "machine"
+    },
+    "recovery.email.start.body": {
+      "text": "Введіть ім’я користувача та пошту для відновлення.",
+      "status": "machine"
+    },
+    "recovery.email.totp.body": {
+      "text": "Введіть 6-значний код із застосунку-автентифікатора.",
+      "status": "machine"
+    },
+    "recovery.email.totp.lost": {
+      "text": "Втратили автентифікатор? Виберіть інший спосіб повернутися.",
+      "status": "machine"
+    },
+    "recovery.email.totp.title": {
+      "text": "Код з автентифікатора",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6560,6 +6792,118 @@
     },
     "recovery.words.tries_left": {
       "text": "{count, plural, one {Залишилася # спроба} few {Залишилися # спроби} many {Залишилося # спроб} other {Залишилося # спроби}} до паузи на 15 хвилин.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.body": {
+      "text": "Ключі облікового запису змінилися. Введіть адресу знову, щоб код із листа міг повернути обліковий запис.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.title": {
+      "text": "Додайте пошту знову",
+      "status": "machine"
+    },
+    "recovery_email.body": {
+      "text": "Якщо ви забудете пароль, ми надішлемо код на цю адресу, щоб ви могли повернутися.",
+      "status": "machine"
+    },
+    "recovery_email.code.expired": {
+      "text": "Термін дії коду минув.",
+      "status": "machine"
+    },
+    "recovery_email.code.other_address": {
+      "text": "Указати іншу адресу",
+      "status": "machine"
+    },
+    "recovery_email.code.resend": {
+      "text": "Надіслати ще раз",
+      "status": "machine"
+    },
+    "recovery_email.code.resend_in": {
+      "text": "Надіслати ще раз через {time}",
+      "status": "machine"
+    },
+    "recovery_email.code.sent_to": {
+      "text": "Ми надіслали 6-значний код на {address}.",
+      "status": "machine"
+    },
+    "recovery_email.code.title": {
+      "text": "Введіть код",
+      "status": "machine"
+    },
+    "recovery_email.code.used_up": {
+      "text": "Забагато спроб. Надішліть новий код.",
+      "status": "machine"
+    },
+    "recovery_email.code.wrong": {
+      "text": "Код не підходить.",
+      "status": "machine"
+    },
+    "recovery_email.field": {
+      "text": "Пошта",
+      "status": "machine"
+    },
+    "recovery_email.invalid": {
+      "text": "Введіть адресу пошти повністю.",
+      "status": "machine"
+    },
+    "recovery_email.mailbox_warning": {
+      "text": "Будь-хто, хто може читати цю скриньку, зможе увійти у ваш обліковий запис. Збережіть фразу відновлення, щоб це змінити.",
+      "status": "machine"
+    },
+    "recovery_email.needs_username": {
+      "text": "Спочатку виберіть ім’я користувача.",
+      "status": "machine"
+    },
+    "recovery_email.not_kept": {
+      "text": "Lakko не зберігає вашу адресу. Коли знадобиться код, ви введете її знову разом з ім’ям користувача.",
+      "status": "machine"
+    },
+    "recovery_email.remove": {
+      "text": "Видалити",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.body": {
+      "text": "Ви не зможете повернутися в обліковий запис через пошту.",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.title": {
+      "text": "Видалити пошту для відновлення?",
+      "status": "machine"
+    },
+    "recovery_email.replace": {
+      "text": "Замінити",
+      "status": "machine"
+    },
+    "recovery_email.send": {
+      "text": "Надіслати код",
+      "status": "machine"
+    },
+    "recovery_email.send_failed": {
+      "text": "Не вдалося надіслати лист. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "recovery_email.status.off": {
+      "text": "Вимк.",
+      "status": "machine"
+    },
+    "recovery_email.status.on": {
+      "text": "Увімк.",
+      "status": "machine"
+    },
+    "recovery_email.title": {
+      "text": "Пошта для відновлення",
+      "status": "machine"
+    },
+    "recovery_email.totp_warning": {
+      "text": "Знадобиться також код із застосунку-автентифікатора. Якщо він на телефоні, який ви втратите, пошти буде недостатньо.",
+      "status": "machine"
+    },
+    "recovery_email.unavailable": {
+      "text": "Коди поштою зараз недоступні.",
+      "status": "machine"
+    },
+    "recovery_email.username_change": {
+      "text": "Зміна імені користувача вимикає пошту для відновлення. Потім її можна додати знову.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -7708,6 +8052,50 @@
     },
     "username.a11y_hint": {
       "text": "Ім’я користувача: {message}",
+      "status": "machine"
+    },
+    "username.change.body": {
+      "text": "Вас більше не зможуть знайти за іменем {old}. Протягом 30 днів ніхто інший не зможе його зайняти.",
+      "status": "machine"
+    },
+    "username.change.next_change": {
+      "text": "Після цього змінити його знову можна буде через 30 днів.",
+      "status": "machine"
+    },
+    "username.change.other_devices": {
+      "text": "Інші ваші пристрої отримають нове ім’я користувача, коли наступного разу будуть у мережі.",
+      "status": "machine"
+    },
+    "username.change.save": {
+      "text": "Змінити",
+      "status": "machine"
+    },
+    "username.change.title": {
+      "text": "Змінити ім’я користувача",
+      "status": "machine"
+    },
+    "username.change.too_soon": {
+      "text": "Змінити ім’я користувача знову можна буде {date}.",
+      "status": "machine"
+    },
+    "username.claim.body": {
+      "text": "З іменем користувача й паролем ви зможете увійти на іншому пристрої, додати пошту для відновлення, і вас зможуть знайти.",
+      "status": "machine"
+    },
+    "username.claim.done": {
+      "text": "Ваше ім’я користувача: {username}.",
+      "status": "machine"
+    },
+    "username.claim.password_help": {
+      "text": "Виберіть пароль для входу. Досі у вас його не було.",
+      "status": "machine"
+    },
+    "username.claim.save": {
+      "text": "Зберегти",
+      "status": "machine"
+    },
+    "username.claim.title": {
+      "text": "Виберіть ім’я користувача",
       "status": "machine"
     },
     "username.error.bind_limited_later": {

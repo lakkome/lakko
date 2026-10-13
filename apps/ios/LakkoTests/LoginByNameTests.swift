@@ -404,6 +404,8 @@ final class LoginByNameFlowTests: XCTestCase {
             if path == "/totp/recover" {
                 return (200, #"{"account_id_b64":"\#(base64UrlEncodeNoPad(accountId))","session_token":"tok-totp","session_expires_at_ms":9000000,"refresh_token":"r1.t","refresh_expires_at_ms":9000000000,"key_generation":1}"#)
             }
+            // ADR-0068: the handle is asked about first; here the account has none.
+            if path == "/auth/login-handle/check" { return (200, #"{"state":"none"}"#) }
             if method == "PUT", path == "/auth/login-handle" { return (200, #"{"bound":true}"#) }
             return (503, "")
         }
@@ -422,7 +424,8 @@ final class LoginByNameFlowTests: XCTestCase {
         }
         XCTAssertTrue(rebound, "a sign-in by name re-binds the handle")
         let requests = NameRouteStub.requests(host)
-        XCTAssertEqual(requests.map(\.path), ["/totp/recover", "/auth/login-handle"])
+        XCTAssertEqual(
+            requests.map(\.path), ["/totp/recover", "/auth/login-handle/check", "/auth/login-handle"])
         XCTAssertEqual(requests.first?.json["handle"] as? String, wireHandle("alice"))
         XCTAssertEqual(requests.last?.json["handle"] as? String, wireHandle("alice"))
         XCTAssertEqual(requests.last?.authorization, "Bearer tok-totp")

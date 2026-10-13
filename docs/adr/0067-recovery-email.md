@@ -404,8 +404,56 @@ Not built, or different:
   era title; the passkey list is read once when the step opens.
 - No component-level tests of the new screens on any client; the pure rules
   and step machines are tested.
-- Translations: the 85 new catalog keys exist in English and Russian
-  (machine); the other nine languages show English.
+- Translations: the 85 new catalog keys are machine-translated into the ten
+  languages (2026-10-13); the 29 security-critical ones render in English
+  until a native review. Letters are English only.
+- Deployed to the test stack on 2026-10-13 with letters through Zoho
+  (`smtppro.zoho.eu`, a dedicated mailbox; SPF, DKIM and DMARC published);
+  no letter had been sent and nothing had been walked there at the time of
+  writing.
+- No client can change a username, and a guest cannot claim one. The auth
+  side of a rename exists (handle replace, which drops the recovery email);
+  discovery treats names as immutable and the username certificate cannot
+  be superseded, so a rename needs its own decision.
+
+## Amended 2026-10-13: the account's devices keep the address
+
+Maintainer's decision. As first built, no device kept the address, so every
+event that drops the email vault (a key reset, a rotation, saving nothing)
+left a mail-protected account without one until the person typed the
+address again. The address is now kept by the account's own devices:
+
+- On the device, wrapped under the device key; between the account's
+  devices and in the phrase-sealed backup as one register of the synced
+  state (`lakko-sync`, carried like the lineage register). The server
+  stores what it stored before: the keyed hash, never the address.
+- `PUT /recovery-email/vault {address, vault_salt, sealed_entropy}`
+  (bearer, no fresh-auth grant): the server recomputes the key from the
+  account's bound handle and the address, requires it to equal the stored
+  one, requires that no vault exists and that no phrase is saved, and
+  stores the vault under the client-chosen 16-byte salt. No letter: the
+  address is the one already confirmed. A session that also knows the
+  address can therefore install a vault only where none exists; one sealing
+  the wrong entropy fails the restore's bundle check later, so the worst
+  case is a recovery that does not work, not a takeover.
+- After a reset, a rotation that is not "save a phrase", or a restore, a
+  device that holds the address re-seals at once. "Add your email again"
+  remains only where no device holds the address, and after a recall (which
+  deletes the stored key, so the address must be confirmed by a letter
+  again; the form is pre-filled).
+- Settings shows the address on a device that holds it.
+
+Cost: the address is on the account's devices and in its backup; someone
+who gets into an unlocked device learns it.
+
+Built 2026-10-13 on the core (`lakko-sync` recovery-email register, entry
+tag 11, envelope `lakko/sync/recovery-email/v1\0`), `services/auth`
+(`PUT /recovery-email/vault`, which also takes `handle`; its own limit scope,
+10 a day, charged before the address is compared) and the three clients;
+unit tests only. On every client a write made before the synced state has
+loaded waits in memory, so an app closed in that moment loses the address
+and asks for it again. A username change keeps the recovery email when the
+device holds the address ([ADR-0068](0068-username-change.md)).
 
 ## References
 

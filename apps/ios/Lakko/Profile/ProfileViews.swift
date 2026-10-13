@@ -147,8 +147,20 @@ struct ProfileSettingsScreen: View {
     @StateObject private var viewModel: ProfileSettingsViewModel
     @ObservedObject private var l10n = Localization.shared
 
-    init(viewModel: @autoclosure @escaping () -> ProfileSettingsViewModel) {
+    /// "Choose a username", for an account without one (a guest).
+    private let onChooseUsername: (() -> Void)?
+    /// "Change username" (ADR-0068), beside the name of an account that
+    /// has one.
+    private let onChangeUsername: (() -> Void)?
+
+    init(
+        viewModel: @autoclosure @escaping () -> ProfileSettingsViewModel,
+        onChooseUsername: (() -> Void)? = nil,
+        onChangeUsername: (() -> Void)? = nil
+    ) {
         self._viewModel = StateObject(wrappedValue: viewModel())
+        self.onChooseUsername = onChooseUsername
+        self.onChangeUsername = onChangeUsername
     }
 
     var body: some View {
@@ -184,6 +196,11 @@ struct ProfileSettingsScreen: View {
                         Text("@\(username)")
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                        if let onChangeUsername {
+                            Button(l10n.t("username.change.title"), action: onChangeUsername)
+                        }
+                    } else if let onChooseUsername {
+                        Button(l10n.t("username.claim.title"), action: onChooseUsername)
                     } else {
                         Text(l10n.t("settings.profile.username.none"))
                             .foregroundStyle(.secondary)

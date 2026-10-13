@@ -235,6 +235,40 @@ class MainActivity : ComponentActivity() {
         // ADR-0065 R.5 — a conversation that continues in a new group keeps
         // its row through the lineage register of the synced state.
         chatRepository.lineageRecorder = { successor, root -> deviceGroupSync.recordLineage(successor, root) }
+        // ADR-0067 (amended 2026-10-13) - the account's devices keep the
+        // recovery address in one register of the synced state.
+        authRepository.recoveryAddressPort = object : me.lakko.app.auth.RecoveryAddressPort {
+            override fun state(): me.lakko.app.auth.RecoveryAddressState = deviceGroupSync.recoveryEmail.value
+
+            override suspend fun write(address: String?): Boolean = deviceGroupSync.setRecoveryEmail(address)
+        }
+        // ADR-0068 - and the account's username in another.
+        authRepository.ownUsernamePort = object : me.lakko.app.auth.OwnUsernamePort {
+            override fun state(): me.lakko.app.auth.OwnUsernameState = deviceGroupSync.ownUsername.value
+
+            override suspend fun write(username: String?): Boolean = deviceGroupSync.setOwnUsername(username)
+        }
+        // The username changed on this device's marker (a rename here, or
+        // one adopted from another device): the stored profile takes it and
+        // the existing publishers follow (profile, Everyone, introductions).
+        authRepository.onUsernameChanged = { username, renamedElsewhere ->
+            authRepository.identitySecrets.value?.accountId?.let { accountId ->
+                val existing = me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)
+                me.lakko.app.profile.applyOwnNameChange(
+                    current = existing,
+                    newName = existing?.displayName,
+                    username = username.takeIf { it.isNotBlank() },
+                    nowMs = System.currentTimeMillis(),
+                )?.let { me.lakko.app.profile.OwnProfileStore.save(applicationContext, accountId, it) }
+            }
+            if (renamedElsewhere) {
+                // The certificate held here is the old name's: fetched again.
+                chatRepository.refreshUsernameCertificate()
+            } else {
+                chatRepository.publishOwnProfileToAllGroups()
+            }
+            me.lakko.app.reach.ReachManager.get(applicationContext).publishOwnProfileToDevices()
+        }
 
         // ADR-0026 Phase 4 — the anti-censorship arming controller.
         // Apply the persisted preference at boot: when on, fetch +
@@ -777,6 +811,29 @@ private fun AppRoot(
     }
 
     val sessionAccount = (state as? AuthState.Session)?.account
+    // ADR-0067 - the register changed or became readable: a parked write is
+    // flushed, Settings is told, the automatic re-seal is evaluated.
+    LaunchedEffect(authRepository, deviceGroupSync) {
+        deviceGroupSync.recoveryEmail.collect {
+            try {
+                authRepository.onRecoveryAddressState()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                android.util.Log.w("lakko-auth", "recovery address not applied: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+    // ADR-0068 - the own-username register changed or became readable.
+    LaunchedEffect(authRepository, deviceGroupSync, sessionAccount?.accountIdB64) {
+        deviceGroupSync.ownUsername.collect {
+            try {
+                authRepository.onOwnUsernameState()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                android.util.Log.w("lakko-auth", "own username not applied: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
     if (sessionAccount != null) {
         // ADR-0067 / UX 19.1a - "Protect your account", the one step after
         // sign-up. Drawn ABOVE the session root, which keeps running
@@ -1992,6 +2049,41 @@ private fun SessionRoot(
                         repository = authRepository,
                         onDone = { navController.popBackStack() },
                         onBack = { navController.popBackStack() },
+                        onChooseUsername = { navController.navigate(Routes.CHOOSE_USERNAME) },
+                    )
+                }
+                // ADR-0068 - change the username.
+                composable(Routes.CHANGE_USERNAME) {
+                    me.lakko.app.ui.auth.ChangeUsernameScreen(
+                        repository = authRepository,
+                        onDone = { navController.popBackStack() },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                // A guest chooses a username and its first password.
+                composable(Routes.CHOOSE_USERNAME) {
+                    val ctx = chatRepository.context
+                    me.lakko.app.ui.auth.ChooseUsernameScreen(
+                        repository = authRepository,
+                        onDone = { claimed ->
+                            // The profile now carries the username (and its
+                            // certificate): through the existing publishers.
+                            identitySecrets?.accountId?.let { accountId ->
+                                val existing = me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)
+                                me.lakko.app.profile.applyOwnNameChange(
+                                    current = existing,
+                                    newName = existing?.displayName,
+                                    username = claimed.takeIf { it.isNotBlank() },
+                                    nowMs = System.currentTimeMillis(),
+                                )?.let { me.lakko.app.profile.OwnProfileStore.save(ctx, accountId, it) }
+                            }
+                            chatRepository.publishOwnProfileToAllGroups()
+                            me.lakko.app.reach.ReachManager.get(ctx).publishOwnProfileToDevices()
+                            navController.popBackStack()
+                            // Then, once: "Protect your account".
+                            authRepository.finishUsernameClaim()
+                        },
+                        onBack = { navController.popBackStack() },
                     )
                 }
                 // ADR-0067 / UX 19.5 - Settings > Account > Recovery phrase.
@@ -2218,6 +2310,8 @@ private fun SessionRoot(
                                 me.lakko.app.reach.ReachManager.get(ctx).publishOwnProfileToDevices()
                             },
                             onBack = { navController.popBackStack() },
+                            onChooseUsername = { navController.navigate(Routes.CHOOSE_USERNAME) },
+                            onChangeUsername = { navController.navigate(Routes.CHANGE_USERNAME) },
                         )
                     } else {
                         LoadingScreen()
@@ -2254,6 +2348,7 @@ private fun SessionRoot(
                         authRepository = authRepository,
                         onBack = { navController.popBackStack() },
                         chatRepository = chatRepository,
+                        onChooseUsername = { navController.navigate(Routes.CHOOSE_USERNAME) },
                     )
                 }
                 // docs/ux/chat-folders.md section 4 — Settings > Chat folders.
@@ -2430,6 +2525,8 @@ private object Routes {
     const val RECOVERY = "settings/recovery"
     const val RECOVERY_EMAIL = "settings/recovery_email"
     const val SAVE_PHRASE = "settings/save_phrase"
+    const val CHOOSE_USERNAME = "settings/choose_username"
+    const val CHANGE_USERNAME = "settings/change_username"
     const val ANTI_CENSORSHIP = "settings/anti_censorship"
     const val CHANNELS_I_SHARE = "settings/channels_i_share"
     const val LANGUAGE = "settings/language"

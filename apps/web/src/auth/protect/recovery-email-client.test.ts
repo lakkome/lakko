@@ -96,6 +96,29 @@ describe("the recovery-email routes", () => {
     });
   });
 
+  it("PUT /recovery-email/vault carries the handle, the address, the client's salt and the blob, and no grant", async () => {
+    const c = client(() => json({ vault: true }));
+    await c.client.putVault({
+      sessionToken: "tok",
+      handle: HANDLE,
+      address: "name@example.com",
+      vaultSalt: "c2FsdHNhbHRzYWx0c2FsdA==",
+      sealedEntropy: "AAAA",
+    });
+    expect(c.calls[0]).toMatchObject({
+      url: "/api/auth/recovery-email/vault",
+      method: "PUT",
+      headers: { authorization: "Bearer tok" },
+      body: {
+        handle: HANDLE,
+        address: "name@example.com",
+        vault_salt: "c2FsdHNhbHRzYWx0c2FsdA==",
+        sealed_entropy: "AAAA",
+      },
+    });
+    expect(Object.keys(c.calls[0]?.body as object).includes("fresh_grant")).toBe(false);
+  });
+
   it("the recover routes are anonymous and carry what the server names", async () => {
     const c = client((call) => {
       if (call.url.endsWith("/recover/start")) {

@@ -1017,6 +1017,20 @@ public class ReachManager internal constructor(
      *  §5), or `null` until one was fetched. */
     public fun usernameCertificate(): ByteArray? = doc.usernameCertHex?.let(::reachUnhex)
 
+    /** ADR-0068 - the account was renamed: the certificate held here is the
+     *  old name's. Dropped, so the current one is fetched again. */
+    public fun dropUsernameCertificate() {
+        val b = binding.get() ?: return
+        if (doc.usernameCertHex == null) return
+        doc = doc.copy(usernameCertHex = null)
+        scope.launch {
+            lock.withLock {
+                doc = doc.copy(usernameCertHex = null)
+                store.save(b.accountIdB64, doc)
+            }
+        }
+    }
+
     /** Keep the certificate from `POST /discovery/register` or
      *  `GET /discovery/username-certificate`. */
     public fun keepUsernameCertificate(certificate: ByteArray): Boolean {

@@ -10,6 +10,7 @@ import {
   clearProtectStepOwed,
   clearProtectionFacts,
   dismissBanner,
+  emailFormPrefill,
   emailNeedsAddingAgain,
   isPhraseProtected,
   newWordsShown,
@@ -267,5 +268,40 @@ describe("the publish-owed screen after a reset or a take-back (alignment P)", (
 
   it("keeps its existing text for a phrase-protected account", () => {
     expect(publishOwedTextKey(true)).toBe("recovery_phrase.fresh.publish_owed");
+  });
+});
+
+describe("a device that holds the address (amended 2026-10-13)", () => {
+  const gone = status({ enabled: true, vault: false });
+
+  it("is not asked to add the email again: it puts the vault back by itself", () => {
+    expect(emailNeedsAddingAgain(gone, true)).toBe(false);
+    expect(emailNeedsAddingAgain(gone, false)).toBe(true);
+    expect(protectionRows(gone, true, true).email).toEqual({ on: true, actions: ["replace", "remove"] });
+    expect(protectionRows(gone, true, false).email).toEqual({ on: true, actions: ["addAgain", "remove"] });
+    expect(protectBannerKeys(gone, true)).toEqual({ titleKey: "protect.banner.none", bodyKey: null });
+    expect(protectBannerKeys(gone, false).titleKey).toBe("recovery_email.add_again.title");
+  });
+
+  it("after a recall the server holds no email: the ordinary add state, pre-filled with the held address", () => {
+    const recalled = status({ enabled: false });
+    expect(protectionRows(recalled, true, true).email).toEqual({ on: false, actions: ["add"] });
+    expect(emailNeedsAddingAgain(recalled, true)).toBe(false);
+    expect(emailFormPrefill("add", "name@example.com")).toBe("name@example.com");
+    expect(emailFormPrefill("addAgain", "name@example.com")).toBe("name@example.com");
+    expect(emailFormPrefill("add", null)).toBe("");
+  });
+
+  it("Replace starts empty: a new address is being typed", () => {
+    expect(emailFormPrefill("replace", "name@example.com")).toBe("");
+  });
+});
+
+describe("the banner while a re-seal is pending (ADR-0068 pass B, item 6)", () => {
+  it("is not shown: the device holds the address and is putting the vault back", () => {
+    const NOW = 1_800_000_000_000;
+    expect(protectBannerShown("none", null, NOW, false, true)).toBe(false);
+    // Without the address it is (the add-again state).
+    expect(protectBannerShown("none", null, NOW, false, false)).toBe(true);
   });
 });

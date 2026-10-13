@@ -4693,6 +4693,34 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0068 - the account was renamed on another of its devices: the
+     * certificate held here is the old name's. Drop it, fetch the current
+     * one (`GET /discovery/username-certificate` answers for the current
+     * name) and re-publish the profile, which the Everyone record and the
+     * introduction record follow. Without a certificate the profile is still
+     * re-published at once (the username line shows after the fetch).
+     */
+    public fun refreshUsernameCertificate() {
+        val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+        reach.dropUsernameCertificate()
+        publishOwnProfileToAllGroups()
+        val token = keyPackageAccount.get()?.sessionToken ?: return
+        reachScope.launch {
+            try {
+                val cert = keyPackageDiscoveryFactory().use { client ->
+                    client.setSessionToken(token)
+                    client.fetchUsernameCertificate()
+                } ?: return@launch
+                if (reach.keepUsernameCertificate(cert)) publishOwnProfileToAllGroups()
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.i("ChatRepository", "ADR-0068: username certificate not fetched: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /**
      * ADR-0048 §2 — the own profile changed: publish it into every group this
      * device is in. Best-effort and fire-and-forget.
      */

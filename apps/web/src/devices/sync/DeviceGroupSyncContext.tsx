@@ -92,6 +92,11 @@ import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
 import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
 import { mintHlc, observeHlc } from "./hlc";
 import type { LineageEntry } from "../../chat/lineage";
+import {
+  installAddressRegister,
+  publishHeldAddress,
+} from "../../auth/protect/address-register";
+import { installUsernameRegister, publishRegisterUsername } from "../../auth/username-register";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
 import { sealKeyRotationAfterRemoval } from "../key-rotation";
 import { installKeyRotationPort, type JournalCatchUp } from "./key-rotation-port";
@@ -340,6 +345,8 @@ export function DeviceGroupSyncProvider(props: {
   let synced: WasmSyncedState | null = null;
   /** The loaded wasm module, for the synchronous receive path. */
   let wasmSync: Awaited<ReturnType<typeof loadWasm>> | null = null;
+  let uninstallAddressRegister: (() => void) | null = null;
+  let uninstallUsernameRegister: (() => void) | null = null;
   void loadWasm().then((w) => {
     wasmSync = w;
   });
@@ -453,6 +460,13 @@ export function DeviceGroupSyncProvider(props: {
     setOrder(p.order);
     setFolders(p.folders);
     setLineageEntries(p.lineage);
+    // ADR-0067 (amended 2026-10-13): the recovery address the account's
+    // devices keep, for the screens above this provider.
+    if (activeAccountIdB64 !== null) {
+      publishHeldAddress(activeAccountIdB64, synced.recoveryEmail() ?? null);
+      // ADR-0068: the account's username as its devices agree on it.
+      publishRegisterUsername(activeAccountIdB64, synced.ownUsername() ?? null);
+    }
     setStateVersion((v) => v + 1);
   }
 
@@ -616,6 +630,14 @@ export function DeviceGroupSyncProvider(props: {
     startPollLoop(accountIdB64, deviceKey);
     void drainFolderOutbox();
     void flushUnsentLineage();
+    void flushUnsentRecoveryEmail();
+    // ADR-0067: the synced state is loaded, so the recovery address can be
+    // written (a write that waited for this is applied now).
+    uninstallAddressRegister?.();
+    uninstallAddressRegister = installAddressRegister({ accountIdB64, set: setRecoveryEmailImpl });
+    void flushUnsentOwnUsername();
+    uninstallUsernameRegister?.();
+    uninstallUsernameRegister = installUsernameRegister({ accountIdB64, set: setOwnUsernameImpl });
   }
 
   function startPollLoop(accountIdB64: string, deviceKey: CryptoKey): void {
@@ -745,6 +767,10 @@ export function DeviceGroupSyncProvider(props: {
       }
       synced = null;
     }
+    uninstallAddressRegister?.();
+    uninstallAddressRegister = null;
+    uninstallUsernameRegister?.();
+    uninstallUsernameRegister = null;
     activeAccountIdB64 = null;
     boundSyncGeneration = null;
     ownDeviceGroupId = null;
@@ -825,6 +851,13 @@ export function DeviceGroupSyncProvider(props: {
       // is the snapshot parts PLUS every lineage envelope, each with its
       // original stamp.
       await sendLineageEnvelopes(synced.lineageEnvelopes());
+      // ADR-0067 - the recovery-email register is not in `snapshotParts()`
+      // either: its envelope rides beside them, with its original stamp.
+      const recoveryEmail = synced.recoveryEmailEnvelope();
+      if (recoveryEmail !== undefined) await sendLineageEnvelopes([recoveryEmail]);
+      // ADR-0068 - and the own-username register, the same way.
+      const ownUsername = synced.ownUsernameEnvelope();
+      if (ownUsername !== undefined) await sendLineageEnvelopes([ownUsername]);
     } catch (err) {
       // The next growth, or the new device's own writes, carry the state
       // forward; a failed re-send is not retried in a loop.
@@ -850,6 +883,117 @@ export function DeviceGroupSyncProvider(props: {
       }
       await publishGroupMessage(group.createServiceEnvelopeMessage(identity, envelope, mintHlc()));
     }
+  }
+
+  // ----- ADR-0067: the recovery-email register --------------------
+
+  /** `localStorage` marker: the register written here has not been confirmed
+   *  sent (it holds no address, only the fact). The same rule as the lineage
+   *  marker; re-sending is idempotent (last writer wins by stamp). */
+  const recoveryEmailUnsentKey = (account: string): string => `lakko.recovery-email.unsent.v1.${account}`;
+
+  async function sendRecoveryEmailRegister(account: string): Promise<void> {
+    if (synced === null) return;
+    try {
+      const envelope = synced.recoveryEmailEnvelope();
+      if (envelope !== undefined) await sendLineageEnvelopes([envelope]);
+      localStorage.removeItem(recoveryEmailUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "recovery-email register send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  /** Send the register again when an earlier send was not confirmed. */
+  async function flushUnsentRecoveryEmail(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(recoveryEmailUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    await sendRecoveryEmailRegister(account);
+  }
+
+  /** Write the register (`null`: no recovery email), fold it here at once
+   *  and send it to the account's other devices. Never throws; the address
+   *  is never logged. */
+  async function setRecoveryEmailImpl(address: string | null): Promise<void> {
+    if (synced === null) return;
+    let written: boolean;
+    try {
+      written = synced.setRecoveryEmail(mintHlc(), address);
+    } catch {
+      // An address the one rule refuses: nothing is kept.
+      return;
+    }
+    if (!written) return;
+    refresh();
+    const account = activeAccountIdB64;
+    if (account === null) return;
+    try {
+      localStorage.setItem(recoveryEmailUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: the send below is the only attempt */
+    }
+    await sendRecoveryEmailRegister(account);
+  }
+
+  // ----- ADR-0068: the own-username register ----------------------
+
+  const ownUsernameUnsentKey = (account: string): string => `lakko.own-username.unsent.v1.${account}`;
+
+  async function sendOwnUsernameRegister(account: string): Promise<void> {
+    if (synced === null) return;
+    try {
+      const envelope = synced.ownUsernameEnvelope();
+      if (envelope !== undefined) await sendLineageEnvelopes([envelope]);
+      localStorage.removeItem(ownUsernameUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "own-username register send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentOwnUsername(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(ownUsernameUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    await sendOwnUsernameRegister(account);
+  }
+
+  /** Write the register, fold it here at once and send it to the account's
+   *  other devices. Never throws. */
+  async function setOwnUsernameImpl(username: string): Promise<void> {
+    if (synced === null) return;
+    let written: boolean;
+    try {
+      written = synced.setOwnUsername(mintHlc(), username);
+    } catch {
+      // A name the username rule refuses: nothing is kept.
+      return;
+    }
+    if (!written) return;
+    refresh();
+    const account = activeAccountIdB64;
+    if (account === null) return;
+    try {
+      localStorage.setItem(ownUsernameUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: the send below is the only attempt */
+    }
+    await sendOwnUsernameRegister(account);
   }
 
   /** Send every register again when an earlier send was not confirmed. */
@@ -1370,6 +1514,30 @@ export function DeviceGroupSyncProvider(props: {
       // inside is dropped by the intake.
       // ADR-0065 R.5 / R.13a - a lineage envelope is routed BEFORE that
       // dispatcher: it is a `lakko-sync` register, folded by the one fold.
+      // ADR-0067 - the recovery-email register, the same way.
+      if (wasmSync !== null && wasmSync.isRecoveryEmailEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyRecoveryEmailEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
+      // ADR-0068 - the own-username register, the same way.
+      if (wasmSync !== null && wasmSync.isOwnUsernameEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyOwnUsernameEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
       if (wasmSync !== null && wasmSync.isLineageEnvelope(parsed.serviceEnvelope)) {
         try {
           if (synced?.applyLineageEnvelope(parsed.serviceEnvelope) === true) {

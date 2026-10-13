@@ -14,6 +14,7 @@ import { PROOF_COPY } from "../fresh-auth";
 import { createProofGate } from "../proof-gate";
 import { ProofBlock } from "../ProofBlock";
 import { t } from "../../l10n";
+import { rememberAddress } from "./address-register";
 import { emailFailure, emailFailureKey } from "./email-flow";
 import { markOwnAction } from "./notices";
 import { refreshProtection } from "./protection-state";
@@ -50,6 +51,8 @@ export function RemoveRecoveryEmail(props: {
       if (grant === null) return;
       markOwnAction(plainStore(), s.account.accountId, "recovery-email-removed", Date.now());
       await new RecoveryEmailClient().remove(token, grant);
+      // The account has no recovery email: its devices forget the address.
+      rememberAddress(s.account.accountId, null);
       void refreshProtection(s.account.accountId, token);
       props.onRemoved();
     } catch (err) {

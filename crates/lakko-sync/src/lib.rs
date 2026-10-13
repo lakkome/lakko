@@ -24,7 +24,11 @@
 //!   flags / read cursors / drafts / conversation order maps the
 //!   DeviceGroup carries, one commutative, associative, idempotent
 //!   [`SyncedState`] every client consumes over the FFI, its persistence
-//!   codec, and the catch-up snapshot.
+//!   codec, and the catch-up snapshot. The same fold holds the
+//!   conversation-lineage registers (ADR-0065), the account's recovery
+//!   email register (ADR-0067) and its own-username register (ADR-0068),
+//!   each carried between devices by its own
+//!   DeviceGroup service envelope.
 //!
 //! ## Why no character-level CRDT
 //!
@@ -78,53 +82,119 @@ pub use synced::{should_send_snapshot, SyncedState};
 /// oracle* rather than a parse wrapper.
 #[doc(hidden)]
 pub mod fuzz_api {
-    use crate::synced::{compose_lineage_envelope, decode_lineage_envelope};
+    use crate::synced::{
+        compose_lineage_envelope, compose_own_username_envelope, compose_recovery_email_envelope,
+        decode_lineage_envelope, decode_own_username_envelope, decode_recovery_email_envelope,
+    };
     use crate::{EditChain, EditOp, Hlc, HybridLogicalClock, SyncedState};
 
-    /// Drive the two byte decoders of the synced state on arbitrary input
-    /// and check what they accept (ADR-0065 R.5, ADR-0058):
+    /// Drive the four byte decoders of the synced state on arbitrary input
+    /// and check what they accept (ADR-0065 R.5, ADR-0067, ADR-0068,
+    /// ADR-0058):
     ///
     /// * [`decode_lineage_envelope`] — reached from a DeviceGroup service
     ///   envelope another device of the account sent. Whatever decodes must
     ///   re-encode to the identical bytes (the encoding is canonical) and
     ///   fold into a state whose own envelopes carry the same registers.
+    /// * [`decode_recovery_email_envelope`] — the account's recovery email
+    ///   register, reached the same way. Whatever decodes must re-encode to
+    ///   the identical bytes, hold an address within its bounds (or the
+    ///   removal), fold to exactly that register, and not apply twice.
+    /// * [`decode_own_username_envelope`] — the account's own username
+    ///   register, reached the same way, held to the same properties.
     /// * [`SyncedState::from_bytes`] — reached from local persistence and
     ///   from the backup payload a storage tier serves. Whatever decodes
-    ///   must persist to bytes that read back as the same state.
+    ///   must persist to bytes that read back as the same state, and its
+    ///   recovery email and own-username registers must be valid and travel
+    ///   by their envelopes.
     ///
-    /// Neither may panic. Returns `false` when a property is violated.
+    /// None may panic. Returns `false` when a property is violated.
     #[must_use]
     pub fn decode_synced_and_check(bytes: &[u8]) -> bool {
-        if let Ok(entries) = decode_lineage_envelope(bytes) {
-            if compose_lineage_envelope(&entries).as_deref() != Ok(bytes) {
-                return false;
-            }
-            let mut state = SyncedState::new();
-            if state.apply_lineage_envelope(bytes).is_err() {
-                return false;
-            }
-            if state.all_lineage() != entries {
-                return false;
-            }
-            if state.lineage_envelopes() != vec![bytes.to_vec()] {
+        lineage_envelope_holds(bytes)
+            && recovery_email_envelope_holds(bytes)
+            && own_username_envelope_holds(bytes)
+            && persisted_state_holds(bytes)
+    }
+
+    /// The lineage envelope: canonical, and it folds to exactly its own
+    /// registers.
+    fn lineage_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = decode_lineage_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        compose_lineage_envelope(&entries).as_deref() == Ok(bytes)
+            && state.apply_lineage_envelope(bytes).is_ok()
+            && state.all_lineage() == entries
+            && state.lineage_envelopes() == vec![bytes.to_vec()]
+    }
+
+    /// The recovery-email envelope (ADR-0067): canonical, within its bounds,
+    /// it folds to exactly its own register, and a re-send is not an update.
+    fn recovery_email_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(register) = decode_recovery_email_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        compose_recovery_email_envelope(&register).as_deref() == Ok(bytes)
+            && register.value.validate().is_ok()
+            && state.apply_recovery_email_envelope(bytes) == Ok(true)
+            && state.recovery_email_register().as_ref() == Some(&register)
+            && state.recovery_email().is_some() != register.value.is_removed()
+            && state.recovery_email_envelope().as_deref() == Some(bytes)
+            && state.apply_recovery_email_envelope(bytes) == Ok(false)
+    }
+
+    /// The own-username envelope (ADR-0068): the same properties.
+    fn own_username_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(register) = decode_own_username_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        compose_own_username_envelope(&register).as_deref() == Ok(bytes)
+            && register.value.validate().is_ok()
+            && state.apply_own_username_envelope(bytes) == Ok(true)
+            && state.own_username_register().as_ref() == Some(&register)
+            && state.own_username().is_some() != register.value.is_none()
+            && state.own_username_envelope().as_deref() == Some(bytes)
+            && state.apply_own_username_envelope(bytes) == Ok(false)
+    }
+
+    /// The persisted state: it reads back as itself, and each
+    /// envelope-carried register is valid and rebuilt by its envelope.
+    fn persisted_state_holds(bytes: &[u8]) -> bool {
+        let Ok(state) = SyncedState::from_bytes(bytes) else {
+            return true;
+        };
+        if SyncedState::from_bytes(&state.to_bytes()).as_ref() != Ok(&state) {
+            return false;
+        }
+        let mut rebuilt = SyncedState::new();
+        for envelope in state.lineage_envelopes() {
+            if rebuilt.apply_lineage_envelope(&envelope).is_err() {
                 return false;
             }
         }
-        if let Ok(state) = SyncedState::from_bytes(bytes) {
-            if SyncedState::from_bytes(&state.to_bytes()).as_ref() != Ok(&state) {
-                return false;
-            }
-            let mut rebuilt = SyncedState::new();
-            for envelope in state.lineage_envelopes() {
-                if rebuilt.apply_lineage_envelope(&envelope).is_err() {
-                    return false;
-                }
-            }
-            if rebuilt.all_lineage() != state.all_lineage() {
+        if let Some(envelope) = state.recovery_email_envelope() {
+            if rebuilt.apply_recovery_email_envelope(&envelope).is_err() {
                 return false;
             }
         }
-        true
+        if let Some(envelope) = state.own_username_envelope() {
+            if rebuilt.apply_own_username_envelope(&envelope).is_err() {
+                return false;
+            }
+        }
+        rebuilt.all_lineage() == state.all_lineage()
+            && rebuilt.recovery_email_register() == state.recovery_email_register()
+            && rebuilt.own_username_register() == state.own_username_register()
+            && !state
+                .recovery_email_register()
+                .is_some_and(|r| r.value.validate().is_err())
+            && !state
+                .own_username_register()
+                .is_some_and(|r| r.value.validate().is_err())
     }
 
     /// Upper bound on decoded events — caps allocation so a short
@@ -270,8 +340,28 @@ mod fuzz_api_tests {
         state.set_lineage(3, b"succ-a", b"root").unwrap();
         state.set_lineage(4, b"succ-b", b"root").unwrap();
         let envelope = state.lineage_envelopes().remove(0);
+        state.set_recovery_email(5, Some("a@b.example")).unwrap();
+        let email = state.recovery_email_envelope().unwrap();
         let persisted = state.to_bytes();
-        for wire in [&envelope, &persisted] {
+        let mut removed = state.clone();
+        removed.set_recovery_email(6, None).unwrap();
+        let removal = removed.recovery_email_envelope().unwrap();
+        removed.set_own_username(7, Some("bob_42")).unwrap();
+        let named = removed.own_username_envelope().unwrap();
+        let persisted_removal = removed.to_bytes();
+        removed.set_own_username(8, None).unwrap();
+        let unnamed = removed.own_username_envelope().unwrap();
+        let persisted_unnamed = removed.to_bytes();
+        for wire in [
+            &envelope,
+            &persisted,
+            &email,
+            &removal,
+            &persisted_removal,
+            &named,
+            &unnamed,
+            &persisted_unnamed,
+        ] {
             assert!(decode_synced_and_check(wire));
             for i in 0..wire.len() {
                 assert!(decode_synced_and_check(&wire[..i]));

@@ -86,7 +86,7 @@
 //!   sender: nothing is delivered, and neither the address nor the code is
 //!   logged.
 //! - `LAKKO_AUTH_LIMIT_EMAIL_LETTER_HANDLE` / `_EMAIL_LETTER_ACCOUNT` /
-//!   `_EMAIL_VERIFY` / `_EMAIL_VAULT_OPEN` and `LAKKO_AUTH_IP_LIMIT_EMAIL` —
+//!   `_EMAIL_VERIFY` / `_EMAIL_VAULT_OPEN` / `_EMAIL_VAULT_STORE` and `LAKKO_AUTH_IP_LIMIT_EMAIL` —
 //!   the recovery email's limits, each `N/SECS` (defaults chosen, not
 //!   measured; see `src/limits.rs`).
 //! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — anonymous-token epoch window (default
@@ -123,6 +123,12 @@
 //! - `PUT  /auth/login-handle`       — bind the caller's login handle (ADR-0054 S5, bearer-auth;
 //!   `429 handle-bind-limited` per account, per address, and within the minimum interval
 //!   between handle changes)
+//!   Since ADR-0068 a bind that CHANGES the handle needs `fresh_grant` in the body (`403
+//!   fresh-auth-required`), and with `previous_handle` + `recovery_email {address,
+//!   vault_salt?, sealed_entropy?}` it moves the recovery email to the new handle instead of
+//!   dropping it (`403 address-mismatch`, `409 handle-mismatch`).
+//! - `POST /auth/login-handle/check` — `{state: "same" | "other" | "none"}` for the handle a
+//!   device holds against its account's bound one (ADR-0068, bearer-auth)
 //! - `DELETE /auth/login-handle`     — remove it (ADR-0054 S5, bearer-auth)
 //! - `POST /auth/session/refresh`    — renew the session pair with a refresh credential
 //!   (ADR-0065 section 3.2, anonymous, per-address limited)
@@ -154,6 +160,10 @@
 //!   session's account (bearer-auth)
 //! - `DELETE /recovery-email`        — remove the recovery email and the vault (bearer-auth +
 //!   `fresh_grant`)
+//! - `PUT  /recovery-email/vault`    — store an email vault where the account has none, for the
+//!   address it already confirmed (ADR-0067 amended 2026-10-13; bearer-auth, NO fresh-auth
+//!   grant; body `handle`, `address`, `vault_salt`, `sealed_entropy`; `403 address-mismatch`,
+//!   `409 no-recovery-email` / `phrase-saved` / `vault-exists`)
 //! - `DELETE /recovery-email/vault`  — the account becomes phrase-protected: delete the vault,
 //!   mark the account, write the notice (bearer-auth + `fresh_grant`)
 //! - `GET  /account/notices?after=`  — what happened to the account, for its own devices
@@ -720,6 +730,10 @@ fn build_app(state: AppState) -> Router {
                 .route_layer(ip(limits::Category::HandleBind))
                 .delete(login_handle::delete),
         )
+        // ADR-0068 section 2 — how the handle a device holds relates to the
+        // one its account is bound to; the session sync binds only on
+        // `none`. Counted per account inside.
+        .route("/auth/login-handle/check", post(login_handle::check_handle))
         // ADR-0065 — reset the account keys: one transaction that bumps the
         // key generation (signing every other device out), replaces the
         // recovery credential (the OPAQUE registration made from the new
@@ -765,7 +779,7 @@ fn build_app(state: AppState) -> Router {
         )
         .route(
             "/recovery-email/vault",
-            delete(recovery_email::remove_vault),
+            put(recovery_email::put_vault).delete(recovery_email::remove_vault),
         )
         .route("/account/notices", get(account_notices::list))
         .route("/auth/session/logout", post(session::logout))

@@ -160,11 +160,15 @@ public fun RecoveryEmailScreen(
     onDone: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Opens "Choose a username" for an account that has none; `null`
+     *  where the surface cannot navigate there (the line is then plain). */
+    onChooseUsername: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val authState by repository.state.collectAsStateWithLifecycle()
     val status by repository.recoveryEmail.collectAsStateWithLifecycle()
+    val heldAddress by repository.recoveryAddress.collectAsStateWithLifecycle()
     val username = (authState as? AuthState.Session)?.account?.username.orEmpty()
     val proof = rememberProofController(repository, ProofSurface.RecoveryEmail)
 
@@ -181,6 +185,17 @@ public fun RecoveryEmailScreen(
     var wrongTries by remember { mutableStateOf(0) }
 
     LaunchedEffect(Unit) { if (status == null) repository.refreshRecoveryEmail() }
+    // After a recall the server dropped the stored value: the form opens
+    // with the address this device holds. A replacement starts empty.
+    var prefilled by remember { mutableStateOf(false) }
+    LaunchedEffect(status, heldAddress) {
+        val known = status ?: return@LaunchedEffect
+        if (!prefilled && address.isEmpty() && started == null) {
+            val start = me.lakko.app.auth.enrolPrefill(known.enabled, heldAddress)
+            if (start.isNotEmpty()) address = start
+            prefilled = true
+        }
+    }
 
     fun apply(failure: EmailRecoverFailure) {
         when (failure) {
@@ -269,7 +284,13 @@ public fun RecoveryEmailScreen(
     ) {
         if (username.isBlank()) {
             // A guest account: the stored value is made from the username.
-            Lead(t("recovery_email.needs_username"))
+            if (onChooseUsername != null) {
+                Lead(t("recovery_email.needs_username"))
+                Spacer(Modifier.height(16.dp))
+                BusyButton(label = t("username.claim.title"), busy = false, onClick = onChooseUsername)
+            } else {
+                Lead(t("recovery_email.needs_username"))
+            }
             return@AuthScaffold
         }
         if (unavailable || status?.available == false) {
@@ -659,9 +680,14 @@ public fun AccountProtectionSection(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val status by repository.recoveryEmail.collectAsStateWithLifecycle()
+    // The address this device holds (the account's devices keep it).
+    val heldAddress by repository.recoveryAddress.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { repository.refreshRecoveryEmail() }
     val known = status ?: return
-    val protection = accountProtection(known)
+    val addressHeld = heldAddress != null
+    // A device that holds the address re-seals by itself: nothing is asked.
+    val resealing = me.lakko.app.auth.resealNeeded(known.enabled, known.vault, known.phraseSaved, addressHeld)
+    val protection = if (resealing) AccountProtection.Email else accountProtection(known)
     var bannerRevision by remember { mutableStateOf(0) }
     // An account with a passkey has a way back in: no banner. Unknown until
     // the passkey list answered, and until then the banner waits.
@@ -707,7 +733,7 @@ public fun AccountProtectionSection(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp).fillMaxWidth(),
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                val prompt = me.lakko.app.auth.protectPrompt(known)
+                val prompt = me.lakko.app.auth.protectPrompt(known, addressHeld)
                 Text(t(prompt.title), color = MaterialTheme.colorScheme.onErrorContainer)
                 prompt.body?.let {
                     Text(
@@ -719,7 +745,7 @@ public fun AccountProtectionSection(
                 Row {
                     TextButton(
                         onClick = {
-                            if (recoveryEmailRow(known) == RecoveryEmailRow.Absent) onOpenSavePhrase() else onOpenRecoveryEmail()
+                            if (recoveryEmailRow(known, addressHeld) == RecoveryEmailRow.Absent) onOpenSavePhrase() else onOpenRecoveryEmail()
                         },
                     ) { Text(t("protect.banner.action")) }
                     TextButton(
@@ -732,7 +758,7 @@ public fun AccountProtectionSection(
             }
         }
     }
-    val emailRow = recoveryEmailRow(known)
+    val emailRow = recoveryEmailRow(known, addressHeld)
     if (emailRow != RecoveryEmailRow.Absent) {
         val on = emailRow == RecoveryEmailRow.On
         ListItem(
@@ -745,7 +771,12 @@ public fun AccountProtectionSection(
                             RecoveryEmailRow.AddAgain -> "recovery_email.add_again.title"
                             else -> "recovery_email.status.off"
                         },
-                    ),
+                    ).let { line ->
+                        // A device that holds the address shows it, in plain
+                        // text under the row title; one that does not shows On.
+                        val shown = heldAddress
+                        if (emailRow == RecoveryEmailRow.On && shown != null) "\u2066$shown\u2069" else line
+                    },
                 )
             },
             leadingContent = {

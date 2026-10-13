@@ -2,6 +2,10 @@
   "format": 1,
   "language": "hi",
   "messages": {
+    "account.keys_changed.finishing": {
+      "text": "आपके अकाउंट को नई कुंजियाँ मिल गई हैं। हम बदलाव पूरा कर रहे हैं।",
+      "status": "machine"
+    },
     "app.not_found.body": {
       "text": "इस पते पर कुछ नहीं है।",
       "status": "machine"
@@ -6186,6 +6190,58 @@
       "text": "आप ग्रुप के मालिक होंगे। आप बाद में और लोगों को जोड़ सकते हैं।",
       "status": "machine"
     },
+    "notice.email_added": {
+      "text": "आपके अकाउंट में रिकवरी ईमेल जोड़ा गया।",
+      "status": "machine"
+    },
+    "notice.email_removed": {
+      "text": "आपका रिकवरी ईमेल हटा दिया गया।",
+      "status": "machine"
+    },
+    "notice.email_replaced": {
+      "text": "आपका रिकवरी ईमेल बदल दिया गया।",
+      "status": "machine"
+    },
+    "notice.opened_by_email.body": {
+      "text": "{date} को, किसी दूसरे डिवाइस पर।",
+      "status": "machine"
+    },
+    "notice.opened_by_email.title": {
+      "text": "आपका अकाउंट आपके रिकवरी ईमेल से खोला गया",
+      "status": "machine"
+    },
+    "notice.password_by_email.body": {
+      "text": "{date} को किसी ने आपके रिकवरी ईमेल से नया पासवर्ड चुना।",
+      "status": "machine"
+    },
+    "notice.password_by_email.title": {
+      "text": "आपका पासवर्ड बदल दिया गया",
+      "status": "machine"
+    },
+    "notice.phrase_saved": {
+      "text": "आपके अकाउंट के लिए रिकवरी फ़्रेज़ सेव की गई।",
+      "status": "machine"
+    },
+    "notice.secure.new_keys": {
+      "text": "इससे आपके अकाउंट को नई कुंजियाँ मिलती हैं, इसलिए जिसने भी इसे खोला था वह इसे खो देता है।",
+      "status": "machine"
+    },
+    "notice.secure.password_saved": {
+      "text": "आपका पासवर्ड बदल दिया गया।",
+      "status": "machine"
+    },
+    "notice.secure.title": {
+      "text": "अपना अकाउंट सुरक्षित करें",
+      "status": "machine"
+    },
+    "notice.was_me": {
+      "text": "मैंने किया था",
+      "status": "machine"
+    },
+    "notice.was_not_me": {
+      "text": "मैंने नहीं किया था",
+      "status": "machine"
+    },
     "notification.channel.messages": {
       "text": "मैसेज",
       "status": "machine"
@@ -6282,6 +6338,10 @@
       "text": "इसके बजाय पासवर्ड इस्तेमाल करें",
       "status": "machine"
     },
+    "proof.recovery_email.help": {
+      "text": "अपना रिकवरी ईमेल बदलने के लिए पासवर्ड डालें।",
+      "status": "machine"
+    },
     "proof.remove_device.cancelled": {
       "text": "रद्द किया गया। डिवाइस नहीं हटाया गया।",
       "status": "machine"
@@ -6326,6 +6386,134 @@
       "text": "आप क्या कर सकते हैं:",
       "status": "machine"
     },
+    "proof.save_phrase.help": {
+      "text": "रिकवरी फ़्रेज़ सेव करने के लिए पासवर्ड डालें।",
+      "status": "machine"
+    },
+    "proof.username.help": {
+      "text": "अपना यूज़रनेम बदलने के लिए पासवर्ड डालें।",
+      "status": "machine"
+    },
+    "protect.banner.action": {
+      "text": "सुरक्षित करें",
+      "status": "machine"
+    },
+    "protect.banner.none": {
+      "text": "इस अकाउंट में वापस आने का कोई तरीका नहीं है।",
+      "status": "machine"
+    },
+    "protect.body": {
+      "text": "अगर आप पासवर्ड भूल जाएँ या यह फ़ोन खो दें, तो इसी तरह अकाउंट में वापस आएँगे।",
+      "status": "machine"
+    },
+    "protect.continue": {
+      "text": "जारी रखें",
+      "status": "machine"
+    },
+    "protect.done": {
+      "text": "हो गया",
+      "status": "machine"
+    },
+    "protect.email.badge": {
+      "text": "सुझाया गया",
+      "status": "machine"
+    },
+    "protect.email.body": {
+      "text": "हम उस पर एक कोड भेजते हैं। जो भी उस मेलबॉक्स को पढ़ सकता है, वह आपके अकाउंट में आ सकता है।",
+      "status": "machine"
+    },
+    "protect.email.title": {
+      "text": "ईमेल जोड़ें",
+      "status": "machine"
+    },
+    "protect.passkey.body": {
+      "text": "अपने फ़िंगरप्रिंट, चेहरे या स्क्रीन लॉक से साइन इन करें। कोई पासवर्ड याद रखने की ज़रूरत नहीं।",
+      "status": "machine"
+    },
+    "protect.passkey.title": {
+      "text": "पासकी बनाएँ",
+      "status": "machine"
+    },
+    "protect.phrase.body": {
+      "text": "12 शब्द जो सिर्फ़ आपके पास रहते हैं। ज़्यादा मज़बूत, और ईमेल से कोई संबंध नहीं।",
+      "status": "machine"
+    },
+    "protect.phrase.save.body": {
+      "text": "12 शब्द जो सिर्फ़ आपके पास रहते हैं। इसके बाद ईमेल से मिला कोड आपका पासवर्ड बदल सकता है, लेकिन आपका अकाउंट नहीं खोल सकता।",
+      "status": "machine"
+    },
+    "protect.phrase.save.effect": {
+      "text": "इससे आपके अकाउंट को नई कुंजियाँ मिलती हैं। आपके संपर्क और चैट जैसे हैं वैसे ही रहते हैं। आपके दूसरे डिवाइस साइन इन रहते हैं।",
+      "status": "machine"
+    },
+    "protect.phrase.save.failed": {
+      "text": "हम इसे पूरा नहीं कर सके। कुछ नहीं बदला।",
+      "status": "machine"
+    },
+    "protect.phrase.save.finishing": {
+      "text": "आपके अकाउंट को नई कुंजियाँ मिल गई हैं। पूरा किया जा रहा है।",
+      "status": "machine"
+    },
+    "protect.phrase.save.progress": {
+      "text": "आपके अकाउंट की कुंजियाँ बदली जा रही हैं",
+      "status": "machine"
+    },
+    "protect.phrase.save.show": {
+      "text": "मेरे 12 शब्द दिखाएँ",
+      "status": "machine"
+    },
+    "protect.phrase.title": {
+      "text": "रिकवरी फ़्रेज़ सेव करें",
+      "status": "machine"
+    },
+    "protect.skip": {
+      "text": "अभी नहीं",
+      "status": "machine"
+    },
+    "protect.skip.confirm.body": {
+      "text": "अगर आप पासवर्ड भूल जाएँ या यह फ़ोन खो दें, तो आप इस अकाउंट में वापस नहीं आ पाएँगे।",
+      "status": "machine"
+    },
+    "protect.skip.confirm.continue": {
+      "text": "बिना सुरक्षा के जारी रखें",
+      "status": "machine"
+    },
+    "protect.skip.confirm.title": {
+      "text": "बिना सुरक्षा के जारी रखें?",
+      "status": "machine"
+    },
+    "protect.status.email": {
+      "text": "आपके ईमेल से सुरक्षित",
+      "status": "machine"
+    },
+    "protect.status.none": {
+      "text": "सुरक्षित नहीं",
+      "status": "machine"
+    },
+    "protect.status.phrase": {
+      "text": "आपकी रिकवरी फ़्रेज़ से सुरक्षित",
+      "status": "machine"
+    },
+    "protect.title": {
+      "text": "अपने अकाउंट की सुरक्षा करें",
+      "status": "machine"
+    },
+    "recall.phrase.changed": {
+      "text": "इस अकाउंट की कुंजियाँ {date} को बदली गईं। क्या यह आपने किया था?",
+      "status": "machine"
+    },
+    "recall.phrase.take_back": {
+      "text": "अकाउंट वापस लें",
+      "status": "machine"
+    },
+    "recall.phrase.use": {
+      "text": "इसके बजाय मेरी रिकवरी फ़्रेज़ इस्तेमाल करें",
+      "status": "machine"
+    },
+    "recall.phrase.wrong": {
+      "text": "ये शब्द इस अकाउंट की रिकवरी फ़्रेज़ नहीं हैं।",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "ऑथेंटिकेटर कोड आपको लॉग इन कराता है। जिस डिवाइस पर यह अकाउंट कभी नहीं रहा, उस पर इसके बाद भी आपको दूसरा डिवाइस, पासकी या अपनी रिकवरी फ़्रेज़ चाहिए।",
       "status": "machine"
@@ -6348,6 +6536,50 @@
     },
     "recovery.device.restoring": {
       "text": "{username} रिस्टोर हो रहा है",
+      "status": "machine"
+    },
+    "recovery.email.check.body": {
+      "text": "अगर वह यूज़रनेम और पता एक-दूसरे से जुड़े हैं, तो कोड भेजा जा रहा है। यह 10 मिनट तक काम करता है।",
+      "status": "machine"
+    },
+    "recovery.email.check.title": {
+      "text": "अपना ईमेल देखें",
+      "status": "machine"
+    },
+    "recovery.email.failed": {
+      "text": "हम आपका अकाउंट वापस नहीं ला सके। फिर से कोशिश करें, या कोई दूसरा तरीका चुनें।",
+      "status": "machine"
+    },
+    "recovery.email.restoring": {
+      "text": "आपका अकाउंट वापस लाया जा रहा है",
+      "status": "machine"
+    },
+    "recovery.email.row.body": {
+      "text": "आपके रिकवरी ईमेल पर भेजा गया कोड।",
+      "status": "machine"
+    },
+    "recovery.email.row.title": {
+      "text": "ईमेल कोड",
+      "status": "machine"
+    },
+    "recovery.email.save": {
+      "text": "सेव करें और साइन इन करें",
+      "status": "machine"
+    },
+    "recovery.email.start.body": {
+      "text": "अपना यूज़रनेम और रिकवरी ईमेल टाइप करें।",
+      "status": "machine"
+    },
+    "recovery.email.totp.body": {
+      "text": "अपने ऑथेंटिकेटर ऐप का 6 अंकों का कोड टाइप करें।",
+      "status": "machine"
+    },
+    "recovery.email.totp.lost": {
+      "text": "ऑथेंटिकेटर खो गया? अकाउंट में वापस आने का कोई दूसरा तरीका इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "recovery.email.totp.title": {
+      "text": "ऑथेंटिकेटर कोड",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6560,6 +6792,118 @@
     },
     "recovery.words.tries_left": {
       "text": "15 मिनट के विराम से पहले {count, plural, one {# कोशिश बाकी} other {# कोशिशें बाकी}}।",
+      "status": "machine"
+    },
+    "recovery_email.add_again.body": {
+      "text": "आपके अकाउंट की कुंजियाँ बदल गई हैं। अपना पता फिर से टाइप करें ताकि ईमेल से मिला कोड आपका अकाउंट वापस ला सके।",
+      "status": "machine"
+    },
+    "recovery_email.add_again.title": {
+      "text": "अपना ईमेल फिर से जोड़ें",
+      "status": "machine"
+    },
+    "recovery_email.body": {
+      "text": "अगर आप पासवर्ड भूल जाएँ, तो हम इस पते पर एक कोड भेजते हैं ताकि आप अकाउंट में वापस आ सकें।",
+      "status": "machine"
+    },
+    "recovery_email.code.expired": {
+      "text": "इस कोड की समय-सीमा खत्म हो गई।",
+      "status": "machine"
+    },
+    "recovery_email.code.other_address": {
+      "text": "दूसरा पता इस्तेमाल करें",
+      "status": "machine"
+    },
+    "recovery_email.code.resend": {
+      "text": "फिर से भेजें",
+      "status": "machine"
+    },
+    "recovery_email.code.resend_in": {
+      "text": "{time} बाद फिर से भेजें",
+      "status": "machine"
+    },
+    "recovery_email.code.sent_to": {
+      "text": "हमने {address} पर 6 अंकों का कोड भेजा है।",
+      "status": "machine"
+    },
+    "recovery_email.code.title": {
+      "text": "कोड डालें",
+      "status": "machine"
+    },
+    "recovery_email.code.used_up": {
+      "text": "बहुत ज़्यादा कोशिशें हो गईं। नया कोड भेजें।",
+      "status": "machine"
+    },
+    "recovery_email.code.wrong": {
+      "text": "यह कोड सही नहीं है।",
+      "status": "machine"
+    },
+    "recovery_email.field": {
+      "text": "ईमेल",
+      "status": "machine"
+    },
+    "recovery_email.invalid": {
+      "text": "पूरा ईमेल पता टाइप करें।",
+      "status": "machine"
+    },
+    "recovery_email.mailbox_warning": {
+      "text": "जो भी इस मेलबॉक्स को पढ़ सकता है, वह आपके अकाउंट में आ सकता है। इसे बदलने के लिए रिकवरी फ़्रेज़ सेव करें।",
+      "status": "machine"
+    },
+    "recovery_email.needs_username": {
+      "text": "पहले यूज़रनेम चुनें।",
+      "status": "machine"
+    },
+    "recovery_email.not_kept": {
+      "text": "Lakko आपका पता नहीं रखता। जब आपको कोड चाहिए होगा, तब आप इसे अपने यूज़रनेम के साथ फिर से टाइप करेंगे।",
+      "status": "machine"
+    },
+    "recovery_email.remove": {
+      "text": "हटाएँ",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.body": {
+      "text": "आप ईमेल से अकाउंट में वापस नहीं आ पाएँगे।",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.title": {
+      "text": "रिकवरी ईमेल हटाएँ?",
+      "status": "machine"
+    },
+    "recovery_email.replace": {
+      "text": "बदलें",
+      "status": "machine"
+    },
+    "recovery_email.send": {
+      "text": "कोड भेजें",
+      "status": "machine"
+    },
+    "recovery_email.send_failed": {
+      "text": "हम ईमेल नहीं भेज सके। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery_email.status.off": {
+      "text": "बंद",
+      "status": "machine"
+    },
+    "recovery_email.status.on": {
+      "text": "चालू",
+      "status": "machine"
+    },
+    "recovery_email.title": {
+      "text": "रिकवरी ईमेल",
+      "status": "machine"
+    },
+    "recovery_email.totp_warning": {
+      "text": "आपको अपने ऑथेंटिकेटर ऐप का कोड भी चाहिए होगा। अगर वह उसी फ़ोन पर है जो खो जाता है, तो ईमेल काफ़ी नहीं होगा।",
+      "status": "machine"
+    },
+    "recovery_email.unavailable": {
+      "text": "ईमेल कोड अभी उपलब्ध नहीं हैं।",
+      "status": "machine"
+    },
+    "recovery_email.username_change": {
+      "text": "यूज़रनेम बदलने से आपका रिकवरी ईमेल बंद हो जाता है। बाद में आप इसे फिर से जोड़ सकते हैं।",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -7708,6 +8052,50 @@
     },
     "username.a11y_hint": {
       "text": "यूज़रनेम: {message}",
+      "status": "machine"
+    },
+    "username.change.body": {
+      "text": "लोग अब आपको {old} से नहीं ढूँढ पाएँगे। 30 दिनों तक कोई और इसे नहीं ले सकता।",
+      "status": "machine"
+    },
+    "username.change.next_change": {
+      "text": "इसके बाद आप इसे 30 दिन बाद फिर से बदल सकते हैं।",
+      "status": "machine"
+    },
+    "username.change.other_devices": {
+      "text": "आपके दूसरे डिवाइस अगली बार ऑनलाइन होने पर नया यूज़रनेम पा लेते हैं।",
+      "status": "machine"
+    },
+    "username.change.save": {
+      "text": "बदलें",
+      "status": "machine"
+    },
+    "username.change.title": {
+      "text": "यूज़रनेम बदलें",
+      "status": "machine"
+    },
+    "username.change.too_soon": {
+      "text": "आप {date} को अपना यूज़रनेम फिर से बदल सकते हैं।",
+      "status": "machine"
+    },
+    "username.claim.body": {
+      "text": "यूज़रनेम और पासवर्ड के साथ आप किसी दूसरे डिवाइस पर साइन इन कर सकते हैं, रिकवरी ईमेल जोड़ सकते हैं, और लोग आपको ढूँढ सकते हैं।",
+      "status": "machine"
+    },
+    "username.claim.done": {
+      "text": "आपका यूज़रनेम {username} है।",
+      "status": "machine"
+    },
+    "username.claim.password_help": {
+      "text": "साइन इन के लिए पासवर्ड चुनें। अब तक आपके पास कोई पासवर्ड नहीं था।",
+      "status": "machine"
+    },
+    "username.claim.save": {
+      "text": "सेव करें",
+      "status": "machine"
+    },
+    "username.claim.title": {
+      "text": "यूज़रनेम चुनें",
       "status": "machine"
     },
     "username.error.bind_limited_later": {

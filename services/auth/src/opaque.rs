@@ -2587,16 +2587,7 @@ mod signup_login_limits_e2e_tests {
         let (_, hb) = crate::login_handle::random_handle();
         let put = |token: String, handle: String| {
             let state = state.clone();
-            async move {
-                send_json(
-                    &state,
-                    Method::PUT,
-                    "/auth/login-handle",
-                    Some(&token),
-                    Some(&serde_json::json!({ "handle": handle })),
-                )
-                .await
-            }
+            async move { put_handle(&state, &token, &handle).await }
         };
 
         // Bind, then sign in by name (password and recovery), learning the
@@ -2962,13 +2953,30 @@ mod signup_login_limits_e2e_tests {
         (id, token)
     }
 
+    /// A fresh-auth grant for the account `token` names, as a password
+    /// sign-in made just now would have returned.
+    fn grant_for(state: &crate::AppState, token: &str) -> String {
+        let now = crate::session::now_ms();
+        let verified = state.session_token_secret.verify(token, now).unwrap();
+        state
+            .session_token_secret
+            .issue_fresh_grant(&verified.account_id, verified.key_generation, now + 60_000)
+            .unwrap()
+    }
+
+    /// `PUT /auth/login-handle` with a live fresh-auth grant, which a bind
+    /// that changes the handle needs since ADR-0068 (a first bind ignores
+    /// it). What these tests are about is everything after that gate.
     async fn put_handle(state: &crate::AppState, token: &str, handle: &str) -> (StatusCode, Bytes) {
         send_json(
             state,
             Method::PUT,
             "/auth/login-handle",
             Some(token),
-            Some(&serde_json::json!({ "handle": handle })),
+            Some(&serde_json::json!({
+                "handle": handle,
+                "fresh_grant": grant_for(state, token),
+            })),
         )
         .await
     }

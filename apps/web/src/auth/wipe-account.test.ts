@@ -42,6 +42,8 @@ import {
   setPhraseProtected,
 } from "./protect/account-protection";
 import { markOwnAction, startNoticeCursor } from "./protect/notices";
+import { markFirstPasswordOwed } from "./username-claim";
+import { writeRenamedAt, writeRenameOwed } from "./username-change";
 import { markThreeWordsSuspended, saveBudget } from "./recover/three-words";
 import { writeKeyResetOwed } from "./key-reset-owed";
 import { writeGenesisRecorded, writeKnownDeviceId } from "./session-device";
@@ -225,6 +227,11 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
   put(`lakko:reset-continuity:${acct}`, JSON.stringify({ keyGeneration: 2, signedAtMs: 1 }));
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
+  put(`lakko.recovery-email.unsent.v1.${acct}`, "1");
+  markFirstPasswordOwed(local, acct);
+  put(`lakko.own-username.unsent.v1.${acct}`, "1");
+  writeRenamedAt(local, acct, 5);
+  writeRenameOwed(local, acct, { v: 1, oldUsername: "alice", newUsername: "alicia", phase: "binding" });
   put(
     `lakko.contacts.verified-bindings.v1.${acct}`,
     JSON.stringify({ QUFB: { keyB64: "a2V5", keyGeneration: 1, verifiedAtMs: 1 } }),
@@ -559,6 +566,11 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.leave-requested.v1": "account",
   "lakko:reset-continuity:": "account",
   "lakko.lineage.unsent.v1.": "account",
+  "lakko.recovery-email.unsent.v1.": "account",
+  "lakko:first-password-owed:": "account",
+  "lakko.own-username.unsent.v1.": "account",
+  "lakko:username-changed-at:": "account",
+  "lakko:username-change-owed:": "account",
   "lakko.contacts.verified-bindings.v1.": "account",
   "lakko.reset-continuity.v1.": "account",
   "lakko.channels.orphaned-by-reset.v1": "account",

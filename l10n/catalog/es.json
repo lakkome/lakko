@@ -2,6 +2,10 @@
   "format": 1,
   "language": "es",
   "messages": {
+    "account.keys_changed.finishing": {
+      "text": "Tu cuenta tiene claves nuevas. Estamos terminando el cambio.",
+      "status": "machine"
+    },
     "app.not_found.body": {
       "text": "No hay nada en esta dirección.",
       "status": "machine"
@@ -6186,6 +6190,58 @@
       "text": "Serás el propietario del grupo. Puedes añadir a más personas después.",
       "status": "machine"
     },
+    "notice.email_added": {
+      "text": "Se añadió un correo de recuperación a tu cuenta.",
+      "status": "machine"
+    },
+    "notice.email_removed": {
+      "text": "Se quitó tu correo de recuperación.",
+      "status": "machine"
+    },
+    "notice.email_replaced": {
+      "text": "Se reemplazó tu correo de recuperación.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.body": {
+      "text": "{date}, en otro dispositivo.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.title": {
+      "text": "Tu cuenta se abrió con tu correo de recuperación",
+      "status": "machine"
+    },
+    "notice.password_by_email.body": {
+      "text": "{date}: alguien usó tu correo de recuperación para elegir una contraseña nueva.",
+      "status": "machine"
+    },
+    "notice.password_by_email.title": {
+      "text": "Se cambió tu contraseña",
+      "status": "machine"
+    },
+    "notice.phrase_saved": {
+      "text": "Se guardó una frase de recuperación para tu cuenta.",
+      "status": "machine"
+    },
+    "notice.secure.new_keys": {
+      "text": "Esto da claves nuevas a tu cuenta, así que quien la abrió la pierde.",
+      "status": "machine"
+    },
+    "notice.secure.password_saved": {
+      "text": "Se cambió tu contraseña.",
+      "status": "machine"
+    },
+    "notice.secure.title": {
+      "text": "Asegura tu cuenta",
+      "status": "machine"
+    },
+    "notice.was_me": {
+      "text": "Fui yo",
+      "status": "machine"
+    },
+    "notice.was_not_me": {
+      "text": "No fui yo",
+      "status": "machine"
+    },
     "notification.channel.messages": {
       "text": "Mensajes",
       "status": "machine"
@@ -6282,6 +6338,10 @@
       "text": "Usar tu contraseña en su lugar",
       "status": "machine"
     },
+    "proof.recovery_email.help": {
+      "text": "Escribe tu contraseña para cambiar tu correo de recuperación.",
+      "status": "machine"
+    },
     "proof.remove_device.cancelled": {
       "text": "Cancelado. El dispositivo no se quitó.",
       "status": "machine"
@@ -6326,6 +6386,134 @@
       "text": "Qué puedes hacer:",
       "status": "machine"
     },
+    "proof.save_phrase.help": {
+      "text": "Escribe tu contraseña para guardar una frase de recuperación.",
+      "status": "machine"
+    },
+    "proof.username.help": {
+      "text": "Escribe tu contraseña para cambiar tu nombre de usuario.",
+      "status": "machine"
+    },
+    "protect.banner.action": {
+      "text": "Proteger",
+      "status": "machine"
+    },
+    "protect.banner.none": {
+      "text": "Esta cuenta no tiene forma de volver a entrar.",
+      "status": "machine"
+    },
+    "protect.body": {
+      "text": "Si olvidas tu contraseña o pierdes este teléfono, así vuelves a entrar.",
+      "status": "machine"
+    },
+    "protect.continue": {
+      "text": "Continuar",
+      "status": "machine"
+    },
+    "protect.done": {
+      "text": "Hecho",
+      "status": "machine"
+    },
+    "protect.email.badge": {
+      "text": "Recomendado",
+      "status": "machine"
+    },
+    "protect.email.body": {
+      "text": "Enviamos un código a esa dirección. Cualquiera que pueda leer ese buzón puede entrar en tu cuenta.",
+      "status": "machine"
+    },
+    "protect.email.title": {
+      "text": "Añadir un correo",
+      "status": "machine"
+    },
+    "protect.passkey.body": {
+      "text": "Inicia sesión con tu huella, tu rostro o el bloqueo de pantalla. Sin contraseña que recordar.",
+      "status": "machine"
+    },
+    "protect.passkey.title": {
+      "text": "Crear una llave de acceso",
+      "status": "machine"
+    },
+    "protect.phrase.body": {
+      "text": "12 palabras que solo tú guardas. Más fuerte, y sin relación con el correo.",
+      "status": "machine"
+    },
+    "protect.phrase.save.body": {
+      "text": "12 palabras que solo tú guardas. Después de esto, un código por correo puede cambiar tu contraseña, pero no puede abrir tu cuenta.",
+      "status": "machine"
+    },
+    "protect.phrase.save.effect": {
+      "text": "Esto da claves nuevas a tu cuenta. Tus contactos y chats quedan como están. Tus otros dispositivos siguen con la sesión iniciada.",
+      "status": "machine"
+    },
+    "protect.phrase.save.failed": {
+      "text": "No pudimos terminar. No cambió nada.",
+      "status": "machine"
+    },
+    "protect.phrase.save.finishing": {
+      "text": "Tu cuenta tiene claves nuevas. Terminando.",
+      "status": "machine"
+    },
+    "protect.phrase.save.progress": {
+      "text": "Cambiando las claves de tu cuenta",
+      "status": "machine"
+    },
+    "protect.phrase.save.show": {
+      "text": "Mostrar mis 12 palabras",
+      "status": "machine"
+    },
+    "protect.phrase.title": {
+      "text": "Guardar una frase de recuperación",
+      "status": "machine"
+    },
+    "protect.skip": {
+      "text": "Ahora no",
+      "status": "machine"
+    },
+    "protect.skip.confirm.body": {
+      "text": "Si olvidas tu contraseña o pierdes este teléfono, no podrás volver a entrar en esta cuenta.",
+      "status": "machine"
+    },
+    "protect.skip.confirm.continue": {
+      "text": "Continuar sin protección",
+      "status": "machine"
+    },
+    "protect.skip.confirm.title": {
+      "text": "¿Continuar sin protección?",
+      "status": "machine"
+    },
+    "protect.status.email": {
+      "text": "Protegida por tu correo",
+      "status": "machine"
+    },
+    "protect.status.none": {
+      "text": "Sin protección",
+      "status": "machine"
+    },
+    "protect.status.phrase": {
+      "text": "Protegida por tu frase de recuperación",
+      "status": "machine"
+    },
+    "protect.title": {
+      "text": "Protege tu cuenta",
+      "status": "machine"
+    },
+    "recall.phrase.changed": {
+      "text": "Las claves de esta cuenta se cambiaron el {date}. ¿Fuiste tú?",
+      "status": "machine"
+    },
+    "recall.phrase.take_back": {
+      "text": "Recuperar la cuenta",
+      "status": "machine"
+    },
+    "recall.phrase.use": {
+      "text": "Usar mi frase de recuperación",
+      "status": "machine"
+    },
+    "recall.phrase.wrong": {
+      "text": "Esas palabras no son la frase de recuperación de esta cuenta.",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "Un código de la app de autenticación inicia tu sesión. En un dispositivo que nunca ha tenido esta cuenta, después todavía necesitas otro dispositivo, una llave de acceso o tu frase de recuperación.",
       "status": "machine"
@@ -6348,6 +6536,50 @@
     },
     "recovery.device.restoring": {
       "text": "Restaurando {username}",
+      "status": "machine"
+    },
+    "recovery.email.check.body": {
+      "text": "Si ese nombre de usuario y esa dirección van juntos, hay un código en camino. Funciona durante 10 minutos.",
+      "status": "machine"
+    },
+    "recovery.email.check.title": {
+      "text": "Revisa tu correo",
+      "status": "machine"
+    },
+    "recovery.email.failed": {
+      "text": "No pudimos traer de vuelta tu cuenta. Inténtalo de nuevo o elige otra forma.",
+      "status": "machine"
+    },
+    "recovery.email.restoring": {
+      "text": "Trayendo de vuelta tu cuenta",
+      "status": "machine"
+    },
+    "recovery.email.row.body": {
+      "text": "Un código enviado a tu correo de recuperación.",
+      "status": "machine"
+    },
+    "recovery.email.row.title": {
+      "text": "Código por correo",
+      "status": "machine"
+    },
+    "recovery.email.save": {
+      "text": "Guardar e iniciar sesión",
+      "status": "machine"
+    },
+    "recovery.email.start.body": {
+      "text": "Escribe tu nombre de usuario y tu correo de recuperación.",
+      "status": "machine"
+    },
+    "recovery.email.totp.body": {
+      "text": "Escribe el código de 6 dígitos de tu app de autenticación.",
+      "status": "machine"
+    },
+    "recovery.email.totp.lost": {
+      "text": "¿Perdiste tu app de autenticación? Usa otra forma de volver a entrar.",
+      "status": "machine"
+    },
+    "recovery.email.totp.title": {
+      "text": "Código de la app de autenticación",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6560,6 +6792,118 @@
     },
     "recovery.words.tries_left": {
       "text": "{count, plural, one {Queda # intento} other {Quedan # intentos}} antes de una pausa de 15 minutos.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.body": {
+      "text": "Las claves de tu cuenta cambiaron. Escribe tu dirección otra vez para que un código por correo pueda traer de vuelta tu cuenta.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.title": {
+      "text": "Añade tu correo otra vez",
+      "status": "machine"
+    },
+    "recovery_email.body": {
+      "text": "Si olvidas tu contraseña, enviamos un código a esta dirección para que puedas volver a entrar.",
+      "status": "machine"
+    },
+    "recovery_email.code.expired": {
+      "text": "Ese código caducó.",
+      "status": "machine"
+    },
+    "recovery_email.code.other_address": {
+      "text": "Usar otra dirección",
+      "status": "machine"
+    },
+    "recovery_email.code.resend": {
+      "text": "Enviar de nuevo",
+      "status": "machine"
+    },
+    "recovery_email.code.resend_in": {
+      "text": "Enviar de nuevo en {time}",
+      "status": "machine"
+    },
+    "recovery_email.code.sent_to": {
+      "text": "Enviamos un código de 6 dígitos a {address}.",
+      "status": "machine"
+    },
+    "recovery_email.code.title": {
+      "text": "Escribe el código",
+      "status": "machine"
+    },
+    "recovery_email.code.used_up": {
+      "text": "Demasiados intentos. Envía un código nuevo.",
+      "status": "machine"
+    },
+    "recovery_email.code.wrong": {
+      "text": "Ese código no es correcto.",
+      "status": "machine"
+    },
+    "recovery_email.field": {
+      "text": "Correo",
+      "status": "machine"
+    },
+    "recovery_email.invalid": {
+      "text": "Escribe una dirección de correo completa.",
+      "status": "machine"
+    },
+    "recovery_email.mailbox_warning": {
+      "text": "Cualquiera que pueda leer este buzón puede entrar en tu cuenta. Guarda una frase de recuperación para cambiarlo.",
+      "status": "machine"
+    },
+    "recovery_email.needs_username": {
+      "text": "Elige primero un nombre de usuario.",
+      "status": "machine"
+    },
+    "recovery_email.not_kept": {
+      "text": "Lakko no guarda tu dirección. La escribirás de nuevo, junto con tu nombre de usuario, cuando necesites un código.",
+      "status": "machine"
+    },
+    "recovery_email.remove": {
+      "text": "Quitar",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.body": {
+      "text": "No podrás volver a entrar por correo.",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.title": {
+      "text": "¿Quitar el correo de recuperación?",
+      "status": "machine"
+    },
+    "recovery_email.replace": {
+      "text": "Reemplazar",
+      "status": "machine"
+    },
+    "recovery_email.send": {
+      "text": "Enviar código",
+      "status": "machine"
+    },
+    "recovery_email.send_failed": {
+      "text": "No pudimos enviar el correo. Inténtalo más tarde.",
+      "status": "machine"
+    },
+    "recovery_email.status.off": {
+      "text": "Desactivado",
+      "status": "machine"
+    },
+    "recovery_email.status.on": {
+      "text": "Activado",
+      "status": "machine"
+    },
+    "recovery_email.title": {
+      "text": "Correo de recuperación",
+      "status": "machine"
+    },
+    "recovery_email.totp_warning": {
+      "text": "También necesitarás un código de tu app de autenticación. Si está en el teléfono que pierdes, el correo no bastará.",
+      "status": "machine"
+    },
+    "recovery_email.unavailable": {
+      "text": "Los códigos por correo no están disponibles ahora mismo.",
+      "status": "machine"
+    },
+    "recovery_email.username_change": {
+      "text": "Cambiar tu nombre de usuario desactiva tu correo de recuperación. Puedes añadirlo de nuevo después.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -7708,6 +8052,50 @@
     },
     "username.a11y_hint": {
       "text": "Nombre de usuario: {message}",
+      "status": "machine"
+    },
+    "username.change.body": {
+      "text": "La gente ya no te encontrará por {old}. Nadie más puede quedárselo durante 30 días.",
+      "status": "machine"
+    },
+    "username.change.next_change": {
+      "text": "Después de esto podrás cambiarlo otra vez en 30 días.",
+      "status": "machine"
+    },
+    "username.change.other_devices": {
+      "text": "Tus otros dispositivos reciben el nuevo nombre de usuario la próxima vez que estén en línea.",
+      "status": "machine"
+    },
+    "username.change.save": {
+      "text": "Cambiar",
+      "status": "machine"
+    },
+    "username.change.title": {
+      "text": "Cambiar nombre de usuario",
+      "status": "machine"
+    },
+    "username.change.too_soon": {
+      "text": "Podrás cambiar tu nombre de usuario otra vez el {date}.",
+      "status": "machine"
+    },
+    "username.claim.body": {
+      "text": "Con un nombre de usuario y una contraseña puedes iniciar sesión en otro dispositivo, añadir un correo de recuperación, y la gente puede encontrarte.",
+      "status": "machine"
+    },
+    "username.claim.done": {
+      "text": "Tu nombre de usuario es {username}.",
+      "status": "machine"
+    },
+    "username.claim.password_help": {
+      "text": "Elige una contraseña para iniciar sesión. Hasta ahora no tenías ninguna.",
+      "status": "machine"
+    },
+    "username.claim.save": {
+      "text": "Guardar",
+      "status": "machine"
+    },
+    "username.claim.title": {
+      "text": "Elige un nombre de usuario",
       "status": "machine"
     },
     "username.error.bind_limited_later": {

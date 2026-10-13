@@ -250,4 +250,118 @@ class RecoveryEmailClientTest {
         assertFalse(status.enabled || status.vault || status.phraseSaved || status.totp)
         assertTrue(Json.parseToJsonElement("""{"a":true}""").jsonObject["a"]!!.jsonPrimitive.boolean)
     }
+
+    @Test
+    fun `the re-seal is a PUT with the handle, the address, a salt and the vault, and no grant`() = runTest {
+        val seen = mutableListOf<Captured>()
+        val salt = ByteArray(EMAIL_VAULT_SALT_LEN) { (0xF9 + it % 7).toByte() }
+        val sealed = ByteArray(EMAIL_VAULT_SEALED_LEN) { (0xFA + it % 6).toByte() }
+        client(seen, HttpStatusCode.OK to """{"vault":true}""")
+            .use { it.recoveryEmailVaultPut("tok", handle, "name@example.com", salt, sealed) }
+        val request = seen.single()
+        assertEquals(HttpMethod.Put, request.method)
+        assertTrue(request.url.endsWith("/recovery-email/vault"))
+        assertEquals("Bearer tok", request.authorization)
+        val body = request.body!!
+        assertEquals(base64UrlEncodeNoPad(handle), body["handle"]!!.jsonPrimitive.content)
+        assertEquals("name@example.com", body["address"]!!.jsonPrimitive.content)
+        assertEquals(base64Encode(salt), body["vault_salt"]!!.jsonPrimitive.content)
+        assertEquals(base64Encode(sealed), body["sealed_entropy"]!!.jsonPrimitive.content)
+        assertFalse(body.containsKey("fresh_grant"))
+    }
+
+    @Test
+    fun `the re-seal's refusals keep their codes`() = runTest {
+        for ((status, code, outcome) in listOf(
+            Triple(HttpStatusCode.Conflict, "vault-exists", ResealOutcome.Settled),
+            Triple(HttpStatusCode.Forbidden, "address-mismatch", ResealOutcome.AddressStale),
+            Triple(HttpStatusCode.TooManyRequests, "too-many-attempts", ResealOutcome.RetryLater),
+        )) {
+            try {
+                client(mutableListOf(), status to """{"error":"$code"}""").use {
+                    it.recoveryEmailVaultPut("tok", handle, "a@b", ByteArray(EMAIL_VAULT_SALT_LEN), ByteArray(EMAIL_VAULT_SEALED_LEN))
+                }
+                fail("$code must throw")
+            } catch (err: AuthHttpError) {
+                assertEquals(outcome, resealOutcomeOf(err))
+            }
+        }
+    }
+
+    // ---- ADR-0068: the login handle on a rename -----------------------------
+
+    @Test
+    fun `a first bind sends the handle alone`() = runTest {
+        val seen = mutableListOf<Captured>()
+        client(seen, HttpStatusCode.OK to """{"bound":true}""").use { it.bindLoginHandle("tok", handle) }
+        val body = seen.single().body!!
+        assertEquals(setOf("handle"), body.keys)
+    }
+
+    @Test
+    fun `a rename's bind carries the grant, the previous handle and the recovery email`() = runTest {
+        val seen = mutableListOf<Captured>()
+        val previous = ByteArray(32) { 9 }
+        client(seen, HttpStatusCode.OK to """{"bound":true}""").use {
+            it.bindLoginHandle(
+                sessionToken = "tok",
+                handle = handle,
+                freshGrant = "grant",
+                previousHandle = previous,
+                recoveryEmail = LoginHandleRecoveryEmail(address = "name@example.com", vault_salt = "c2FsdA==", sealed_entropy = "dmF1bHQ="),
+            )
+        }
+        val body = seen.single().body!!
+        assertEquals(HttpMethod.Put, seen.single().method)
+        assertEquals("grant", body["fresh_grant"]!!.jsonPrimitive.content)
+        assertEquals(base64UrlEncodeNoPad(previous), body["previous_handle"]!!.jsonPrimitive.content)
+        val email = body["recovery_email"]!!.jsonObject
+        assertEquals("name@example.com", email["address"]!!.jsonPrimitive.content)
+        assertEquals("c2FsdA==", email["vault_salt"]!!.jsonPrimitive.content)
+        assertEquals("dmF1bHQ=", email["sealed_entropy"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `with a saved phrase the recovery email travels without a vault`() = runTest {
+        val seen = mutableListOf<Captured>()
+        client(seen, HttpStatusCode.OK to """{"bound":true}""").use {
+            it.bindLoginHandle("tok", handle, "grant", ByteArray(32) { 9 }, LoginHandleRecoveryEmail(address = "a@b"))
+        }
+        assertEquals(setOf("address"), seen.single().body!!["recovery_email"]!!.jsonObject.keys)
+    }
+
+    @Test
+    fun `handle-taken is taken, handle-mismatch is its own refusal`() = runTest {
+        val taken = client(mutableListOf(), HttpStatusCode.Conflict to """{"error":"handle-taken"}""")
+            .use { it.bindLoginHandle("tok", handle) }
+        assertEquals(LoginHandleBinding.Taken, taken)
+        try {
+            client(mutableListOf(), HttpStatusCode.Conflict to """{"error":"handle-mismatch"}""")
+                .use { it.bindLoginHandle("tok", handle) }
+            fail("handle-mismatch must throw")
+        } catch (err: AuthHttpError) {
+            assertEquals("handle-mismatch", err.code)
+        }
+    }
+
+    @Test
+    fun `the check names the account's handle state, and an unknown answer binds nothing`() = runTest {
+        val seen = mutableListOf<Captured>()
+        client(
+            seen,
+            HttpStatusCode.OK to """{"state":"same"}""",
+            HttpStatusCode.OK to """{"state":"other"}""",
+            HttpStatusCode.OK to """{"state":"none"}""",
+            HttpStatusCode.OK to """{"state":"surprise"}""",
+        ).use { c ->
+            assertEquals(LoginHandleState.Same, c.checkLoginHandle("tok", handle))
+            assertEquals(LoginHandleState.Other, c.checkLoginHandle("tok", handle))
+            assertEquals(LoginHandleState.None, c.checkLoginHandle("tok", handle))
+            assertEquals(HandleSyncAction.WaitForRegister, handleSyncAction(c.checkLoginHandle("tok", handle)))
+        }
+        assertTrue(seen[0].url.endsWith("/auth/login-handle/check"))
+        assertEquals(HttpMethod.Post, seen[0].method)
+        assertEquals("Bearer tok", seen[0].authorization)
+        assertEquals(base64UrlEncodeNoPad(handle), seen[0].body!!["handle"]!!.jsonPrimitive.content)
+    }
 }

@@ -576,7 +576,59 @@ public class DiscoveryClient(
                     body = "server reported ok=false",
                 )
             }
-            RegisterResult(normalisedUsername = normalisedUsername)
+            RegisterResult(
+                normalisedUsername = normalisedUsername,
+                // ADR-0060 section 5 - the certificate the register call
+                // returned is kept (a malformed one is as good as none).
+                usernameCertificate = resp.username_certificate_b64?.let {
+                    try {
+                        base64Decode(it)
+                    } catch (_: IllegalArgumentException) {
+                        null
+                    }
+                },
+            )
+        }
+    }
+
+    /**
+     * ADR-0068 - replace the account's current username with [username]:
+     * OPRF, then `POST /discovery/username/replace`. The old name is retired
+     * (nobody finds the account by it; nobody else takes it for 30 days), and
+     * the account leaves Everyone on the server until the client publishes
+     * its public record again. Returns the claimed name and the NEW
+     * username certificate.
+     *
+     * @throws DiscoveryHttpError `409 no-username`, `409 username-taken`,
+     *   `429 rename-too-soon` (with `retry_after_secs`).
+     */
+    public suspend fun replaceUsername(accountId: ByteArray, username: String): RegisterResult {
+        require(accountId.size == 16) { "accountId must be 16 bytes (got ${accountId.size})" }
+        return OprfBlinder.blind(username).use { blinder ->
+            val normalisedUsername = blinder.normalizedUsername()
+            val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
+            val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
+            val resp: RegisterResponse = doPost("/discovery/username/replace") {
+                contentType(ContentType.Application.Json)
+                setBody(RegisterRequest(account_id = base64Encode(accountId), oprf_hash = lookupKeyB64))
+            }
+            if (!resp.ok) {
+                throw DiscoveryHttpError(
+                    status = 200,
+                    endpoint = "/discovery/username/replace",
+                    body = "server reported ok=false",
+                )
+            }
+            RegisterResult(
+                normalisedUsername = normalisedUsername,
+                usernameCertificate = resp.username_certificate_b64?.let {
+                    try {
+                        base64Decode(it)
+                    } catch (_: IllegalArgumentException) {
+                        null
+                    }
+                },
+            )
         }
     }
 
@@ -1818,6 +1870,8 @@ public data class RegisterResult(
      *  + trim + leading-`@` strip). Surface to the UI so the user
      *  sees what handle is now bound to their account. */
     val normalisedUsername: String,
+    /** The username certificate the register call returned, if any. */
+    val usernameCertificate: ByteArray? = null,
 )
 
 /**

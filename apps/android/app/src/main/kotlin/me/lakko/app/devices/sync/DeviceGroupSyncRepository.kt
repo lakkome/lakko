@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import me.lakko.app.auth.IdentitySecrets
+import me.lakko.app.auth.OwnUsernameState
+import me.lakko.app.auth.RecoveryAddressState
 import me.lakko.app.auth.base64Encode
 import me.lakko.app.devices.DeviceAttestKey
 import me.lakko.app.devices.DeviceGroupJournalEnvelope
@@ -419,6 +421,8 @@ public class DeviceGroupSyncRepository(
         forkRepairedFor = null
         synchronized(stateLock) {
             syncedState = null
+            mutableRecoveryEmail.value = RecoveryAddressState.NOT_READY
+            mutableOwnUsername.value = OwnUsernameState.NOT_READY
         }
         pendingFlag = null
         knownLeaves = null
@@ -521,6 +525,8 @@ public class DeviceGroupSyncRepository(
         synchronized(stateLock) {
             val state = syncedState ?: return
             try {
+                republishRecoveryEmail(state)
+                republishOwnUsername(state)
                 republishLineage(state)
                 // ADR-0065 R.5 - every person-facing store is keyed by
                 // conversation id; a screen holding ANY segment's id reads the
@@ -671,6 +677,135 @@ public class DeviceGroupSyncRepository(
         if (changed) republish()
     }
 
+    // ------------------------------------------------------------
+    // ADR-0067 (amended 2026-10-13) - the recovery email address
+    // ------------------------------------------------------------
+
+    private val mutableRecoveryEmail: MutableStateFlow<RecoveryAddressState> =
+        MutableStateFlow(RecoveryAddressState.NOT_READY)
+
+    /**
+     * The account's recovery email address as this device holds it: one
+     * register of the synced state, shared with the account's other devices
+     * and the sealed backup, persisted with the state under the device key.
+     * Never logged.
+     */
+    public val recoveryEmail: StateFlow<RecoveryAddressState> = mutableRecoveryEmail.asStateFlow()
+
+    /** Project the register. Under [stateLock]. */
+    private fun republishRecoveryEmail(state: SyncedState) {
+        val next = RecoveryAddressState(ready = true, address = runCatching { state.recoveryEmail() }.getOrNull())
+        if (next != mutableRecoveryEmail.value) mutableRecoveryEmail.value = next
+    }
+
+    /**
+     * Write the register ([address] `null` or blank = removed) and tell the
+     * account's other devices. `false` when the state is not open, the
+     * address is refused, or what is held is identical or newer. A failed
+     * publish is not lost: a catch-up re-sends the register.
+     */
+    public suspend fun setRecoveryEmail(address: String?): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            val written = try {
+                state.setRecoveryEmail(Hlc.mint(), address?.takeIf { it.isNotBlank() })
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "recovery email register refused (${cause.javaClass.simpleName})")
+                false
+            }
+            if (!written) return false
+            runCatching { state.recoveryEmailEnvelope() }.getOrNull()
+        }
+        republish()
+        if (envelope != null) {
+            try {
+                sendServiceEnvelope(envelope)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "recovery email register not published (${cause.javaClass.simpleName})")
+                pendingFlag?.recordFailure()
+            }
+        }
+        return true
+    }
+
+    /** A received recovery-email envelope, folded by its original stamp. */
+    private fun applyRecoveryEmail(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyRecoveryEmailEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "recovery email envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
+    // ------------------------------------------------------------
+    // ADR-0068 - the account's own username
+    // ------------------------------------------------------------
+
+    private val mutableOwnUsername: MutableStateFlow<OwnUsernameState> = MutableStateFlow(OwnUsernameState.NOT_READY)
+
+    /** The account's username as the synced state's register holds it: what
+     *  tells a device that the account was renamed on another one. */
+    public val ownUsername: StateFlow<OwnUsernameState> = mutableOwnUsername.asStateFlow()
+
+    /** Project the register. Under [stateLock]. */
+    private fun republishOwnUsername(state: SyncedState) {
+        val next = OwnUsernameState(ready = true, username = runCatching { state.ownUsername() }.getOrNull())
+        if (next != mutableOwnUsername.value) mutableOwnUsername.value = next
+    }
+
+    /**
+     * Write the register and tell the account's other devices. `false` when
+     * the state is not open, the name is refused, or what is held is
+     * identical or newer. A failed publish is not lost: a catch-up re-sends
+     * the register.
+     */
+    public suspend fun setOwnUsername(username: String?): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            val written = try {
+                state.setOwnUsername(Hlc.mint(), username?.takeIf { it.isNotBlank() })
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "own username register refused (${cause.javaClass.simpleName})")
+                false
+            }
+            if (!written) return false
+            runCatching { state.ownUsernameEnvelope() }.getOrNull()
+        }
+        republish()
+        if (envelope != null) {
+            try {
+                sendServiceEnvelope(envelope)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "own username register not published (${cause.javaClass.simpleName})")
+                pendingFlag?.recordFailure()
+            }
+        }
+        return true
+    }
+
+    /** A received own-username envelope, folded by its original stamp. */
+    private fun applyOwnUsername(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyOwnUsernameEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "own username envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
     /** Fold this device's own write in, under its own leaf. */
     private fun foldLocal(body: DeviceGroupBody, hlc: ULong) {
         val ownLeaf = runCatching { group.get()?.ownLeafIndex() }.getOrNull() ?: 0u
@@ -702,6 +837,10 @@ public class DeviceGroupSyncRepository(
         // ADR-0065 R.13a - the backup payload carries the lineage registers
         // (`to_bytes`), and `snapshotParts()` does not.
         for (envelope in runCatching { restored.lineageEnvelopes() }.getOrNull().orEmpty()) applyLineage(envelope)
+        // ADR-0067 - and the recovery email register, with its own stamp.
+        runCatching { restored.recoveryEmailEnvelope() }.getOrNull()?.let { applyRecoveryEmail(it) }
+        // ADR-0068 - and the own-username register.
+        runCatching { restored.ownUsernameEnvelope() }.getOrNull()?.let { applyOwnUsername(it) }
     }
 
     /** Permanently destroy the repository — cancels the
@@ -900,6 +1039,16 @@ public class DeviceGroupSyncRepository(
             runCatching { syncedState?.lineageEnvelopes() }.getOrNull().orEmpty()
         }
         for (envelope in lineageEnvelopes) sendServiceEnvelope(envelope)
+        // ADR-0067 - the recovery email register is not in `snapshot()` either.
+        val recoveryEmailEnvelope = synchronized(stateLock) {
+            runCatching { syncedState?.recoveryEmailEnvelope() }.getOrNull()
+        }
+        recoveryEmailEnvelope?.let { sendServiceEnvelope(it) }
+        // ADR-0068 - nor is the own-username register.
+        val ownUsernameEnvelope = synchronized(stateLock) {
+            runCatching { syncedState?.ownUsernameEnvelope() }.getOrNull()
+        }
+        ownUsernameEnvelope?.let { sendServiceEnvelope(it) }
     }
 
     /** Re-send everything this device holds if a write of ours is still
@@ -1084,6 +1233,20 @@ public class DeviceGroupSyncRepository(
                             )
                             val body = parsed.body
                             if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isOwnUsernameEnvelope(body.envelope)
+                            ) {
+                                // ADR-0068 - the account's username from
+                                // another of its devices (a rename there).
+                                applyOwnUsername(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isRecoveryEmailEnvelope(body.envelope)
+                            ) {
+                                // ADR-0067 - the account's recovery email
+                                // address from another of its devices; a
+                                // `lakko-sync` envelope, routed before the
+                                // lakko-contacts dispatcher.
+                                applyRecoveryEmail(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isLineageEnvelope(body.envelope)
                             ) {
                                 // ADR-0065 R.13a - a lineage register from
@@ -1580,6 +1743,14 @@ public class DeviceGroupSyncRepository(
                     // not part of `snapshotParts()`.
                     for (envelope in SyncedState.fromBytes(bytes).lineageEnvelopes()) {
                         existing.applyLineageEnvelope(envelope)
+                    }
+                    // ADR-0067 - and the recovery email register.
+                    SyncedState.fromBytes(bytes).recoveryEmailEnvelope()?.let {
+                        existing.applyRecoveryEmailEnvelope(it)
+                    }
+                    // ADR-0068 - and the own-username register.
+                    SyncedState.fromBytes(bytes).ownUsernameEnvelope()?.let {
+                        existing.applyOwnUsernameEnvelope(it)
                     }
                     existing.toBytes()
                 }

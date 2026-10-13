@@ -318,8 +318,11 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
     }
 
     func testARestoredSessionBindsTheHandleOfItsCanonicalNameOnce() async throws {
+        // ADR-0068: the landing asks first; the account has no handle, so
+        // this is a first bind.
         let host = NameRouteStub.scope { method, path, _ in
-            method == "PUT" && path == "/auth/login-handle" ? (200, #"{"bound":true}"#) : (503, "")
+            if path == "/auth/login-handle/check" { return (200, #"{"state":"none"}"#) }
+            return method == "PUT" && path == "/auth/login-handle" ? (200, #"{"bound":true}"#) : (503, "")
         }
         let directory = NoDirectory()
         let repo = restore(
@@ -343,6 +346,36 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
         XCTAssertEqual(directory.calls, 0)
     }
 
+    /// ADR-0068 section 2 — a device whose name is stale (the account was
+    /// renamed on another device) must not bind its old handle back.
+    func testARestoredSessionWithAStaleNameBindsNothing() async {
+        let host = NameRouteStub.scope { _, path, _ in
+            path == "/auth/login-handle/check" ? (200, #"{"state":"other"}"#) : (200, #"{"bound":true}"#)
+        }
+        let repo = restore(
+            host: host, store: store(username: "alice"),
+            persistence: RestorablePersistence(token: "tok-stale"),
+            ledger: LoginHandleBindLedger())
+        XCTAssertEqual(repo.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+        let asked = await waitUntil {
+            NameRouteStub.requests(host).contains { $0.path == "/auth/login-handle/check" }
+        }
+        XCTAssertTrue(asked)
+        await settle()
+        XCTAssertTrue(binds(host).isEmpty, "the rename is not reverted")
+
+        // The bound handle is this name's: nothing to do either.
+        let same = NameRouteStub.scope { _, path, _ in
+            path == "/auth/login-handle/check" ? (200, #"{"state":"same"}"#) : (200, #"{"bound":true}"#)
+        }
+        _ = restore(
+            host: same, store: store(username: "alice"),
+            persistence: RestorablePersistence(token: "tok-same"),
+            ledger: LoginHandleBindLedger())
+        await settle()
+        XCTAssertTrue(binds(same).isEmpty)
+    }
+
     func testAGuestWithNoUsernameBindsNothing() async {
         let host = NameRouteStub.scope { _, _, _ in (200, #"{"bound":true}"#) }
         let repo = restore(
@@ -358,7 +391,8 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
 
     func testATakenHandleChangesNothing() async {
         let host = NameRouteStub.scope { method, path, _ in
-            method == "PUT" && path == "/auth/login-handle" ? (409, #"{"error":"handle-taken"}"#) : (503, "")
+            if path == "/auth/login-handle/check" { return (200, #"{"state":"none"}"#) }
+            return method == "PUT" && path == "/auth/login-handle" ? (409, #"{"error":"handle-taken"}"#) : (503, "")
         }
         let sessionStore = store(username: "alice")
         let persistence = RestorablePersistence(token: "tok-409")
@@ -379,8 +413,11 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
     }
 
     func testTheSameSessionInstalledTwiceBindsOnce() async {
+        // ADR-0068: the landing asks first; the account has no handle, so
+        // this is a first bind.
         let host = NameRouteStub.scope { method, path, _ in
-            method == "PUT" && path == "/auth/login-handle" ? (200, #"{"bound":true}"#) : (503, "")
+            if path == "/auth/login-handle/check" { return (200, #"{"state":"none"}"#) }
+            return method == "PUT" && path == "/auth/login-handle" ? (200, #"{"bound":true}"#) : (503, "")
         }
         let ledger = LoginHandleBindLedger()
         let sessionStore = store(username: "alice")

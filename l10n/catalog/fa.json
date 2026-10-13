@@ -2,6 +2,10 @@
   "format": 1,
   "language": "fa",
   "messages": {
+    "account.keys_changed.finishing": {
+      "text": "حساب شما کلیدهای جدید دارد. در حال تکمیل تغییر هستیم.",
+      "status": "machine"
+    },
     "app.not_found.body": {
       "text": "در این نشانی چیزی نیست.",
       "status": "machine"
@@ -6186,6 +6190,58 @@
       "text": "شما مالک گروه خواهید بود. بعداً می‌توانید افراد دیگری اضافه کنید.",
       "status": "machine"
     },
+    "notice.email_added": {
+      "text": "یک ایمیل بازیابی به حساب شما اضافه شد.",
+      "status": "machine"
+    },
+    "notice.email_removed": {
+      "text": "ایمیل بازیابی شما حذف شد.",
+      "status": "machine"
+    },
+    "notice.email_replaced": {
+      "text": "ایمیل بازیابی شما جایگزین شد.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.body": {
+      "text": "{date}، در دستگاهی دیگر.",
+      "status": "machine"
+    },
+    "notice.opened_by_email.title": {
+      "text": "حساب شما با ایمیل بازیابی‌تان باز شد",
+      "status": "machine"
+    },
+    "notice.password_by_email.body": {
+      "text": "در {date} کسی با ایمیل بازیابی شما رمز عبور جدیدی انتخاب کرد.",
+      "status": "machine"
+    },
+    "notice.password_by_email.title": {
+      "text": "رمز عبور شما تغییر کرد",
+      "status": "machine"
+    },
+    "notice.phrase_saved": {
+      "text": "یک عبارت بازیابی برای حساب شما ذخیره شد.",
+      "status": "machine"
+    },
+    "notice.secure.new_keys": {
+      "text": "با این کار حساب شما کلیدهای جدید می‌گیرد و هر کسی که آن را باز کرده دسترسی‌اش را از دست می‌دهد.",
+      "status": "machine"
+    },
+    "notice.secure.password_saved": {
+      "text": "رمز عبور شما تغییر کرد.",
+      "status": "machine"
+    },
+    "notice.secure.title": {
+      "text": "حساب خود را ایمن کنید",
+      "status": "machine"
+    },
+    "notice.was_me": {
+      "text": "من بودم",
+      "status": "machine"
+    },
+    "notice.was_not_me": {
+      "text": "من نبودم",
+      "status": "machine"
+    },
     "notification.channel.messages": {
       "text": "پیام‌ها",
       "status": "machine"
@@ -6282,6 +6338,10 @@
       "text": "استفاده از رمز عبور به‌جای آن",
       "status": "machine"
     },
+    "proof.recovery_email.help": {
+      "text": "برای تغییر ایمیل بازیابی، رمز عبور خود را وارد کنید.",
+      "status": "machine"
+    },
     "proof.remove_device.cancelled": {
       "text": "لغو شد. دستگاه حذف نشد.",
       "status": "machine"
@@ -6326,6 +6386,134 @@
       "text": "کارهایی که می‌توانید انجام دهید:",
       "status": "machine"
     },
+    "proof.save_phrase.help": {
+      "text": "برای ذخیره عبارت بازیابی، رمز عبور خود را وارد کنید.",
+      "status": "machine"
+    },
+    "proof.username.help": {
+      "text": "برای تغییر نام کاربری، رمز عبور خود را وارد کنید.",
+      "status": "machine"
+    },
+    "protect.banner.action": {
+      "text": "محافظت",
+      "status": "machine"
+    },
+    "protect.banner.none": {
+      "text": "این حساب هیچ راهی برای بازگشت ندارد.",
+      "status": "machine"
+    },
+    "protect.body": {
+      "text": "اگر رمز عبور را فراموش کنید یا این گوشی را گم کنید، از این راه به حساب برمی‌گردید.",
+      "status": "machine"
+    },
+    "protect.continue": {
+      "text": "ادامه",
+      "status": "machine"
+    },
+    "protect.done": {
+      "text": "انجام شد",
+      "status": "machine"
+    },
+    "protect.email.badge": {
+      "text": "پیشنهادی",
+      "status": "machine"
+    },
+    "protect.email.body": {
+      "text": "کدی به آن می‌فرستیم. هر کسی که بتواند آن صندوق ایمیل را بخواند می‌تواند وارد حساب شما شود.",
+      "status": "machine"
+    },
+    "protect.email.title": {
+      "text": "افزودن ایمیل",
+      "status": "machine"
+    },
+    "protect.passkey.body": {
+      "text": "با اثر انگشت، چهره یا قفل صفحه وارد شوید. نیازی به یادآوری رمز عبور نیست.",
+      "status": "machine"
+    },
+    "protect.passkey.title": {
+      "text": "ساخت کلید عبور",
+      "status": "machine"
+    },
+    "protect.phrase.body": {
+      "text": "12 کلمه که فقط شما نگه می‌دارید. قوی‌تر است و ربطی به ایمیل ندارد.",
+      "status": "machine"
+    },
+    "protect.phrase.save.body": {
+      "text": "12 کلمه که فقط شما نگه می‌دارید. پس از این، کد ایمیلی می‌تواند رمز عبور شما را تغییر دهد اما نمی‌تواند حساب شما را باز کند.",
+      "status": "machine"
+    },
+    "protect.phrase.save.effect": {
+      "text": "با این کار حساب شما کلیدهای جدید می‌گیرد. مخاطبان و گفتگوهای شما همان‌طور که هستند می‌مانند. دستگاه‌های دیگرتان واردشده باقی می‌مانند.",
+      "status": "machine"
+    },
+    "protect.phrase.save.failed": {
+      "text": "تکمیل ممکن نشد. چیزی تغییر نکرد.",
+      "status": "machine"
+    },
+    "protect.phrase.save.finishing": {
+      "text": "حساب شما کلیدهای جدید دارد. در حال اتمام.",
+      "status": "machine"
+    },
+    "protect.phrase.save.progress": {
+      "text": "در حال تغییر کلیدهای حساب شما",
+      "status": "machine"
+    },
+    "protect.phrase.save.show": {
+      "text": "نمایش 12 کلمه من",
+      "status": "machine"
+    },
+    "protect.phrase.title": {
+      "text": "ذخیره عبارت بازیابی",
+      "status": "machine"
+    },
+    "protect.skip": {
+      "text": "الان نه",
+      "status": "machine"
+    },
+    "protect.skip.confirm.body": {
+      "text": "اگر رمز عبور را فراموش کنید یا این گوشی را گم کنید، دیگر نمی‌توانید به این حساب برگردید.",
+      "status": "machine"
+    },
+    "protect.skip.confirm.continue": {
+      "text": "ادامه بدون محافظت",
+      "status": "machine"
+    },
+    "protect.skip.confirm.title": {
+      "text": "بدون محافظت ادامه می‌دهید؟",
+      "status": "machine"
+    },
+    "protect.status.email": {
+      "text": "با ایمیل شما محافظت می‌شود",
+      "status": "machine"
+    },
+    "protect.status.none": {
+      "text": "محافظت‌نشده",
+      "status": "machine"
+    },
+    "protect.status.phrase": {
+      "text": "با عبارت بازیابی شما محافظت می‌شود",
+      "status": "machine"
+    },
+    "protect.title": {
+      "text": "از حساب خود محافظت کنید",
+      "status": "machine"
+    },
+    "recall.phrase.changed": {
+      "text": "کلیدهای این حساب در {date} تغییر کرد. شما بودید؟",
+      "status": "machine"
+    },
+    "recall.phrase.take_back": {
+      "text": "پس گرفتن حساب",
+      "status": "machine"
+    },
+    "recall.phrase.use": {
+      "text": "استفاده از عبارت بازیابی به‌جای آن",
+      "status": "machine"
+    },
+    "recall.phrase.wrong": {
+      "text": "این کلمات عبارت بازیابی این حساب نیستند.",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "کد برنامه احراز هویت شما را وارد می‌کند. در دستگاهی که هرگز این حساب را نداشته است، پس از آن هنوز به دستگاه دیگر، کلید عبور یا عبارت بازیابی نیاز دارید.",
       "status": "machine"
@@ -6348,6 +6536,50 @@
     },
     "recovery.device.restoring": {
       "text": "در حال بازیابی {username}",
+      "status": "machine"
+    },
+    "recovery.email.check.body": {
+      "text": "اگر آن نام کاربری و نشانی به هم تعلق داشته باشند، کدی در راه است. تا 10 دقیقه کار می‌کند.",
+      "status": "machine"
+    },
+    "recovery.email.check.title": {
+      "text": "ایمیل خود را بررسی کنید",
+      "status": "machine"
+    },
+    "recovery.email.failed": {
+      "text": "بازگرداندن حساب شما ممکن نشد. دوباره تلاش کنید یا راه دیگری انتخاب کنید.",
+      "status": "machine"
+    },
+    "recovery.email.restoring": {
+      "text": "در حال بازگرداندن حساب شما",
+      "status": "machine"
+    },
+    "recovery.email.row.body": {
+      "text": "کدی که به ایمیل بازیابی شما فرستاده می‌شود.",
+      "status": "machine"
+    },
+    "recovery.email.row.title": {
+      "text": "کد ایمیلی",
+      "status": "machine"
+    },
+    "recovery.email.save": {
+      "text": "ذخیره و ورود",
+      "status": "machine"
+    },
+    "recovery.email.start.body": {
+      "text": "نام کاربری و ایمیل بازیابی خود را وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.email.totp.body": {
+      "text": "کد 6 رقمی برنامه احراز هویت خود را وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.email.totp.lost": {
+      "text": "برنامه احراز هویت را از دست داده‌اید؟ از راه دیگری به حساب برگردید.",
+      "status": "machine"
+    },
+    "recovery.email.totp.title": {
+      "text": "کد برنامه احراز هویت",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6560,6 +6792,118 @@
     },
     "recovery.words.tries_left": {
       "text": "{count, plural, one {# تلاش مانده} other {# تلاش مانده}} تا توقف پانزده‌دقیقه‌ای.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.body": {
+      "text": "کلیدهای حساب شما تغییر کرد. نشانی خود را دوباره وارد کنید تا کد ایمیلی بتواند حساب شما را بازگرداند.",
+      "status": "machine"
+    },
+    "recovery_email.add_again.title": {
+      "text": "ایمیل خود را دوباره اضافه کنید",
+      "status": "machine"
+    },
+    "recovery_email.body": {
+      "text": "اگر رمز عبور را فراموش کنید، کدی به این نشانی می‌فرستیم تا بتوانید به حساب برگردید.",
+      "status": "machine"
+    },
+    "recovery_email.code.expired": {
+      "text": "این کد منقضی شده است.",
+      "status": "machine"
+    },
+    "recovery_email.code.other_address": {
+      "text": "استفاده از نشانی دیگر",
+      "status": "machine"
+    },
+    "recovery_email.code.resend": {
+      "text": "ارسال دوباره",
+      "status": "machine"
+    },
+    "recovery_email.code.resend_in": {
+      "text": "ارسال دوباره پس از {time}",
+      "status": "machine"
+    },
+    "recovery_email.code.sent_to": {
+      "text": "یک کد 6 رقمی به {address} فرستادیم.",
+      "status": "machine"
+    },
+    "recovery_email.code.title": {
+      "text": "کد را وارد کنید",
+      "status": "machine"
+    },
+    "recovery_email.code.used_up": {
+      "text": "تلاش‌ها بیش از حد است. کد جدیدی بفرستید.",
+      "status": "machine"
+    },
+    "recovery_email.code.wrong": {
+      "text": "این کد درست نیست.",
+      "status": "machine"
+    },
+    "recovery_email.field": {
+      "text": "ایمیل",
+      "status": "machine"
+    },
+    "recovery_email.invalid": {
+      "text": "نشانی ایمیل را کامل وارد کنید.",
+      "status": "machine"
+    },
+    "recovery_email.mailbox_warning": {
+      "text": "هر کسی که بتواند این صندوق ایمیل را بخواند می‌تواند وارد حساب شما شود. برای تغییر این وضع، یک عبارت بازیابی ذخیره کنید.",
+      "status": "machine"
+    },
+    "recovery_email.needs_username": {
+      "text": "ابتدا یک نام کاربری انتخاب کنید.",
+      "status": "machine"
+    },
+    "recovery_email.not_kept": {
+      "text": "Lakko نشانی شما را نگه نمی‌دارد. هر وقت به کد نیاز داشتید، آن را دوباره همراه با نام کاربری خود وارد می‌کنید.",
+      "status": "machine"
+    },
+    "recovery_email.remove": {
+      "text": "حذف",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.body": {
+      "text": "دیگر نمی‌توانید با ایمیل به حساب برگردید.",
+      "status": "machine"
+    },
+    "recovery_email.remove.confirm.title": {
+      "text": "ایمیل بازیابی حذف شود؟",
+      "status": "machine"
+    },
+    "recovery_email.replace": {
+      "text": "جایگزینی",
+      "status": "machine"
+    },
+    "recovery_email.send": {
+      "text": "ارسال کد",
+      "status": "machine"
+    },
+    "recovery_email.send_failed": {
+      "text": "ارسال ایمیل ممکن نشد. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery_email.status.off": {
+      "text": "خاموش",
+      "status": "machine"
+    },
+    "recovery_email.status.on": {
+      "text": "روشن",
+      "status": "machine"
+    },
+    "recovery_email.title": {
+      "text": "ایمیل بازیابی",
+      "status": "machine"
+    },
+    "recovery_email.totp_warning": {
+      "text": "به کدی از برنامه احراز هویت خود هم نیاز خواهید داشت. اگر آن برنامه روی گوشی‌ای باشد که گم می‌کنید، ایمیل کافی نخواهد بود.",
+      "status": "machine"
+    },
+    "recovery_email.unavailable": {
+      "text": "کدهای ایمیلی در حال حاضر در دسترس نیستند.",
+      "status": "machine"
+    },
+    "recovery_email.username_change": {
+      "text": "تغییر نام کاربری ایمیل بازیابی شما را خاموش می‌کند. بعد از آن می‌توانید دوباره اضافه‌اش کنید.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -7708,6 +8052,50 @@
     },
     "username.a11y_hint": {
       "text": "نام کاربری: {message}",
+      "status": "machine"
+    },
+    "username.change.body": {
+      "text": "دیگران دیگر شما را با {old} پیدا نمی‌کنند. تا 30 روز هیچ‌کس دیگری نمی‌تواند آن را بگیرد.",
+      "status": "machine"
+    },
+    "username.change.next_change": {
+      "text": "پس از این، 30 روز دیگر می‌توانید دوباره آن را تغییر دهید.",
+      "status": "machine"
+    },
+    "username.change.other_devices": {
+      "text": "دستگاه‌های دیگرتان دفعه بعد که آنلاین شوند نام کاربری جدید را می‌گیرند.",
+      "status": "machine"
+    },
+    "username.change.save": {
+      "text": "تغییر",
+      "status": "machine"
+    },
+    "username.change.title": {
+      "text": "تغییر نام کاربری",
+      "status": "machine"
+    },
+    "username.change.too_soon": {
+      "text": "در {date} می‌توانید دوباره نام کاربری خود را تغییر دهید.",
+      "status": "machine"
+    },
+    "username.claim.body": {
+      "text": "با نام کاربری و رمز عبور می‌توانید در دستگاه دیگری وارد شوید، ایمیل بازیابی اضافه کنید و دیگران می‌توانند شما را پیدا کنند.",
+      "status": "machine"
+    },
+    "username.claim.done": {
+      "text": "نام کاربری شما {username} است.",
+      "status": "machine"
+    },
+    "username.claim.password_help": {
+      "text": "یک رمز عبور برای ورود انتخاب کنید. تا الان رمز عبوری نداشته‌اید.",
+      "status": "machine"
+    },
+    "username.claim.save": {
+      "text": "ذخیره",
+      "status": "machine"
+    },
+    "username.claim.title": {
+      "text": "یک نام کاربری انتخاب کنید",
       "status": "machine"
     },
     "username.error.bind_limited_later": {

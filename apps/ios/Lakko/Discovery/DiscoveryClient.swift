@@ -288,6 +288,34 @@ public final class DiscoveryClient {
     /// `discovery-lookup` token) → finalize → `POST /discovery/lookup`.
     /// Both requests anonymous; with no session there is no token, and the
     /// lookup fails with ``AnonTokenUnavailable/noSession``.
+    /// `POST /discovery/username/replace` (ADR-0068 section 1): the account's
+    /// current name is retired (held for 30 days) and `username` becomes its
+    /// name. Answers the canonical name and the NEW name's certificate.
+    ///
+    /// The rename takes the account out of Everyone on the server: the
+    /// caller publishes the public record and name terms again.
+    ///
+    /// Throws `409 username-taken` / `no-username`, `429 rename-too-soon`
+    /// (with `retry_after_secs`).
+    public func replaceUsername(
+        accountId: Data, username: String
+    ) async throws -> (normalisedUsername: String, certificate: Data?) {
+        guard accountId.count == Self.accountIdLength else {
+            throw DiscoveryClientError.argument("accountId must be \(Self.accountIdLength) bytes")
+        }
+        _ = try requireValidUsername(
+            username, emptyError: DiscoveryClientError.argument("username must be non-empty"))
+        let blinder = try OprfBlinder.blind(username: username)
+        let normalisedUsername = try blinder.normalizedUsername()
+        let oprfResp = try await oprfEvaluate(OprfRequest(blinded: blinder.blindedB64()))
+        // Only the lookup key goes to discovery (ADR-0060 section 5).
+        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
+        let resp: UsernameReplaceWire = try await post(
+            endpoint: "/discovery/username/replace",
+            body: RegisterRequest(accountId: base64Encode(accountId), oprfHash: base64Encode(lookupKey)))
+        return (normalisedUsername, resp.usernameCertificateB64.flatMap(base64Decode))
+    }
+
     public func lookup(username: String) async throws -> LookupResult {
         // ADR-0048 §4 — never send a lookup for a name that fails the rule.
         _ = try requireValidUsername(
@@ -2111,6 +2139,11 @@ public struct DeviceKeyPackage: Equatable {
 }
 
 // MARK: - ADR-0060 wire shapes
+
+private struct UsernameReplaceWire: Decodable {
+    let usernameCertificateB64: String?
+    enum CodingKeys: String, CodingKey { case usernameCertificateB64 = "username_certificate_b64" }
+}
 
 private struct UsernameCertificateWire: Decodable {
     let usernameCertificateB64: String

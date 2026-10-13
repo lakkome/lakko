@@ -240,6 +240,14 @@ enum AccountLocalDataWipe {
             standard.removeObject(
                 forKey: DeviceGroupSyncRepository.lineageUnsentKey(accountIdB64: accountIdB64))
         }
+        step("own-username-unsent") {
+            standard.removeObject(
+                forKey: DeviceGroupSyncRepository.ownUsernameUnsentKey(accountIdB64: accountIdB64))
+        }
+        step("recovery-email-unsent") {
+            standard.removeObject(
+                forKey: DeviceGroupSyncRepository.recoveryEmailUnsentKey(accountIdB64: accountIdB64))
+        }
         step("profiles") { ProfileDirectory.shared.forget(accountIdB64: accountIdB64) }
         step("contacts-inbox") { ContactsInboxStore().clear(accountIdB64: accountIdB64) }
         // ADR-0065 R.3 — the requests kept waiting for an identity verdict.

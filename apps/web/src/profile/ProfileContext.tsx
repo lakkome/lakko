@@ -94,6 +94,11 @@ export interface ProfileApi {
    *  every group this device is in and send it to this account's other
    *  devices. `null` clears the name. */
   saveOwnDisplayName(name: string | null): Promise<void>;
+  /** The account's username was just claimed (a guest chose one): keep the
+   *  certificate the register call returned (`null`: fetched as usual) and
+   *  publish the own profile, now with the username and the certificate, to
+   *  every conversation and to the account's other devices. */
+  usernameClaimed(certificate: Uint8Array | null): Promise<void>;
   /** Resolve a person — a 32-byte key or its base64. Reactive. */
   resolve(key: Uint8Array | string): ResolvedName;
   /** File a received profile under its AUTHENTICATED sender key. With a
@@ -236,6 +241,25 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     }
     return certFetch;
   }
+  // ADR-0068: the name changed under this session (a rename here, or one
+  // adopted from the own-username register): the cached certificate is the
+  // OLD name's. Drop it, fetch the current one, and publish the profile
+  // again. The first run (the landing) only records the name.
+  let certUsername: string | null | undefined;
+  createEffect(() => {
+    const username = ownUsername();
+    const previous = certUsername;
+    certUsername = username;
+    if (previous === undefined || previous === username) return;
+    setOwnCert(null);
+    certFetch = null;
+    if (username === null) return;
+    void ensureOwnCertificate().then(() => {
+      bump();
+      ownProfileChanged();
+      return scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
+    }).catch(() => undefined);
+  });
   const verifier = new UsernameVerifier({
     // ADR-0060 section 5 — a claimed username is verified against the
     // discovery-signed certificate the person's own profile carries: one OPRF
@@ -544,6 +568,13 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       setOwnProfileTick((t) => t + 1);
       bump();
       // ADR-0048 section 4a — and to this account's other devices.
+      ownProfileChanged();
+      await scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
+    },
+    async usernameClaimed(certificate) {
+      if (certificate !== null) setOwnCert(certificate);
+      else await ensureOwnCertificate();
+      bump();
       ownProfileChanged();
       await scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
     },

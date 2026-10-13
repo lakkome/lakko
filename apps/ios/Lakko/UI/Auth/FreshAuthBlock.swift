@@ -34,12 +34,15 @@ enum FreshAuthSurface: Equatable {
     case recoveryEmail
     /// ADR-0067 / UX 19.5 — `Save a recovery phrase`.
     case savePhrase
+    /// ADR-0068 — changing the username.
+    case changeUsername
 
     /// The helper under the field, naming the action.
     var helpKey: String? {
         switch self {
         case .recoveryEmail: return "proof.recovery_email.help"
         case .savePhrase: return "proof.save_phrase.help"
+        case .changeUsername: return "proof.username.help"
         case .removeDevice: return "proof.remove_device.help"
         case .reset: return "restore_identity.reset.password_help"
         case .deleteAccount: return "proof.delete.help"
@@ -55,7 +58,7 @@ enum FreshAuthSurface: Equatable {
         switch self {
         case .reset, .addPasskey, .changePassword:
             return "restore_identity.reset.error.wrong_password"
-        case .recoveryEmail, .savePhrase: return "settings.recovery.phrase.wrong_password"
+        case .recoveryEmail, .savePhrase, .changeUsername: return "settings.recovery.phrase.wrong_password"
         case .removeDevice: return "proof.remove_device.wrong_password"
         case .deleteAccount: return "proof.delete.wrong_password"
         case .addDeviceRequest: return "proof.add_device.request.wrong_password"
@@ -68,7 +71,7 @@ enum FreshAuthSurface: Equatable {
     /// surface is simply as it was.
     var cancelledKey: String? {
         switch self {
-        case .recoveryEmail, .savePhrase: return nil
+        case .recoveryEmail, .savePhrase, .changeUsername: return nil
         case .reset: return "proof.reset.cancelled"
         case .deleteAccount: return "settings.account.delete.error.cancelled"
         case .addDeviceRequest: return "proof.add_device.request.cancelled"

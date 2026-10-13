@@ -90,6 +90,9 @@ export interface RegisterResult {
    *  + trim + leading-`@` strip). Surface back to the UI so the
    *  user knows what handle is now bound to their account. */
   normalisedUsername: string;
+  /** The username certificate the register call returned (ADR-0060), or
+   *  `null` when the server sent none. */
+  usernameCertificate: Uint8Array | null;
 }
 
 /** Result of `DiscoveryClient.lookup`. The server returns 404
@@ -231,6 +234,31 @@ export class DiscoveryClientArgError extends Error {
  *  2.2). The core names it too (`accountStatementHeaderName()`); a test pins
  *  the two together. */
 export const ACCOUNT_STATEMENT_HEADER = "x-lakko-account-statement";
+
+/** The username certificate a register / replace answer carries, or `null`. */
+function certificateOf(resp: unknown): Uint8Array | null {
+  const certB64 = (resp as { username_certificate_b64?: unknown }).username_certificate_b64;
+  if (typeof certB64 !== "string" || certB64.length === 0) return null;
+  try {
+    return base64Decode(certB64);
+  } catch {
+    return null;
+  }
+}
+
+/** The `409` codes of `POST /discovery/register` and `username/replace`
+ *  (ADR-0068: the bodies are JSON). */
+export const CODE_USERNAME_TAKEN = "username-taken";
+export const CODE_USERNAME_ALREADY_SET = "username-already-set";
+
+/**
+ * Whether a discovery `409` means the NAME is taken. `username-already-set`
+ * (this account already has a name) is not that. A `409` with no readable
+ * code is read as taken, as before the bodies were JSON.
+ */
+export function isUsernameTaken(status: number, errorCode: string | null): boolean {
+  return status === 409 && errorCode !== CODE_USERNAME_ALREADY_SET && errorCode !== "no-username";
+}
 
 export class DiscoveryHttpError extends Error {
   override name = "DiscoveryHttpError";
@@ -452,6 +480,38 @@ export class DiscoveryClient {
 
   async register(req: RegisterRequest): Promise<RegisterResponse> {
     return this.post("/discovery/register", req);
+  }
+
+  /** `POST /discovery/username/replace` (ADR-0068, session): the account's
+   *  name becomes the one `oprf_hash` is the lookup key of. */
+  async usernameReplace(req: RegisterRequest): Promise<RegisterResponse> {
+    return this.post("/discovery/username/replace", req);
+  }
+
+  /**
+   * Change this account's `@username` at discovery (ADR-0068): OPRF blind,
+   * evaluate, finalize, then `username/replace`. Returns the canonical name
+   * and the new certificate. Throws `DiscoveryHttpError`: `409
+   * username-taken`, `409 no-username`, `429 rename-too-soon` (with
+   * `retry_after_secs` in the body).
+   *
+   * A rename takes the account out of Everyone at the server; the caller's
+   * publishers put it back.
+   */
+  async replaceUsername(accountId: Uint8Array, username: string): Promise<RegisterResult> {
+    if (accountId.length !== 16) {
+      throw new DiscoveryClientArgError("accountId must be 16 bytes");
+    }
+    const wasm = await loadWasm();
+    const blinder = wasm.OprfBlinder.blind(username);
+    const normalisedUsername = blinder.normalizedUsername;
+    const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
+    const lookupKeyB64 = base64Encode(finalizeOprf(blinder, oprfResp.evaluated).lookupKey);
+    const resp = await this.usernameReplace({ account_id: base64Encode(accountId), oprf_hash: lookupKeyB64 });
+    if (!resp.ok) {
+      throw new DiscoveryHttpError(200, "/discovery/username/replace", "server reported ok=false");
+    }
+    return { normalisedUsername, usernameCertificate: certificateOf(resp) };
   }
 
   /** `POST /discovery/identity` — upsert the identity bundle. */
@@ -825,7 +885,10 @@ export class DiscoveryClient {
         "server reported ok=false",
       );
     }
-    return { normalisedUsername };
+    // ADR-0060: the discovery-signed certificate binding the name to the
+    // account. Kept: the profile carries it, and a name claimed later (a
+    // guest choosing a username) publishes it at once.
+    return { normalisedUsername, usernameCertificate: certificateOf(registerResp) };
   }
 
   /**

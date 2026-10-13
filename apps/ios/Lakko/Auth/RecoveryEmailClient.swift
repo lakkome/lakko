@@ -198,6 +198,23 @@ public struct EmailEnrolled: Codable, Equatable, Sendable {
     }
 }
 
+struct EmailVaultPutRequest: Codable, Equatable {
+    let handle: String
+    let address: String
+    let vaultSalt: String
+    let sealedEntropy: String
+
+    enum CodingKeys: String, CodingKey {
+        case handle, address
+        case vaultSalt = "vault_salt"
+        case sealedEntropy = "sealed_entropy"
+    }
+}
+
+struct EmailVaultPutResponse: Codable, Equatable {
+    let vault: Bool?
+}
+
 struct FreshGrantRequest: Codable, Equatable {
     let freshGrant: String
 
@@ -422,6 +439,23 @@ public extension AuthClient {
             endpoint: "/recovery-email/enrol/finish",
             body: EmailEnrolFinishRequest(
                 challengeId: challengeId, code: code, sealedEntropy: sealedEntropy.map(base64Encode)),
+            bearer: sessionToken)
+    }
+
+    /// `PUT /recovery-email/vault` (bearer, no fresh-auth grant): put the
+    /// email vault back for the address already confirmed. `vaultSalt` is 16
+    /// random bytes chosen here; `sealedEntropy` the 44-byte vault sealed
+    /// with it. Every well-formed request spends one of ten per day: never
+    /// called in a loop.
+    func recoveryEmailVaultPut(
+        sessionToken: String, handle: Data, address: String, vaultSalt: Data, sealedEntropy: Data
+    ) async throws {
+        try requireHandle(handle)
+        let _: EmailVaultPutResponse = try await send(
+            method: "PUT", endpoint: "/recovery-email/vault",
+            body: EmailVaultPutRequest(
+                handle: base64UrlEncodeNoPad(handle), address: address,
+                vaultSalt: base64Encode(vaultSalt), sealedEntropy: base64Encode(sealedEntropy)),
             bearer: sessionToken)
     }
 

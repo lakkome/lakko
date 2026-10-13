@@ -34,18 +34,46 @@
 //! codec lives in `lakko-mls`); [`SyncedState::lineage_envelopes`] and
 //! [`SyncedState::apply_lineage_envelope`] carry it instead, and
 //! [`SyncedState::to_bytes`] persists it with the rest.
+//!
+//! ## The recovery email register (ADR-0067, amended 2026-10-13)
+//!
+//! One register per account holding the normalised recovery email address,
+//! or an empty value for "none". It is an ordinary last-writer-wins register
+//! (not write-once): [`SyncedState::set_recovery_email`] writes whenever its
+//! stamp wins. A removal is a stamped empty value and is KEPT, so a device
+//! that was offline across it cannot bring the address back with an older
+//! stamp. Like lineage it does not travel in [`StateSnapshot`];
+//! [`SyncedState::recovery_email_envelope`] and
+//! [`SyncedState::apply_recovery_email_envelope`] carry it between devices,
+//! and [`SyncedState::to_bytes`] persists it (and so the backup carries it).
+//!
+//! ## The own-username register (ADR-0068 section 3)
+//!
+//! One register per account holding the account's canonical username, or an
+//! empty value for "none": the recovery-email register's shape exactly.
+//! Last-writer-wins, the empty value kept with its stamp, carried between
+//! devices by [`SyncedState::own_username_envelope`] /
+//! [`SyncedState::apply_own_username_envelope`], persisted by
+//! [`SyncedState::to_bytes`], never in [`StateSnapshot`].
 
 use std::collections::BTreeMap;
 
 use super::entry::{
     take_bytes32, take_u32, take_u64, take_u8, CodecError, ConversationEntry,
     ConversationOrderEntry, ConversationRef, DraftEntry, FlagsEntry, FolderChanges, FolderId,
-    FolderMeta, LineageEntry, MemberState, ReadCursorEntry, RegisterKey, Stamped, StateSnapshot,
-    SyncEntry,
+    FolderMeta, LineageEntry, MemberState, OwnUsernameEntry, ReadCursorEntry, RecoveryEmailEntry,
+    RegisterKey, Stamped, StateSnapshot, SyncEntry,
 };
 use super::lineage::{
     compose_lineage_envelope, decode_lineage_envelope, LineageEnvelopeError,
     LINEAGE_ENVELOPE_MAX_ENTRIES,
+};
+use super::own_username::{
+    compose_own_username_envelope, decode_own_username_envelope, OwnUsernameEnvelopeError,
+};
+
+use super::recovery_email::{
+    compose_recovery_email_envelope, decode_recovery_email_envelope, RecoveryEmailEnvelopeError,
 };
 
 /// The persistence format's version byte.
@@ -223,9 +251,12 @@ impl SyncedState {
                         value: o.clone(),
                     });
                 },
-                // Lineage registers travel in their own envelope
-                // (`lineage_envelopes`), never in the snapshot.
-                SyncEntry::Lineage(_) => {},
+                // Lineage registers, the recovery email and the own
+                // username travel in their own envelopes
+                // (`lineage_envelopes`, `recovery_email_envelope`,
+                // `own_username_envelope`), never in the snapshot.
+                SyncEntry::Lineage(_) | SyncEntry::RecoveryEmail(_) | SyncEntry::OwnUsername(_) => {
+                },
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
@@ -367,6 +398,183 @@ impl SyncedState {
             entries
                 .into_iter()
                 .map(|s| (s.hlc, SyncEntry::Lineage(s.value))),
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // Recovery email (ADR-0067, amended 2026-10-13).
+    // -----------------------------------------------------------------
+
+    /// Write the account's recovery email register, stamped `hlc`:
+    /// `Some(address)` sets the address, `None` (or an empty address)
+    /// records that the account has none.
+    ///
+    /// `address` must already be normalised
+    /// (`lakko_mnemonic::recovery_email::normalize_recovery_email`; the FFI
+    /// surfaces do it); it is stored as given and never re-spelled.
+    ///
+    /// An ordinary last-writer-wins write: `Ok(true)` when the register now
+    /// holds this value (send [`Self::recovery_email_envelope`] to the
+    /// account's other devices), `Ok(false)` when what is held has a greater
+    /// stamp, or an equal stamp and larger-or-identical bytes, and nothing
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::RecoveryEmailLength`] /
+    /// [`super::entry::BoundsError::RecoveryEmailShape`].
+    pub fn set_recovery_email(
+        &mut self,
+        hlc: u64,
+        address: Option<&str>,
+    ) -> Result<bool, super::entry::BoundsError> {
+        let entry = RecoveryEmailEntry {
+            address: address.unwrap_or_default().to_owned(),
+        };
+        Ok(matches!(
+            self.apply(hlc, SyncEntry::RecoveryEmail(entry))?,
+            ApplyOutcome::Applied
+        ))
+    }
+
+    /// The recovery email register as held, a stamped removal included, so a
+    /// caller can tell "removed at T" from "never written" (`None`).
+    #[must_use]
+    pub fn recovery_email_register(&self) -> Option<Stamped<RecoveryEmailEntry>> {
+        match self.registers.get(&RegisterKey::RecoveryEmail) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::RecoveryEmail(r),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: r.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The account's recovery email address, or `None` when the register was
+    /// never written or holds a removal.
+    #[must_use]
+    pub fn recovery_email(&self) -> Option<String> {
+        self.recovery_email_register()
+            .map(|s| s.value.address)
+            .filter(|a| !a.is_empty())
+    }
+
+    /// The envelope carrying the held register with its original stamp, a
+    /// removal included: what a device sends to its other devices after
+    /// [`Self::set_recovery_email`] returned `true`, and again as the
+    /// catch-up re-send beside [`Self::snapshot`] after the DeviceGroup
+    /// grew. `None` when the register was never written.
+    #[must_use]
+    pub fn recovery_email_envelope(&self) -> Option<Vec<u8>> {
+        compose_recovery_email_envelope(&self.recovery_email_register()?).ok()
+    }
+
+    /// Decode a recovery-email envelope and fold the register in with its
+    /// original stamp. Fail closed: a malformed envelope changes nothing.
+    /// Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`RecoveryEmailEnvelopeError`].
+    pub fn apply_recovery_email_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, RecoveryEmailEnvelopeError> {
+        let register = decode_recovery_email_envelope(bytes)?;
+        Ok(matches!(
+            self.apply(register.hlc, SyncEntry::RecoveryEmail(register.value))?,
+            ApplyOutcome::Applied
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // Own username (ADR-0068 section 3).
+    // -----------------------------------------------------------------
+
+    /// Write the account's own-username register, stamped `hlc`:
+    /// `Some(username)` sets it, `None` (or an empty string) records that
+    /// the account has none.
+    ///
+    /// `username` must already be canonical
+    /// (`lakko_contacts::username::check_canonical_username`; the FFI
+    /// surfaces normalise first); it is stored as given.
+    ///
+    /// An ordinary last-writer-wins write: `Ok(true)` when the register now
+    /// holds this value (send [`Self::own_username_envelope`] to the
+    /// account's other devices), `Ok(false)` when what is held has a greater
+    /// stamp, or an equal stamp and larger-or-identical bytes, and nothing
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::OwnUsername`].
+    pub fn set_own_username(
+        &mut self,
+        hlc: u64,
+        username: Option<&str>,
+    ) -> Result<bool, super::entry::BoundsError> {
+        let entry = OwnUsernameEntry {
+            username: username.unwrap_or_default().to_owned(),
+        };
+        Ok(matches!(
+            self.apply(hlc, SyncEntry::OwnUsername(entry))?,
+            ApplyOutcome::Applied
+        ))
+    }
+
+    /// The own-username register as held, a stamped "none" included, so a
+    /// caller can tell "cleared at T" from "never written" (`None`).
+    #[must_use]
+    pub fn own_username_register(&self) -> Option<Stamped<OwnUsernameEntry>> {
+        match self.registers.get(&RegisterKey::OwnUsername) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::OwnUsername(u),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: u.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The account's own username, or `None` when the register was never
+    /// written or holds "none".
+    #[must_use]
+    pub fn own_username(&self) -> Option<String> {
+        self.own_username_register()
+            .map(|s| s.value.username)
+            .filter(|u| !u.is_empty())
+    }
+
+    /// The envelope carrying the held register with its original stamp, a
+    /// "none" included: what a device sends to its other devices after
+    /// [`Self::set_own_username`] returned `true`, and again as the catch-up
+    /// re-send beside [`Self::snapshot`] after the DeviceGroup grew. `None`
+    /// when the register was never written.
+    #[must_use]
+    pub fn own_username_envelope(&self) -> Option<Vec<u8>> {
+        compose_own_username_envelope(&self.own_username_register()?).ok()
+    }
+
+    /// Decode an own-username envelope and fold the register in with its
+    /// original stamp. Fail closed: a malformed envelope changes nothing.
+    /// Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`OwnUsernameEnvelopeError`].
+    pub fn apply_own_username_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, OwnUsernameEnvelopeError> {
+        let register = decode_own_username_envelope(bytes)?;
+        Ok(matches!(
+            self.apply(register.hlc, SyncEntry::OwnUsername(register.value))?,
+            ApplyOutcome::Applied
         ))
     }
 
@@ -655,6 +863,8 @@ mod tests {
         INCLUDE_GROUPS,
     };
     use super::super::lineage::LINEAGE_ENVELOPE_DOMAIN_V1;
+    use super::super::own_username::OWN_USERNAME_ENVELOPE_DOMAIN_V1;
+    use super::super::recovery_email::RECOVERY_EMAIL_ENVELOPE_DOMAIN_V1;
     use super::*;
     use proptest::prelude::*;
 
@@ -679,6 +889,18 @@ mod tests {
         SyncEntry::Lineage(LineageEntry {
             successor_group_id: vec![successor],
             root_conversation_id: vec![root],
+        })
+    }
+    const ADDRESSES: [&str; 4] = ["", "a@b", "b@a", "änna@büro.example"];
+    fn email(address: &str) -> SyncEntry {
+        SyncEntry::RecoveryEmail(RecoveryEmailEntry {
+            address: address.to_owned(),
+        })
+    }
+    const USERNAMES: [&str; 4] = ["", "bob", "alice", "bob_42"];
+    fn uname(username: &str) -> SyncEntry {
+        SyncEntry::OwnUsername(OwnUsernameEntry {
+            username: username.to_owned(),
         })
     }
     fn member(f: u8, c: u8, state: MemberState) -> SyncEntry {
@@ -808,6 +1030,305 @@ mod tests {
             fresh.apply_lineage_envelope(e).unwrap();
         }
         assert_eq!(fresh, s);
+    }
+
+    #[test]
+    fn the_recovery_email_is_a_last_writer_wins_register() {
+        use super::super::entry::BoundsError;
+        let mut s = SyncedState::new();
+        assert_eq!(s.recovery_email(), None);
+        assert_eq!(s.recovery_email_register(), None);
+        assert_eq!(s.recovery_email_envelope(), None);
+
+        assert_eq!(s.set_recovery_email(5, Some("a@b")), Ok(true));
+        assert_eq!(s.recovery_email().as_deref(), Some("a@b"));
+        // The same write again, and an older one, change nothing.
+        assert_eq!(s.set_recovery_email(5, Some("a@b")), Ok(false));
+        assert_eq!(s.set_recovery_email(4, Some("old@b")), Ok(false));
+        assert_eq!(s.recovery_email().as_deref(), Some("a@b"));
+        // Not write-once: a newer address replaces it.
+        assert_eq!(s.set_recovery_email(6, Some("new@b")), Ok(true));
+        assert_eq!(s.recovery_email().as_deref(), Some("new@b"));
+        assert_eq!(s.recovery_email_register().unwrap().hlc, 6);
+        assert_eq!(s.len(), 1);
+
+        // An invalid address is refused and changes nothing.
+        assert_eq!(
+            s.set_recovery_email(9, Some("ab")),
+            Err(BoundsError::RecoveryEmailLength)
+        );
+        assert_eq!(
+            s.set_recovery_email(9, Some("no-at-sign")),
+            Err(BoundsError::RecoveryEmailShape)
+        );
+        assert_eq!(s.recovery_email().as_deref(), Some("new@b"));
+    }
+
+    #[test]
+    fn a_removal_beats_an_older_address_and_a_newer_address_beats_an_older_removal() {
+        let mut s = SyncedState::new();
+        s.set_recovery_email(5, Some("a@b")).unwrap();
+        assert_eq!(s.set_recovery_email(7, None), Ok(true));
+        assert_eq!(s.recovery_email(), None);
+        // The removal is kept, with its stamp.
+        let held = s.recovery_email_register().unwrap();
+        assert_eq!((held.hlc, held.value.is_removed()), (7, true));
+        assert_eq!(s.len(), 1);
+        // A stale device re-sends the address it still holds: refused, in
+        // every form it can arrive in.
+        assert_eq!(s.set_recovery_email(6, Some("a@b")), Ok(false));
+        assert_eq!(s.apply(6, email("a@b")), Ok(ApplyOutcome::Superseded));
+        let mut stale = SyncedState::new();
+        stale.set_recovery_email(5, Some("a@b")).unwrap();
+        assert_eq!(
+            s.apply_recovery_email_envelope(&stale.recovery_email_envelope().unwrap()),
+            Ok(false)
+        );
+        assert!(!s.merge_from(&stale));
+        assert_eq!(s.recovery_email(), None);
+        // And the stale device learns of the removal from any of them.
+        assert!(stale.merge_from(&s));
+        assert_eq!(stale.recovery_email(), None);
+
+        // An empty address is the removal too.
+        let mut t = SyncedState::new();
+        t.set_recovery_email(1, Some("")).unwrap();
+        assert!(t.recovery_email_register().unwrap().value.is_removed());
+
+        // A newer address beats an older removal.
+        assert_eq!(s.set_recovery_email(8, Some("again@b")), Ok(true));
+        assert_eq!(s.recovery_email().as_deref(), Some("again@b"));
+        // An older removal arriving late does not remove it.
+        assert_eq!(s.apply(7, email("")), Ok(ApplyOutcome::Superseded));
+        assert_eq!(s.recovery_email().as_deref(), Some("again@b"));
+    }
+
+    #[test]
+    fn an_equal_stamp_on_the_recovery_email_is_decided_by_the_bytes_in_either_order() {
+        let fold_of = |order: [&str; 3]| {
+            let mut s = SyncedState::new();
+            for a in order {
+                s.apply(5, email(a)).ok();
+            }
+            s
+        };
+        let x = fold_of(["a@b", "", "b@a"]);
+        assert_eq!(x, fold_of(["b@a", "a@b", ""]));
+        assert_eq!(x, fold_of(["", "b@a", "a@b"]));
+        // The larger canonical bytes win: the longer length prefix first.
+        assert_eq!(x.recovery_email().as_deref(), Some("b@a"));
+    }
+
+    #[test]
+    fn the_recovery_email_travels_by_envelope_and_persistence_never_by_snapshot() {
+        let mut a = SyncedState::new();
+        a.apply(1, meta(1, "Work")).ok();
+        a.set_recovery_email(4, Some("änna@büro.example")).unwrap();
+        assert!(a
+            .snapshot()
+            .stamped_entries()
+            .iter()
+            .all(|(_, e)| !matches!(e, SyncEntry::RecoveryEmail(_))));
+
+        let live = a.recovery_email_envelope().unwrap();
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_recovery_email_envelope(&live), Ok(true));
+        assert_eq!(b.apply_recovery_email_envelope(&live), Ok(false));
+        assert_eq!(b.recovery_email_register(), a.recovery_email_register());
+        // The original stamp travelled, so a re-send never beats a later write.
+        assert_eq!(b.recovery_email_register().unwrap().hlc, 4);
+        assert_eq!(b.recovery_email_envelope().unwrap(), live);
+
+        // Through bytes (local persistence and the backup payload).
+        let restored = SyncedState::from_bytes(&a.to_bytes()).unwrap();
+        assert_eq!(restored, a);
+        assert_eq!(
+            restored.recovery_email().as_deref(),
+            Some("änna@büro.example")
+        );
+        let mut merged = SyncedState::new();
+        assert!(merged.merge_from(&restored));
+        assert_eq!(merged, a);
+        assert_eq!(a.max_hlc(), 4);
+
+        // A removal round-trips through all three as a removal.
+        a.set_recovery_email(9, None).unwrap();
+        let removal = a.recovery_email_envelope().unwrap();
+        assert_eq!(b.apply_recovery_email_envelope(&removal), Ok(true));
+        assert_eq!(b.recovery_email(), None);
+        let restored = SyncedState::from_bytes(&a.to_bytes()).unwrap();
+        assert_eq!(
+            restored.recovery_email_register(),
+            a.recovery_email_register()
+        );
+        assert!(restored
+            .recovery_email_register()
+            .unwrap()
+            .value
+            .is_removed());
+
+        // A malformed envelope changes nothing.
+        let mut bad = removal;
+        bad.push(0);
+        let before = b.clone();
+        assert_eq!(
+            b.apply_recovery_email_envelope(&bad),
+            Err(RecoveryEmailEnvelopeError::Trailing)
+        );
+        assert_eq!(b, before);
+        // Nor does a state whose register breaks a bound: the whole state
+        // is refused.
+        let mut bytes = vec![1, 0, 0, 0, 1];
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+        bytes.extend_from_slice(&[0, 0, 0, 7, 11, 0, 0, 0, 2, b'a', b'@']);
+        assert_eq!(
+            SyncedState::from_bytes(&bytes),
+            Err(CodecError::Bounds(
+                super::super::entry::BoundsError::RecoveryEmailLength
+            ))
+        );
+    }
+
+    #[test]
+    fn the_own_username_is_a_last_writer_wins_register() {
+        use super::super::entry::BoundsError;
+        let mut s = SyncedState::new();
+        assert_eq!(s.own_username(), None);
+        assert_eq!(s.own_username_register(), None);
+        assert_eq!(s.own_username_envelope(), None);
+
+        assert_eq!(s.set_own_username(5, Some("bob")), Ok(true));
+        assert_eq!(s.own_username().as_deref(), Some("bob"));
+        assert_eq!(s.set_own_username(5, Some("bob")), Ok(false));
+        assert_eq!(s.set_own_username(4, Some("old_name")), Ok(false));
+        // Not write-once: a rename replaces it.
+        assert_eq!(s.set_own_username(6, Some("robert")), Ok(true));
+        assert_eq!(s.own_username().as_deref(), Some("robert"));
+        assert_eq!(s.own_username_register().unwrap().hlc, 6);
+        assert_eq!(s.len(), 1);
+
+        for bad in ["ab", "Bob", "bo b", "@bob"] {
+            assert_eq!(
+                s.set_own_username(9, Some(bad)),
+                Err(BoundsError::OwnUsername)
+            );
+        }
+        assert_eq!(s.own_username().as_deref(), Some("robert"));
+        // It shares nothing with the recovery email register.
+        s.set_recovery_email(7, Some("a@b")).unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.own_username().as_deref(), Some("robert"));
+    }
+
+    #[test]
+    fn no_username_beats_an_older_name_and_a_newer_name_beats_an_older_none() {
+        let mut s = SyncedState::new();
+        s.set_own_username(5, Some("bob")).unwrap();
+        assert_eq!(s.set_own_username(7, None), Ok(true));
+        assert_eq!(s.own_username(), None);
+        let held = s.own_username_register().unwrap();
+        assert_eq!((held.hlc, held.value.is_none()), (7, true));
+        assert_eq!(s.len(), 1);
+        // A stale device re-sends the name it still holds: refused, in
+        // every form it can arrive in.
+        assert_eq!(s.set_own_username(6, Some("bob")), Ok(false));
+        assert_eq!(s.apply(6, uname("bob")), Ok(ApplyOutcome::Superseded));
+        let mut stale = SyncedState::new();
+        stale.set_own_username(5, Some("bob")).unwrap();
+        assert_eq!(
+            s.apply_own_username_envelope(&stale.own_username_envelope().unwrap()),
+            Ok(false)
+        );
+        assert!(!s.merge_from(&stale));
+        assert_eq!(s.own_username(), None);
+        assert!(stale.merge_from(&s));
+        assert_eq!(stale.own_username(), None);
+
+        let mut t = SyncedState::new();
+        t.set_own_username(1, Some("")).unwrap();
+        assert!(t.own_username_register().unwrap().value.is_none());
+
+        // A newer name beats an older "none", and a late older "none" does
+        // not clear it. The same holds for a rename: the old name arriving
+        // late does not come back.
+        assert_eq!(s.set_own_username(8, Some("robert")), Ok(true));
+        assert_eq!(s.apply(7, uname("")), Ok(ApplyOutcome::Superseded));
+        assert_eq!(s.apply(5, uname("bob")), Ok(ApplyOutcome::Superseded));
+        assert_eq!(s.own_username().as_deref(), Some("robert"));
+    }
+
+    #[test]
+    fn an_equal_stamp_on_the_own_username_is_decided_by_the_bytes_in_either_order() {
+        let fold_of = |order: [&str; 3]| {
+            let mut s = SyncedState::new();
+            for u in order {
+                s.apply(5, uname(u)).ok();
+            }
+            s
+        };
+        let x = fold_of(["bob", "", "alice"]);
+        assert_eq!(x, fold_of(["alice", "bob", ""]));
+        assert_eq!(x, fold_of(["", "alice", "bob"]));
+        // The larger canonical bytes win: the longer length prefix first.
+        assert_eq!(x.own_username().as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn the_own_username_travels_by_envelope_and_persistence_never_by_snapshot() {
+        let mut a = SyncedState::new();
+        a.apply(1, meta(1, "Work")).ok();
+        a.set_own_username(4, Some("bob_42")).unwrap();
+        assert!(a
+            .snapshot()
+            .stamped_entries()
+            .iter()
+            .all(|(_, e)| !matches!(e, SyncEntry::OwnUsername(_))));
+
+        let live = a.own_username_envelope().unwrap();
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_own_username_envelope(&live), Ok(true));
+        assert_eq!(b.apply_own_username_envelope(&live), Ok(false));
+        assert_eq!(b.own_username_register(), a.own_username_register());
+        assert_eq!(b.own_username_register().unwrap().hlc, 4);
+        assert_eq!(b.own_username_envelope().unwrap(), live);
+        // The envelope kinds do not cross.
+        assert_eq!(
+            b.apply_recovery_email_envelope(&live),
+            Err(RecoveryEmailEnvelopeError::WrongDomain)
+        );
+
+        let restored = SyncedState::from_bytes(&a.to_bytes()).unwrap();
+        assert_eq!(restored, a);
+        assert_eq!(restored.own_username().as_deref(), Some("bob_42"));
+        let mut merged = SyncedState::new();
+        assert!(merged.merge_from(&restored));
+        assert_eq!(merged, a);
+
+        a.set_own_username(9, None).unwrap();
+        let none = a.own_username_envelope().unwrap();
+        assert_eq!(b.apply_own_username_envelope(&none), Ok(true));
+        assert_eq!(b.own_username(), None);
+        let restored = SyncedState::from_bytes(&a.to_bytes()).unwrap();
+        assert!(restored.own_username_register().unwrap().value.is_none());
+
+        let mut bad = none;
+        bad.push(0);
+        let before = b.clone();
+        assert_eq!(
+            b.apply_own_username_envelope(&bad),
+            Err(OwnUsernameEnvelopeError::Trailing)
+        );
+        assert_eq!(b, before);
+        // A persisted state whose register breaks the rule is refused whole.
+        let mut bytes = vec![1, 0, 0, 0, 1];
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+        bytes.extend_from_slice(&[0, 0, 0, 8, 12, 0, 0, 0, 3, b'B', b'o', b'b']);
+        assert_eq!(
+            SyncedState::from_bytes(&bytes),
+            Err(CodecError::Bounds(
+                super::super::entry::BoundsError::OwnUsername
+            ))
+        );
     }
 
     #[test]
@@ -1048,16 +1569,27 @@ mod tests {
             )),
             // Successors 0..3 and roots 10..13: several writers naming
             // different roots for one successor collide often.
-            (hlc, c, 10u8..13).prop_map(|(h, s, r)| (h, lineage(s, r))),
+            (hlc.clone(), c, 10u8..13).prop_map(|(h, s, r)| (h, lineage(s, r))),
+            // One register for the whole account: addresses and removals
+            // from several writers collide on few stamps.
+            (hlc.clone(), prop::sample::select(ADDRESSES.to_vec()))
+                .prop_map(|(h, a)| (h, email(a))),
+            (hlc, prop::sample::select(USERNAMES.to_vec())).prop_map(|(h, u)| (h, uname(u))),
         ]
     }
 
-    /// Everything a fresh device is sent to catch up: the snapshot's entries
-    /// and the lineage envelopes.
+    /// Everything a fresh device is sent to catch up: the snapshot's entries,
+    /// the lineage envelopes and the recovery-email envelope.
     fn catch_up(from: &SyncedState, into: &mut SyncedState) {
         into.apply_all(from.snapshot().stamped_entries());
         for envelope in from.lineage_envelopes() {
             into.apply_lineage_envelope(&envelope).unwrap();
+        }
+        if let Some(envelope) = from.recovery_email_envelope() {
+            into.apply_recovery_email_envelope(&envelope).unwrap();
+        }
+        if let Some(envelope) = from.own_username_envelope() {
+            into.apply_own_username_envelope(&envelope).unwrap();
         }
     }
 
@@ -1089,6 +1621,8 @@ mod tests {
             let b = fold(&shuffled);
             prop_assert_eq!(&a, &b);
             prop_assert_eq!(a.folders(), b.folders());
+            prop_assert_eq!(a.recovery_email_register(), b.recovery_email_register());
+            prop_assert_eq!(a.own_username_register(), b.own_username_register());
         }
 
         /// Idempotent: folding everything twice changes nothing.
@@ -1140,6 +1674,8 @@ mod tests {
             rl.merge_from(&l);
             prop_assert_eq!(&lr, &rl);
             prop_assert_eq!(lr.all_lineage(), rl.all_lineage());
+            prop_assert_eq!(lr.recovery_email_register(), rl.recovery_email_register());
+            prop_assert_eq!(lr.own_username_register(), rl.own_username_register());
             let mut again = lr.clone();
             prop_assert!(!again.merge_from(&r));
             prop_assert!(!again.merge_from(&l));
@@ -1202,6 +1738,178 @@ mod tests {
                 prop_assert!(rebuilt.apply_lineage_envelope(&e).unwrap());
             }
             prop_assert_eq!(rebuilt, a);
+        }
+
+        /// The recovery email alone: any arrival order of any writers'
+        /// envelopes (addresses and removals) converges on the greatest
+        /// `(stamp, canonical bytes)` written, applying twice changes
+        /// nothing, and the held envelope rebuilds the register.
+        #[test]
+        fn recovery_email_envelopes_converge_in_any_order(
+            writes in prop::collection::vec((0u64..6, 0usize..ADDRESSES.len()), 1..20),
+            seed in any::<u64>(),
+        ) {
+            let envelopes: Vec<Vec<u8>> = writes
+                .iter()
+                .map(|(h, a)| {
+                    compose_recovery_email_envelope(&Stamped {
+                        hlc: *h,
+                        value: RecoveryEmailEntry { address: ADDRESSES[*a].to_owned() },
+                    })
+                    .unwrap()
+                })
+                .collect();
+            let mut a = SyncedState::new();
+            for e in &envelopes {
+                a.apply_recovery_email_envelope(e).unwrap();
+            }
+            let mut shuffled = envelopes.clone();
+            let mut x = seed | 1;
+            for i in (1..shuffled.len()).rev() {
+                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                let j = usize::try_from(x % (i as u64 + 1)).unwrap_or(0);
+                shuffled.swap(i, j);
+            }
+            let mut b = SyncedState::new();
+            for e in shuffled.iter().chain(envelopes.iter()) {
+                b.apply_recovery_email_envelope(e).unwrap();
+            }
+            prop_assert_eq!(&a, &b);
+            prop_assert_eq!(a.len(), 1);
+            let held = a.recovery_email_register().unwrap();
+            let best = writes
+                .iter()
+                .map(|(h, i)| (*h, email(ADDRESSES[*i]).canonical_bytes()))
+                .max()
+                .unwrap();
+            prop_assert_eq!(
+                (held.hlc, SyncEntry::RecoveryEmail(held.value.clone()).canonical_bytes()),
+                best
+            );
+            prop_assert_eq!(a.recovery_email().is_none(), held.value.is_removed());
+            let mut rebuilt = SyncedState::new();
+            prop_assert!(rebuilt
+                .apply_recovery_email_envelope(&a.recovery_email_envelope().unwrap())
+                .unwrap());
+            prop_assert_eq!(rebuilt, a);
+        }
+
+        /// The recovery-email envelope decoder is total, and whatever it
+        /// accepts is canonical: it re-encodes to the identical bytes.
+        #[test]
+        fn recovery_email_envelope_decode_is_total_and_canonical(
+            noise in prop::collection::vec(any::<u8>(), 0..96),
+            hlc in any::<u64>(),
+            pick in 0usize..ADDRESSES.len(),
+            at in any::<usize>(),
+            flip in 1u8..=255,
+        ) {
+            let mut prefixed = RECOVERY_EMAIL_ENVELOPE_DOMAIN_V1.to_vec();
+            prefixed.push(1);
+            prefixed.extend_from_slice(&noise);
+            for candidate in [noise.clone(), prefixed] {
+                if let Ok(decoded) = decode_recovery_email_envelope(&candidate) {
+                    prop_assert_eq!(compose_recovery_email_envelope(&decoded).unwrap(), candidate);
+                }
+            }
+            let register = Stamped {
+                hlc,
+                value: RecoveryEmailEntry { address: ADDRESSES[pick].to_owned() },
+            };
+            let mut wire = compose_recovery_email_envelope(&register).unwrap();
+            prop_assert_eq!(decode_recovery_email_envelope(&wire).unwrap(), register);
+            let i = at % wire.len();
+            prop_assert!(decode_recovery_email_envelope(&wire[..i]).is_err());
+            wire[i] ^= flip;
+            if let Ok(decoded) = decode_recovery_email_envelope(&wire) {
+                prop_assert_eq!(compose_recovery_email_envelope(&decoded).unwrap(), wire);
+            }
+        }
+
+        /// The own username alone: any arrival order of any writers'
+        /// envelopes (names and "none") converges on the greatest `(stamp,
+        /// canonical bytes)` written, applying twice changes nothing, and
+        /// the held envelope rebuilds the register.
+        #[test]
+        fn own_username_envelopes_converge_in_any_order(
+            writes in prop::collection::vec((0u64..6, 0usize..USERNAMES.len()), 1..20),
+            seed in any::<u64>(),
+        ) {
+            let envelopes: Vec<Vec<u8>> = writes
+                .iter()
+                .map(|(h, u)| {
+                    compose_own_username_envelope(&Stamped {
+                        hlc: *h,
+                        value: OwnUsernameEntry { username: USERNAMES[*u].to_owned() },
+                    })
+                    .unwrap()
+                })
+                .collect();
+            let mut a = SyncedState::new();
+            for e in &envelopes {
+                a.apply_own_username_envelope(e).unwrap();
+            }
+            let mut shuffled = envelopes.clone();
+            let mut x = seed | 1;
+            for i in (1..shuffled.len()).rev() {
+                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                let j = usize::try_from(x % (i as u64 + 1)).unwrap_or(0);
+                shuffled.swap(i, j);
+            }
+            let mut b = SyncedState::new();
+            for e in shuffled.iter().chain(envelopes.iter()) {
+                b.apply_own_username_envelope(e).unwrap();
+            }
+            prop_assert_eq!(&a, &b);
+            prop_assert_eq!(a.len(), 1);
+            let held = a.own_username_register().unwrap();
+            let best = writes
+                .iter()
+                .map(|(h, i)| (*h, uname(USERNAMES[*i]).canonical_bytes()))
+                .max()
+                .unwrap();
+            prop_assert_eq!(
+                (held.hlc, SyncEntry::OwnUsername(held.value.clone()).canonical_bytes()),
+                best
+            );
+            prop_assert_eq!(a.own_username().is_none(), held.value.is_none());
+            let mut rebuilt = SyncedState::new();
+            prop_assert!(rebuilt
+                .apply_own_username_envelope(&a.own_username_envelope().unwrap())
+                .unwrap());
+            prop_assert_eq!(rebuilt, a);
+        }
+
+        /// The own-username envelope decoder is total, and whatever it
+        /// accepts is canonical: it re-encodes to the identical bytes.
+        #[test]
+        fn own_username_envelope_decode_is_total_and_canonical(
+            noise in prop::collection::vec(any::<u8>(), 0..96),
+            hlc in any::<u64>(),
+            pick in 0usize..USERNAMES.len(),
+            at in any::<usize>(),
+            flip in 1u8..=255,
+        ) {
+            let mut prefixed = OWN_USERNAME_ENVELOPE_DOMAIN_V1.to_vec();
+            prefixed.push(1);
+            prefixed.extend_from_slice(&noise);
+            for candidate in [noise.clone(), prefixed] {
+                if let Ok(decoded) = decode_own_username_envelope(&candidate) {
+                    prop_assert_eq!(compose_own_username_envelope(&decoded).unwrap(), candidate);
+                }
+            }
+            let register = Stamped {
+                hlc,
+                value: OwnUsernameEntry { username: USERNAMES[pick].to_owned() },
+            };
+            let mut wire = compose_own_username_envelope(&register).unwrap();
+            prop_assert_eq!(decode_own_username_envelope(&wire).unwrap(), register);
+            let i = at % wire.len();
+            prop_assert!(decode_own_username_envelope(&wire[..i]).is_err());
+            wire[i] ^= flip;
+            if let Ok(decoded) = decode_own_username_envelope(&wire) {
+                prop_assert_eq!(compose_own_username_envelope(&decoded).unwrap(), wire);
+            }
         }
 
         /// The persistence decoder is total on arbitrary bytes and on a

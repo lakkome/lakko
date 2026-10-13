@@ -74,6 +74,21 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// continues which conversation. Read through ``ConversationLineage``.
     @Published public private(set) var lineage: [LineageEntry] = []
 
+    /// ADR-0067 (amended 2026-10-13) — the account's recovery email address,
+    /// as this account's devices keep it: one register of the synced state,
+    /// so it is on disk under the device key, with the sibling devices and in
+    /// the phrase-sealed backup. `nil` when no device ever wrote one, or it
+    /// was removed. Never logged.
+    @Published public private(set) var recoveryEmail: String?
+
+    /// ADR-0068 section 3 — the account's own username, as its devices keep
+    /// it: one more register of the synced state. `nil` when never written.
+    @Published public private(set) var ownUsername: String?
+
+    /// The synced state of the bound account was loaded from disk: a write
+    /// that waited for it can run. Wired by the composition root.
+    var onSyncedStateReady: (@MainActor () -> Void)?
+
     /// UX spec chat-folders section 6 — something folded here is still
     /// waiting to reach the other devices (this device is offline).
     @Published public private(set) var pendingSync: Bool = false
@@ -215,6 +230,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
         refreshDerived()
         ready = true
+        onSyncedStateReady?()
         // UX 17.5 — the roster as restored: the first reading on this device
         // seeds the acknowledged set; a later one may raise the notice for a
         // device added while the app was closed and already applied.
@@ -349,6 +365,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if o != order { order = o }
         if folderList != folders { folders = folderList }
         if lineageList != lineage { lineage = lineageList }
+        let address = (try? s.recoveryEmail()).flatMap { $0 }
+        if address != recoveryEmail { recoveryEmail = address }
+        let name = (try? s.ownUsername()).flatMap { $0 }
+        if name != ownUsername { ownUsername = name }
         let isPending = pending?.isPending ?? false
         if pendingSync != isPending { pendingSync = isPending }
     }
@@ -559,6 +579,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         // ADR-0065 R.5 — every lineage register is its own slot: one never
         // replaces another.
         if isLineageEnvelope(bytes: envelope) { return "lineage:" + envelope.base64EncodedString() }
+        // ADR-0067 — one register: a newer unsent one replaces an older.
+        if isRecoveryEmailEnvelope(bytes: envelope) { return "recovery-email" }
+        // ADR-0068 — likewise the own-username register.
+        if isOwnUsernameEnvelope(bytes: envelope) { return "own-username" }
         guard let kind = try? dispatchIncomingEnvelope(plaintext: envelope).kind else {
             return envelope.base64EncodedString()
         }
@@ -723,6 +747,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         var cursor: Int64 = startCursor
         // ADR-0065 R.5 — a lineage register whose send was never confirmed.
         await flushUnsentLineage()
+        // ADR-0067 — the same for the recovery-email register.
+        await flushUnsentRecoveryEmail()
+        await flushUnsentOwnUsername()
         while !Task.isCancelled {
             if !pendingServiceEnvelopes.isEmpty {
                 await flushPendingServiceEnvelopes()
@@ -1047,6 +1074,31 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 return
             }
+            // ADR-0067 — the recovery-email register, routed before the
+            // lakko-contacts dispatcher for the same reason.
+            if isRecoveryEmailEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyRecoveryEmailEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("ADR-0067: recovery-email envelope refused")
+                }
+                return
+            }
+            // ADR-0068 — the own-username register, the same way.
+            if isOwnUsernameEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyOwnUsernameEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("ADR-0068: own-username envelope refused")
+                }
+                return
+            }
             // ADR-0066 section 3.3 — the account's own `key-rotation`
             // envelope: meaningful here and nowhere else. It never reaches
             // the reach / profile adopters.
@@ -1152,6 +1204,117 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         for envelope in (try? syncedState.lineageEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
+        // ADR-0067 — nor is the recovery-email register: it is re-sent with
+        // its original stamp beside them.
+        if let envelope = (try? syncedState.recoveryEmailEnvelope()).flatMap({ $0 }) {
+            await sendServiceEnvelope(envelope)
+        }
+        // ADR-0068 — and the own-username register.
+        if let envelope = (try? syncedState.ownUsernameEnvelope()).flatMap({ $0 }) {
+            await sendServiceEnvelope(envelope)
+        }
+    }
+
+    // MARK: - ADR-0068: the own-username register
+
+    static func ownUsernameUnsentKey(accountIdB64: String) -> String {
+        "lakko.own-username.unsent.v1.\(accountIdB64)"
+    }
+
+    func flushUnsentOwnUsername() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.ownUsernameUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            if let envelope = try syncedState.ownUsernameEnvelope() {
+                try await sendLineageEnvelopes([envelope])
+            }
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("ADR-0068: own-username register send failed; retried at the next start")
+        }
+    }
+
+    /// Write `username` to the register (last writer wins), persist it at
+    /// once and send it to the account's other devices. Returns `false`
+    /// when the synced state is not loaded yet or the name is refused.
+    @discardableResult
+    public func setOwnUsername(_ username: String) async -> Bool {
+        guard ready, !deviceRemoved, let account = activeAccountIdB64 else { return false }
+        let written: Bool
+        do {
+            written = try syncedState.setOwnUsername(hlc: Hlc.mint(), username: username)
+        } catch {
+            NSLog("ADR-0068: own-username register refused")
+            return false
+        }
+        guard written else { return true }
+        stateChanged()
+        persistSyncState()
+        UserDefaults.standard.set(true, forKey: Self.ownUsernameUnsentKey(accountIdB64: account))
+        do {
+            if let envelope = try syncedState.ownUsernameEnvelope() {
+                try await sendLineageEnvelopes([envelope])
+            }
+            UserDefaults.standard.removeObject(forKey: Self.ownUsernameUnsentKey(accountIdB64: account))
+        } catch {
+            NSLog("ADR-0068: own-username register send failed; retried at the next start")
+        }
+        return true
+    }
+
+    // MARK: - ADR-0067: the recovery-email register
+
+    /// `UserDefaults` marker: the register written here has not been
+    /// confirmed sent (the lineage marker's pattern).
+    static func recoveryEmailUnsentKey(accountIdB64: String) -> String {
+        "lakko.recovery-email.unsent.v1.\(accountIdB64)"
+    }
+
+    /// Send the register again when an earlier send was not confirmed.
+    func flushUnsentRecoveryEmail() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.recoveryEmailUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            if let envelope = try syncedState.recoveryEmailEnvelope() {
+                try await sendLineageEnvelopes([envelope])
+            }
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("ADR-0067: recovery-email register send failed; retried at the next start")
+        }
+    }
+
+    /// Keep `address` as the account's recovery email (`nil` = removed):
+    /// write the register (last writer wins; the core normalises), persist
+    /// it at once, and send it to the account's other devices. Returns
+    /// `false` when the account's synced state is not loaded yet (the caller
+    /// tries again once it is) or the address is refused.
+    @discardableResult
+    public func setRecoveryEmail(_ address: String?) async -> Bool {
+        guard ready, !deviceRemoved, let account = activeAccountIdB64 else { return false }
+        let written: Bool
+        do {
+            written = try syncedState.setRecoveryEmail(hlc: Hlc.mint(), address: address)
+        } catch {
+            NSLog("ADR-0067: recovery-email register refused")
+            return false
+        }
+        guard written else { return true }
+        stateChanged()
+        // The register must survive a kill right after the write.
+        persistSyncState()
+        UserDefaults.standard.set(true, forKey: Self.recoveryEmailUnsentKey(accountIdB64: account))
+        do {
+            if let envelope = try syncedState.recoveryEmailEnvelope() {
+                try await sendLineageEnvelopes([envelope])
+            }
+            UserDefaults.standard.removeObject(forKey: Self.recoveryEmailUnsentKey(accountIdB64: account))
+        } catch {
+            NSLog("ADR-0067: recovery-email register send failed; retried at the next start")
+        }
+        return true
     }
 
     // MARK: - ADR-0065 R.5: the lineage register

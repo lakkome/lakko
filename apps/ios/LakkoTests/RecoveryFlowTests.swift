@@ -53,6 +53,13 @@ private final class ScriptedDirectory: AccountDirectory, DeviceRestoreDirectory 
         return try registerOutcome.get()
     }
 
+    var replaceError: Error?
+    func replaceUsername(accountId: Data, username: String, sessionToken: String) async throws -> ReplacedUsername {
+        events.append("replace:\(username)")
+        if let replaceError { throw replaceError }
+        return ReplacedUsername(normalisedUsername: username, certificate: Data(repeating: 0xCE, count: 153))
+    }
+
     func publishIdentityBundle(
         accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
         leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
@@ -1337,6 +1344,357 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase(), "the phrase is kept")
         model.leaveForm()
         XCTAssertFalse(model.wordsRetired)
+    }
+
+    // MARK: - A guest chooses a username (ADR-0067 pass A, part 2)
+
+    /// A signed-in guest account that holds its keys.
+    private func guest(
+        routes: @escaping (String, [String: Any]) -> (Int, String)? = { _, _ in nil }
+    ) throws -> (Harness, String) {
+        let account = newAccount()
+        let persistence = ScriptedPersistence()
+        persistence.deviceKey = true
+        persistence.seed = RecoveryMnemonic.generate().toSeed()
+        try persistence.putSessionToken(
+            PersistedSessionToken(pair: .fixture(access: "tok-guest")), accountIdB64: account.b64)
+        let h = harness(
+            marker: PersistedSession(accountIdB64: account.b64, username: ""),
+            persistence: persistence, routes: routes)
+        XCTAssertTrue(isSession(h.repository))
+        return (h, account.b64)
+    }
+
+    func testAGuestClaimsAUsernameAndOwesItsFirstPassword() async throws {
+        let (h, accountIdB64) = try guest(routes: { path, _ in
+            path == "/auth/login-handle" ? (200, #"{"bound":true}"#) : nil
+        })
+        var claimed: [SessionAccount] = []
+        h.repository.onUsernameClaimed = { claimed.append($0) }
+        XCTAssertFalse(h.repository.firstPasswordOwed)
+        XCTAssertFalse(h.repository.passwordChangeAllowed, "a bare session changes no password")
+
+        let bound = try await h.repository.claimUsername(" @Alice ")
+
+        XCTAssertEqual(bound, "alice")
+        // The handle at auth first, then the name in discovery.
+        XCTAssertEqual(NameRouteStub.requests(h.host).first { $0.path == "/auth/login-handle" }?.method, "PUT")
+        XCTAssertTrue(h.directory.events.contains("register:alice"))
+        // The name is in the local marker and the live session.
+        XCTAssertEqual(h.store.load(), PersistedSession(accountIdB64: accountIdB64, username: "alice"))
+        XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+        XCTAssertEqual(claimed, [SessionAccount(accountIdB64: accountIdB64, username: "alice")])
+        // Its first password needs no proof: nobody knows the one it has.
+        XCTAssertTrue(h.repository.firstPasswordOwed)
+        XCTAssertTrue(h.repository.passwordChangeAllowed)
+        // The handle was bound by the claim: the landing does not bind again.
+        XCTAssertEqual(NameRouteStub.requests(h.host).filter { $0.path == "/auth/login-handle" }.count, 1)
+
+        // An account with a username is not offered the claim.
+        do {
+            _ = try await h.repository.claimUsername("bob")
+            XCTFail("a named account cannot claim again")
+        } catch {}
+        AccountProtectionStore().clear(accountIdB64: accountIdB64)
+    }
+
+    func testATakenNameLeavesTheGuestAsItWas() async throws {
+        // Taken at auth.
+        let (h, accountIdB64) = try guest(routes: { path, _ in
+            path == "/auth/login-handle" ? (409, #"{"error":"handle-taken"}"#) : nil
+        })
+        do {
+            _ = try await h.repository.claimUsername("alice")
+            XCTFail("a taken name must not be saved")
+        } catch {
+            XCTAssertTrue(error is UsernameTaken, "\(error)")
+        }
+        XCTAssertEqual(h.store.load()?.username, "")
+        XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "")))
+        XCTAssertFalse(h.repository.firstPasswordOwed)
+        XCTAssertFalse(h.directory.events.contains("register:alice"), "discovery is not asked")
+
+        // Taken at discovery: the handle is released again.
+        let (d, _) = try guest(routes: { path, _ in
+            path == "/auth/login-handle" ? (200, #"{"bound":true,"removed":true}"#) : nil
+        })
+        d.directory.registerOutcome = .failure(
+            DiscoveryClientError.http(status: 409, endpoint: "/discovery/register", body: ""))
+        do {
+            _ = try await d.repository.claimUsername("alice")
+            XCTFail("a taken name must not be saved")
+        } catch {
+            XCTAssertTrue(error is UsernameTaken, "\(error)")
+        }
+        XCTAssertEqual(
+            NameRouteStub.requests(d.host).filter { $0.path == "/auth/login-handle" }.map(\.method),
+            ["PUT", "DELETE"])
+        XCTAssertEqual(d.store.load()?.username, "")
+        XCTAssertFalse(d.repository.firstPasswordOwed)
+    }
+
+    // MARK: - ADR-0068: the handle sync, the own-username register, the rename
+
+    /// A signed-in named account that holds its keys, with scripted handle routes.
+    private func named(
+        _ username: String = "alice",
+        check: String = "same",
+        put: @escaping ([String: Any]) -> (Int, String) = { _ in (200, #"{"bound":true}"#) }
+    ) throws -> (Harness, String, Data) {
+        let account = newAccount()
+        let persistence = ScriptedPersistence()
+        persistence.deviceKey = true
+        persistence.seed = RecoveryMnemonic.generate().toSeed()
+        try persistence.putSessionToken(
+            PersistedSessionToken(pair: .fixture(access: "tok-named")), accountIdB64: account.b64)
+        let h = harness(
+            marker: PersistedSession(accountIdB64: account.b64, username: username),
+            persistence: persistence,
+            routes: { path, json in
+                switch path {
+                case "/auth/login-handle/check": return (200, #"{"state":"\#(check)"}"#)
+                case "/auth/login-handle": return put(json)
+                default: return nil
+                }
+            })
+        XCTAssertTrue(isSession(h.repository))
+        return (h, account.b64, account.bytes)
+    }
+
+    private func handleRequests(_ h: Harness) -> [RecordedAuthRequest] {
+        NameRouteStub.requests(h.host).filter { $0.path == "/auth/login-handle" }
+    }
+
+    func testTheSessionChecksTheHandleAndBindsOnlyAFirstOne() async throws {
+        // The bound handle is this name's: nothing is sent.
+        let (same, sameId, _) = try named(check: "same")
+        let asked = await waitUntil {
+            NameRouteStub.requests(same.host).contains { $0.path == "/auth/login-handle/check" }
+        }
+        XCTAssertTrue(asked)
+        XCTAssertEqual(handleRequests(same).count, 0)
+
+        // The account has no handle: a first bind, with no grant.
+        let (none, noneId, _) = try named(check: "none")
+        let bound = await waitUntil { self.handleRequests(none).count == 1 }
+        XCTAssertTrue(bound)
+        XCTAssertEqual(handleRequests(none).first?.method, "PUT")
+        XCTAssertNil(handleRequests(none).first?.json["fresh_grant"])
+
+        // Renamed elsewhere: this device binds NOTHING (it would revert it).
+        let (other, otherId, _) = try named(check: "other")
+        let checked = await waitUntil {
+            NameRouteStub.requests(other.host).contains { $0.path == "/auth/login-handle/check" }
+        }
+        XCTAssertTrue(checked)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(handleRequests(other).count, 0, "a stale name never re-binds")
+        for id in [sameId, noneId, otherId] { AccountProtectionStore().clear(accountIdB64: id) }
+    }
+
+    func testTheRegisterSeedsOnceAndANewerNameUpdatesTheMarker() async throws {
+        let (h, accountIdB64, _) = try named("alice", check: "same")
+        var written: [String] = []
+        h.repository.storeOwnUsername = { name in
+            written.append(name)
+            return true
+        }
+        var renamed: [(SessionAccount, Data?)] = []
+        h.repository.onUsernameRenamed = { renamed.append(($0, $1)) }
+
+        // An account from before the register: seeded once from the marker,
+        // after auth confirmed the name's handle in this session.
+        await h.repository.ownUsernameRegisterChanged(nil)
+        for _ in 0..<200 where written.isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(written, ["alice"])
+        await h.repository.ownUsernameRegisterChanged("alice")
+        XCTAssertEqual(written, ["alice"], "the same name is nothing")
+        XCTAssertTrue(renamed.isEmpty)
+
+        // A newer name written on another device: the marker, the session
+        // and what derives from the name follow.
+        await h.repository.ownUsernameRegisterChanged("alice_b")
+        XCTAssertEqual(h.store.load(), PersistedSession(accountIdB64: accountIdB64, username: "alice_b"))
+        XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice_b")))
+        XCTAssertEqual(renamed.count, 1)
+        XCTAssertEqual(renamed.first?.0.username, "alice_b")
+        XCTAssertNil(renamed.first?.1, "the certificate is fetched again")
+        // The handle state is known for this session: no check, no bind for the new name.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(handleRequests(h).count, 0)
+        XCTAssertEqual(
+            NameRouteStub.requests(h.host).filter { $0.path == "/auth/login-handle/check" }.count, 1,
+            "only the landing's check for the old name")
+        AccountProtectionStore().clear(accountIdB64: accountIdB64)
+    }
+
+    /// The account was renamed elsewhere and this device has not heard yet:
+    /// auth answers `other`, and the empty register is never seeded with
+    /// the old name.
+    func testAStaleDeviceDoesNotSeedTheRegister() async throws {
+        let (h, accountIdB64, _) = try named("alice", check: "other")
+        var written: [String] = []
+        h.repository.storeOwnUsername = { name in
+            written.append(name)
+            return true
+        }
+        await h.repository.ownUsernameRegisterChanged(nil)
+        for _ in 0..<200 where NameRouteStub.requests(h.host).filter({ $0.path == "/auth/login-handle/check" }).isEmpty {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        await h.repository.ownUsernameRegisterChanged(nil)
+        XCTAssertEqual(written, [], "a stale name is never written")
+        XCTAssertEqual(handleRequests(h).count, 0)
+        // The register arrives with the new name: adopted.
+        await h.repository.ownUsernameRegisterChanged("alice_b")
+        XCTAssertEqual(h.store.load()?.username, "alice_b")
+        XCTAssertEqual(written, [])
+        AccountProtectionStore().clear(accountIdB64: accountIdB64)
+    }
+
+    func testARenameMovesTheHandleThenDiscoveryThenTheMarkerAndTheRegister() async throws {
+        let (h, accountIdB64, accountBytes) = try named("alice")
+        h.reset.loginAccount = accountBytes
+        var written: [String] = []
+        var registerLoaded = false
+        h.repository.storeOwnUsername = { name in
+            guard registerLoaded else { return false }
+            written.append(name)
+            return true
+        }
+        var renamed: [(SessionAccount, Data?)] = []
+        h.repository.onUsernameRenamed = { renamed.append(($0, $1)) }
+
+        // Without a live proof nothing is sent.
+        do {
+            _ = try await h.repository.renameUsername(to: "alice_b")
+            XCTFail("a rename needs the proof")
+        } catch {
+            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
+        }
+        XCTAssertEqual(handleRequests(h).count, 0)
+
+        try await h.repository.proveWithPassword(password: Data("correct horse".utf8))
+        let new = try await h.repository.renameUsername(to: " @Alice_B ")
+
+        XCTAssertEqual(new, "alice_b")
+        // b. The handle, with the grant and the previous handle; no
+        //    recovery email (the account has none).
+        let put = try XCTUnwrap(handleRequests(h).first)
+        XCTAssertEqual(put.method, "PUT")
+        XCTAssertEqual(put.json["handle"] as? String, base64UrlEncodeNoPad(try loginHandle(username: "alice_b")))
+        XCTAssertEqual(
+            put.json["previous_handle"] as? String, base64UrlEncodeNoPad(try loginHandle(username: "alice")))
+        XCTAssertEqual(put.json["fresh_grant"] as? String, "grant-1")
+        XCTAssertNil(put.json["recovery_email"])
+        // c. Discovery, after the handle.
+        XCTAssertTrue(h.directory.events.contains("replace:alice_b"))
+        // d. The marker, the session, the register, the stamp; the record is gone.
+        XCTAssertEqual(h.store.load()?.username, "alice_b")
+        XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice_b")))
+        XCTAssertEqual(written, [], "the synced state was not loaded: the register is owed")
+        XCTAssertNil(AccountProtectionStore().renameOwed(accountIdB64: accountIdB64))
+        XCTAssertNotNil(h.repository.renameTooSoonUntilMs, "the next change is 30 days away")
+        // e. The re-publish gets the certificate the replace answered.
+        XCTAssertEqual(renamed.first?.0.username, "alice_b")
+        XCTAssertEqual(renamed.first?.1, Data(repeating: 0xCE, count: 153))
+        // The register still holds the OLD name (this device's write is
+        // owed): it is not adopted back, and the owed write is made.
+        await h.repository.ownUsernameRegisterChanged("alice")
+        XCTAssertEqual(h.store.load()?.username, "alice_b")
+        registerLoaded = true
+        await h.repository.ownUsernameRegisterChanged("alice")
+        XCTAssertEqual(written, ["alice_b"])
+        XCTAssertEqual(h.store.load()?.username, "alice_b")
+        await h.repository.ownUsernameRegisterChanged("alice_b")
+        XCTAssertNil(AccountProtectionStore().usernameRegisterOwed(accountIdB64: accountIdB64))
+
+        // Too soon by the device's own stamp: nothing is sent.
+        let before = handleRequests(h).count
+        do {
+            _ = try await h.repository.renameUsername(to: "alice_c")
+            XCTFail("one rename per 30 days")
+        } catch let refused as UsernameRenameFailed {
+            if case .tooSoon = refused.failure {} else { XCTFail("\(refused.failure)") }
+        }
+        XCTAssertEqual(handleRequests(h).count, before)
+        AccountProtectionStore().clear(accountIdB64: accountIdB64)
+    }
+
+    func testATakenNameAtDiscoveryBindsTheOldHandleBack() async throws {
+        let (h, accountIdB64, accountBytes) = try named("alice")
+        h.reset.loginAccount = accountBytes
+        h.directory.replaceError = DiscoveryClientError.http(
+            status: 409, endpoint: "/discovery/username/replace", body: #"{"error":"username-taken"}"#)
+        try await h.repository.proveWithPassword(password: Data("correct horse".utf8))
+
+        do {
+            _ = try await h.repository.renameUsername(to: "bob")
+            XCTFail("a taken name is not a rename")
+        } catch let refused as UsernameRenameFailed {
+            XCTAssertEqual(refused.failure, .taken)
+        }
+        // The new handle, then the old one back.
+        let puts = handleRequests(h)
+        XCTAssertEqual(puts.count, 2)
+        XCTAssertEqual(puts[1].json["handle"] as? String, base64UrlEncodeNoPad(try loginHandle(username: "alice")))
+        XCTAssertEqual(
+            puts[1].json["previous_handle"] as? String, base64UrlEncodeNoPad(try loginHandle(username: "bob")))
+        // Nothing local moved, and nothing is owed.
+        XCTAssertEqual(h.store.load()?.username, "alice")
+        XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+        XCTAssertNil(AccountProtectionStore().renameOwed(accountIdB64: accountIdB64))
+        XCTAssertNil(h.repository.renameTooSoonUntilMs)
+
+        // The server's "too soon" names the date.
+        h.directory.replaceError = DiscoveryClientError.http(
+            status: 429, endpoint: "/discovery/username/replace",
+            body: #"{"error":"rename-too-soon","retry_after_secs":86400}"#)
+        do {
+            _ = try await h.repository.renameUsername(to: "bob")
+            XCTFail("too soon")
+        } catch let refused as UsernameRenameFailed {
+            XCTAssertEqual(refused.failure, .tooSoon(untilMs: h.clock.nowMs + 86_400_000))
+        }
+        AccountProtectionStore().clear(accountIdB64: accountIdB64)
+    }
+
+    func testARenameTheHandleRefusesChangesNothing() async throws {
+        let (h, accountIdB64, accountBytes) = try named("alice", put: { _ in (409, #"{"error":"handle-taken"}"#) })
+        h.reset.loginAccount = accountBytes
+        try await h.repository.proveWithPassword(password: Data("correct horse".utf8))
+        do {
+            _ = try await h.repository.renameUsername(to: "bob")
+            XCTFail("taken at auth")
+        } catch let refused as UsernameRenameFailed {
+            XCTAssertEqual(refused.failure, .taken)
+        }
+        XCTAssertFalse(h.directory.events.contains("replace:bob"), "discovery is not asked")
+        XCTAssertNil(AccountProtectionStore().renameOwed(accountIdB64: accountIdB64))
+        XCTAssertEqual(h.store.load()?.username, "alice")
+    }
+
+    func testARenameInterruptedAfterTheHandleIsFinishedAtTheNextLanding() async throws {
+        // The app closed between the handle and discovery: the record says so.
+        let (h, accountIdB64, _) = try named("alice", check: "other")
+        var written: [String] = []
+        h.repository.storeOwnUsername = { name in
+            written.append(name)
+            return true
+        }
+        AccountProtectionStore().setRenameOwed(
+            UsernameRename.Record(oldName: "alice", newName: "alice_b", phase: .bound, startedAtMs: 1),
+            accountIdB64: accountIdB64)
+
+        await h.repository.resumeOwedRename()
+
+        XCTAssertTrue(h.directory.events.contains("replace:alice_b"))
+        XCTAssertEqual(h.store.load()?.username, "alice_b")
+        XCTAssertEqual(written, ["alice_b"])
+        XCTAssertNil(AccountProtectionStore().renameOwed(accountIdB64: accountIdB64))
+        XCTAssertEqual(handleRequests(h).count, 0, "no bind: the handle was already the new one")
+        AccountProtectionStore().clear(accountIdB64: accountIdB64)
     }
 
     // MARK: - Show recovery phrase while a replace is owed

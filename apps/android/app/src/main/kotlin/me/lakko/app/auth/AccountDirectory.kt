@@ -46,7 +46,28 @@ internal interface AccountDirectory {
      * @throws DiscoveryHttpError with `status == 409` when the name is taken.
      */
     suspend fun registerUsername(sessionToken: String, accountId: ByteArray, username: String): String
+
+    /**
+     * ADR-0068: replace the account's current name with [username]
+     * (`POST /discovery/username/replace`); the claimed name and the new
+     * certificate. `409 username-taken` / `no-username`, `429 rename-too-soon`.
+     */
+    suspend fun replaceUsername(sessionToken: String, accountId: ByteArray, username: String): ClaimedUsername =
+        throw UnsupportedOperationException("this directory cannot rename")
+
+    /**
+     * [registerUsername], also handing back the username certificate the
+     * register call returned (ADR-0060 section 5), when it returned one.
+     */
+    suspend fun registerUsernameWithCertificate(
+        sessionToken: String,
+        accountId: ByteArray,
+        username: String,
+    ): ClaimedUsername = ClaimedUsername(registerUsername(sessionToken, accountId, username), null)
 }
+
+/** A claimed name and the certificate discovery issued for it. */
+internal class ClaimedUsername(val username: String, val certificate: ByteArray?)
 
 /** [AccountDirectory] over a short-lived [DiscoveryClient] per call. */
 internal class DiscoveryAccountDirectory(
@@ -56,7 +77,13 @@ internal class DiscoveryAccountDirectory(
         sessionToken: String,
         accountId: ByteArray,
         username: String,
-    ): String = clientFactory().use { client ->
+    ): String = registerUsernameWithCertificate(sessionToken, accountId, username).username
+
+    override suspend fun registerUsernameWithCertificate(
+        sessionToken: String,
+        accountId: ByteArray,
+        username: String,
+    ): ClaimedUsername = clientFactory().use { client ->
         // A fresh client per call, so the bearer is never left attached to a
         // client some other flow reuses.
         client.setSessionToken(sessionToken)
@@ -69,7 +96,21 @@ internal class DiscoveryAccountDirectory(
                 bearer = sessionToken,
             ),
         )
-        client.registerUsername(accountId, username).normalisedUsername
+        val result = client.registerUsername(accountId, username)
+        ClaimedUsername(result.normalisedUsername, result.usernameCertificate)
+    }
+
+    override suspend fun replaceUsername(
+        sessionToken: String,
+        accountId: ByteArray,
+        username: String,
+    ): ClaimedUsername = clientFactory().use { client ->
+        client.setSessionToken(sessionToken)
+        client.useTokenSession(
+            me.lakko.app.anon.AnonSession(accountKey = base64Encode(accountId), bearer = sessionToken),
+        )
+        val result = client.replaceUsername(accountId, username)
+        ClaimedUsername(result.normalisedUsername, result.usernameCertificate)
     }
 }
 
@@ -107,14 +148,27 @@ internal suspend fun claimUsernameAtSignup(
     sessionToken: String,
     accountId: ByteArray,
     username: String,
-): String {
+): String = claimUsername(directory, binder, handles, sessionToken, accountId, username).username
+
+/**
+ * The claim itself, in the order above, keeping the certificate the register
+ * call returned. Also what a guest runs later ("Choose a username").
+ */
+internal suspend fun claimUsername(
+    directory: AccountDirectory,
+    binder: LoginHandleBinder,
+    handles: LoginHandleSource,
+    sessionToken: String,
+    accountId: ByteArray,
+    username: String,
+): ClaimedUsername {
     val trimmed = username.trim()
     val named = namedHandleOrRefuse(handles, trimmed)
     if (binder.bind(sessionToken, named.handle) == LoginHandleBinding.Taken) {
         throw AuthClientArgError(takenCopy(trimmed), me.lakko.app.l10n.UiText("auth.signup.error.username_taken"))
     }
     try {
-        return directory.registerUsername(sessionToken, accountId, trimmed)
+        return directory.registerUsernameWithCertificate(sessionToken, accountId, trimmed)
     } catch (err: Throwable) {
         // The name did not land at discovery: give the handle back. A failed
         // release must not mask the reason the claim failed.
@@ -123,7 +177,10 @@ internal suspend fun claimUsernameAtSignup(
         } catch (release: Throwable) {
             err.addSuppressed(release)
         }
-        if (err is DiscoveryHttpError && err.status == HTTP_CONFLICT) {
+        // ADR-0068: the 409 body is JSON now. `username-taken` (or the
+        // older bodiless 409) is the taken line; `username-already-set`
+        // (the account already holds a name) is not, and propagates.
+        if (isUsernameTaken(err)) {
             throw AuthClientArgError(takenCopy(trimmed), me.lakko.app.l10n.UiText("auth.signup.error.username_taken"))
         }
         throw err
@@ -132,4 +189,3 @@ internal suspend fun claimUsernameAtSignup(
 
 private fun takenCopy(trimmed: String): String = "username @$trimmed is already taken — pick another"
 
-private const val HTTP_CONFLICT = 409

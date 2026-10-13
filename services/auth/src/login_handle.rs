@@ -20,7 +20,15 @@
 //! leak without the pepper is not a dictionary over usernames.
 //!
 //! - **`PUT /auth/login-handle`** — bearer. Binds the caller's account to a
-//!   handle, replacing its previous one (one per account). A handle another
+//!   handle, replacing its previous one (one per account). Since ADR-0068 a
+//!   bind that CHANGES the handle (the account already holds another) needs
+//!   `fresh_grant` (`403 fresh-auth-required`, before any counter); a first
+//!   bind and a re-bind of the held handle do not. With `recovery_email`
+//!   (and `previous_handle`) a change moves the recovery email to the new
+//!   handle instead of dropping it (`403 address-mismatch`, `409
+//!   handle-mismatch`; either refuses the whole bind).
+//! - **`POST /auth/login-handle/check {handle}`** — bearer. `{"state":
+//!   "same" | "other" | "none"}` for the session's own account. A handle another
 //!   account holds is `409 {"error":"handle-taken"}` and changes nothing.
 //!   That answer is an existence oracle clients need (the claim order), so
 //!   it is rationed rather than removed: a per-account counter charged on
@@ -203,6 +211,21 @@ pub(crate) async fn resolve(
     })
 }
 
+/// What a bind may do when it turns out to CHANGE the account's handle
+/// (ADR-0068 section 2). Decided by the caller before the transaction; the
+/// transaction applies it to what it finds under the account row's lock.
+#[derive(Default)]
+pub(crate) struct ChangeTerms {
+    /// The request carried a fresh-auth grant that verified. Without it a
+    /// change is refused ([`BindOutcome::GrantRequired`]).
+    pub(crate) grant: bool,
+    /// `handle_key` of the handle the client says the account holds now
+    /// (`previous_handle`). Checked against the stored one before a re-key.
+    pub(crate) previous_key: Option<[u8; 32]>,
+    /// Move the recovery email to the new handle instead of dropping it.
+    pub(crate) rekey: Option<crate::recovery_email::RekeyPlan>,
+}
+
 /// How a bind ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BindOutcome {
@@ -218,6 +241,15 @@ pub(crate) enum BindOutcome {
         /// Seconds until a change is admitted (>= 1).
         retry_after_secs: u64,
     },
+    /// The bind would change the account's handle and carried no verified
+    /// fresh-auth grant; nothing changed (`403 fresh-auth-required`).
+    GrantRequired,
+    /// A re-key was asked for and `previous_handle` is not the handle the
+    /// account holds; nothing changed (`409 handle-mismatch`).
+    PreviousHandleMismatch,
+    /// A re-key was asked for and the address is not the stored one's;
+    /// nothing changed (`403 address-mismatch`).
+    AddressMismatch,
 }
 
 /// Attempts at a bind that lost a race: a concurrent bind of the same
@@ -285,10 +317,11 @@ pub(crate) async fn bind(
     account_id: &[u8; ACCOUNT_ID_LEN],
     handle: &[u8; HANDLE_LEN],
     min_interval_secs: u32,
+    terms: &ChangeTerms,
 ) -> Result<BindOutcome, sqlx::Error> {
     let key = handle_key(pepper, handle);
     for _ in 0..BIND_ATTEMPTS {
-        match bind_once(pool, account_id, &key, min_interval_secs).await {
+        match bind_once(pool, account_id, &key, min_interval_secs, terms).await {
             Ok(outcome) => return Ok(outcome),
             Err(AttemptError::AccountRace) => {
                 tracing::debug!("login handle bind raced a bind of the same account; retrying");
@@ -322,6 +355,7 @@ async fn bind_once(
     account_id: &[u8; ACCOUNT_ID_LEN],
     key: &[u8; 32],
     min_interval_secs: u32,
+    terms: &ChangeTerms,
 ) -> Result<BindOutcome, AttemptError> {
     let mut tx = pool.begin().await?;
     // Serialise this account's binds: the second waits here until the first
@@ -343,6 +377,14 @@ async fn bind_once(
     if current.as_deref() == Some(key.as_slice()) {
         tx.commit().await?;
         return Ok(BindOutcome::Unchanged);
+    }
+    // ADR-0068 section 2: a CHANGE of handle (the account holds another one)
+    // needs a fresh-auth grant: a session alone must not move the name the
+    // account is signed into by. Decided here, under the lock, on the handle
+    // the account holds NOW; a first bind needs none. Before the interval
+    // check, so restoring the previous handle needs it too.
+    if current.is_some() && !terms.grant {
+        return Ok(BindOutcome::GrantRequired);
     }
     let change: Option<(Option<i64>, Option<Vec<u8>>)> = sqlx::query_as(
         "SELECT CAST(? - TIMESTAMPDIFF(SECOND, last_changed_at, NOW(3)) AS SIGNED), \
@@ -388,13 +430,29 @@ async fn bind_once(
         },
         Err(e) => return Err(e.into()),
     }
-    if current.is_some() {
+    if let Some(current) = current.as_deref() {
         // ADR-0067 section 6: the recovery email was made from the old name
         // (the server's `email_key` and the client's vault key both take the
-        // handle), so a change of handle turns it off in this transaction.
-        // Nothing here inserts into those tables, so the deletes' gap locks
-        // cannot deadlock two accounts' binds.
-        crate::recovery_email::drop_for_handle_change(&mut tx, account_id).await?;
+        // handle), so a change of handle turns it off in this transaction,
+        // unless the bind carries the confirmed address (ADR-0068 section
+        // 2): then the key is moved to the new handle here, with no letter.
+        match terms.rekey.as_ref() {
+            None => crate::recovery_email::drop_for_handle_change(&mut tx, account_id).await?,
+            Some(plan) => {
+                // The server stores only the keyed handle, so the client
+                // names the old one; it must be the one the account holds.
+                if terms.previous_key.as_ref().map(<[u8; 32]>::as_slice) != Some(current) {
+                    return Ok(BindOutcome::PreviousHandleMismatch);
+                }
+                let outcome =
+                    crate::recovery_email::rekey_for_handle_change(&mut tx, account_id, plan)
+                        .await?;
+                if outcome == crate::recovery_email::RekeyOutcome::AddressMismatch {
+                    // Rolled back on drop: the handle written above too.
+                    return Ok(BindOutcome::AddressMismatch);
+                }
+            },
+        }
     }
     sqlx::query(
         "INSERT INTO login_handle_changes (account_id, last_changed_at, previous_handle_key) \
@@ -415,6 +473,30 @@ async fn bind_once(
 pub(crate) struct PutReq {
     /// The 32-byte handle, base64url without padding.
     pub handle: String,
+    /// The `k1` fresh-auth grant. Needed only when the bind CHANGES the
+    /// account's handle (ADR-0068 section 2).
+    #[serde(default)]
+    pub fresh_grant: Option<String>,
+    /// The handle the account holds now, base64url without padding. Needed
+    /// with `recovery_email`: the server stores only a keyed hash of the
+    /// handle and cannot recompute the stored `email_key` without it.
+    #[serde(default)]
+    pub previous_handle: Option<String>,
+    /// Keep the recovery email across the change by re-keying it to the new
+    /// handle. Absent: a change drops it.
+    #[serde(default)]
+    pub recovery_email: Option<crate::recovery_email::RekeyReq>,
+}
+
+/// `handle_key` of the handle `account_id` holds, if any.
+async fn current_key(
+    pool: &MySqlPool,
+    account_id: &[u8; ACCOUNT_ID_LEN],
+) -> Result<Option<Vec<u8>>, sqlx::Error> {
+    sqlx::query_scalar("SELECT handle_key FROM login_handles WHERE account_id = ?")
+        .bind(account_id.as_slice())
+        .fetch_optional(pool)
+        .await
 }
 
 /// `PUT /auth/login-handle` — bind the caller's account to a handle.
@@ -434,6 +516,38 @@ pub(crate) async fn put(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let pepper = pepper(&state)?;
     let handle = decode_handle(&req.handle)?;
+    let previous = req
+        .previous_handle
+        .as_deref()
+        .map(decode_handle)
+        .transpose()?;
+    let rekey = req
+        .recovery_email
+        .as_ref()
+        .map(|r| crate::recovery_email::rekey_plan(&state, previous.as_ref(), &handle, r))
+        .transpose()?;
+
+    // ADR-0068 section 2: a change needs the grant, and the refusal comes
+    // before any counter, so a session without one spends none of the
+    // owner's bind budget. Whether this IS a change is read here and decided
+    // again under the row lock in `bind_once`.
+    let held = current_key(&state.db, &auth.0)
+        .await
+        .map_err(ApiError::Db)?;
+    let changes = held
+        .as_deref()
+        .is_some_and(|held| held != handle_key(&pepper, &handle).as_slice());
+    let grant = if changes || req.fresh_grant.is_some() {
+        match crate::session::require_fresh_grant(&state, &auth.0, req.fresh_grant.as_deref()).await
+        {
+            Ok(_) => true,
+            Err(ApiError::FreshAuthRequired) if !changes => false,
+            Err(e) => return Err(e),
+        }
+    } else {
+        false
+    };
+
     crate::limits::charge_name(
         &state.db,
         &state.limits,
@@ -441,18 +555,37 @@ pub(crate) async fn put(
         &auth.0,
     )
     .await?;
+    let terms = ChangeTerms {
+        grant,
+        previous_key: previous.as_ref().map(|p| handle_key(&pepper, p)),
+        rekey,
+    };
     let outcome = bind(
         &state.db,
         &pepper,
         &auth.0,
         &handle,
         state.limits.handle_change_min_interval_secs(),
+        &terms,
     )
     .await
     .map_err(ApiError::Db)?;
     match outcome {
         BindOutcome::Bound | BindOutcome::Unchanged => {},
         BindOutcome::Taken => return Err(ApiError::HandleTaken),
+        BindOutcome::GrantRequired => return Err(ApiError::FreshAuthRequired),
+        BindOutcome::PreviousHandleMismatch => {
+            return Err(ApiError::Coded(
+                axum::http::StatusCode::CONFLICT,
+                "handle-mismatch",
+            ));
+        },
+        BindOutcome::AddressMismatch => {
+            return Err(ApiError::Coded(
+                axum::http::StatusCode::FORBIDDEN,
+                "address-mismatch",
+            ));
+        },
         BindOutcome::TooSoon { retry_after_secs } => {
             return Err(ApiError::Limit(crate::limits::LimitError::Limited {
                 code: crate::limits::CODE_HANDLE_BIND_LIMITED,
@@ -462,6 +595,57 @@ pub(crate) async fn put(
     }
     tracing::info!(account_id = %URL_SAFE_NO_PAD.encode(auth.0), "login handle bound");
     Ok(Json(serde_json::json!({ "bound": true })))
+}
+
+/// `POST /auth/login-handle/check` body.
+#[derive(Deserialize)]
+pub(crate) struct CheckReq {
+    /// The 32-byte handle the device holds, base64url without padding.
+    pub handle: String,
+}
+
+/// `POST /auth/login-handle/check {handle}` — bearer (ADR-0068 section 2).
+/// How the handle a device holds relates to the one its account is bound to:
+///
+/// - `{"state":"same"}`: it is the bound one; nothing to do;
+/// - `{"state":"other"}`: the account is bound to ANOTHER handle (it was
+///   renamed on another device): bind nothing and wait for the name from the
+///   account's other devices;
+/// - `{"state":"none"}`: the account has no handle; the device may bind.
+///
+/// It compares with the session's own account only, so it says nothing about
+/// any other account. One primary-key read, counted per account by
+/// [`crate::limits::Scope::HandleCheck`] (its own counter: every device asks
+/// at every landing, and the bind's budget is five a day).
+///
+/// # Errors
+///
+/// `503 login-by-name-disabled`, [`ApiError::BadInput`], [`ApiError::Limit`],
+/// [`ApiError::Db`].
+#[axum::debug_handler]
+pub(crate) async fn check_handle(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedAccount>,
+    Json(req): Json<CheckReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let pepper = pepper(&state)?;
+    let handle = decode_handle(&req.handle)?;
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::HandleCheck,
+        &auth.0,
+    )
+    .await?;
+    let held = current_key(&state.db, &auth.0)
+        .await
+        .map_err(ApiError::Db)?;
+    let state_name = match held {
+        None => "none",
+        Some(held) if held == handle_key(&pepper, &handle).as_slice() => "same",
+        Some(_) => "other",
+    };
+    Ok(Json(serde_json::json!({ "state": state_name })))
 }
 
 /// `DELETE /auth/login-handle` — remove the caller's handle.
@@ -539,9 +723,19 @@ pub(crate) async fn bind_for_test(
     handle: &[u8; HANDLE_LEN],
 ) {
     assert_eq!(
-        bind(pool, &TEST_PEPPER, account_id, handle, 0)
-            .await
-            .expect("bind handle"),
+        bind(
+            pool,
+            &TEST_PEPPER,
+            account_id,
+            handle,
+            0,
+            &ChangeTerms {
+                grant: true,
+                ..ChangeTerms::default()
+            },
+        )
+        .await
+        .expect("bind handle"),
         BindOutcome::Bound
     );
 }
@@ -636,7 +830,11 @@ mod bind_concurrency_tests {
                 tasks.push(tokio::spawn(async move {
                     let (handle, _) = random_handle();
                     let key = handle_key(&TEST_PEPPER, &handle);
-                    match bind_once(&pool, &id, &key, 0).await {
+                    let terms = ChangeTerms {
+                        grant: true,
+                        ..ChangeTerms::default()
+                    };
+                    match bind_once(&pool, &id, &key, 0, &terms).await {
                         Ok(outcome) => Ok(outcome),
                         Err(AttemptError::Deadlock) => Err("deadlock".to_string()),
                         Err(AttemptError::AccountRace) => Err("account race".to_string()),

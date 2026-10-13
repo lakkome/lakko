@@ -546,6 +546,15 @@ export type DeviceRequestResultRequest =
  *  one). `409 {"error":"handle-taken"}` when another account holds it. */
 export interface LoginHandlePutRequest {
   handle: string;
+  /** ADR-0068: a bind that CHANGES the account's handle needs the `k1`
+   *  fresh-auth grant; a first bind or a re-bind of the held handle none. */
+  fresh_grant?: string;
+  /** The handle the account holds now (base64url, no pad), on a change. */
+  previous_handle?: string;
+  /** Re-key the stored recovery email to the new handle. `vault_salt` and
+   *  `sealed_entropy` (standard base64) only when no phrase is saved. Without
+   *  this field a change drops the recovery email. */
+  recovery_email?: { address: string; vault_salt?: string; sealed_entropy?: string };
 }
 
 /** `PUT /auth/login-handle` response body. */

@@ -1356,6 +1356,45 @@ public final class AuthClient {
         )
     }
 
+    /// `PUT /auth/login-handle` that CHANGES the account's handle (ADR-0068
+    /// section 2): needs the fresh-auth grant and names the handle held now.
+    /// With `recoveryEmail` the server re-keys the stored recovery email to
+    /// the new handle (and replaces the vault when one is sent) in the same
+    /// transaction; without it a change drops the recovery email.
+    ///
+    /// Throws `403 fresh-auth-required` / `address-mismatch`, `409
+    /// handle-taken` / `handle-mismatch`, `429 handle-bind-limited`.
+    public func changeLoginHandle(
+        handle: Data, previousHandle: Data, freshGrant: String,
+        recoveryEmail: LoginHandleRecoveryEmail?, sessionToken: String
+    ) async throws {
+        try requireHandle(handle)
+        try requireHandle(previousHandle)
+        let _: LoginHandleBindResponse = try await send(
+            method: "PUT",
+            endpoint: "/auth/login-handle",
+            body: LoginHandleBindRequest(
+                handle: base64UrlEncodeNoPad(handle), freshGrant: freshGrant,
+                previousHandle: base64UrlEncodeNoPad(previousHandle), recoveryEmail: recoveryEmail),
+            bearer: sessionToken
+        )
+    }
+
+    /// `POST /auth/login-handle/check` - what the account's bound handle is
+    /// relative to `handle` (``LoginHandleState``).
+    public func checkLoginHandle(handle: Data, sessionToken: String) async throws -> LoginHandleState {
+        try requireHandle(handle)
+        let response: LoginHandleCheckResponse = try await post(
+            endpoint: "/auth/login-handle/check",
+            body: LoginHandleCheckRequest(handle: base64UrlEncodeNoPad(handle)),
+            bearer: sessionToken)
+        guard let state = LoginHandleState(rawValue: response.state) else {
+            throw AuthClientError.http(
+                status: 200, endpoint: "/auth/login-handle/check", body: "unknown state in response")
+        }
+        return state
+    }
+
     /// `DELETE /auth/login-handle` - remove the signed-in account's handle.
     /// Returns whether one was removed.
     @discardableResult

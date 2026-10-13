@@ -34,6 +34,12 @@ protocol AccountDirectory {
         sessionToken: String
     ) async throws -> RegisterResult
 
+    /// `POST /discovery/username/replace` (ADR-0068): retire the account's
+    /// current name and make `username` its name.
+    func replaceUsername(
+        accountId: Data, username: String, sessionToken: String
+    ) async throws -> ReplacedUsername
+
     /// Upsert the account's identity bundle (`POST /discovery/identity`,
     /// session-token gated). `keyResetAttest` is the ADR-0065 key-reset
     /// attestation on the upload that installs reset keys, `nil` otherwise.
@@ -82,6 +88,15 @@ extension AccountDirectory {
 /// The production directory — a fresh ``DiscoveryClient`` per call, carrying
 /// the session token only where the endpoint needs it.
 struct DiscoveryAccountDirectory: AccountDirectory {
+    func replaceUsername(
+        accountId: Data, username: String, sessionToken: String
+    ) async throws -> ReplacedUsername {
+        let replaced = try await DiscoveryClient(sessionToken: sessionToken)
+            .replaceUsername(accountId: accountId, username: username)
+        return ReplacedUsername(
+            normalisedUsername: replaced.normalisedUsername, certificate: replaced.certificate)
+    }
+
     func registerUsername(
         accountId: Data,
         username: String,
@@ -129,6 +144,23 @@ struct DiscoveryAccountDirectory: AccountDirectory {
             genesisAttest: nil,
             keyResetAttest: keyResetAttest
         )
+    }
+}
+
+/// What a rename's discovery step answers.
+struct ReplacedUsername: Equatable {
+    let normalisedUsername: String
+    /// The new name's certificate, when the server sent one.
+    let certificate: Data?
+}
+
+extension AccountDirectory {
+    /// `POST /discovery/username/replace` (ADR-0068). A directory that does
+    /// not implement it refuses: a test double scripts its own.
+    func replaceUsername(
+        accountId: Data, username: String, sessionToken: String
+    ) async throws -> ReplacedUsername {
+        throw DiscoveryClientError.argument("username replace is not wired")
     }
 }
 

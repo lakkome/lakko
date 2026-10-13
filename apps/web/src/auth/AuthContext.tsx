@@ -303,6 +303,18 @@ import {
   newWordsShown,
   setPhraseProtected,
 } from "./protect/account-protection";
+import {
+  clearFirstPasswordOwed,
+  isFirstPasswordOwed,
+  markFirstPasswordOwed,
+  usernameClaimOffered,
+} from "./username-claim";
+import {
+  registerUsername,
+  rememberUsername,
+  usernameRegisterAction,
+  usernameWritePending,
+} from "./username-register";
 import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { KeyedError } from "../l10n/keyed-error";
@@ -627,6 +639,29 @@ export interface AuthApi {
   /** The person chose on the "Protect your account" step (an email was
    *  added, a phrase is being saved, or "Continue without"). */
   finishProtectStep(): void;
+  /** A guest account chooses its username (ADR-0067 pass A, part 2): the
+   *  sign-up's claim, run later. Binds the login handle at auth, registers
+   *  the name at discovery (releasing the handle again when that fails),
+   *  saves the name in the local account marker and in the live session,
+   *  and marks the account's first password as owed, which is what lets
+   *  `replacePassword` run once without a proof. Only for a signed-in
+   *  account that has no username. Throws `UsernameTakenError`, or what the
+   *  bind or the register threw. Resolves the canonical name and the
+   *  username certificate the register call returned. */
+  claimGuestUsername(
+    username: string,
+  ): Promise<{ readonly username: string; readonly certificate: Uint8Array | null }>;
+  /** ADR-0068: the account's username changed on THIS device (the rename's
+   *  server steps are done): the local marker, the live session, the handle
+   *  marked known for this session, and the own-username register, which
+   *  carries the name to the account's other devices. */
+  applyRenamedUsername(username: string): Promise<void>;
+  /** Whether the signed-in account's FIRST password is still owed (a guest
+   *  whose name was saved and whose password step did not finish). */
+  firstPasswordOwed(): boolean;
+  /** Offer the "Protect your account" step once (after a guest chose a
+   *  username: it never saw the step). */
+  offerProtectStep(): void;
   /** Land the session `POST /recovery-email/recover/password/finish`
    *  answered (ADR-0067 section 7, password mode): the password was already
    *  replaced by the mailed code, so no new-password step is owed and no
@@ -934,7 +969,13 @@ export interface AuthApi {
      *  asks nothing but the new password, since this device holds the keys
      *  and the person was just told someone else changed or used the
      *  account's password. */
-    options?: { readonly afterAccountNotice?: boolean },
+    options?: {
+      readonly afterAccountNotice?: boolean;
+      /** A guest that just chose a username sets its FIRST password: there
+       *  is no password to prove. Honoured only while the account's
+       *  first-password marker is set (`username-claim.ts`). */
+      readonly firstPassword?: boolean;
+    },
   ): Promise<void>;
   /** ADR-0018 factor (a), path (a) — finish the
    *  `needs-recovery-phrase` state with a seed transferred from
@@ -1507,6 +1548,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // 409, a 503 or a network error changes nothing for the user.
   const loginHandleSync = createLoginHandleSync({
     handleFor: loginHandleFor,
+    check: (token, handle) => client.checkLoginHandle(token, handle),
     bind: (token, handle) => client.bindLoginHandle(token, handle),
   });
   /** The re-bind a sign-in by name runs, recorded so the effect does not
@@ -1544,7 +1586,56 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     const s = state();
     const secrets = identitySecrets();
     if (s.kind !== "session" || secrets === null) return;
-    void loginHandleSync.ensure(secrets.sessionToken, s.account.username);
+    const accountIdB64 = s.account.accountId;
+    const username = s.account.username;
+    void loginHandleSync.ensure(secrets.sessionToken, username).then((outcome) => {
+      // The account holds the handle of this name: the name is current.
+      if (outcome === "same" || outcome === "bound") {
+        setConfirmedUsername({ accountIdB64, username });
+      }
+    });
+  });
+
+  // ADR-0068: the own-username register. A name auth confirmed, with an
+  // empty register, seeds it once; a register that names another name than
+  // the local marker is adopted (the account was renamed, or its name
+  // chosen, on another device).
+  const [confirmedUsername, setConfirmedUsername] = createSignal<{
+    readonly accountIdB64: string;
+    readonly username: string;
+  } | null>(null);
+  /** The name is the account's on this device from now on: the local
+   *  marker, the live session, and the handle marked known for this session
+   *  (nothing is bound: whoever changed the name bound it). */
+  async function applyOwnUsername(accountIdB64: string, username: string): Promise<void> {
+    const s = state();
+    if (s.kind !== "session" || s.account.accountId !== accountIdB64) return;
+    savePersisted({ v: 1, accountIdB64, username });
+    setConfirmedUsername({ accountIdB64, username });
+    setState({ kind: "session", account: { accountId: accountIdB64, username } });
+    try {
+      const token = sessionTokens.peek() ?? identitySecrets()?.sessionToken ?? null;
+      if (token !== null) loginHandleSync.markBound(token, (await loginHandleFor(username)).wire);
+    } catch {
+      // A name the rule refuses cannot be a registered name; nothing to mark.
+    }
+  }
+  createEffect(() => {
+    const s = state();
+    if (s.kind !== "session") return;
+    const accountIdB64 = s.account.accountId;
+    const confirmed = confirmedUsername();
+    const action = usernameRegisterAction({
+      local: s.account.username,
+      register: registerUsername(accountIdB64),
+      writePending: usernameWritePending(accountIdB64),
+      localConfirmed:
+        confirmed !== null &&
+        confirmed.accountIdB64 === accountIdB64 &&
+        confirmed.username === s.account.username,
+    });
+    if (action.kind === "seed") rememberUsername(accountIdB64, action.username);
+    else if (action.kind === "adopt") void applyOwnUsername(accountIdB64, action.username);
   });
 
   // Keep the encrypted backup current. Until this ran, the blob was written
@@ -4531,6 +4622,57 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       setSignupPhrase(null);
     },
+    async claimGuestUsername(username) {
+      const s = state();
+      const secrets = identitySecrets();
+      if (s.kind !== "session" || secrets === null || !usernameClaimOffered(s.account.username)) {
+        throw new KeyedError("common.error.session_not_ready");
+      }
+      const accountIdB64 = s.account.accountId;
+      const token = sessionTokens.peek() ?? secrets.sessionToken;
+      // The sign-up's order (ADR-0054 S5): the login handle at auth FIRST,
+      // then the name at discovery; a discovery failure releases the handle.
+      const handle = await loginHandleFor(username);
+      const reg = await claimUsername({
+        username,
+        bind: async () => {
+          await client.bindLoginHandle(token, handle.wire);
+          loginHandleSync.markBound(token, handle.wire);
+        },
+        register: () => discovery.registerUsername(secrets.accountId, username),
+        release: async () => {
+          await client.releaseLoginHandle(token);
+        },
+      });
+      // The name is the account's: the local marker, the first-password
+      // marker (before the state moves, so a reload in between retries only
+      // the password), then the live session.
+      savePersisted({ v: 1, accountIdB64, username: reg.normalisedUsername });
+      markFirstPasswordOwed(plainStorage(), accountIdB64);
+      setConfirmedUsername({ accountIdB64, username: reg.normalisedUsername });
+      rememberUsername(accountIdB64, reg.normalisedUsername);
+      setState({ kind: "session", account: { accountId: accountIdB64, username: reg.normalisedUsername } });
+      return { username: reg.normalisedUsername, certificate: reg.usernameCertificate };
+    },
+    async applyRenamedUsername(username) {
+      const s = state();
+      if (s.kind !== "session") throw new KeyedError("common.error.session_not_ready");
+      // The register first: the adoption rule never overrules a write of
+      // this device that is on its way.
+      rememberUsername(s.account.accountId, username);
+      await applyOwnUsername(s.account.accountId, username);
+    },
+    firstPasswordOwed() {
+      protectVersion();
+      const s = state();
+      return s.kind === "session" && isFirstPasswordOwed(plainStorage(), s.account.accountId);
+    },
+    offerProtectStep() {
+      const s = state();
+      if (s.kind !== "session") return;
+      markProtectStepOwed(plainStorage(), s.account.accountId);
+      setProtectVersion((v) => v + 1);
+    },
     protectStepOwed,
     finishProtectStep() {
       const s = state();
@@ -4807,6 +4949,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // a reload until the person chose.
       markProtectStepOwed(plainStorage(), accountIdB64);
       setProtectVersion((v) => v + 1);
+      // ADR-0068: the claimed name goes into the own-username register
+      // (applied when the synced state of the new account is loaded).
+      setConfirmedUsername({ accountIdB64, username: normalisedUsername });
+      rememberUsername(accountIdB64, normalisedUsername);
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: normalisedUsername },
@@ -5189,7 +5335,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // so the bare session would do. This client does not allow it: the
       // person proves the current password or a passkey, or checks three
       // words of the recovery phrase, first.
-      if (options?.afterAccountNotice !== true && !api.passwordChangeAllowed()) {
+      const ungated =
+        options?.afterAccountNotice === true ||
+        (options?.firstPassword === true && isFirstPasswordOwed(plainStorage(), s.account.accountId));
+      if (!ungated && !api.passwordChangeAllowed()) {
         throw new FreshAuthRequiredError();
       }
       const accountIdB64 = s.account.accountId;
@@ -5230,6 +5379,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           keyGeneration: result.session.keyGeneration,
         });
         setNewPasswordOwed(false);
+        // A guest's first password is set: the ungated change is over.
+        clearFirstPasswordOwed(plainStorage(), s.account.accountId);
+        setProtectVersion((v) => v + 1);
         // A new password ends what the old proof and the phrase check
         // stood for.
         freshGrants.clear();

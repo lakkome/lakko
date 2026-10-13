@@ -615,10 +615,61 @@ public struct TotpRecoverResponse: Codable, Equatable, SessionPairCarrying {
 public struct LoginHandleBindRequest: Codable, Equatable {
     /// base64url, no padding, of the 32-byte handle.
     public let handle: String
+    /// ADR-0068 — the fresh-auth grant: needed only when the bind CHANGES
+    /// the account's handle.
+    public var freshGrant: String?
+    /// The handle the account holds now (base64url, no padding), for a change.
+    public var previousHandle: String?
+    /// The recovery email carried from the previous handle to this one.
+    /// Absent: a change drops the recovery email.
+    public var recoveryEmail: LoginHandleRecoveryEmail?
 
-    public init(handle: String) {
+    public init(
+        handle: String, freshGrant: String? = nil, previousHandle: String? = nil,
+        recoveryEmail: LoginHandleRecoveryEmail? = nil
+    ) {
         self.handle = handle
+        self.freshGrant = freshGrant
+        self.previousHandle = previousHandle
+        self.recoveryEmail = recoveryEmail
     }
+
+    enum CodingKeys: String, CodingKey {
+        case handle
+        case freshGrant = "fresh_grant"
+        case previousHandle = "previous_handle"
+        case recoveryEmail = "recovery_email"
+    }
+}
+
+/// The `recovery_email` part of a handle change (ADR-0068 section 2): the
+/// confirmed address, and, only while no phrase is saved, the email vault
+/// sealed under the NEW handle with a fresh salt (both standard base64).
+public struct LoginHandleRecoveryEmail: Codable, Equatable {
+    public let address: String
+    public let vaultSalt: String?
+    public let sealedEntropy: String?
+
+    public init(address: String, vaultSalt: Data? = nil, sealedEntropy: Data? = nil) {
+        self.address = address
+        self.vaultSalt = vaultSalt.map { $0.base64EncodedString() }
+        self.sealedEntropy = sealedEntropy.map { $0.base64EncodedString() }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case address
+        case vaultSalt = "vault_salt"
+        case sealedEntropy = "sealed_entropy"
+    }
+}
+
+/// `POST /auth/login-handle/check` body and answer.
+struct LoginHandleCheckRequest: Codable, Equatable {
+    let handle: String
+}
+
+struct LoginHandleCheckResponse: Codable, Equatable {
+    let state: String
 }
 
 /// `PUT /auth/login-handle` response body.

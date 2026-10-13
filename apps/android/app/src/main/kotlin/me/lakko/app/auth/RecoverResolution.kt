@@ -99,6 +99,13 @@ public interface LoginHandleBinder {
 
     /** `DELETE /auth/login-handle`. */
     public suspend fun unbind(sessionToken: String): Boolean
+
+    /**
+     * `POST /auth/login-handle/check` (ADR-0068 section 2): what the account
+     * holds relative to [handle]. The default answers "none" (bind), which is
+     * what a first bind at sign-up is.
+     */
+    public suspend fun check(sessionToken: String, handle: ByteArray): LoginHandleState = LoginHandleState.None
 }
 
 /** [LoginHandleBinder] over a short-lived [AuthClient] per call. */
@@ -110,6 +117,9 @@ public class AuthClientLoginHandleBinder(
 
     override suspend fun unbind(sessionToken: String): Boolean =
         clientFactory().use { it.unbindLoginHandle(sessionToken) }
+
+    override suspend fun check(sessionToken: String, handle: ByteArray): LoginHandleState =
+        clientFactory().use { it.checkLoginHandle(sessionToken, handle) }
 }
 
 /**

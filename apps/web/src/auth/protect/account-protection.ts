@@ -106,7 +106,11 @@ export interface ProtectionRows {
  * must choose a username before it can add an email (the stored value is
  * made from the username).
  */
-export function protectionRows(status: RecoveryEmailStatus, hasUsername: boolean): ProtectionRows {
+export function protectionRows(
+  status: RecoveryEmailStatus,
+  hasUsername: boolean,
+  addressHeld = false,
+): ProtectionRows {
   const phrase = status.phraseSaved ? "show" : "save";
   if (!status.available && !status.enabled) return { email: null, phrase };
   if (!hasUsername) return { email: { on: false, actions: ["choose-username"] }, phrase };
@@ -115,9 +119,11 @@ export function protectionRows(status: RecoveryEmailStatus, hasUsername: boolean
   }
   const actions: EmailRowAction[] = [];
   if (status.available) {
-    // The email is on but its vault is gone (a key reset or a recall, with
-    // no phrase saved): adding it again seals the new phrase.
-    if (!status.vault && !status.phraseSaved) actions.push("addAgain");
+    // The email is on but its vault is gone (a key reset or a rotation, with
+    // no phrase saved) and this device does not hold the address: adding it
+    // again seals the new phrase. A device that holds the address puts the
+    // vault back by itself (`reseal.ts`) and offers Replace as usual.
+    if (emailNeedsAddingAgain(status, addressHeld)) actions.push("addAgain");
     else actions.push("replace");
   }
   actions.push("remove");
@@ -140,8 +146,14 @@ export function protectBannerShown(
   dismissedAtMs: number | null,
   nowMs: number,
   hasPasskey: boolean | null,
+  /** The email is on, its vault is missing, and this device holds the
+   *  address: it is putting the vault back by itself (`reseal.ts`), or
+   *  waiting to. The account is about to be protected again, so the banner
+   *  is not shown. */
+  resealPending = false,
 ): boolean {
   if (mode !== "none") return false;
+  if (resealPending) return false;
   if (hasPasskey !== false) return false;
   if (dismissedAtMs === null) return true;
   return nowMs - dismissedAtMs >= PROTECT_BANNER_RETURN_MS;
@@ -178,19 +190,32 @@ export function newWordsShown(phraseProtectedOnDevice: boolean, hasUsername: boo
   return phraseProtectedOnDevice && hasUsername;
 }
 
-/** The email is on but its vault is gone and no phrase is saved: the row
- *  and the banner ask for the address again. */
-export function emailNeedsAddingAgain(status: RecoveryEmailStatus): boolean {
-  return status.enabled && !status.vault && !status.phraseSaved;
+/** The email is on but its vault is gone, no phrase is saved, and this
+ *  device does not hold the address: the row and the banner ask for it
+ *  again. A device that holds it re-seals the vault by itself. */
+export function emailNeedsAddingAgain(status: RecoveryEmailStatus, addressHeld = false): boolean {
+  return status.enabled && !status.vault && !status.phraseSaved && !addressHeld;
+}
+
+/**
+ * What the email form starts with. Adding (the account has no recovery
+ * email at the server, as after a recall) pre-fills the address this device
+ * holds; replacing starts empty, since a new address is being typed.
+ */
+export function emailFormPrefill(action: EmailRowAction, heldAddress: string | null): string {
+  return action === "add" || action === "addAgain" ? (heldAddress ?? "") : "";
 }
 
 /** The banner's two lines: the add-again state, or the ordinary one (which
  *  has no second line). */
-export function protectBannerKeys(status: RecoveryEmailStatus): {
+export function protectBannerKeys(
+  status: RecoveryEmailStatus,
+  addressHeld = false,
+): {
   readonly titleKey: string;
   readonly bodyKey: string | null;
 } {
-  return emailNeedsAddingAgain(status)
+  return emailNeedsAddingAgain(status, addressHeld)
     ? { titleKey: "recovery_email.add_again.title", bodyKey: "recovery_email.add_again.body" }
     : { titleKey: "protect.banner.none", bodyKey: null };
 }

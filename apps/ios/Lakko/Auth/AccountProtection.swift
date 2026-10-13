@@ -72,9 +72,68 @@ public extension RecoveryEmailStatus {
     }
 
     /// The email is on but the server holds no vault for an account without
-    /// a saved phrase: the person adds the email again, and the enrolment
-    /// seals the vault under the phrase the account has now.
-    var emailNeedsAddingAgain: Bool { enabled && !vault && !phraseSaved }
+    /// a saved phrase (a key reset, a rotation or a recall dropped it).
+    var vaultMissing: Bool { enabled && !vault && !phraseSaved }
+
+    /// `vaultMissing` with no device of the account holding the address:
+    /// the person adds the email again. (A device that holds the address
+    /// re-seals by itself: ``EmailReseal``.)
+    var emailNeedsAddingAgain: Bool { needsAddingAgain(addressHeld: false) }
+
+    func needsAddingAgain(addressHeld: Bool) -> Bool { vaultMissing && !addressHeld }
+}
+
+/// ADR-0067, amended 2026-10-13 — the automatic re-seal: a device that
+/// holds the address puts the email vault back by itself, silently.
+public enum EmailReseal {
+
+    /// The one rule, evaluated after every read of `GET /recovery-email`.
+    public static func resealNeeded(
+        enabled: Bool, vault: Bool, phraseSaved: Bool, addressHeld: Bool
+    ) -> Bool {
+        enabled && !vault && !phraseSaved && addressHeld
+    }
+
+    /// What one `PUT /recovery-email/vault` came to.
+    public enum Outcome: Equatable {
+        /// Stored, or as good as: a vault exists already, or a phrase was
+        /// saved (no vault is wanted). The status is read again.
+        case done
+        /// `403 address-mismatch`: the address this device holds is not the
+        /// account's any more. The register is cleared; "add your email
+        /// again" takes over.
+        case addressStale
+        /// Anything else: tried again at the next landing, never in a loop
+        /// (every well-formed request spends one of ten per day).
+        case retryAtNextLanding
+    }
+
+    public static func outcome(status: Int, body: String) -> Outcome {
+        let code = ((try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any])?["error"]
+            as? String
+        switch (status, code) {
+        case (200..<300, _): return .done
+        case (409, "vault-exists"), (409, "phrase-saved"): return .done
+        case (403, "address-mismatch"): return .addressStale
+        default: return .retryAtNextLanding
+        }
+    }
+
+    public static func outcome(of error: Error?) -> Outcome {
+        guard let error else { return .done }
+        if case .http(let status, _, let body) = error as? AuthClientError {
+            return outcome(status: status, body: body)
+        }
+        return .retryAtNextLanding
+    }
+
+    /// The address the enrol form starts with: nothing when an address is
+    /// being replaced (a new one is typed), else the one this device holds
+    /// (after a recall the stored key is gone and the same address is
+    /// confirmed by a letter again).
+    public static func prefill(replacing: Bool, addressHeld: String?) -> String {
+        replacing ? "" : (addressHeld ?? "")
+    }
 }
 
 /// What Settings > Account draws (UX 19.1, 19.2, 19.5), pure.
@@ -108,7 +167,7 @@ public struct ProtectionRows: Equatable {
     /// Whether any "three words" surface exists for this account.
     public let showsThreeWords: Bool
 
-    public static func decide(_ status: RecoveryEmailStatus) -> ProtectionRows {
+    public static func decide(_ status: RecoveryEmailStatus, addressHeld: Bool = false) -> ProtectionRows {
         let statusKey: String
         switch status.protection {
         case .email: statusKey = "protect.status.email"
@@ -116,7 +175,7 @@ public struct ProtectionRows: Equatable {
         case .none: statusKey = "protect.status.none"
         }
         let email: EmailRow
-        if status.emailNeedsAddingAgain {
+        if status.needsAddingAgain(addressHeld: addressHeld) {
             email = .addAgain
         } else if status.enabled {
             email = .on
@@ -192,7 +251,7 @@ public struct ProtectStep: Equatable {
     /// saved, the passkey when the account has one.
     public static func done(status: RecoveryEmailStatus?, hasPasskey: Bool) -> Set<Row> {
         var done: Set<Row> = []
-        if let status, status.enabled, !status.emailNeedsAddingAgain { done.insert(.email) }
+        if let status, status.enabled, !status.vaultMissing { done.insert(.email) }
         if status?.phraseSaved == true { done.insert(.phrase) }
         if hasPasskey { done.insert(.passkey) }
         return done
@@ -232,8 +291,8 @@ public enum ProtectBanner {
         public let actionKey: String
     }
 
-    public static func copy(_ status: RecoveryEmailStatus) -> Copy {
-        status.emailNeedsAddingAgain
+    public static func copy(_ status: RecoveryEmailStatus, addressHeld: Bool = false) -> Copy {
+        status.needsAddingAgain(addressHeld: addressHeld)
             ? Copy(
                 titleKey: "recovery_email.add_again.title", bodyKey: "recovery_email.add_again.body",
                 actionKey: "protect.email.title")
@@ -242,10 +301,13 @@ public enum ProtectBanner {
 
     /// - Parameter hasPasskey: the account has at least one passkey: it has
     ///   a way back in, so the banner (and its 30-day return) is not shown.
+    /// - Parameter resealing: the vault is missing and this device holds the
+    ///   address, so it is putting the vault back by itself: nothing to ask.
     public static func shows(
-        protection: AccountProtection, hasPasskey: Bool = false, dismissedAtMs: Int64?, nowMs: Int64
+        protection: AccountProtection, hasPasskey: Bool = false, resealing: Bool = false,
+        dismissedAtMs: Int64?, nowMs: Int64
     ) -> Bool {
-        guard protection == .none, !hasPasskey else { return false }
+        guard protection == .none, !hasPasskey, !resealing else { return false }
         guard let dismissedAtMs else { return true }
         // A clock that went backwards reads as "not yet".
         return nowMs >= dismissedAtMs && nowMs - dismissedAtMs >= returnsAfterMs
@@ -277,7 +339,8 @@ public struct AccountProtectionStore {
 
     /// Every key of `accountIdB64`, for the wipe.
     static func keys(accountIdB64: String) -> [String] {
-        ["phrase-saved", "status", "banner-dismissed", "notice-cursor", "own-actions"]
+        ["phrase-saved", "status", "banner-dismissed", "notice-cursor", "own-actions", "first-password-owed",
+         "rename-owed", "rename-at", "username-register-owed"]
             .map { key($0, accountIdB64: accountIdB64) }
     }
 
@@ -292,6 +355,61 @@ public struct AccountProtectionStore {
 
     public func setPhraseSaved(_ saved: Bool, accountIdB64: String) {
         defaults.set(saved, forKey: Self.key("phrase-saved", accountIdB64: accountIdB64))
+    }
+
+    // MARK: A claimed username whose first password is still owed
+
+    /// A guest chose a username on this device and the account's first
+    /// password has not been set yet (the password it has is random and
+    /// known to nobody). Until it is, the password form opens without a
+    /// proof: there is nothing that could be proven.
+    public func firstPasswordOwed(accountIdB64: String) -> Bool {
+        defaults.bool(forKey: Self.key("first-password-owed", accountIdB64: accountIdB64))
+    }
+
+    public func setFirstPasswordOwed(_ owed: Bool, accountIdB64: String) {
+        if owed {
+            defaults.set(true, forKey: Self.key("first-password-owed", accountIdB64: accountIdB64))
+        } else {
+            defaults.removeObject(forKey: Self.key("first-password-owed", accountIdB64: accountIdB64))
+        }
+    }
+
+    // MARK: Changing the username (ADR-0068)
+
+    /// The rename this device started and has not finished.
+    public func renameOwed(accountIdB64: String) -> UsernameRename.Record? {
+        defaults.data(forKey: Self.key("rename-owed", accountIdB64: accountIdB64))
+            .flatMap { try? JSONDecoder().decode(UsernameRename.Record.self, from: $0) }
+    }
+
+    public func setRenameOwed(_ record: UsernameRename.Record?, accountIdB64: String) {
+        let key = Self.key("rename-owed", accountIdB64: accountIdB64)
+        if let record, let data = try? JSONEncoder().encode(record) {
+            defaults.set(data, forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    /// When this device last changed the username (unix ms).
+    public func lastRenameAtMs(accountIdB64: String) -> Int64? {
+        defaults.object(forKey: Self.key("rename-at", accountIdB64: accountIdB64)) as? Int64
+    }
+
+    public func setLastRenameAtMs(_ ms: Int64, accountIdB64: String) {
+        defaults.set(ms, forKey: Self.key("rename-at", accountIdB64: accountIdB64))
+    }
+
+    /// A name this device wrote locally and still owes the own-username
+    /// register (the synced state was not loaded, or the write failed).
+    public func usernameRegisterOwed(accountIdB64: String) -> String? {
+        defaults.string(forKey: Self.key("username-register-owed", accountIdB64: accountIdB64))
+    }
+
+    public func setUsernameRegisterOwed(_ name: String?, accountIdB64: String) {
+        let key = Self.key("username-register-owed", accountIdB64: accountIdB64)
+        if let name { defaults.set(name, forKey: key) } else { defaults.removeObject(forKey: key) }
     }
 
     // MARK: The last status read

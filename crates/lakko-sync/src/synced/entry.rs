@@ -37,6 +37,17 @@ pub const SNAPSHOT_MAX_PARTS: u32 = 64;
 /// A lineage register's group id maximum length in bytes (each of the two
 /// ids; an MLS group id is 32 bytes today and travels as opaque bytes).
 pub const LINEAGE_GROUP_ID_MAX_LEN: usize = 64;
+/// Shortest recovery email address the register holds, in bytes (`a@b`).
+/// An empty address is the removal and is not subject to it.
+pub const RECOVERY_EMAIL_MIN_LEN: usize = 3;
+/// Longest recovery email address the register holds, in bytes (the RFC
+/// 5321 path limit).
+pub const RECOVERY_EMAIL_MAX_LEN: usize = 254;
+
+/// Longest own username the register holds, in bytes: the canonical
+/// username bound (`lakko_contacts::username::USERNAME_MAX_LEN`). An empty
+/// value is "no username".
+pub const OWN_USERNAME_MAX_LEN: usize = lakko_contacts::username::USERNAME_MAX_LEN;
 
 /// `include_kinds` bit: one-to-one conversations.
 pub const INCLUDE_ONE_TO_ONE: u32 = 1 << 0;
@@ -111,6 +122,19 @@ pub enum BoundsError {
     /// lineage has no register: it is the conversation id itself.
     #[error("lineage register names a group as its own successor")]
     LineageSelfReference,
+    /// A recovery email register's address was neither empty nor 3..=254
+    /// bytes long.
+    #[error("recovery email address length is out of bounds")]
+    RecoveryEmailLength,
+    /// A recovery email register's address held a control character or
+    /// white space, did not hold exactly one `@`, or had nothing on one side
+    /// of it.
+    #[error("recovery email address is not a normalised address")]
+    RecoveryEmailShape,
+    /// An own-username register's value was neither empty nor a canonical
+    /// username (`[a-z0-9_]`, 3..=32).
+    #[error("own username is not a canonical username")]
+    OwnUsername,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.
@@ -389,6 +413,135 @@ impl LineageEntry {
     }
 }
 
+/// The account's recovery email address (ADR-0067, amended 2026-10-13): one
+/// register per account.
+///
+/// `address` is the NORMALISED address
+/// (`lakko_mnemonic::recovery_email::normalize_recovery_email`), or empty for
+/// "no recovery email". A removal is a stamped empty value and is kept like
+/// any other value, so a device that was offline across the removal cannot
+/// bring the address back with its older stamp.
+///
+/// The address never leaves the account's own devices and its phrase-sealed
+/// backup; the server holds a keyed hash of it and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryEmailEntry {
+    /// The normalised address, or empty when the account has none.
+    pub address: String,
+}
+
+/// Check a recovery email register's address: empty (the removal), or a
+/// normalised address.
+///
+/// This crate does not depend on `lakko-mnemonic` (it would pull the BIP39
+/// tables into every crate that folds synced state, the notification
+/// extension among them), so the check here is structural: 3..=254 bytes, no
+/// control character, no white space, exactly one `@` with text on both
+/// sides. Lower-casing is the writer's job (the FFI surfaces normalise with
+/// the one definition before they write); a register is never re-spelled on
+/// receipt, because two devices re-spelling differently would not converge.
+///
+/// # Errors
+///
+/// [`BoundsError::RecoveryEmailLength`] or
+/// [`BoundsError::RecoveryEmailShape`].
+pub fn check_recovery_email_address(address: &str) -> Result<(), BoundsError> {
+    if address.is_empty() {
+        return Ok(());
+    }
+    if address.len() < RECOVERY_EMAIL_MIN_LEN || address.len() > RECOVERY_EMAIL_MAX_LEN {
+        return Err(BoundsError::RecoveryEmailLength);
+    }
+    if address.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(BoundsError::RecoveryEmailShape);
+    }
+    let mut parts = address.split('@');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(local), Some(domain), None) if !local.is_empty() && !domain.is_empty() => Ok(()),
+        _ => Err(BoundsError::RecoveryEmailShape),
+    }
+}
+
+impl RecoveryEmailEntry {
+    /// The stamped removal: no recovery email.
+    #[must_use]
+    pub const fn removed() -> Self {
+        Self {
+            address: String::new(),
+        }
+    }
+
+    /// `true` when the register says the account has no recovery email.
+    #[must_use]
+    pub fn is_removed(&self) -> bool {
+        self.address.is_empty()
+    }
+
+    /// [`check_recovery_email_address`] of the held address.
+    ///
+    /// # Errors
+    ///
+    /// [`BoundsError::RecoveryEmailLength`] or
+    /// [`BoundsError::RecoveryEmailShape`].
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        check_recovery_email_address(&self.address)
+    }
+}
+
+/// The account's own username (ADR-0068 section 3): one register per
+/// account.
+///
+/// `username` is the CANONICAL username
+/// ([`lakko_contacts::username::check_canonical_username`]: `[a-z0-9_]`,
+/// 3..=32), or empty for "no username". An empty value is stamped and kept
+/// like any other, so a device that was offline across the change cannot
+/// bring an old name back with its older stamp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnUsernameEntry {
+    /// The canonical username, or empty when the account has none.
+    pub username: String,
+}
+
+/// Check an own-username register's value: empty (no username), or a
+/// canonical username by the one rule
+/// ([`lakko_contacts::username::check_canonical_username`]).
+///
+/// # Errors
+///
+/// [`BoundsError::OwnUsername`].
+pub fn check_own_username(username: &str) -> Result<(), BoundsError> {
+    if username.is_empty() {
+        return Ok(());
+    }
+    lakko_contacts::username::check_canonical_username(username)
+        .map_err(|_| BoundsError::OwnUsername)
+}
+
+impl OwnUsernameEntry {
+    /// The stamped "no username".
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            username: String::new(),
+        }
+    }
+
+    /// `true` when the register says the account has no username.
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        self.username.is_empty()
+    }
+
+    /// [`check_own_username`] of the held value.
+    ///
+    /// # Errors
+    ///
+    /// [`BoundsError::OwnUsername`].
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        check_own_username(&self.username)
+    }
+}
+
 /// One register value of any kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncEntry {
@@ -410,8 +563,12 @@ pub enum SyncEntry {
     Draft(DraftEntry),
     /// The explicit conversation order.
     ConversationOrder(ConversationOrderEntry),
-    /// A conversation-lineage register (ADR-0065 R.5). Appended last.
+    /// A conversation-lineage register (ADR-0065 R.5).
     Lineage(LineageEntry),
+    /// The account's recovery email address (ADR-0067).
+    RecoveryEmail(RecoveryEmailEntry),
+    /// The account's own username (ADR-0068). Appended last.
+    OwnUsername(OwnUsernameEntry),
 }
 
 /// Which register an entry writes.
@@ -435,9 +592,15 @@ pub enum RegisterKey {
     Draft(Vec<u8>),
     /// The explicit conversation order.
     ConversationOrder,
-    /// The lineage register of this successor group. Appended last, so the
-    /// register order of every older kind is unchanged.
+    /// The lineage register of this successor group. Appended after the
+    /// ADR-0058 kinds, so their register order is unchanged.
     Lineage(Vec<u8>),
+    /// The account's one recovery email register. Appended after the
+    /// older kinds, so their register order is unchanged.
+    RecoveryEmail,
+    /// The account's one own-username register. Appended last, so the
+    /// register order of every older kind is unchanged.
+    OwnUsername,
 }
 
 impl RegisterKey {
@@ -464,6 +627,8 @@ const TAG_CURSOR: u8 = 7;
 const TAG_DRAFT: u8 = 8;
 const TAG_CONV_ORDER: u8 = 9;
 const TAG_LINEAGE: u8 = 10;
+const TAG_RECOVERY_EMAIL: u8 = 11;
+const TAG_OWN_USERNAME: u8 = 12;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -480,6 +645,8 @@ impl SyncEntry {
             Self::Draft(d) => RegisterKey::Draft(d.group_id.clone()),
             Self::ConversationOrder(_) => RegisterKey::ConversationOrder,
             Self::Lineage(l) => RegisterKey::Lineage(l.successor_group_id.clone()),
+            Self::RecoveryEmail(_) => RegisterKey::RecoveryEmail,
+            Self::OwnUsername(_) => RegisterKey::OwnUsername,
         }
     }
 
@@ -502,6 +669,8 @@ impl SyncEntry {
                 }
             },
             Self::Lineage(l) => l.validate(),
+            Self::RecoveryEmail(r) => r.validate(),
+            Self::OwnUsername(u) => u.validate(),
             Self::FolderRemoved(_)
             | Self::Flags(_)
             | Self::ReadCursor(_)
@@ -583,6 +752,14 @@ impl SyncEntry {
                 out.push(TAG_LINEAGE);
                 put_bytes32(&mut out, &l.successor_group_id);
                 put_bytes32(&mut out, &l.root_conversation_id);
+            },
+            Self::RecoveryEmail(r) => {
+                out.push(TAG_RECOVERY_EMAIL);
+                put_bytes32(&mut out, r.address.as_bytes());
+            },
+            Self::OwnUsername(u) => {
+                out.push(TAG_OWN_USERNAME);
+                put_bytes32(&mut out, u.username.as_bytes());
             },
         }
         out
@@ -689,6 +866,8 @@ impl SyncEntry {
                 Self::ConversationOrder(ConversationOrderEntry { group_ids })
             },
             TAG_LINEAGE => Self::Lineage(take_lineage(&mut cur)?),
+            TAG_RECOVERY_EMAIL => Self::RecoveryEmail(take_recovery_email(&mut cur)?),
+            TAG_OWN_USERNAME => Self::OwnUsername(take_own_username(&mut cur)?),
             _ => return Err(CodecError::UnknownTag),
         };
         if !cur.is_empty() {
@@ -987,6 +1166,28 @@ fn take_lineage(cur: &mut &[u8]) -> Result<LineageEntry, CodecError> {
     })
 }
 
+/// A recovery email register: the length is checked against the bound BEFORE
+/// the bytes are taken, so a hostile length never sizes a copy.
+fn take_recovery_email(cur: &mut &[u8]) -> Result<RecoveryEmailEntry, CodecError> {
+    let n = take_u32(cur)? as usize;
+    if n > RECOVERY_EMAIL_MAX_LEN {
+        return Err(BoundsError::RecoveryEmailLength.into());
+    }
+    let address = String::from_utf8(take_n(cur, n)?.to_vec()).map_err(|_| CodecError::NotUtf8)?;
+    Ok(RecoveryEmailEntry { address })
+}
+
+/// An own-username register: the length is checked against the bound BEFORE
+/// the bytes are taken, so a hostile length never sizes a copy.
+fn take_own_username(cur: &mut &[u8]) -> Result<OwnUsernameEntry, CodecError> {
+    let n = take_u32(cur)? as usize;
+    if n > OWN_USERNAME_MAX_LEN {
+        return Err(BoundsError::OwnUsername.into());
+    }
+    let username = String::from_utf8(take_n(cur, n)?.to_vec()).map_err(|_| CodecError::NotUtf8)?;
+    Ok(OwnUsernameEntry { username })
+}
+
 fn take_string(cur: &mut &[u8]) -> Result<String, CodecError> {
     String::from_utf8(take_bytes32(cur)?).map_err(|_| CodecError::NotUtf8)
 }
@@ -1088,6 +1289,14 @@ mod tests {
                 successor_group_id: vec![7; 32],
                 root_conversation_id: vec![8; 32],
             }),
+            SyncEntry::RecoveryEmail(RecoveryEmailEntry {
+                address: "änna@büro.example".into(),
+            }),
+            SyncEntry::RecoveryEmail(RecoveryEmailEntry::removed()),
+            SyncEntry::OwnUsername(OwnUsernameEntry {
+                username: "bob_42".into(),
+            }),
+            SyncEntry::OwnUsername(OwnUsernameEntry::none()),
         ];
         for e in entries {
             let bytes = e.canonical_bytes();
@@ -1164,6 +1373,167 @@ mod tests {
             SyncEntry::Lineage(LineageEntry {
                 successor_group_id: vec![1],
                 root_conversation_id: vec![2],
+            })
+        ));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn a_recovery_email_register_follows_its_bounds_and_its_layout_is_pinned() {
+        let ok = check_recovery_email_address;
+        assert_eq!(ok(""), Ok(()));
+        assert_eq!(ok("a@b"), Ok(()));
+        let longest = format!("{}@b", "a".repeat(RECOVERY_EMAIL_MAX_LEN - 2));
+        assert_eq!(longest.len(), 254);
+        assert_eq!(ok(&longest), Ok(()));
+        assert_eq!(
+            ok(&format!("a{longest}")),
+            Err(BoundsError::RecoveryEmailLength)
+        );
+        for short in ["a", "a@", "@", "ab"] {
+            assert_eq!(ok(short), Err(BoundsError::RecoveryEmailLength));
+        }
+        for bad in [
+            "abc",
+            "a@b@c",
+            "@ab",
+            "ab@",
+            "a b@c",
+            "a@b\n",
+            "a\u{0}@b",
+            " a@b",
+            "a@b\u{a0}",
+        ] {
+            assert_eq!(ok(bad), Err(BoundsError::RecoveryEmailShape), "{bad:?}");
+        }
+        assert!(RecoveryEmailEntry::removed().is_removed());
+
+        let e = |a: &str| {
+            SyncEntry::RecoveryEmail(RecoveryEmailEntry {
+                address: a.to_owned(),
+            })
+        };
+        assert_eq!(
+            e("a@b").canonical_bytes(),
+            [11, 0, 0, 0, 3, b'a', b'@', b'b']
+        );
+        assert_eq!(e("").canonical_bytes(), [11, 0, 0, 0, 0]);
+        assert_eq!(e("a@b").key(), RegisterKey::RecoveryEmail);
+        assert_eq!(e("").key(), RegisterKey::RecoveryEmail);
+        // The register sorts after every older kind.
+        assert!(RegisterKey::Lineage(vec![0xFF; 64]) < RegisterKey::RecoveryEmail);
+
+        // Decode refuses what validate refuses, a hostile length, bytes that
+        // are not UTF-8, and trailing bytes.
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 2, b'a', b'@']),
+            Err(CodecError::Bounds(BoundsError::RecoveryEmailLength))
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 3, b'a', b'b', b'c']),
+            Err(CodecError::Bounds(BoundsError::RecoveryEmailShape))
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 0xFF, b'a']),
+            Err(CodecError::Bounds(BoundsError::RecoveryEmailLength))
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[11, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
+            Err(CodecError::Bounds(BoundsError::RecoveryEmailLength))
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 3, b'a', 0xFF, b'b']),
+            Err(CodecError::NotUtf8)
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 3, b'a', b'@']),
+            Err(CodecError::Truncated)
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 0, 0]),
+            Err(CodecError::Trailing)
+        );
+    }
+
+    #[test]
+    fn a_recovery_email_register_never_enters_a_folder_change_set() {
+        let mut c = FolderChanges::default();
+        assert!(!c.push(
+            1,
+            SyncEntry::RecoveryEmail(RecoveryEmailEntry {
+                address: "a@b".into(),
+            })
+        ));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn an_own_username_register_follows_its_bounds_and_its_layout_is_pinned() {
+        let ok = check_own_username;
+        assert_eq!(OWN_USERNAME_MAX_LEN, 32);
+        assert_eq!(ok(""), Ok(()));
+        assert_eq!(ok("bob"), Ok(()));
+        assert_eq!(ok("a_1"), Ok(()));
+        assert_eq!(ok(&"a".repeat(32)), Ok(()));
+        for bad in ["a", "ab", "Bob", "bo b", "bob!", "b\u{f6}b", "@bob", " bob"] {
+            assert_eq!(ok(bad), Err(BoundsError::OwnUsername), "{bad:?}");
+        }
+        assert_eq!(ok(&"a".repeat(33)), Err(BoundsError::OwnUsername));
+        assert!(OwnUsernameEntry::none().is_none());
+
+        let e = |u: &str| {
+            SyncEntry::OwnUsername(OwnUsernameEntry {
+                username: u.to_owned(),
+            })
+        };
+        assert_eq!(
+            e("bob").canonical_bytes(),
+            [12, 0, 0, 0, 3, b'b', b'o', b'b']
+        );
+        assert_eq!(e("").canonical_bytes(), [12, 0, 0, 0, 0]);
+        assert_eq!(e("bob").key(), RegisterKey::OwnUsername);
+        assert_eq!(e("").key(), RegisterKey::OwnUsername);
+        // The register sorts after every older kind.
+        assert!(RegisterKey::RecoveryEmail < RegisterKey::OwnUsername);
+
+        let bounds = Err(CodecError::Bounds(BoundsError::OwnUsername));
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 2, b'a', b'b']),
+            bounds
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'B', b'o', b'b']),
+            bounds
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 33, b'a']),
+            bounds
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[12, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
+            bounds
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', 0xFF, b'b']),
+            Err(CodecError::NotUtf8)
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', b'b']),
+            Err(CodecError::Truncated)
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 0, 0]),
+            Err(CodecError::Trailing)
+        );
+    }
+
+    #[test]
+    fn an_own_username_register_never_enters_a_folder_change_set() {
+        let mut c = FolderChanges::default();
+        assert!(!c.push(
+            1,
+            SyncEntry::OwnUsername(OwnUsernameEntry {
+                username: "bob".into(),
             })
         ));
         assert!(c.is_empty());

@@ -3,20 +3,28 @@
 
 //! Fuzz target — the byte decoders of the synced state (`lakko-sync`).
 //!
-//! Two decoders run on bytes this device did not write:
+//! Four decoders run on bytes this device did not write:
 //!
 //! * `decode_lineage_envelope` (ADR-0065 R.5): a conversation-lineage
 //!   envelope another device of the same account sent over the DeviceGroup's
 //!   opaque service-envelope carrier. Domain, version (judged before the
 //!   count), a bounded count, one-byte length prefixes checked against their
 //!   bound before any copy, strictly ascending successors, no trailing bytes.
+//! * `decode_recovery_email_envelope` (ADR-0067, amended 2026-10-13): the
+//!   account's recovery email register, sent the same way. Domain, version
+//!   (judged before the rest), a stamp, a one-byte length checked against
+//!   its bound before any copy, no trailing bytes, UTF-8, the address shape.
+//! * `decode_own_username_envelope` (ADR-0068 section 3): the account's own
+//!   username register, sent the same way and laid out the same; the value
+//!   must be empty or a canonical username.
 //! * `SyncedState::from_bytes` (ADR-0058): the persisted fold, which is also
 //!   what the backup payload carries, so a hostile storage tier chooses it.
 //!
-//! The harness asserts neither panics, that an accepted envelope is
-//! canonical (re-encodes to the identical bytes) and folds to exactly its
-//! own registers, and that an accepted state persists to bytes that read
-//! back as the same state.
+//! The harness asserts none panics, that an accepted envelope is canonical
+//! (re-encodes to the identical bytes) and folds to exactly its own
+//! registers, that an accepted recovery-email or own-username envelope holds a
+//! valid value or the empty one and does not apply twice, and that an accepted state
+//! persists to bytes that read back as the same state.
 
 #![no_main]
 

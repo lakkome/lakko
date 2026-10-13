@@ -558,10 +558,18 @@ describe("the grant stays in memory and reaches every gated route", () => {
     const body = ctx.slice(start, end);
     // The one exception is the "It was not me" screen of an account notice
     // (ADR-0067, UX 19.6), which asks nothing but the new password.
+    // The other is a guest's FIRST password (it has none to prove), and only
+    // while the account's first-password marker is set.
+    expect(body.includes("options?.afterAccountNotice === true ||")).toBe(true);
     expect(
-      body.includes("if (options?.afterAccountNotice !== true && !api.passwordChangeAllowed()) {"),
+      body.includes(
+        "(options?.firstPassword === true && isFirstPasswordOwed(plainStorage(), s.account.accountId));",
+      ),
     ).toBe(true);
+    expect(body.includes("if (!ungated && !api.passwordChangeAllowed()) {")).toBe(true);
     expect(body.includes("throw new FreshAuthRequiredError();")).toBe(true);
+    // The marker goes when the password is saved: the ungated change is one.
+    expect(body.includes("clearFirstPasswordOwed(plainStorage(), s.account.accountId);")).toBe(true);
   });
 
   it("only the account notice's screen replaces the password without the gate", () => {

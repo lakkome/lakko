@@ -1703,17 +1703,61 @@ export class AuthClient {
    *  32 bytes), replacing its previous one. Idempotent for the same handle.
    *  `409 handle-taken` (another account holds it) surfaces as an
    *  `AuthHttpError` with status 409; `503 login-by-name-disabled` as 503. */
-  async bindLoginHandle(sessionToken: string, handle: string): Promise<void> {
+  async bindLoginHandle(
+    sessionToken: string,
+    handle: string,
+    /** ADR-0068, a bind that CHANGES the handle (a rename, or its
+     *  rollback): the fresh-auth grant, the handle held now, and the
+     *  recovery email to re-key (omitted: the server drops it). */
+    change?: {
+      readonly freshGrant: string;
+      readonly previousHandle: string;
+      readonly recoveryEmail?: {
+        readonly address: string;
+        /** Standard base64; both absent when a phrase is saved. */
+        readonly vaultSalt?: string;
+        readonly sealedEntropy?: string;
+      };
+    },
+  ): Promise<void> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
     requireHandle(handle);
+    const body: LoginHandlePutRequest = { handle };
+    if (change !== undefined) {
+      requireHandle(change.previousHandle);
+      body.fresh_grant = change.freshGrant;
+      body.previous_handle = change.previousHandle;
+      if (change.recoveryEmail !== undefined) {
+        body.recovery_email = {
+          address: change.recoveryEmail.address,
+          ...(change.recoveryEmail.vaultSalt !== undefined && change.recoveryEmail.sealedEntropy !== undefined
+            ? { vault_salt: change.recoveryEmail.vaultSalt, sealed_entropy: change.recoveryEmail.sealedEntropy }
+            : {}),
+        };
+      }
+    }
     await this.request<LoginHandlePutRequest, LoginHandlePutResponse>(
       "PUT",
       "/auth/login-handle",
-      { handle },
+      body,
       sessionToken,
     );
+  }
+
+  /** `POST /auth/login-handle/check` (ADR-0068): whether `handle` is the
+   *  one this account holds (`same`), the account holds another (`other`),
+   *  or it holds none (`none`). */
+  async checkLoginHandle(sessionToken: string, handle: string): Promise<"same" | "other" | "none"> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    requireHandle(handle);
+    const endpoint = "/auth/login-handle/check";
+    const resp = await this.post<{ handle: string }, { state?: unknown }>(endpoint, { handle }, sessionToken);
+    if (resp.state === "same" || resp.state === "other" || resp.state === "none") return resp.state;
+    throw new AuthHttpError(200, endpoint, "unknown handle state");
   }
 
   /** `DELETE /auth/login-handle` — remove this account's handle. Returns

@@ -52,10 +52,19 @@
 //! - `DELETE /recovery-email {fresh_grant}` -> `{removed}`.
 //! - `GET /recovery-email` -> `{available, enabled, vault, phrase_saved,
 //!   totp}`.
+//! - `PUT /recovery-email/vault {handle, address, vault_salt,
+//!   sealed_entropy}` -> `{vault}` (amended 2026-10-13, no fresh-auth
+//!   grant): a device that kept the address re-seals a vault after a reset
+//!   or a rotation dropped it. No letter: the server recomputes `email_key`
+//!   and requires it to equal the stored one. Only where no vault exists and
+//!   no phrase is saved.
 //! - `DELETE /recovery-email/vault {fresh_grant}` -> `{vault_removed,
 //!   phrase_saved}`: the account becomes phrase-protected.
 //! - Re-binding or removing the login handle deletes both rows in the same
-//!   transaction ([`drop_for_handle_change`]).
+//!   transaction ([`drop_for_handle_change`]), unless the bind carries the
+//!   address (`recovery_email`, ADR-0068 section 2): then the key is moved to
+//!   the new handle in that transaction ([`rekey_for_handle_change`]), with
+//!   no letter.
 //!
 //! # Recover (anonymous)
 //!
@@ -178,6 +187,9 @@ const CODE_HANDLE_MISMATCH: &str = "handle-mismatch";
 const CODE_USERNAME_REQUIRED: &str = "username-required";
 const CODE_PHRASE_SAVED: &str = "phrase-saved";
 const CODE_MAIL_SEND_FAILED: &str = "mail-send-failed";
+const CODE_ADDRESS_MISMATCH: &str = "address-mismatch";
+const CODE_NO_RECOVERY_EMAIL: &str = "no-recovery-email";
+const CODE_VAULT_EXISTS: &str = "vault-exists";
 
 const fn disabled() -> ApiError {
     ApiError::Coded(StatusCode::SERVICE_UNAVAILABLE, CODE_DISABLED)
@@ -629,6 +641,35 @@ pub(crate) async fn status(
 // Enrol
 // ---------------------------------------------------------------------------
 
+/// Require that `handle` is the login handle bound to `account_id`: `409
+/// username-required` when the account has none, `409 handle-mismatch` when
+/// it has another.
+async fn require_own_handle(
+    state: &AppState,
+    on: &Enabled,
+    account_id: &[u8; 16],
+    handle: &[u8; HANDLE_LEN],
+) -> Result<(), ApiError> {
+    let resolved = crate::login_handle::resolve(&state.db, &on.handle_pepper, handle).await?;
+    if resolved.bound && &resolved.account_id == account_id {
+        return Ok(());
+    }
+    let has_handle: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM login_handles WHERE account_id = ?")
+            .bind(&account_id[..])
+            .fetch_optional(&state.db)
+            .await
+            .map_err(ApiError::Db)?;
+    Err(ApiError::Coded(
+        StatusCode::CONFLICT,
+        if has_handle.is_some() {
+            CODE_HANDLE_MISMATCH
+        } else {
+            CODE_USERNAME_REQUIRED
+        },
+    ))
+}
+
 /// Body of `POST /recovery-email/enrol/start`.
 #[derive(Deserialize)]
 pub(crate) struct EnrolStartReq {
@@ -685,23 +726,7 @@ pub(crate) async fn enrol_start(
         CODE_ADDRESS_INVALID,
     ))?;
 
-    let resolved = crate::login_handle::resolve(&state.db, &on.handle_pepper, &handle).await?;
-    if !(resolved.bound && resolved.account_id == account_id) {
-        let has_handle: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM login_handles WHERE account_id = ?")
-                .bind(&account_id[..])
-                .fetch_optional(&state.db)
-                .await
-                .map_err(ApiError::Db)?;
-        return Err(ApiError::Coded(
-            StatusCode::CONFLICT,
-            if has_handle.is_some() {
-                CODE_HANDLE_MISMATCH
-            } else {
-                CODE_USERNAME_REQUIRED
-            },
-        ));
-    }
+    require_own_handle(&state, &on, &account_id, &handle).await?;
 
     crate::limits::charge_name(&state.db, &state.limits, Scope::EmailLetterHandle, &handle).await?;
     crate::limits::charge_name(
@@ -989,6 +1014,183 @@ pub(crate) async fn drop_for_handle_change(
     Ok(())
 }
 
+/// The `recovery_email` object of `PUT /auth/login-handle` (ADR-0068 section
+/// 2): the address the account confirmed, so a change of handle re-keys the
+/// recovery email instead of dropping it.
+#[derive(Deserialize)]
+pub(crate) struct RekeyReq {
+    /// The address, as the device kept it.
+    pub(crate) address: String,
+    /// Standard base64 of the 16-byte salt of the vault re-sealed under the
+    /// NEW handle. With `sealed_entropy`, or neither.
+    #[serde(default)]
+    pub(crate) vault_salt: Option<String>,
+    /// Standard base64 of the 44-byte vault re-sealed under the NEW handle.
+    #[serde(default)]
+    pub(crate) sealed_entropy: Option<String>,
+}
+
+/// What a handle change does to the recovery email, computed before the
+/// bind's transaction: everything but the comparison with the stored row.
+pub(crate) struct RekeyPlan {
+    /// `email_key` of the address under the handle the client says the
+    /// account holds now (`previous_handle`); `None` when it sent none.
+    old_email_key: Option<[u8; 32]>,
+    /// `email_key` of the address under the NEW handle.
+    new_email_key: [u8; 32],
+    /// The vault to store, already wrapped at rest: `(vault_salt, body_enc)`.
+    vault: Option<([u8; VAULT_SALT_LEN], Vec<u8>)>,
+}
+
+/// How a re-key inside the bind's transaction ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RekeyOutcome {
+    /// The account has no recovery email: nothing to do.
+    Nothing,
+    /// The key now names the new handle (and the vault was replaced or
+    /// removed).
+    Rekeyed,
+    /// The address under the previous handle is not the stored key's. The
+    /// caller rolls the whole bind back.
+    AddressMismatch,
+}
+
+/// Validate a [`RekeyReq`] and compute its [`RekeyPlan`].
+///
+/// # Errors
+///
+/// `503 recovery-email-disabled` when the feature is off (the server could
+/// not check the address, and dropping the email against the client's stated
+/// wish would be worse than refusing); `400 address-invalid`; `400` for a
+/// salt without a blob, the reverse, or either of the wrong size;
+/// [`ApiError::Internal`].
+pub(crate) fn rekey_plan(
+    state: &AppState,
+    previous_handle: Option<&[u8; HANDLE_LEN]>,
+    new_handle: &[u8; HANDLE_LEN],
+    req: &RekeyReq,
+) -> Result<RekeyPlan, ApiError> {
+    let on = enabled(state)?;
+    let address = normalise_address(&req.address).ok_or(ApiError::Coded(
+        StatusCode::BAD_REQUEST,
+        CODE_ADDRESS_INVALID,
+    ))?;
+    let vault = match (req.vault_salt.as_deref(), req.sealed_entropy.as_deref()) {
+        (None, None) => None,
+        (Some(salt), Some(sealed)) => {
+            let salt: [u8; VAULT_SALT_LEN] = B64
+                .decode(salt)
+                .ok()
+                .and_then(|bytes| <[u8; VAULT_SALT_LEN]>::try_from(bytes.as_slice()).ok())
+                .ok_or(ApiError::BadInput("vault_salt must be 16 bytes, base64"))?;
+            let sealed = B64
+                .decode(sealed)
+                .ok()
+                .filter(|bytes| bytes.len() == SEALED_ENTROPY_LEN)
+                .ok_or(ApiError::BadInput(
+                    "sealed_entropy must be the 44-byte blob of a 12-word phrase, base64",
+                ))?;
+            let body_enc =
+                lakko_crypto::aead::seal_with_key(&on.vault_key, &sealed).map_err(|e| {
+                    tracing::error!(error = %e, "recovery email: vault seal failed");
+                    ApiError::Internal
+                })?;
+            Some((salt, body_enc))
+        },
+        _ => {
+            return Err(ApiError::BadInput(
+                "vault_salt and sealed_entropy go together",
+            ))
+        },
+    };
+    Ok(RekeyPlan {
+        old_email_key: previous_handle.map(|old| on.config.email_key(old, &address)),
+        new_email_key: on.config.email_key(new_handle, &address),
+        vault,
+    })
+}
+
+/// Move the account's recovery email to its new handle inside the bind's
+/// transaction (the caller holds the account row's lock and has checked that
+/// `previous_handle` is the handle the account holds).
+///
+/// With no `recovery_emails` row there is nothing to move. Otherwise the
+/// address under the previous handle must be the stored key's (compared
+/// without an early exit); then the key is rewritten under the new handle,
+/// the vault is replaced by the one sent (never for a phrase-protected
+/// account) or removed (the old one was sealed under the old handle), and
+/// the account's challenges and tickets are dropped. No notice: the
+/// recovery email is the same one.
+///
+/// # Errors
+///
+/// Any `sqlx::Error`; the caller rolls the bind back.
+pub(crate) async fn rekey_for_handle_change(
+    tx: &mut Transaction<'_, MySql>,
+    account_id: &[u8; 16],
+    plan: &RekeyPlan,
+) -> Result<RekeyOutcome, sqlx::Error> {
+    let stored: Option<[u8; 32]> = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT email_key FROM recovery_emails WHERE account_id = ?",
+    )
+    .bind(&account_id[..])
+    .fetch_optional(&mut **tx)
+    .await?
+    .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok());
+    let Some(stored) = stored else {
+        // Whatever else the account had under the old name goes, as without
+        // a re-key.
+        delete_rows(tx, account_id).await?;
+        return Ok(RekeyOutcome::Nothing);
+    };
+    let matches = plan
+        .old_email_key
+        .as_ref()
+        .is_some_and(|old| ct_eq(old, &stored));
+    if !matches {
+        return Ok(RekeyOutcome::AddressMismatch);
+    }
+    sqlx::query("UPDATE recovery_emails SET email_key = ? WHERE account_id = ?")
+        .bind(&plan.new_email_key[..])
+        .bind(&account_id[..])
+        .execute(&mut **tx)
+        .await?;
+    let phrase_saved: bool = sqlx::query_scalar("SELECT phrase_saved FROM accounts WHERE id = ?")
+        .bind(&account_id[..])
+        .fetch_one(&mut **tx)
+        .await?;
+    match plan.vault.as_ref().filter(|_| !phrase_saved) {
+        Some((salt, body_enc)) => {
+            sqlx::query(
+                "INSERT INTO email_vaults (account_id, vault_salt, body_enc) VALUES (?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE vault_salt = VALUES(vault_salt), \
+                    body_enc = VALUES(body_enc), created_at = NOW(3)",
+            )
+            .bind(&account_id[..])
+            .bind(&salt[..])
+            .bind(body_enc.as_slice())
+            .execute(&mut **tx)
+            .await?;
+        },
+        None => {
+            sqlx::query("DELETE FROM email_vaults WHERE account_id = ?")
+                .bind(&account_id[..])
+                .execute(&mut **tx)
+                .await?;
+        },
+    }
+    for statement in [
+        "DELETE FROM email_tickets WHERE account_id = ?",
+        "DELETE FROM email_challenges WHERE account_id = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(&account_id[..])
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(RekeyOutcome::Rekeyed)
+}
+
 /// `DELETE /recovery-email {fresh_grant}` — bearer + fresh-auth grant.
 /// Removes the key and the vault. `removed` says whether there was one.
 ///
@@ -1040,6 +1242,149 @@ async fn lock_account(
         .await
         .map_err(ApiError::Db)?
         .ok_or(ApiError::InvalidCredential)
+}
+
+/// Body of `PUT /recovery-email/vault`.
+#[derive(Deserialize)]
+pub(crate) struct PutVaultReq {
+    /// The account's login handle: 32 bytes, base64url without padding. The
+    /// server stores only a keyed hash of it, so it cannot recompute
+    /// `email_key` without being handed the handle; it checks that this is
+    /// the one bound to the session's account.
+    pub(crate) handle: String,
+    /// The address the account already confirmed, as the device kept it.
+    pub(crate) address: String,
+    /// Standard base64 of the 16-byte salt the client sealed the vault with.
+    pub(crate) vault_salt: String,
+    /// Standard base64 of the 44-byte email vault.
+    pub(crate) sealed_entropy: String,
+}
+
+/// `PUT /recovery-email/vault` — bearer, NO fresh-auth grant (ADR-0067,
+/// amended 2026-10-13). A device of the account that kept the address stores
+/// a vault again after a key reset or a rotation dropped it. No letter is
+/// sent: the address is the one already confirmed, which the server checks
+/// by recomputing `email_key` from the bound handle and the address.
+///
+/// Order: the feature (`503`); the body (`400`, `address-invalid` for a
+/// refused address); [`Scope::EmailVaultStore`] for the account (`429`),
+/// before anything is compared, so a session cannot test addresses freely;
+/// the handle is the account's bound one (`409 username-required` /
+/// `handle-mismatch`); then one transaction under the account row's lock:
+/// a stored key exists (`409 no-recovery-email`) and equals the recomputed
+/// one, compared without an early exit (`403 address-mismatch`); no phrase
+/// is saved (`409 phrase-saved`); no vault exists (`409 vault-exists`); the
+/// vault is stored under the client's salt, wrapped at rest.
+///
+/// It can only add a vault where there is none, never replace one, and it
+/// writes no notice. A vault sealing the wrong entropy fails the restore's
+/// bundle check on the client: a recovery that does not work, not a
+/// takeover.
+///
+/// # Errors
+///
+/// As listed; [`ApiError::Db`]; [`ApiError::Internal`].
+#[axum::debug_handler]
+pub(crate) async fn put_vault(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedAccount>,
+    Json(req): Json<PutVaultReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let on = enabled(&state)?;
+    let account_id = auth.0;
+    let handle = crate::login_handle::decode_handle(&req.handle)?;
+    let address = normalise_address(&req.address).ok_or(ApiError::Coded(
+        StatusCode::BAD_REQUEST,
+        CODE_ADDRESS_INVALID,
+    ))?;
+    let vault_salt: [u8; VAULT_SALT_LEN] = B64
+        .decode(&req.vault_salt)
+        .ok()
+        .and_then(|bytes| <[u8; VAULT_SALT_LEN]>::try_from(bytes.as_slice()).ok())
+        .ok_or(ApiError::BadInput("vault_salt must be 16 bytes, base64"))?;
+    let sealed = B64
+        .decode(&req.sealed_entropy)
+        .ok()
+        .filter(|bytes| bytes.len() == SEALED_ENTROPY_LEN)
+        .ok_or(ApiError::BadInput(
+            "sealed_entropy must be the 44-byte blob of a 12-word phrase, base64",
+        ))?;
+
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        Scope::EmailVaultStore,
+        &account_id,
+    )
+    .await?;
+
+    require_own_handle(&state, &on, &account_id, &handle).await?;
+    let candidate = on.config.email_key(&handle, &address);
+    let body_enc = lakko_crypto::aead::seal_with_key(&on.vault_key, &sealed).map_err(|e| {
+        tracing::error!(error = %e, "recovery email: vault seal failed");
+        ApiError::Internal
+    })?;
+
+    let mut conn = crate::session::read_committed_conn(&state.db)
+        .await
+        .map_err(ApiError::Db)?;
+    let mut tx = sqlx::Acquire::begin(&mut conn)
+        .await
+        .map_err(ApiError::Db)?;
+    let phrase_saved: Option<bool> =
+        sqlx::query_scalar("SELECT phrase_saved FROM accounts WHERE id = ? FOR UPDATE")
+            .bind(&account_id[..])
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(ApiError::Db)?;
+    let phrase_saved = phrase_saved.ok_or(ApiError::InvalidCredential)?;
+    let stored: Option<[u8; 32]> = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT email_key FROM recovery_emails WHERE account_id = ?",
+    )
+    .bind(&account_id[..])
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(ApiError::Db)?
+    .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok());
+    let Some(stored) = stored else {
+        return Err(ApiError::Coded(
+            StatusCode::CONFLICT,
+            CODE_NO_RECOVERY_EMAIL,
+        ));
+    };
+    if !ct_eq(&candidate, &stored) {
+        return Err(ApiError::Coded(
+            StatusCode::FORBIDDEN,
+            CODE_ADDRESS_MISMATCH,
+        ));
+    }
+    if phrase_saved {
+        return Err(ApiError::Coded(StatusCode::CONFLICT, CODE_PHRASE_SAVED));
+    }
+    // Under the account row's lock every writer of this account's vault
+    // waits, so the read and the insert see the same state.
+    let has_vault: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM email_vaults WHERE account_id = ?")
+            .bind(&account_id[..])
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(ApiError::Db)?;
+    if has_vault.is_some() {
+        return Err(ApiError::Coded(StatusCode::CONFLICT, CODE_VAULT_EXISTS));
+    }
+    sqlx::query("INSERT INTO email_vaults (account_id, vault_salt, body_enc) VALUES (?, ?, ?)")
+        .bind(&account_id[..])
+        .bind(&vault_salt[..])
+        .bind(body_enc.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::Db)?;
+    tx.commit().await.map_err(ApiError::Db)?;
+    tracing::info!(
+        account_id = %URL_SAFE_NO_PAD.encode(account_id),
+        "recovery email: vault stored again for the confirmed address"
+    );
+    Ok(Json(serde_json::json!({ "vault": true })))
 }
 
 /// `DELETE /recovery-email/vault {fresh_grant}` — bearer + fresh-auth grant.

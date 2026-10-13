@@ -35,6 +35,7 @@ import { recoverErrorMessage, screenText } from "../auth-error-copy";
 import { nameTargetFor } from "../login-handle";
 import { newPasswordProblem, MIN_PASSWORD_LENGTH } from "../password-rules";
 import { normalizeTotpCode } from "../totp-code";
+import { rememberAddress } from "../protect/address-register";
 import { CodeField, ResendButton } from "../protect/CodeField";
 import {
   emailFailure,
@@ -214,11 +215,14 @@ export function EmailRecover(props: {
     }
   }
 
-  /** The notice this device's own action caused is not shown to it. */
+  /** The notice this device's own action caused is not shown to it, and
+   *  the address the person just typed is kept by the account's devices
+   *  (it was accepted: the vault opened under it). */
   function rememberOwnAction(): void {
     const s = auth.state();
     if (actedKind === null || s.kind === "anon" || s.kind === "loading") return;
     markOwnAction(plainStore(), s.account.accountId, actedKind, actedAtMs);
+    rememberAddress(s.account.accountId, address());
   }
 
   /** The existing phrase restore, with the phrase the vault held. */
@@ -304,6 +308,8 @@ export function EmailRecover(props: {
         })(),
       });
       markOwnAction(plainStore(), base64Encode(landed.accountId), actedKind, actedAtMs);
+      // The mailed code was accepted for this address.
+      rememberAddress(base64Encode(landed.accountId), address());
       setPassword("");
       setConfirm("");
       await auth.landEmailPasswordRecovery(canonicalUsername, landed.accountId, landed.session);

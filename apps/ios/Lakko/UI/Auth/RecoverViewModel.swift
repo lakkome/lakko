@@ -159,13 +159,14 @@ public final class RecoverViewModel: ObservableObject {
     ///   email), so the notice is not shown here.
     convenience init(
         repository: AuthRepository, cachedUsername: String?,
-        noteOwnAction: @escaping @MainActor (AccountNoticeKind) -> Void
+        noteOwnAction: @escaping @MainActor (AccountNoticeKind) -> Void,
+        keepAddress: @escaping @MainActor (String) -> Void = { _ in }
     ) {
         self.init(
             repository: repository,
             cachedUsername: cachedUsername,
             email: EmailRecoverModel(
-                ports: .live(repository: repository, noteOwnAction: noteOwnAction),
+                ports: .live(repository: repository, noteOwnAction: noteOwnAction, keepAddress: keepAddress),
                 cachedUsername: cachedUsername),
             budgets: ThreeWordsBudgetStore(),
             nowMs: { Int64(Date().timeIntervalSince1970 * 1000) },
@@ -675,7 +676,8 @@ extension EmailRecoverModel.Ports {
     @MainActor
     static func live(
         repository: AuthRepository,
-        noteOwnAction: @escaping @MainActor (AccountNoticeKind) -> Void
+        noteOwnAction: @escaping @MainActor (AccountNoticeKind) -> Void,
+        keepAddress: @escaping @MainActor (String) -> Void = { _ in }
     ) -> EmailRecoverModel.Ports {
         // The letter is written in the language of this device.
         let lang: @Sendable () async -> String = { await MainActor.run { Localization.shared.language } }
@@ -705,7 +707,8 @@ extension EmailRecoverModel.Ports {
                 try await repository.recoverPasswordByEmail(
                     username: username, ticket: ticket, newPassword: newPassword)
             },
-            noteOwnAction: noteOwnAction
+            noteOwnAction: noteOwnAction,
+            keepAddress: keepAddress
         )
     }
 }

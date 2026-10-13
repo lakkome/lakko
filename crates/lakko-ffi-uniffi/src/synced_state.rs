@@ -408,6 +408,50 @@ fn lineage_refusal(e: core::LineageEnvelopeError) -> FfiError {
     FfiError::SyncedState(format!("{}: {e}", e.code()))
 }
 
+/// The account's recovery email register as held (ADR-0067, amended
+/// 2026-10-13), a removal included.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RecoveryEmailRegister {
+    /// HLC stamp the register was written at.
+    pub hlc: u64,
+    /// The normalised address, or `None` when the register records that the
+    /// account has no recovery email (a removal).
+    pub address: Option<String>,
+}
+
+fn recovery_email_register(s: Stamped<core::RecoveryEmailEntry>) -> RecoveryEmailRegister {
+    RecoveryEmailRegister {
+        hlc: s.hlc,
+        address: Some(s.value.address).filter(|a| !a.is_empty()),
+    }
+}
+
+/// The account's own-username register as held (ADR-0068 section 3), a
+/// stamped "none" included.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OwnUsernameRegister {
+    /// HLC stamp the register was written at.
+    pub hlc: u64,
+    /// The canonical username, or `None` when the register records that the
+    /// account has no username.
+    pub username: Option<String>,
+}
+
+fn own_username_register(s: Stamped<core::OwnUsernameEntry>) -> OwnUsernameRegister {
+    OwnUsernameRegister {
+        hlc: s.hlc,
+        username: Some(s.value.username).filter(|u| !u.is_empty()),
+    }
+}
+
+fn own_username_refusal(e: core::OwnUsernameEnvelopeError) -> FfiError {
+    FfiError::SyncedState(format!("{}: {e}", e.code()))
+}
+
+fn recovery_email_refusal(e: core::RecoveryEmailEnvelopeError) -> FfiError {
+    FfiError::SyncedState(format!("{}: {e}", e.code()))
+}
+
 fn flags_register(s: Stamped<core::FlagsEntry>) -> FlagsRegister {
     FlagsRegister {
         hlc: s.hlc,
@@ -736,6 +780,166 @@ impl SyncedState {
             .map_err(lineage_refusal)
     }
 
+    /// Write the account's recovery email register (ADR-0067, amended
+    /// 2026-10-13), stamped `hlc`: an address sets it, `None` (or a blank
+    /// string) records that the account has none. The address is normalised
+    /// here with the one rule (`normalizeRecoveryEmail`), so any spelling
+    /// the person typed may be passed.
+    ///
+    /// An ordinary last-writer-wins write, NOT write-once: `true` when the
+    /// register now holds this value, in which case send
+    /// [`Self::recovery_email_envelope`] to the account's other devices in a
+    /// DeviceGroup service envelope
+    /// (`DeviceGroup.createServiceEnvelopeMessage`); `false` when what is
+    /// held is newer or identical and nothing changed. A removal is kept
+    /// with its stamp, so a stale device cannot bring the address back.
+    ///
+    /// The address is personal data: it stays on the account's devices and
+    /// in the sealed backup, and must not be logged.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::RecoveryEmail`] `"<code>: <reason>"` (the codes of
+    /// `normalizeRecoveryEmail`) when the address is refused.
+    pub fn set_recovery_email(&self, hlc: u64, address: Option<String>) -> Result<bool, FfiError> {
+        let normalised = match address.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => Some(
+                lakko_mnemonic::recovery_email::normalize_recovery_email(raw)
+                    .map_err(|e| FfiError::RecoveryEmail(format!("{}: {e}", e.code())))?,
+            ),
+        };
+        self.with(|s| s.set_recovery_email(hlc, normalised.as_deref()))?
+            .map_err(|e| FfiError::SyncedState(e.to_string()))
+    }
+
+    /// The account's recovery email address, or `None` when the register
+    /// was never written or holds a removal.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn recovery_email(&self) -> Result<Option<String>, FfiError> {
+        self.with(|s| s.recovery_email())
+    }
+
+    /// The recovery email register as held, a removal included
+    /// (`address == None` with its stamp); `None` when it was never written.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn recovery_email_register(&self) -> Result<Option<RecoveryEmailRegister>, FfiError> {
+        self.with(|s| s.recovery_email_register().map(recovery_email_register))
+    }
+
+    /// The service envelope carrying the held register with its original
+    /// stamp, a removal included: the live send after
+    /// [`Self::set_recovery_email`] returned `true`, and the catch-up
+    /// re-send beside [`Self::snapshot_parts`] and
+    /// [`Self::lineage_envelopes`] (the register is NOT in the snapshot
+    /// parts). `None` when the register was never written.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn recovery_email_envelope(&self) -> Result<Option<Vec<u8>>, FfiError> {
+        self.with(|s| s.recovery_email_envelope())
+    }
+
+    /// Decode a recovery-email envelope received in a DeviceGroup service
+    /// envelope (route on [`is_recovery_email_envelope`]) and fold the
+    /// register in with its original stamp. Fail closed: a malformed
+    /// envelope changes nothing. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"` with code
+    /// `wrongDomain` / `unknownVersion` / `truncated` / `trailing` /
+    /// `notUtf8` / `bounds`.
+    pub fn apply_recovery_email_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_recovery_email_envelope(&envelope))?
+            .map_err(recovery_email_refusal)
+    }
+
+    /// Write the account's own-username register (ADR-0068 section 3),
+    /// stamped `hlc`: a username sets it, `None` (or a blank string) records
+    /// that the account has none. The username is normalised and checked
+    /// here with the one rule (`validateUsername`), so `"@Bob"` may be
+    /// passed and `"bob"` is stored.
+    ///
+    /// An ordinary last-writer-wins write, NOT write-once: `true` when the
+    /// register now holds this value, in which case send
+    /// [`Self::own_username_envelope`] to the account's other devices in a
+    /// DeviceGroup service envelope
+    /// (`DeviceGroup.createServiceEnvelopeMessage`); `false` when what is
+    /// held is newer or identical and nothing changed. A "none" is kept with
+    /// its stamp, so a stale device cannot bring an old name back.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::UsernameEmpty`] / [`FfiError::UsernameTooShort`] /
+    /// [`FfiError::UsernameTooLong`] / [`FfiError::UsernameInvalidCharacters`],
+    /// as for `validateUsername`.
+    pub fn set_own_username(&self, hlc: u64, username: Option<String>) -> Result<bool, FfiError> {
+        let canonical = match username.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => Some(lakko_discovery_client::validate_username(raw)?),
+        };
+        self.with(|s| s.set_own_username(hlc, canonical.as_deref()))?
+            .map_err(|e| FfiError::SyncedState(e.to_string()))
+    }
+
+    /// The account's own username, or `None` when the register was never
+    /// written or holds "none".
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn own_username(&self) -> Result<Option<String>, FfiError> {
+        self.with(|s| s.own_username())
+    }
+
+    /// The own-username register as held, a "none" included
+    /// (`username == None` with its stamp); `None` when it was never
+    /// written.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn own_username_register(&self) -> Result<Option<OwnUsernameRegister>, FfiError> {
+        self.with(|s| s.own_username_register().map(own_username_register))
+    }
+
+    /// The service envelope carrying the held register with its original
+    /// stamp, a "none" included: the live send after
+    /// [`Self::set_own_username`] returned `true`, and the catch-up re-send
+    /// beside [`Self::snapshot_parts`], [`Self::lineage_envelopes`] and
+    /// [`Self::recovery_email_envelope`] (the register is NOT in the
+    /// snapshot parts). `None` when the register was never written.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn own_username_envelope(&self) -> Result<Option<Vec<u8>>, FfiError> {
+        self.with(|s| s.own_username_envelope())
+    }
+
+    /// Decode an own-username envelope received in a DeviceGroup service
+    /// envelope (route on [`is_own_username_envelope`]) and fold the
+    /// register in with its original stamp. Fail closed: a malformed
+    /// envelope changes nothing. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"` with code
+    /// `wrongDomain` / `unknownVersion` / `truncated` / `trailing` /
+    /// `notUtf8` / `bounds`.
+    pub fn apply_own_username_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_own_username_envelope(&envelope))?
+            .map_err(own_username_refusal)
+    }
+
     /// The greatest stamp held, or 0. Seed the HLC above it after a restore.
     ///
     /// # Errors
@@ -797,6 +1001,44 @@ pub fn lineage_envelope_max_len() -> u32 {
 #[must_use]
 pub fn lineage_group_id_max_len() -> u32 {
     u32::try_from(core::LINEAGE_GROUP_ID_MAX_LEN).unwrap_or(u32::MAX)
+}
+
+/// `true` when `bytes` open with the recovery-email envelope domain
+/// (`lakko/sync/recovery-email/v1`): the routing question for a DeviceGroup
+/// service envelope, asked before the `lakko-contacts` dispatcher. Says
+/// nothing about validity; [`SyncedState::apply_recovery_email_envelope`]
+/// decides that.
+#[uniffi::export]
+#[must_use]
+pub fn is_recovery_email_envelope(bytes: Vec<u8>) -> bool {
+    core::is_recovery_email_envelope(&bytes)
+}
+
+/// Longest recovery-email envelope [`SyncedState::recovery_email_envelope`]
+/// produces (293); below `deviceGroupServiceEnvelopeMaxLen()`.
+#[uniffi::export]
+#[must_use]
+pub fn recovery_email_envelope_max_len() -> u32 {
+    u32::try_from(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
+}
+
+/// `true` when `bytes` open with the own-username envelope domain
+/// (`lakko/sync/username/v1`): the routing question for a DeviceGroup
+/// service envelope, asked before the `lakko-contacts` dispatcher. Says
+/// nothing about validity; [`SyncedState::apply_own_username_envelope`]
+/// decides that.
+#[uniffi::export]
+#[must_use]
+pub fn is_own_username_envelope(bytes: Vec<u8>) -> bool {
+    core::is_own_username_envelope(&bytes)
+}
+
+/// Longest own-username envelope [`SyncedState::own_username_envelope`]
+/// produces (65); below `deviceGroupServiceEnvelopeMaxLen()`.
+#[uniffi::export]
+#[must_use]
+pub fn own_username_envelope_max_len() -> u32 {
+    u32::try_from(core::OWN_USERNAME_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
 }
 
 /// Whether `name` is an acceptable folder name as it stands: 1..=24
@@ -915,6 +1157,276 @@ mod tests {
         const { assert!(core::LINEAGE_ENVELOPE_MAX_LEN <= lakko_mls::MAX_SERVICE_ENVELOPE_LEN) };
         assert!(lineage_envelope_max_len() <= crate::device_group_service_envelope_max_len());
         assert_eq!(lineage_group_id_max_len(), 64);
+    }
+
+    #[test]
+    fn the_recovery_email_is_set_removed_carried_and_persisted() {
+        let a = SyncedState::new();
+        assert_eq!(a.recovery_email().unwrap(), None);
+        assert_eq!(a.recovery_email_register().unwrap(), None);
+        assert_eq!(a.recovery_email_envelope().unwrap(), None);
+
+        // Normalised on the way in, with the one rule.
+        assert!(a
+            .set_recovery_email(5, Some("  Alice@Example.COM ".into()))
+            .unwrap());
+        assert_eq!(
+            a.recovery_email().unwrap().as_deref(),
+            Some("alice@example.com")
+        );
+        assert_eq!(
+            a.recovery_email().unwrap(),
+            Some(
+                crate::email_vault::normalize_recovery_email("  Alice@Example.COM ".into())
+                    .unwrap()
+            )
+        );
+        // The same write and an older one change nothing.
+        assert!(!a
+            .set_recovery_email(5, Some("alice@example.com".into()))
+            .unwrap());
+        assert!(!a
+            .set_recovery_email(4, Some("old@example.com".into()))
+            .unwrap());
+
+        // Live send, and a re-send is not an update.
+        let b = SyncedState::new();
+        let live = a.recovery_email_envelope().unwrap().unwrap();
+        assert!(is_recovery_email_envelope(live.clone()));
+        assert!(!is_lineage_envelope(live.clone()));
+        assert!(live.len() <= recovery_email_envelope_max_len() as usize);
+        assert!(b.apply_recovery_email_envelope(live.clone()).unwrap());
+        assert!(!b.apply_recovery_email_envelope(live.clone()).unwrap());
+        assert_eq!(
+            b.recovery_email_register().unwrap(),
+            Some(RecoveryEmailRegister {
+                hlc: 5,
+                address: Some("alice@example.com".into()),
+            })
+        );
+
+        // The snapshot parts do not carry it; persistence and merge do.
+        assert_eq!(a.snapshot_parts().unwrap()[0].entry_count(), 0);
+        let restored = SyncedState::from_bytes(a.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            restored.recovery_email().unwrap().as_deref(),
+            Some("alice@example.com")
+        );
+        let merged = SyncedState::new();
+        assert!(merged.merge_from(restored).unwrap());
+        assert_eq!(merged.to_bytes().unwrap(), a.to_bytes().unwrap());
+
+        // A removal (None, and a blank string) is kept and beats the older
+        // address everywhere it arrives; the stale envelope cannot undo it.
+        assert!(a.set_recovery_email(7, None).unwrap());
+        assert_eq!(a.recovery_email().unwrap(), None);
+        assert_eq!(
+            a.recovery_email_register().unwrap(),
+            Some(RecoveryEmailRegister {
+                hlc: 7,
+                address: None,
+            })
+        );
+        assert!(!a.apply_recovery_email_envelope(live).unwrap());
+        let removal = a.recovery_email_envelope().unwrap().unwrap();
+        assert!(b.apply_recovery_email_envelope(removal).unwrap());
+        assert_eq!(b.recovery_email().unwrap(), None);
+        let blank = SyncedState::new();
+        assert!(blank.set_recovery_email(1, Some("   ".into())).unwrap());
+        assert_eq!(
+            blank.recovery_email_register().unwrap().unwrap().address,
+            None
+        );
+        // A newer address beats the older removal.
+        assert!(a
+            .set_recovery_email(8, Some("new@example.com".into()))
+            .unwrap());
+        assert_eq!(
+            a.recovery_email().unwrap().as_deref(),
+            Some("new@example.com")
+        );
+        assert_eq!(a.max_hlc().unwrap(), 8);
+    }
+
+    #[test]
+    fn recovery_email_refusals_carry_their_code_and_change_nothing() {
+        let s = SyncedState::new();
+        s.set_recovery_email(1, Some("a@b.example".into())).unwrap();
+        for (raw, code) in [
+            ("ab", "too-short: "),
+            ("no-at-sign", "not-one-at-sign: "),
+            ("a b@c", "whitespace: "),
+            ("a@", "too-short: "),
+            ("abc@", "empty-part: "),
+        ] {
+            match s.set_recovery_email(9, Some(raw.into())) {
+                Err(FfiError::RecoveryEmail(m)) => assert!(m.starts_with(code), "{m}"),
+                other => panic!("expected a refusal for {raw:?}, got {other:?}"),
+            }
+        }
+        let mut bad = s.recovery_email_envelope().unwrap().unwrap();
+        bad.push(0);
+        match s.apply_recovery_email_envelope(bad) {
+            Err(FfiError::SyncedState(m)) => assert!(m.starts_with("trailing: "), "{m}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        match s.apply_recovery_email_envelope(b"lakko/sync/lineage/v1\0".to_vec()) {
+            Err(FfiError::SyncedState(m)) => assert!(m.starts_with("wrongDomain: "), "{m}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(!is_recovery_email_envelope(
+            b"lakko/sync/lineage/v1\0".to_vec()
+        ));
+        assert_eq!(s.recovery_email().unwrap().as_deref(), Some("a@b.example"));
+        assert_eq!(s.recovery_email_register().unwrap().unwrap().hlc, 1);
+    }
+
+    /// `lakko-sync` checks a stored address structurally and does not depend
+    /// on `lakko-mnemonic`; this pins that the two agree: everything the one
+    /// rule normalises is storable, and the length bounds are the same.
+    #[test]
+    fn the_sync_address_check_accepts_everything_the_one_rule_normalises() {
+        use lakko_mnemonic::recovery_email as rule;
+        const { assert!(core::RECOVERY_EMAIL_MIN_LEN == rule::RECOVERY_EMAIL_MIN_LEN) };
+        const { assert!(core::RECOVERY_EMAIL_MAX_LEN == rule::RECOVERY_EMAIL_MAX_LEN) };
+        const {
+            assert!(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN <= lakko_mls::MAX_SERVICE_ENVELOPE_LEN);
+        };
+        assert!(
+            recovery_email_envelope_max_len() <= crate::device_group_service_envelope_max_len()
+        );
+        let longest = format!("{}@B", "A".repeat(252));
+        for raw in [
+            "  A@B ",
+            "Alice.Smith+Tag@Example.COM",
+            "Юзер@Почта.рф",
+            "ΟΔΟΣ@x.gr",
+            "İ@x.tr",
+            longest.as_str(),
+        ] {
+            let normalised = rule::normalize_recovery_email(raw).unwrap();
+            assert_eq!(core::check_recovery_email_address(&normalised), Ok(()));
+            let s = SyncedState::new();
+            assert!(s.set_recovery_email(1, Some(raw.into())).unwrap());
+            assert_eq!(s.recovery_email().unwrap(), Some(normalised));
+        }
+        // And what the one rule refuses, the structural check refuses too.
+        for bad in ["ab", "abc", "a@b@c", "@ab", "ab@", "a b@c", "a@b\n"] {
+            assert!(rule::normalize_recovery_email(bad).is_err() || bad.ends_with('\n'));
+            assert!(core::check_recovery_email_address(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_own_username_is_set_cleared_carried_and_persisted() {
+        let a = SyncedState::new();
+        assert_eq!(a.own_username().unwrap(), None);
+        assert_eq!(a.own_username_register().unwrap(), None);
+        assert_eq!(a.own_username_envelope().unwrap(), None);
+
+        // Normalised on the way in, with the one rule.
+        assert!(a.set_own_username(5, Some(" @Bob_42 ".into())).unwrap());
+        assert_eq!(a.own_username().unwrap().as_deref(), Some("bob_42"));
+        assert_eq!(
+            a.own_username().unwrap(),
+            Some(crate::discovery::validate_username("@Bob_42".into()).unwrap())
+        );
+        assert!(!a.set_own_username(5, Some("bob_42".into())).unwrap());
+        assert!(!a.set_own_username(4, Some("older".into())).unwrap());
+
+        let b = SyncedState::new();
+        let live = a.own_username_envelope().unwrap().unwrap();
+        assert!(is_own_username_envelope(live.clone()));
+        assert!(!is_recovery_email_envelope(live.clone()));
+        assert!(!is_lineage_envelope(live.clone()));
+        assert!(live.len() <= own_username_envelope_max_len() as usize);
+        assert!(b.apply_own_username_envelope(live.clone()).unwrap());
+        assert!(!b.apply_own_username_envelope(live.clone()).unwrap());
+        assert_eq!(
+            b.own_username_register().unwrap(),
+            Some(OwnUsernameRegister {
+                hlc: 5,
+                username: Some("bob_42".into()),
+            })
+        );
+
+        // The snapshot parts do not carry it; persistence and merge do.
+        assert_eq!(a.snapshot_parts().unwrap()[0].entry_count(), 0);
+        let restored = SyncedState::from_bytes(a.to_bytes().unwrap()).unwrap();
+        assert_eq!(restored.own_username().unwrap().as_deref(), Some("bob_42"));
+        let merged = SyncedState::new();
+        assert!(merged.merge_from(restored).unwrap());
+        assert_eq!(merged.to_bytes().unwrap(), a.to_bytes().unwrap());
+
+        // A rename wins over the old name everywhere; the stale envelope
+        // cannot bring the old name back.
+        assert!(a.set_own_username(6, Some("robert".into())).unwrap());
+        assert!(!a.apply_own_username_envelope(live.clone()).unwrap());
+        assert_eq!(a.own_username().unwrap().as_deref(), Some("robert"));
+
+        // "None" (None, and a blank string) is kept and beats the older name.
+        assert!(a.set_own_username(7, None).unwrap());
+        assert_eq!(a.own_username().unwrap(), None);
+        assert_eq!(
+            a.own_username_register().unwrap(),
+            Some(OwnUsernameRegister {
+                hlc: 7,
+                username: None,
+            })
+        );
+        assert!(!a.apply_own_username_envelope(live).unwrap());
+        let none = a.own_username_envelope().unwrap().unwrap();
+        assert!(b.apply_own_username_envelope(none).unwrap());
+        assert_eq!(b.own_username().unwrap(), None);
+        let blank = SyncedState::new();
+        assert!(blank.set_own_username(1, Some("   ".into())).unwrap());
+        assert_eq!(
+            blank.own_username_register().unwrap().unwrap().username,
+            None
+        );
+        // A newer name beats the older "none".
+        assert!(a.set_own_username(8, Some("bobby".into())).unwrap());
+        assert_eq!(a.own_username().unwrap().as_deref(), Some("bobby"));
+    }
+
+    #[test]
+    fn own_username_refusals_carry_their_reason_and_change_nothing() {
+        const {
+            assert!(core::OWN_USERNAME_ENVELOPE_MAX_LEN <= lakko_mls::MAX_SERVICE_ENVELOPE_LEN);
+        };
+        assert!(own_username_envelope_max_len() <= crate::device_group_service_envelope_max_len());
+        let s = SyncedState::new();
+        s.set_own_username(1, Some("bob".into())).unwrap();
+        assert!(matches!(
+            s.set_own_username(9, Some("ab".into())),
+            Err(FfiError::UsernameTooShort(_))
+        ));
+        assert!(matches!(
+            s.set_own_username(9, Some("a".repeat(33))),
+            Err(FfiError::UsernameTooLong(_))
+        ));
+        assert!(matches!(
+            s.set_own_username(9, Some("bo b".into())),
+            Err(FfiError::UsernameInvalidCharacters(_))
+        ));
+        assert!(matches!(
+            s.set_own_username(9, Some("@".into())),
+            Err(FfiError::UsernameEmpty(_))
+        ));
+        let mut bad = s.own_username_envelope().unwrap().unwrap();
+        bad.push(0);
+        match s.apply_own_username_envelope(bad) {
+            Err(FfiError::SyncedState(m)) => assert!(m.starts_with("trailing: "), "{m}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let email = b"lakko/sync/recovery-email/v1\0".to_vec();
+        match s.apply_own_username_envelope(email.clone()) {
+            Err(FfiError::SyncedState(m)) => assert!(m.starts_with("wrongDomain: "), "{m}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(!is_own_username_envelope(email));
+        assert_eq!(s.own_username().unwrap().as_deref(), Some("bob"));
+        assert_eq!(s.own_username_register().unwrap().unwrap().hlc, 1);
     }
 
     #[test]

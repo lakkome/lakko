@@ -130,6 +130,8 @@ public object AccountLocalWipe {
             me.lakko.app.auth.AccountProtectionStore.onDevice(ctx).clearAccount(acct)
         },
         Step("account-notices") { ctx, acct -> me.lakko.app.auth.AccountNoticeStore.onDevice(ctx).clearAccount(acct) },
+        // ADR-0068: a rename still owed and the stamp of the last one.
+        Step("username-rename") { ctx, acct -> me.lakko.app.auth.UsernameRenameStore.onDevice(ctx).clearAccount(acct) },
         // ADR-0065: the attestation and the step markers of a reset whose
         // publish is still owed.
         Step("key-reset-owed") { ctx, acct -> me.lakko.app.auth.KeyResetOwedStore.onDevice(ctx).clear(acct) },

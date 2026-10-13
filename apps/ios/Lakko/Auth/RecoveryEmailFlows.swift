@@ -352,7 +352,9 @@ final class RecoveryEmailModel: ObservableObject {
         var seal: (_ handle: Data, _ address: String, _ vaultSalt: Data) async throws -> Data
         var finish: (_ token: String, _ challengeId: String, _ code: String, _ sealed: Data?) async throws -> EmailEnrolled
         var remove: (_ token: String, _ grant: String) async throws -> Void
-        var enrolled: @MainActor (_ result: EmailEnrolled, _ replaced: Bool) -> Void
+        /// The code was accepted for `address` (normalised): the account's
+        /// devices keep it from here.
+        var enrolled: @MainActor (_ result: EmailEnrolled, _ replaced: Bool, _ address: String) -> Void
         var removed: @MainActor () -> Void
         /// A gated route answered `403 fresh-auth-required`.
         var proofExpired: @MainActor () -> Void
@@ -374,9 +376,15 @@ final class RecoveryEmailModel: ObservableObject {
     private var challenge: EmailEnrolChallenge?
     private var sealing: Task<Data, Error>?
 
-    init(ports: Ports, replacing: Bool, nowMs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }) {
+    /// - Parameter prefill: the address the form starts with
+    ///   (``EmailReseal/prefill(replacing:addressHeld:)``).
+    init(
+        ports: Ports, replacing: Bool, prefill: String = "",
+        nowMs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+    ) {
         self.ports = ports
         self.replacing = replacing
+        self.address = prefill
         self.resend = RetryCountdown(nowMs: nowMs)
         self.wait = RetryCountdown(nowMs: nowMs)
     }
@@ -461,7 +469,7 @@ final class RecoveryEmailModel: ObservableObject {
             self.challenge = nil
             code = ""
             state = EmailEnrol.finished(state)
-            ports.enrolled(result, replaced)
+            ports.enrolled(result, replaced, sentTo ?? "")
         } catch {
             let refusal = RecoveryEmailRefusal.of(error)
             let before = state
@@ -549,6 +557,9 @@ final class EmailRecoverModel: ObservableObject {
         var changePassword: @MainActor (_ username: String, _ ticket: String, _ newPassword: Data) async throws -> Void
         /// This device did what a notice will report.
         var noteOwnAction: @MainActor (AccountNoticeKind) -> Void
+        /// The person got back in with this address (normalised): the
+        /// account's devices keep it from here.
+        var keepAddress: @MainActor (String) -> Void = { _ in }
     }
 
     @Published var username: String
@@ -731,6 +742,7 @@ final class EmailRecoverModel: ObservableObject {
                 do {
                     try await ports.changePassword(name.canonical, ticket, newPassword)
                     // The session landed: the router replaces this screen.
+                    ports.keepAddress(normalizedAddress)
                     reset()
                 } catch {
                     refuseTicketRoute(error)
@@ -755,6 +767,7 @@ final class EmailRecoverModel: ObservableObject {
         guard let phrase else { return }
         do {
             try await ports.restoreWithPhrase(phrase, newPassword, name.canonical)
+            ports.keepAddress(normalizedAddress)
             reset()
         } catch {
             let line: RecoveryEmailLine

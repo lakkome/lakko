@@ -91,6 +91,8 @@ struct ProtectAccountScreen: View {
     /// Leave the step (`Not now`, confirmed, or `Continue`); `nil` for the
     /// Settings entry.
     var onLeave: (() -> Void)?
+    /// "Choose a username first." as a button, for an account without one.
+    var onChooseUsername: (() -> Void)?
 
     @State private var confirmingSkip = false
     @ObservedObject private var l10n = Localization.shared
@@ -128,6 +130,12 @@ struct ProtectAccountScreen: View {
                 RoundedRectangle(cornerRadius: LakkoRadius.card)
                     .stroke(Color.lakkoBorder, lineWidth: 1)
             )
+
+            // A guest: the email needs a username, which it can choose here.
+            if !hasUsername, center.status?.available == true, let onChooseUsername {
+                AuthHint(text: l10n.t("recovery_email.needs_username"))
+                ChooseUsernameButton(username: nil, action: onChooseUsername)
+            }
 
             switch layout.footer {
             case .notNow:
@@ -236,6 +244,8 @@ struct RecoveryEmailScreen: View {
     var startsRemoving = false
     /// The code was accepted, or the address was removed.
     let onDone: () -> Void
+    /// "Choose a username first." as a button (a guest account).
+    var onChooseUsername: (() -> Void)?
 
     @StateObject private var model: RecoveryEmailModel
     @StateObject private var proof: FreshAuthProofModel
@@ -248,16 +258,22 @@ struct RecoveryEmailScreen: View {
         authRepository: AuthRepository,
         center: AccountProtectionCenter,
         startsRemoving: Bool = false,
+        onChooseUsername: (() -> Void)? = nil,
         onDone: @escaping () -> Void
     ) {
         self.authRepository = authRepository
         self.center = center
         self.startsRemoving = startsRemoving
+        self.onChooseUsername = onChooseUsername
         self.onDone = onDone
         let proof = FreshAuthProofModel(surface: .recoveryEmail, repository: authRepository)
+        let replacing = center.status?.enabled ?? false
         let model = RecoveryEmailModel(
             ports: .live(authRepository: authRepository, center: center, proof: proof),
-            replacing: center.status?.enabled ?? false)
+            replacing: replacing,
+            // A new address is typed when one is replaced; after a recall
+            // the address this device holds is confirmed by a letter again.
+            prefill: EmailReseal.prefill(replacing: replacing, addressHeld: center.addressHeld))
         self._model = StateObject(wrappedValue: model)
         self._proof = StateObject(wrappedValue: proof)
         self.resend = model.resend
@@ -272,6 +288,9 @@ struct RecoveryEmailScreen: View {
             if model.needsUsername {
                 // A guest account: the stored value is made from a username.
                 AuthHint(text: l10n.t("recovery_email.needs_username"))
+                if let onChooseUsername {
+                    ChooseUsernameButton(username: nil, action: onChooseUsername)
+                }
             } else if center.status?.available == false, center.status?.enabled != true {
                 AuthHint(text: l10n.t("recovery_email.unavailable"), isError: true)
             } else {
@@ -478,7 +497,9 @@ extension RecoveryEmailModel.Ports {
             remove: { token, grant in
                 try await AuthClient().recoveryEmailRemove(sessionToken: token, freshGrant: grant)
             },
-            enrolled: { [weak center] result, replaced in center?.enrolled(result, replaced: replaced) },
+            enrolled: { [weak center] result, replaced, address in
+                center?.enrolled(result, replaced: replaced, address: address.isEmpty ? nil : address)
+            },
             removed: { [weak center] in center?.removed() },
             proofExpired: { [weak authRepository, weak proof] in
                 authRepository?.dropFreshAuth()
@@ -654,11 +675,10 @@ struct AccountProtectionSection: View {
                     .foregroundStyle(Color.lakkoText)
                 Spacer()
             }
-            if center.bannerVisible, let status = center.status {
+            if center.bannerVisible, let status = center.status, let copy = center.bannerCopy {
                 // UX 19.1a — one dismissible banner, here and nowhere else.
                 // After a reset, a recall or a rotation dropped the email
                 // vault it asks for the email again.
-                let copy = ProtectBanner.copy(status)
                 VStack(alignment: .leading, spacing: 8) {
                     Text(l10n.t(copy.titleKey))
                         .font(.subheadline)
@@ -670,7 +690,9 @@ struct AccountProtectionSection: View {
                     }
                     HStack(spacing: 16) {
                         Button(l10n.t(copy.actionKey)) {
-                            onOpen(status.emailNeedsAddingAgain ? .recoveryEmail(remove: false) : .protectAccount)
+                            onOpen(
+                                status.needsAddingAgain(addressHeld: center.addressHeld != nil)
+                                    ? .recoveryEmail(remove: false) : .protectAccount)
                         }
                             .font(.footnote.weight(.semibold))
                             .frame(minHeight: 44)
@@ -700,9 +722,16 @@ struct AccountProtectionSection: View {
                         Label(l10n.t("recovery_email.title"), systemImage: "envelope")
                             .foregroundStyle(Color.lakkoText)
                         Spacer()
-                        // Never the address: the device does not keep it.
                         Text(l10n.t("recovery_email.status.on"))
                             .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    // The address, on a device that holds it (plain text
+                    // under the row title); a device that does not shows On.
+                    if let address = center.addressHeld {
+                        Text(verbatim: address)
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .textSelection(.enabled)
                     }
                     HStack(spacing: 16) {
                         Button(l10n.t("recovery_email.replace")) { onOpen(.recoveryEmail(remove: false)) }

@@ -447,6 +447,13 @@ export const PROOF_COPY = {
     cancelledKey: null,
     genericKey: "recovery_phrase.fresh.error.generic",
   },
+  // ADR-0068: changing the username moves the account's login handle.
+  changeUsername: {
+    helpKey: "proof.username.help",
+    wrongPasswordKey: "restore_identity.reset.error.wrong_password",
+    cancelledKey: null,
+    genericKey: "recovery_phrase.fresh.error.generic",
+  },
   savePhrase: {
     helpKey: "proof.save_phrase.help",
     wrongPasswordKey: "restore_identity.reset.error.wrong_password",

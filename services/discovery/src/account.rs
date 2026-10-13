@@ -32,7 +32,9 @@ pub(crate) async fn delete_account(
     // The username binding, the published identity bundle, and the MLS
     // KeyPackage are keyed on `account_id`.
     for sql in [
+        // Every row, current and retired (ADR-0068), and the rename time.
         "DELETE FROM usernames WHERE account_id = ?",
+        "DELETE FROM username_renames WHERE account_id = ?",
         "DELETE FROM identity_bundles WHERE account_id = ?",
         "DELETE FROM keypackages WHERE account_id = ?",
         // ADR-0066 - the tombstones of device ids deleted from the directory.

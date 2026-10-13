@@ -849,6 +849,7 @@ final class RecoveryEmailTests: XCTestCase {
         var sealed: [(handle: Data, address: String, salt: Data)] = []
         var finished: [(code: String, sealed: Data?)] = []
         var enrolled: [(EmailEnrolled, Bool)] = []
+        var keptAddresses: [String] = []
         var removed = 0
         var proofExpired = 0
     }
@@ -884,7 +885,10 @@ final class RecoveryEmailTests: XCTestCase {
                     world.calls.append("remove")
                     if let error = world.removeError { throw error }
                 },
-                enrolled: { world.enrolled.append(($0, $1)) },
+                enrolled: { result, replaced, address in
+                    world.enrolled.append((result, replaced))
+                    world.keptAddresses.append(address)
+                },
                 removed: { world.removed += 1 },
                 proofExpired: { world.proofExpired += 1 }),
             replacing: replacing,
@@ -912,6 +916,8 @@ final class RecoveryEmailTests: XCTestCase {
         XCTAssertEqual(model.state.step, .done)
         XCTAssertEqual(world.enrolled.first?.0, EmailEnrolled(enabled: true, vault: true))
         XCTAssertEqual(world.enrolled.first?.1, false)
+        // The normalised address is handed on for the devices to keep.
+        XCTAssertEqual(world.keptAddresses, ["alice@example.com"])
 
         // The surface closed: the address is not kept.
         model.closed()

@@ -63,6 +63,7 @@ pub(crate) fn state(db: MySqlPool, enabled: bool) -> AppState {
         transparency: None,
         username_cert_key: Arc::new(lakko_crypto::signing::SigningKey::from_seed(&[3u8; 32])),
         key_reset_attest_key: None,
+        name_policy: crate::registry::NamePolicy::defaults(),
     }
 }
 

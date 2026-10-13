@@ -104,6 +104,12 @@
 //!   warning), and since no unattested key change is accepted any more, a
 //!   published key can then change only through a supersession proof.
 //!   Malformed: startup fails.
+//! - `LAKKO_DISCOVERY_RENAME_INTERVAL_SECS` — minimum seconds between two
+//!   renames of one account (ADR-0068 D2; default 2592000 = 30 days, chosen
+//!   not measured; 0 = no minimum).
+//! - `LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SECS` — seconds a name an account
+//!   renamed away from stays unclaimable before the hourly pruner frees it
+//!   (ADR-0068 D1; default 2592000 = 30 days, chosen not measured).
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
 //!
 //! ## Endpoints
@@ -112,7 +118,10 @@
 //! - `GET    /ready`               — readiness (DB ping), 200 / 503
 //! - `GET    /version`
 //! - `POST   /discovery/oprf`      — apply server static `K` to a blinded element (token)
-//! - `POST   /discovery/register`  — bind OPRF-hashed username to account_id
+//! - `POST   /discovery/register`  — bind an account's FIRST OPRF-hashed username
+//!   (`409 username-taken` / `409 username-already-set`, ADR-0068)
+//! - `POST   /discovery/username/replace` — rename: retire the current name and bind another
+//!   (ADR-0068; `409 no-username` / `username-taken`, `429 rename-too-soon`)
 //! - `POST   /discovery/lookup`    — resolve OPRF-hashed username → account_id (Everyone only, ADR-0060)
 //! - `PUT    /discovery/visibility`  — enter / leave Everyone, publish name terms (ADR-0060)
 //! - `POST   /discovery/name/lookup` — accounts in Everyone with one name term (ADR-0060)
@@ -229,6 +238,9 @@ pub(crate) struct AppState {
     /// `503 key-reset-disabled`, so no published key can change without a
     /// supersession proof.
     pub(crate) key_reset_attest_key: Option<lakko_crypto::signing::VerifyingKey>,
+    /// ADR-0068 — how often an account may rename and how long a retired
+    /// name stays unclaimable (both 30 days by default; chosen).
+    pub(crate) name_policy: registry::NamePolicy,
 }
 
 /// G-discovery-ratelimit: token buckets on the anonymous OPRF / lookup
@@ -273,6 +285,7 @@ fn rate_limits_from_env(session_token_secret: Arc<TokenSecret>) -> rate_limit::D
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // flat startup wiring reads best whole
 async fn main() -> Result<()> {
     #[cfg(debug_assertions)]
     {
@@ -378,6 +391,8 @@ async fn main() -> Result<()> {
     );
     anon_tokens.log_startup("discovery");
 
+    let name_policy = load_name_policy()?;
+
     let state = AppState {
         db: pool.clone(),
         oprf: Arc::new(oprf_server),
@@ -388,6 +403,7 @@ async fn main() -> Result<()> {
         anon_tokens,
         username_cert_key: Arc::new(username_cert_key),
         key_reset_attest_key,
+        name_policy,
     };
 
     let _spent_pruner = state.anon_tokens.spawn_pruner();
@@ -407,7 +423,9 @@ async fn main() -> Result<()> {
     // G-discovery-ratelimit: drop idle buckets so the
     // limiters' memory ceiling stays bounded.
     // ADR-0066: with it, the tombstones of deleted device ids (30 days).
-    let _pruners = spawn_bucket_and_tombstone_pruners(&rate_limits, &pool);
+    // ADR-0068: and the usernames retired longer ago than the hold.
+    let _pruners =
+        spawn_bucket_and_tombstone_pruners(&rate_limits, &pool, name_policy.retired_hold_secs);
 
     // KT-log S2.5 — the transparency-log reconciliation sweep. Spawned
     // ONLY when the transparency integration is armed; best-effort +
@@ -450,6 +468,8 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
     // write limiter the verified account.
     Router::new()
         .route("/discovery/register", post(registry::register))
+        // ADR-0068 — rename: retire the current name, bind another.
+        .route("/discovery/username/replace", post(registry::replace))
         // ADR-0060 — enter or leave Everyone (username public flag + name
         // search terms), and fetch this account's username certificate.
         .route(
@@ -683,16 +703,31 @@ fn build_transparency_client() -> Option<transparency_log::TransparencyClient> {
     }
 }
 
-/// Spawn the rate-limit bucket pruner and the ADR-0066 device-tombstone
-/// pruner; the handles are held for the life of the process.
+/// Spawn the rate-limit bucket pruner, the ADR-0066 device-tombstone pruner
+/// and the ADR-0068 retired-username pruner (hourly: frees the names retired
+/// longer ago than `retired_hold_secs`); the handles are held for the life
+/// of the process.
 fn spawn_bucket_and_tombstone_pruners(
     rate_limits: &Arc<rate_limit::DiscoveryLimits>,
     pool: &sqlx::MySqlPool,
-) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
-    (
+    retired_hold_secs: u64,
+) -> [tokio::task::JoinHandle<()>; 3] {
+    [
         rate_limit::spawn_pruner(Arc::clone(rate_limits)),
         keypackage::spawn_tombstone_pruner(pool.clone()),
-    )
+        registry::spawn_retired_pruner(pool.clone(), retired_hold_secs),
+    ]
+}
+
+/// ADR-0068 — read and log the rename interval and the retired-name hold.
+fn load_name_policy() -> Result<registry::NamePolicy> {
+    let policy = registry::NamePolicy::from_env().context("username rename policy")?;
+    tracing::info!(
+        rename_interval_secs = policy.rename_interval_secs,
+        retired_hold_secs = policy.retired_hold_secs,
+        "username rename policy"
+    );
+    Ok(policy)
 }
 
 /// KT-log S2.5 — spawn the transparency reconciliation sweep when both the
@@ -878,6 +913,7 @@ mod tests {
             transparency: None,
             username_cert_key: Arc::new(lakko_crypto::signing::SigningKey::from_seed(&[3u8; 32])),
             key_reset_attest_key: None,
+            name_policy: registry::NamePolicy::defaults(),
         };
         let app = build_app(state);
         for (method, uri) in [

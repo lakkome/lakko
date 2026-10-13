@@ -6584,6 +6584,10 @@
       "text": "Enter your password to save a recovery phrase.",
       "comment": "Helper under the password field of the proof block on 'Save a recovery phrase'."
     },
+    "proof.username.help": {
+      "text": "Enter your password to change your username.",
+      "comment": "Helper under the password field of the proof block on the change-username screen."
+    },
     "protect.banner.action": {
       "text": "Protect it",
       "comment": "Button on that banner."
@@ -8393,6 +8397,51 @@
     "username.a11y_hint": {
       "text": "Username: {message}",
       "comment": "Spoken by the screen reader for the reason under a username field. {message} is the reason, like 'At least 3 characters'."
+    },
+    "username.change.body": {
+      "text": "People will no longer find you by {old}. Nobody else can take it for 30 days.",
+      "comment": "Warning on the change-username screen; {old} is the current username with its leading @.",
+      "security_critical": true
+    },
+    "username.change.next_change": {
+      "text": "After this you can change it again in 30 days.",
+      "comment": "Second warning line on the change-username screen."
+    },
+    "username.change.other_devices": {
+      "text": "Your other devices pick up the new username the next time they are online.",
+      "comment": "Note under the done line after a change."
+    },
+    "username.change.save": {
+      "text": "Change",
+      "comment": "Main button of the change-username screen."
+    },
+    "username.change.title": {
+      "text": "Change username",
+      "comment": "Title of the screen where a person changes their username, and label of the button that opens it."
+    },
+    "username.change.too_soon": {
+      "text": "You can change your username again on {date}.",
+      "comment": "Shown instead of the form when the last change was under 30 days ago; {date} is a localized date."
+    },
+    "username.claim.body": {
+      "text": "With a username and a password you can sign in on another device, add a recovery email, and people can find you.",
+      "comment": "Under the title of the choose-a-username screen."
+    },
+    "username.claim.done": {
+      "text": "Your username is {username}.",
+      "comment": "Shown once after the username was saved; {username} includes the leading @."
+    },
+    "username.claim.password_help": {
+      "text": "Choose a password for signing in. You have not had one until now.",
+      "comment": "Under the password field of the choose-a-username screen; the guest account was created without a password the person knows."
+    },
+    "username.claim.save": {
+      "text": "Save",
+      "comment": "Main button of the choose-a-username screen."
+    },
+    "username.claim.title": {
+      "text": "Choose a username",
+      "comment": "Title of the screen where an account created without a username (a guest who joined a call by link) picks one, and label of the button that opens it."
     },
     "username.error.bind_limited_later": {
       "text": "You have changed your username too often. Try again later.",

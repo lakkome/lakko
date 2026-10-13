@@ -30,7 +30,7 @@ import { loadWasm } from "../wasm";
 import { USERNAME_REASON, type UsernameErrorCode } from "../profile/rules";
 import { base64UrlEncodeNoPad } from "./account-id";
 import { AuthHttpError } from "./client";
-import { DiscoveryHttpError } from "../discovery/client";
+import { DiscoveryHttpError, isUsernameTaken } from "../discovery/client";
 
 /** Length of a login handle in bytes. */
 export const LOGIN_HANDLE_LEN = 32;
@@ -197,7 +197,10 @@ export async function claimUsername<T>(args: {
       // eslint-disable-next-line no-console
       console.warn("login handle release after a failed claim failed", releaseErr);
     }
-    if (err instanceof DiscoveryHttpError && err.status === 409) {
+    // ADR-0068: the 409 bodies are JSON. `username-taken` is the name;
+    // `username-already-set` is this account already having one, which is
+    // not "taken" and is rethrown as it is.
+    if (err instanceof DiscoveryHttpError && isUsernameTaken(err.status, err.errorCode)) {
       throw new UsernameTakenError(args.username);
     }
     throw err;

@@ -129,6 +129,18 @@ public class AuthRepository(
             binder = loginHandleBinder,
             launch = { block -> pushScope.launch { block() } },
             log = { message -> Log.w("lakko-auth", message) },
+            // ADR-0068 - a confirmed handle may let this device seed the
+            // own-username register: the rule is evaluated again.
+            onConfirmed = {
+                pushScope.launch {
+                    try {
+                        onOwnUsernameState()
+                    } catch (cause: Throwable) {
+                        if (cause is kotlinx.coroutines.CancellationException) throw cause
+                        Log.w("lakko-auth", "own username not applied: ${cause.javaClass.simpleName}")
+                    }
+                }
+            },
         )
 
     private val mutableState: MutableStateFlow<AuthState> =
@@ -370,6 +382,47 @@ public class AuthRepository(
     private val mutableAccountNotices: MutableStateFlow<List<AccountNotice>> = MutableStateFlow(emptyList())
 
     public val accountNotices: StateFlow<List<AccountNotice>> = mutableAccountNotices.asStateFlow()
+
+    /** The synced state's recovery-email register (ADR-0067, amended
+     *  2026-10-13); set by the app root, which owns the sync runtime. */
+    @Volatile
+    public var recoveryAddressPort: RecoveryAddressPort? = null
+
+    /** The address this device holds for the signed-in account, or `null`.
+     *  Shown in Settings; never logged. */
+    private val mutableRecoveryAddress: MutableStateFlow<String?> = MutableStateFlow(null)
+
+    public val recoveryAddress: StateFlow<String?> = mutableRecoveryAddress.asStateFlow()
+
+    /** The synced state's own-username register (ADR-0068). */
+    @Volatile
+    public var ownUsernamePort: OwnUsernamePort? = null
+
+    /** Told that the account's username changed on this device's marker
+     *  (a rename here, or one adopted from another device): the app root
+     *  updates the stored profile and re-publishes. [renamedElsewhere] is
+     *  `true` for an adopted name (the certificate must be fetched again). */
+    @Volatile
+    public var onUsernameChanged: ((username: String, renamedElsewhere: Boolean) -> Unit)? = null
+
+    /** A name this device wrote while the synced state was closed (sign-up,
+     *  a guest claim): account id to name. */
+    private val pendingUsernameWrite: AtomicReference<Pair<String, String>?> = AtomicReference(null)
+
+    private val renameStore: UsernameRenameStore by lazy { UsernameRenameStore.onDevice(applicationContext) }
+
+    /** `true` while this device's own rename is between its steps. */
+    @Volatile
+    private var renaming: Boolean = false
+
+    /** A register write made before the synced state was open (a recovery
+     *  on a fresh device): account id to address (`null` = removed). */
+    private val pendingAddressWrite: AtomicReference<Pair<String, String?>?> = AtomicReference(null)
+
+    /** Accounts with a re-seal in flight, and those already tried since the
+     *  last landing or register change (one attempt, never a loop). */
+    private val resealInFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val resealTried: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /** Until when "It was not me" lets this device choose a new password
      *  without another proof (UX 19.6: the device holds the keys). */
@@ -693,6 +746,7 @@ public class AuthRepository(
         // elsewhere, read at every landing.
         mutableProtectStepOwed.value = protectionStore.protectStepOwed(accountIdB64)
         mutableRecoveryEmail.value = null
+        resealTried.remove(accountIdB64)
         pushScope.launch { refreshAccountProtection(accountIdB64) }
         // ADR-0066 section 3.3 - a pending key rotation whose key the
         // directory already serves is adopted at the landing.
@@ -1267,6 +1321,9 @@ public class AuthRepository(
                 // The claim above bound the handle for this session; the
                 // session landing below need not repeat it.
                 loginHandleRebinder.markBound(result.sessionToken, normalisedUsername)
+                // ADR-0068 - the name goes into the own-username register
+                // once the synced state is open.
+                pendingUsernameWrite.set(accountIdB64 to normalisedUsername)
                 sessionStore.save(
                     PersistedSession(
                         accountIdB64 = accountIdB64,
@@ -2443,6 +2500,7 @@ public class AuthRepository(
      *  the next landing or when Settings opens. */
     private suspend fun refreshAccountProtection(accountIdB64: String) {
         try {
+            resumeOwedRename(accountIdB64)
             refreshRecoveryEmail()
             fetchAccountNotices(accountIdB64)
         } catch (cause: Throwable) {
@@ -2471,6 +2529,8 @@ public class AuthRepository(
         if (!secretsAreFor(accountIdB64)) return null
         protectionStore.setPhraseSaved(accountIdB64, status.phraseSaved)
         mutableRecoveryEmail.value = status
+        // The automatic re-seal is evaluated after every read.
+        pushScope.launch { resealIfNeeded() }
         return status
     }
 
@@ -2609,7 +2669,10 @@ public class AuthRepository(
             enabled = true,
             vault = vault,
             phraseSaved = protectionStore.phraseSaved(accountIdB64),
+            totp = before?.totp == true,
         )
+        // The confirmed address is kept by the account's devices.
+        keepRecoveryAddress(accountIdB64, address)
     }
 
     /** `DELETE /recovery-email` for the signed-in account.
@@ -2631,6 +2694,384 @@ public class AuthRepository(
             throw err
         }
         mutableRecoveryEmail.value = mutableRecoveryEmail.value?.copy(enabled = false, vault = false)
+        keepRecoveryAddress(accountIdB64, null)
+    }
+
+    // ---- the devices keep the address (amended 2026-10-13) ----------------
+
+    /**
+     * Keep [address] (`null` = removed) in the synced state's register, or
+     * park the write until the state is open. The value is never logged.
+     */
+    private suspend fun keepRecoveryAddress(accountIdB64: String, address: String?) {
+        val port = recoveryAddressPort
+        val written = try {
+            port != null && port.state().ready && secretsAreFor(accountIdB64) && port.write(address).let { true }
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "recovery address not kept: ${cause.javaClass.simpleName}")
+            false
+        }
+        if (written) {
+            pendingAddressWrite.set(null)
+            mutableRecoveryAddress.value = port?.state()?.address
+        } else {
+            pendingAddressWrite.set(accountIdB64 to address)
+        }
+    }
+
+    /**
+     * The register changed or became readable (the app root calls this on
+     * every emission of the sync runtime's register): a parked write is
+     * flushed, Settings is told, and the re-seal rule is evaluated again.
+     */
+    public suspend fun onRecoveryAddressState() {
+        val port = recoveryAddressPort ?: return
+        val accountIdB64 = mutableIdentitySecrets.value?.let { base64Encode(it.accountId) }
+        if (accountIdB64 == null || !port.state().ready) {
+            mutableRecoveryAddress.value = null
+            return
+        }
+        pendingAddressWrite.get()?.let { parked ->
+            if (parked.first == accountIdB64) {
+                pendingAddressWrite.compareAndSet(parked, null)
+                try {
+                    port.write(parked.second)
+                } catch (cause: Throwable) {
+                    if (cause is kotlinx.coroutines.CancellationException) throw cause
+                    Log.w("lakko-auth", "parked recovery address not kept: ${cause.javaClass.simpleName}")
+                }
+            } else {
+                pendingAddressWrite.compareAndSet(parked, null)
+            }
+        }
+        val held = port.state().address
+        if (held != mutableRecoveryAddress.value) {
+            mutableRecoveryAddress.value = held
+            resealTried.remove(accountIdB64)
+        }
+        resealIfNeeded()
+    }
+
+    /**
+     * The automatic re-seal ([resealNeeded]): seal the CURRENT phrase under
+     * the held address with a fresh random salt, off the main thread, and
+     * `PUT /recovery-email/vault`. Silent. One attempt in flight per
+     * account and one per landing or register change; `vault-exists` and
+     * `phrase-saved` read the status again; `address-mismatch` clears the
+     * register (it is stale); anything else waits for the next landing.
+     */
+    private suspend fun resealIfNeeded() {
+        val status = mutableRecoveryEmail.value ?: return
+        val session = mutableState.value as? AuthState.Session ?: return
+        val accountIdB64 = session.account.accountIdB64
+        if (!secretsAreFor(accountIdB64) || session.account.username.isBlank()) return
+        val port = recoveryAddressPort ?: return
+        val held = port.state().takeIf { it.ready }?.address
+        if (!resealNeeded(status.enabled, status.vault, status.phraseSaved, addressHeld = held != null)) return
+        val address = held ?: return
+        // The new words must be on this device: not while a reset's or a
+        // rotation's publish is still owed.
+        if (publishOwed()) return
+        if (!resealTried.add(accountIdB64) || !resealInFlight.add(accountIdB64)) return
+        val failure: Throwable? = try {
+            val token = sessionTokenProvider.current() ?: return
+            val named = resolveNamedSignIn(null, session.account.username, loginHandleSource)
+            val salt = ByteArray(EMAIL_VAULT_SALT_LEN).also { SecureRandom().nextBytes(it) }
+            val sealed = withContext(Dispatchers.Default) {
+                val phrase = DevicePhrase.read(applicationContext, accountIdB64)
+                    ?: throw AuthClientArgError("this device holds no phrase to seal")
+                RecoveryMnemonic.fromPhrase(phrase).use {
+                    uniffi.lakko_ffi_uniffi.emailVaultSeal(it, named.handle, address, salt)
+                }
+            }
+            authClientFactory().use { it.recoveryEmailVaultPut(token, named.handle, address, salt, sealed) }
+            null
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            cause
+        } finally {
+            resealInFlight.remove(accountIdB64)
+        }
+        when (resealOutcomeOf(failure)) {
+            ResealOutcome.Settled -> refreshRecoveryEmail()
+            ResealOutcome.AddressStale -> {
+                Log.w("lakko-auth", "the held recovery address is not the account's any more; cleared")
+                keepRecoveryAddress(accountIdB64, null)
+            }
+            ResealOutcome.RetryLater ->
+                Log.w("lakko-auth", "recovery email vault not re-sealed: ${failure?.javaClass?.simpleName}")
+        }
+    }
+
+    // ---- the own-username register and a rename (ADR-0068) ---------------
+
+    private suspend fun writeOwnUsername(accountIdB64: String, username: String) {
+        val port = ownUsernamePort
+        val written = try {
+            port != null && port.state().ready && port.write(username).let { true }
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "own username not written to the register: ${cause.javaClass.simpleName}")
+            false
+        }
+        if (written) pendingUsernameWrite.set(null) else pendingUsernameWrite.set(accountIdB64 to username)
+    }
+
+    /**
+     * The own-username register changed or became readable (the app root
+     * calls this on every emission): a parked write goes first, an account
+     * from before the register seeds it once from its marker, and a name
+     * that differs from the marker is ADOPTED - the account was renamed on
+     * another device ([ownUsernameSync]).
+     */
+    public suspend fun onOwnUsernameState() {
+        val port = ownUsernamePort ?: return
+        val session = mutableState.value as? AuthState.Session ?: return
+        val accountIdB64 = session.account.accountIdB64
+        if (!secretsAreFor(accountIdB64)) return
+        val parked = pendingUsernameWrite.get()?.takeIf { it.first == accountIdB64 }?.second
+        val action = ownUsernameSync(
+            register = port.state(),
+            localUsername = session.account.username,
+            parked = parked,
+            renaming = renaming,
+            // Seeding needs auth's word on the local name in THIS session.
+            handleConfirmed = loginHandleRebinder.isConfirmed(session.account.username),
+        )
+        when (action) {
+            OwnUsernameSync.Nothing -> if (parked != null && parked == port.state().username) pendingUsernameWrite.set(null)
+            is OwnUsernameSync.Flush -> writeOwnUsername(accountIdB64, action.username)
+            is OwnUsernameSync.Seed -> writeOwnUsername(accountIdB64, action.username)
+            is OwnUsernameSync.Adopt -> adoptUsername(accountIdB64, action.username, renamedElsewhere = true)
+        }
+    }
+
+    /** The marker and the live session take [username]; the handle is known
+     *  for this session; the app root re-publishes the profile. */
+    private fun adoptUsername(accountIdB64: String, username: String, renamedElsewhere: Boolean) {
+        val session = mutableState.value as? AuthState.Session ?: return
+        if (session.account.accountIdB64 != accountIdB64 || session.account.username == username) return
+        sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = username))
+        sessionTokenProvider.peek()?.let { loginHandleRebinder.markBound(it.accessToken, username) }
+        mutableState.value = AuthState.Session(session.account.copy(username = username))
+        try {
+            onUsernameChanged?.invoke(username, renamedElsewhere)
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "the new username was not re-published: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /** When this device may rename again by its own stamp, or `null`. */
+    public fun renameAllowedAtMs(): Long? {
+        val accountIdB64 = signedInAccountIdB64() ?: return null
+        return renameAllowedAtMs(renameStore.lastChangedAtMs(accountIdB64), System.currentTimeMillis())
+    }
+
+    private fun renameRunner(accountIdB64: String): UsernameRenameRunner =
+        UsernameRenameRunner(
+            accountIdB64 = accountIdB64,
+            store = renameStore,
+            ports = object : UsernameRenamePorts {
+                override suspend fun bind(from: String, to: String) = renameBind(accountIdB64, from, to)
+
+                override suspend fun replace(newUsername: String): ByteArray? {
+                    val secrets = mutableIdentitySecrets.value ?: throw AuthClientArgError("not signed in")
+                    val token = sessionTokenProvider.current() ?: secrets.sessionToken
+                    return accountDirectory.replaceUsername(token, secrets.accountId, newUsername).certificate
+                }
+
+                override suspend fun adopt(newUsername: String, certificate: ByteArray?) {
+                    val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+                    if (certificate != null) reach.keepUsernameCertificate(certificate) else reach.dropUsernameCertificate()
+                    renameStore.markChanged(accountIdB64, System.currentTimeMillis())
+                    adoptUsername(accountIdB64, newUsername, renamedElsewhere = certificate == null)
+                    writeOwnUsername(accountIdB64, newUsername)
+                }
+            },
+            log = { Log.w("lakko-auth", it) },
+        )
+
+    /**
+     * `PUT /auth/login-handle` moving the account from [from]'s handle to
+     * [to]'s, with the grant and, when this device holds the address and the
+     * account has a recovery email, the recovery email re-keyed: the address
+     * and (no phrase saved) a vault freshly sealed off the main thread under
+     * [to]'s handle with a new random salt ([renameRecoveryEmail]).
+     */
+    private suspend fun renameBind(accountIdB64: String, from: String, to: String) {
+        val token = sessionTokenProvider.current() ?: throw AuthClientArgError("not signed in")
+        val target = namedHandleOrRefuse(loginHandleSource, to)
+        val previous = namedHandleOrRefuse(loginHandleSource, from)
+        val status = mutableRecoveryEmail.value ?: refreshRecoveryEmail()
+        val address = recoveryAddressPort?.state()?.takeIf { it.ready }?.address
+        val plan = renameRecoveryEmail(
+            hasRecoveryEmail = status?.enabled == true,
+            addressHeld = address != null,
+            phraseSaved = status?.phraseSaved ?: protectionStore.phraseSaved(accountIdB64),
+        )
+        val carried: LoginHandleRecoveryEmail? = when (plan) {
+            RenameRecoveryEmail.None -> null
+            RenameRecoveryEmail.AddressOnly -> LoginHandleRecoveryEmail(address = address.orEmpty())
+            RenameRecoveryEmail.AddressAndVault -> {
+                val salt = ByteArray(EMAIL_VAULT_SALT_LEN).also { SecureRandom().nextBytes(it) }
+                val sealed = withContext(Dispatchers.Default) {
+                    val phrase = DevicePhrase.read(applicationContext, accountIdB64)
+                        ?: throw AuthClientArgError("this device holds no phrase to seal")
+                    RecoveryMnemonic.fromPhrase(phrase).use {
+                        uniffi.lakko_ffi_uniffi.emailVaultSeal(it, target.handle, address.orEmpty(), salt)
+                    }
+                }
+                LoginHandleRecoveryEmail(
+                    address = address.orEmpty(),
+                    vault_salt = base64Encode(salt),
+                    sealed_entropy = base64Encode(sealed),
+                )
+            }
+        }
+        val outcome = try {
+            authClientFactory().use {
+                it.bindLoginHandle(
+                    sessionToken = token,
+                    handle = target.handle,
+                    freshGrant = freshGrant(),
+                    previousHandle = previous.handle,
+                    recoveryEmail = carried,
+                )
+            }
+        } catch (err: AuthHttpError) {
+            if (isFreshAuthRequired(err)) {
+                dropFreshProof()
+                throw FreshAuthRequired()
+            }
+            throw err
+        }
+        if (outcome == LoginHandleBinding.Taken) {
+            throw AuthClientArgError("the username is taken", me.lakko.app.l10n.UiText("auth.signup.error.username_taken"))
+        }
+        // The handle of this session is known: the sync does not ask again.
+        loginHandleRebinder.markBound(token, to)
+    }
+
+    /**
+     * Change the account's username (ADR-0068 section 4): one resumable
+     * operation ([UsernameRenameRunner]) - bind the new handle at auth, replace
+     * the name at discovery (a refusal binds the old handle back), then the
+     * marker, the session state, the register and the re-publish.
+     */
+    public suspend fun changeUsername(newUsername: String): RenameResult {
+        val session = mutableState.value as? AuthState.Session
+        if (session == null || session.account.username.isBlank() || !secretsAreFor(session.account.accountIdB64)) {
+            return RenameResult.Refused(me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        }
+        if (freshGrant() == null) {
+            return RenameResult.Refused(me.lakko.app.l10n.UiText("common.error.unavailable"), needsProof = true)
+        }
+        val named = try {
+            namedHandleOrRefuse(loginHandleSource, newUsername)
+        } catch (err: AuthClientArgError) {
+            return RenameResult.Refused(err.text ?: me.lakko.app.l10n.UiText("username.error.unknown"))
+        }
+        renaming = true
+        return try {
+            renameRunner(session.account.accountIdB64).start(session.account.username, named.username)
+        } finally {
+            renaming = false
+        }
+    }
+
+    /** A rename a crash left between its steps is finished or rolled back
+     *  at the landing. Best effort; a record that cannot be settled stays. */
+    private suspend fun resumeOwedRename(accountIdB64: String) {
+        if (renameStore.load(accountIdB64) == null) return
+        renaming = true
+        try {
+            renameRunner(accountIdB64).resume()
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "owed username rename not settled: ${cause.javaClass.simpleName}")
+        } finally {
+            renaming = false
+        }
+    }
+
+    // ---- a guest chooses a username and its first password ----------------
+
+    /** Whether the signed-in account chose a username and still owes its
+     *  first password (a restart between the two steps). */
+    public fun firstPasswordOwed(): Boolean =
+        signedInAccountIdB64()?.let { protectionStore.firstPasswordOwed(it) } == true
+
+    /**
+     * "Choose a username", the name step: the sign-up claim run later
+     * ([claimUsername]: the login handle at auth, then discovery, the handle
+     * released if discovery refuses), the certificate kept, the name stored
+     * in the account marker and the live session, the handle marked bound.
+     * The first password is owed from here on ([setFirstPassword]).
+     *
+     * @throws AuthClientArgError a taken or refused name (the form's line).
+     * @throws AuthHttpError `429 handle-bind-limited`, others.
+     */
+    public suspend fun claimGuestUsername(username: String): String {
+        val session = mutableState.value as? AuthState.Session
+        val secrets = mutableIdentitySecrets.value
+        if (session == null || secrets == null || session.account.username.isNotBlank()) {
+            throw AuthClientArgError(
+                "no guest session to name",
+                me.lakko.app.l10n.UiText("common.error.session_not_ready"),
+            )
+        }
+        val accountIdB64 = session.account.accountIdB64
+        val token = sessionTokenProvider.current() ?: secrets.sessionToken
+        val claimed = claimUsername(
+            directory = accountDirectory,
+            binder = loginHandleBinder,
+            handles = loginHandleSource,
+            sessionToken = token,
+            accountId = secrets.accountId,
+            username = username,
+        )
+        loginHandleRebinder.markBound(token, claimed.username)
+        // Owed before the name shows anywhere: a restart reopens the screen
+        // on the password.
+        protectionStore.setFirstPasswordOwed(accountIdB64, true)
+        sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = claimed.username))
+        claimed.certificate?.let {
+            try {
+                me.lakko.app.reach.ReachManager.get(applicationContext).keepUsernameCertificate(it)
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "username certificate not kept: ${cause.javaClass.simpleName}")
+            }
+        }
+        mutableState.value = AuthState.Session(session.account.copy(username = claimed.username))
+        writeOwnUsername(accountIdB64, claimed.username)
+        return claimed.username
+    }
+
+    /**
+     * "Choose a username", the password step: the device's seed-based
+     * password change ([replacePassword]) with no proof block - the account
+     * has no known password; this is its first. Allowed only while the first
+     * password is owed.
+     */
+    public suspend fun setFirstPassword(newPassword: ByteArray) {
+        val accountIdB64 = signedInAccountIdB64()
+        if (accountIdB64 == null || !protectionStore.firstPasswordOwed(accountIdB64)) {
+            throw AuthClientArgError(
+                "no first password is owed",
+                me.lakko.app.l10n.UiText("common.error.session_not_ready"),
+            )
+        }
+        replacePassword(newPassword)
+        protectionStore.setFirstPasswordOwed(accountIdB64, false)
+    }
+
+    /** The claim screen closed after its "done" line: the "Protect your
+     *  account" step is offered once (the guest never saw it). */
+    public fun finishUsernameClaim() {
+        val accountIdB64 = signedInAccountIdB64() ?: return
+        protectionStore.setProtectStepOwed(accountIdB64, true)
+        mutableProtectStepOwed.value = true
     }
 
     // ---- Get back in > Email code (UX 19.3) -------------------------------
@@ -2711,6 +3152,8 @@ public class AuthRepository(
                 signedInAccountIdB64()?.let { accountIdB64 ->
                     noticeStore.markOwn(accountIdB64, AccountNoticeKind.AccountOpenedByEmail, System.currentTimeMillis())
                     protectionStore.setPhraseSaved(accountIdB64, false)
+                    // The person typed the address: this device keeps it.
+                    keepRecoveryAddress(accountIdB64, address)
                 }
                 EmailRecoverOutcome.Restored
             }
@@ -2736,6 +3179,9 @@ public class AuthRepository(
                     session = result.session,
                     pushContext = "email-recover",
                 )
+                // The person typed the address: this device keeps it (the
+                // write is parked until the synced state is open).
+                keepRecoveryAddress(accountIdB64, address)
                 EmailRecoverOutcome.PasswordSet
             }
         }
@@ -3771,6 +4217,9 @@ public class AuthRepository(
         val now = System.currentTimeMillis()
         // UX 19.6 - "It was not me" on a device that holds the keys.
         if ((noticePasswordUnlockUntilMs[accountIdB64] ?: 0L) > now) return true
+        // A guest that just chose a username sets its FIRST password: the
+        // account has no known password to prove.
+        if (protectionStore.firstPasswordOwed(accountIdB64)) return true
         return passwordChangeAllowed(
             proofLive = freshAuth.hasLive(accountIdB64, now),
             wordsCheckedAtMs = wordsCheckedAtMs[accountIdB64],
@@ -5622,9 +6071,29 @@ public class AuthRepository(
     /** The publish landed far enough: the new words may be shown. */
     public fun rotationPhraseReleased() {
         mutablePublishOwedRevision.value = mutablePublishOwedRevision.value + 1
+        reevaluateRecoveryEmail()
+    }
+
+    /**
+     * The account keys changed (a rotation ran, here or on another device):
+     * the server dropped the email vault, so the status is read again and
+     * the automatic re-seal evaluated with the NEW phrase.
+     */
+    private fun reevaluateRecoveryEmail() {
+        val accountIdB64 = mutableIdentitySecrets.value?.let { base64Encode(it.accountId) } ?: return
+        resealTried.remove(accountIdB64)
+        pushScope.launch {
+            try {
+                refreshRecoveryEmail()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                Log.w("lakko-auth", "recovery email not re-read: ${cause.javaClass.simpleName}")
+            }
+        }
     }
 
     public fun rotationDiscardPrepared() {
+        reevaluateRecoveryEmail()
         val accountIdB64 = signedInAccountIdB64() ?: return
         try {
             preparedRotationStore.clear(accountIdB64)
@@ -5766,6 +6235,7 @@ public class AuthRepository(
                                     pair = resolution.pair,
                                     asKeptDevice = true,
                                 )
+                                reevaluateRecoveryEmail()
                                 return
                             }
                             KeptResolution.Removed -> {
@@ -6716,6 +7186,8 @@ public class AuthRepository(
         mutableIdentitySecrets.value = null
         // ADR-0067 - what was read for the departing session goes with it.
         mutableRecoveryEmail.value = null
+        mutableRecoveryAddress.value = null
+        loginHandleRebinder.forgetConfirmed()
         mutableAccountNotices.value = emptyList()
         mutableProtectStepOwed.value = false
         // No session, no contact list: an account-less read is empty and an

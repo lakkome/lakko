@@ -52,6 +52,8 @@ import { ScopedDiscoveryRuntime } from "./reach/ScopedDiscoveryRuntime";
 import { OwedDeviceRemovals } from "./devices/OwedDeviceRemovals";
 import { OwedKeyRotation } from "./devices/OwedKeyRotation";
 import { AccountNotices } from "./auth/protect/AccountNotices";
+import { UsernameClaimHost } from "./auth/UsernameClaim";
+import { UsernameChangeHost } from "./auth/UsernameChange";
 import { GroupClosedProvider } from "./chat/GroupClosedContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
 import { JournalOwnershipProvider } from "./ds/JournalOwnershipContext";
@@ -228,6 +230,10 @@ const App: Component = () => (
            * of its devices.
            */}
           <AccountNotices />
+          {/* ADR-0067 pass A - a guest chooses a username and a password. */}
+          <UsernameClaimHost />
+          {/* ADR-0068 - changing a username, and finishing one left undone. */}
+          <UsernameChangeHost />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole

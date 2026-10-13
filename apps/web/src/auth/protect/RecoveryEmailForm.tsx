@@ -8,15 +8,15 @@
  * your account" step.
  *
  * The proof block of section 17.1 is drawn above the email field when no
- * proof is live (sign-up counts as one). The address lives in this
- * component's memory until it closes: it is never stored on the device and
- * never logged.
+ * proof is live (sign-up counts as one). Once confirmed, the address is
+ * kept in the synced state's register (encrypted, shared with the account's
+ * other devices); it is never written to plain storage and never logged.
  *
  * Every decision is `email-flow.ts` (the step machine and the reading of
  * the server's answers) and `enrol-run.ts` (when the email vault is sealed).
  */
 import { plainStore } from "./local";
-import { createSignal, Match, onCleanup, Show, Switch, type JSX } from "solid-js";
+import { createSignal, Match, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
 
 import { useAuth } from "../AuthContext";
 import { base64Decode, base64Encode } from "../account-id";
@@ -29,6 +29,8 @@ import { WaitNotice } from "../recover/FormNotices";
 import { createRetryCountdown } from "../recover/retry-countdown";
 import { currentLanguage, t } from "../../l10n";
 import { loadWasm } from "../../wasm";
+import { openUsernameClaim } from "../username-claim-host";
+import { rememberAddress } from "./address-register";
 import { CodeField, ResendButton } from "./CodeField";
 import {
   emailFailure,
@@ -53,6 +55,9 @@ export function RecoveryEmailForm(props: {
    *  on the sign-up step). */
   readonly onCancel?: () => void;
   readonly cancelLabel?: string;
+  /** What the address field starts with: the address this device holds
+   *  when the email is being added back, nothing when it is replaced. */
+  readonly prefill?: string;
 }): JSX.Element {
   const auth = useAuth();
   const client = new RecoveryEmailClient();
@@ -65,6 +70,9 @@ export function RecoveryEmailForm(props: {
   const [addressValid, setAddressValid] = createSignal(false);
   const wait = createRetryCountdown();
   let codeInput: HTMLInputElement | undefined;
+  onMount(() => {
+    if ((props.prefill ?? "").length > 0) void checkAddress(props.prefill ?? "");
+  });
   // The address never outlives the surface.
   onCleanup(() => {
     setAddress("");
@@ -211,6 +219,10 @@ export function RecoveryEmailForm(props: {
           vaultSalt: base64Decode(current.vaultSalt),
         },
       );
+      // The address is confirmed: the account's devices keep it (the synced
+      // register), which is what lets them put the vault back by themselves
+      // after the keys change.
+      rememberAddress(acct.accountIdB64, address());
       setAddress("");
       setCode("");
       void refreshProtection(acct.accountIdB64, token);
@@ -238,6 +250,9 @@ export function RecoveryEmailForm(props: {
         <p class="form-info" role="status">
           {t("recovery_email.needs_username")}
         </p>
+        <button type="button" class="primary" onClick={openUsernameClaim}>
+          {t("username.claim.title")}
+        </button>
         <Show when={props.onCancel}>
           {(cancel) => (
             <button type="button" onClick={() => cancel()()}>

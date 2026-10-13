@@ -40,8 +40,8 @@ public fun showsNewWords(phraseSaved: Boolean): Boolean = phraseSaved
  *  person is asked to type the address again. */
 public data class ProtectPrompt(val title: String, val body: String?)
 
-public fun protectPrompt(status: RecoveryEmailStatus): ProtectPrompt =
-    if (recoveryEmailRow(status) == RecoveryEmailRow.AddAgain) {
+public fun protectPrompt(status: RecoveryEmailStatus, addressHeld: Boolean = false): ProtectPrompt =
+    if (recoveryEmailRow(status, addressHeld) == RecoveryEmailRow.AddAgain) {
         ProtectPrompt(title = "recovery_email.add_again.title", body = "recovery_email.add_again.body")
     } else {
         ProtectPrompt(title = "protect.banner.none", body = null)
@@ -116,12 +116,113 @@ public enum class RecoveryEmailRow {
     On,
 }
 
-public fun recoveryEmailRow(status: RecoveryEmailStatus): RecoveryEmailRow = when {
+public fun recoveryEmailRow(status: RecoveryEmailStatus, addressHeld: Boolean = false): RecoveryEmailRow = when {
     !status.available -> RecoveryEmailRow.Absent
     !status.enabled -> RecoveryEmailRow.Off
-    !status.vault && !status.phraseSaved -> RecoveryEmailRow.AddAgain
+    addAgainShown(status.enabled, status.vault, status.phraseSaved, addressHeld) -> RecoveryEmailRow.AddAgain
+    // A device that holds the address re-seals by itself: the row stays On.
     else -> RecoveryEmailRow.On
 }
+
+/**
+ * ADR-0067 (amended 2026-10-13) - the automatic re-seal: the server keeps
+ * the address value, holds no vault, no phrase is saved, and THIS device
+ * holds the address. It then seals the current phrase and installs the vault
+ * silently (`PUT /recovery-email/vault`).
+ */
+public fun resealNeeded(enabled: Boolean, vault: Boolean, phraseSaved: Boolean, addressHeld: Boolean): Boolean =
+    enabled && !vault && !phraseSaved && addressHeld
+
+/** "Add your email again" is shown only where no device-held address can
+ *  re-seal by itself. */
+public fun addAgainShown(enabled: Boolean, vault: Boolean, phraseSaved: Boolean, addressHeld: Boolean): Boolean =
+    enabled && !vault && !phraseSaved && !addressHeld
+
+/**
+ * What the add form starts with: the held address when the account has no
+ * recovery email now (after a recall the server dropped the stored value and
+ * a letter must confirm the address again), nothing when an address is being
+ * replaced.
+ */
+public fun enrolPrefill(enabled: Boolean, heldAddress: String?): String =
+    if (!enabled) heldAddress.orEmpty() else ""
+
+/** How one re-seal attempt ended. */
+public enum class ResealOutcome {
+    /** The vault is installed (or already was, or a phrase is saved): read
+     *  the status again. */
+    Settled,
+
+    /** The address this device holds is not the account's any more: clear
+     *  the register; the add-again state follows. */
+    AddressStale,
+
+    /** Anything else: tried again at the next landing, never in a loop. */
+    RetryLater,
+}
+
+/** Classify the answer of `PUT /recovery-email/vault` ([err] `null` = 200). */
+public fun resealOutcomeOf(err: Throwable?): ResealOutcome {
+    if (err == null) return ResealOutcome.Settled
+    val code = (err as? AuthHttpError)?.code
+    return when (code) {
+        "vault-exists", "phrase-saved" -> ResealOutcome.Settled
+        "address-mismatch" -> ResealOutcome.AddressStale
+        else -> ResealOutcome.RetryLater
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A guest chooses a username (and its first password)
+// ---------------------------------------------------------------------------
+
+/** Where "Choose a username" stands. */
+public enum class UsernameClaimStep {
+    /** Nothing is saved: the name and the password are both to be given. */
+    Name,
+
+    /** The name is saved; the password is still owed. Only the password is
+     *  retried. */
+    Password,
+
+    /** Both are saved. */
+    Done,
+}
+
+/** The step a screen opens on. */
+public fun usernameClaimStep(hasUsername: Boolean, passwordOwed: Boolean): UsernameClaimStep = when {
+    !hasUsername -> UsernameClaimStep.Name
+    passwordOwed -> UsernameClaimStep.Password
+    else -> UsernameClaimStep.Done
+}
+
+/** The entry-point rule: "Choose a username" is offered only to an account
+ *  without one (or whose first password is still owed after the name). */
+public fun usernameClaimOffered(hasUsername: Boolean, passwordOwed: Boolean = false): Boolean =
+    usernameClaimStep(hasUsername, passwordOwed) != UsernameClaimStep.Done
+
+/** What the one button does next, and what a failure leaves. */
+public data class UsernameClaimState(
+    val step: UsernameClaimStep,
+    val busy: Boolean = false,
+    val error: me.lakko.app.l10n.UiText? = null,
+) {
+    /** The username field is editable only until the name is saved. */
+    val nameEditable: Boolean get() = step == UsernameClaimStep.Name && !busy
+}
+
+/** The name landed: the password is next, whatever happens to it. */
+public fun afterUsernameSaved(state: UsernameClaimState): UsernameClaimState =
+    state.copy(step = UsernameClaimStep.Password, error = null)
+
+/** The password landed. */
+public fun afterFirstPasswordSaved(state: UsernameClaimState): UsernameClaimState =
+    state.copy(step = UsernameClaimStep.Done, busy = false, error = null)
+
+/** A failure: the step stays where it is (a saved name is kept), with the
+ *  failing step's own line. */
+public fun afterUsernameClaimFailure(state: UsernameClaimState, line: me.lakko.app.l10n.UiText): UsernameClaimState =
+    state.copy(busy = false, error = line)
 
 /** The `Recovery phrase` row of Settings > Account. */
 public enum class RecoveryPhraseRow {
@@ -286,6 +387,13 @@ public class AccountProtectionStore(private val storage: MarkerStorage) {
     public fun dismissBanner(accountIdB64: String, nowMs: Long): Unit =
         write(BANNER_PREFIX + accountIdB64, nowMs.toString())
 
+    /** The guest chose a username and its first password is not set yet. */
+    public fun firstPasswordOwed(accountIdB64: String): Boolean = read(FIRST_PASSWORD_PREFIX + accountIdB64) != null
+
+    public fun setFirstPasswordOwed(accountIdB64: String, owed: Boolean) {
+        if (owed) write(FIRST_PASSWORD_PREFIX + accountIdB64, "1") else drop(FIRST_PASSWORD_PREFIX + accountIdB64)
+    }
+
     public fun protectStepOwed(accountIdB64: String): Boolean = read(STEP_PREFIX + accountIdB64) != null
 
     public fun setProtectStepOwed(accountIdB64: String, owed: Boolean) {
@@ -297,6 +405,7 @@ public class AccountProtectionStore(private val storage: MarkerStorage) {
         drop(PHRASE_PREFIX + accountIdB64)
         drop(BANNER_PREFIX + accountIdB64)
         drop(STEP_PREFIX + accountIdB64)
+        drop(FIRST_PASSWORD_PREFIX + accountIdB64)
     }
 
     private fun read(key: String): String? = try {
@@ -326,8 +435,32 @@ public class AccountProtectionStore(private val storage: MarkerStorage) {
         private const val PHRASE_PREFIX: String = "phrase-saved:"
         private const val BANNER_PREFIX: String = "banner-dismissed:"
         private const val STEP_PREFIX: String = "protect-step-owed:"
+        private const val FIRST_PASSWORD_PREFIX: String = "first-password-owed:"
 
         public fun onDevice(context: Context): AccountProtectionStore =
             AccountProtectionStore(SharedPrefsMarkerStorage(context, PREFS_NAME))
     }
+}
+
+/**
+ * The recovery email address as this device's synced state holds it.
+ * [ready] is `false` until the state is open (nothing can be read or
+ * written before that). Never logged.
+ */
+public data class RecoveryAddressState(val ready: Boolean, val address: String?) {
+    override fun toString(): String = "RecoveryAddressState(ready=$ready, held=${address != null})"
+
+    public companion object {
+        public val NOT_READY: RecoveryAddressState = RecoveryAddressState(ready = false, address = null)
+    }
+}
+
+/** What the auth side needs of the synced state's recovery-email register. */
+public interface RecoveryAddressPort {
+    /** The register as held now. */
+    public fun state(): RecoveryAddressState
+
+    /** Write the register (`null` = removed); `false` when the state is not
+     *  open yet. */
+    public suspend fun write(address: String?): Boolean
 }

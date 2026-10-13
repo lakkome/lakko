@@ -9,8 +9,9 @@
  *     recovery phrase" / "Not protected";
  *   - one dismissible banner for an unprotected account without a passkey,
  *     "This account has no way back in.", which returns after 30 days;
- *   - the `Recovery email` row: On / Off with Replace and Remove. Never the
- *     address: the device does not keep it;
+ *   - the `Recovery email` row: the address on a device that holds it (the
+ *     synced register, ADR-0067 as amended 2026-10-13), else On / Off, with
+ *     Replace and Remove;
  *   - the `Recovery phrase` row: `Show recovery phrase` for a
  *     phrase-protected account, `Save a recovery phrase` for every other.
  *
@@ -36,6 +37,7 @@ import { ModalLayer } from "../../ui/ModalLayer";
 import {
   bannerDismissedAt,
   dismissBanner,
+  emailFormPrefill,
   emailNeedsAddingAgain,
   protectBannerKeys,
   protectBannerShown,
@@ -44,8 +46,11 @@ import {
   protectionStatusKey,
   type EmailRowAction,
 } from "./account-protection";
+import { openUsernameClaim } from "../username-claim-host";
+import { heldAddress } from "./address-register";
 import { protectionStatus, refreshProtection } from "./protection-state";
 import { RecoveryEmailForm } from "./RecoveryEmailForm";
+import { resealNeeded } from "./reseal";
 import { RemoveRecoveryEmail } from "./RemoveRecoveryEmail";
 import { SavePhrasePanel } from "./SavePhrasePanel";
 
@@ -70,9 +75,14 @@ export function ProtectionCard(): JSX.Element {
       : null;
   };
   const status = () => protectionStatus(account()?.accountIdB64 ?? null);
+  // The address, on a device that holds it (the synced register).
+  const address = (): string | null => heldAddress(account()?.accountIdB64 ?? null);
+  // What the email form starts with: the held address when adding, nothing
+  // when replacing.
+  const [prefill, setPrefill] = createSignal("");
   const rows = () => {
     const st = status();
-    return st === null ? null : protectionRows(st, (account()?.username.length ?? 0) > 0);
+    return st === null ? null : protectionRows(st, (account()?.username.length ?? 0) > 0, address() !== null);
   };
   const refresh = (): void => {
     const acct = account();
@@ -111,6 +121,7 @@ export function ProtectionCard(): JSX.Element {
       bannerDismissedAt(plainStore(), acct.accountIdB64),
       Date.now(),
       hasPasskey(),
+      resealNeeded(st.enabled, st.vault, st.phraseSaved, address() !== null),
     );
   };
   function onDismissBanner(): void {
@@ -122,11 +133,15 @@ export function ProtectionCard(): JSX.Element {
   function onProtect(): void {
     const email = rows()?.email ?? null;
     const canAdd = email !== null && email.actions.some((a) => a === "add" || a === "addAgain");
+    setPrefill(canAdd ? (address() ?? "") : "");
     setSheet(canAdd ? "email" : "phrase");
   }
   function onAction(action: EmailRowAction): void {
     if (action === "remove") setSheet("remove");
-    else if (action !== "choose-username") setSheet("email");
+    else if (action !== "choose-username") {
+      setPrefill(emailFormPrefill(action, address()));
+      setSheet("email");
+    }
   }
   function closed(): void {
     setSheet(null);
@@ -143,8 +158,10 @@ export function ProtectionCard(): JSX.Element {
           </p>
           <Show when={banner()}>
             <div class="form-error" role="status">
-              <span>{t(protectBannerKeys(st()).titleKey)}</span>
-              <Show when={protectBannerKeys(st()).bodyKey}>{(key) => <span>{t(key())}</span>}</Show>
+              <span>{t(protectBannerKeys(st(), address() !== null).titleKey)}</span>
+              <Show when={protectBannerKeys(st(), address() !== null).bodyKey}>
+                {(key) => <span>{t(key())}</span>}
+              </Show>
               <div class="lk-actions">
                 <button type="button" class="primary" onClick={onProtect}>
                   {t("protect.banner.action")}
@@ -166,13 +183,20 @@ export function ProtectionCard(): JSX.Element {
                   <span class="lk-card-row-sub">
                     {email().actions.includes("choose-username")
                       ? t("recovery_email.needs_username")
-                      : emailNeedsAddingAgain(st())
+                      : emailNeedsAddingAgain(st(), address() !== null)
                         ? t("recovery_email.add_again.body")
                         : email().on
-                          ? t("recovery_email.status.on")
+                          ? // A device that holds the address shows it; one
+                            // that does not shows On.
+                            (address() ?? t("recovery_email.status.on"))
                           : t("recovery_email.status.off")}
                   </span>
                 </div>
+                <Show when={email().actions.includes("choose-username")}>
+                  <button type="button" class="lk-card-row-action" onClick={openUsernameClaim}>
+                    {t("username.claim.title")}
+                  </button>
+                </Show>
                 <For each={email().actions.filter((a) => a !== "choose-username")}>
                   {(action) => (
                     <button
@@ -213,7 +237,7 @@ export function ProtectionCard(): JSX.Element {
 
           <ModalLayer open={sheet() === "email"} title={t("recovery_email.title")} onClose={closed}>
             <Show when={sheet() === "email"}>
-              <RecoveryEmailForm onDone={closed} onCancel={closed} />
+              <RecoveryEmailForm onDone={closed} onCancel={closed} prefill={prefill()} />
             </Show>
           </ModalLayer>
           <ModalLayer

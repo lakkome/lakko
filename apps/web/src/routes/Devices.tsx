@@ -31,6 +31,7 @@ import {
 import { A } from "@solidjs/router";
 import { Icon } from "../ui/icons";
 import { useAuth } from "../auth/AuthContext";
+import { openUsernameClaim } from "../auth/username-claim-host";
 import { newWordsShown } from "../auth/protect/account-protection";
 import { phraseProtectedHere } from "../auth/protect/protection-state";
 import { AuthClient } from "../auth/client";
@@ -184,6 +185,9 @@ export default function Devices(): JSX.Element {
             </div>
             <Show when={!hasUsername()}>
               <p class="lk-meta" style={{ margin: 0 }}>{t("device_link.pairing.needs_username")}</p>
+              <button type="button" onClick={openUsernameClaim}>
+                {t("username.claim.title")}
+              </button>
             </Show>
           </section>
           <Show when={add() !== "closed" && hasUsername()}>

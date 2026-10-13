@@ -93,14 +93,15 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         repository: AuthRepository,
         username: String,
         accountIdB64: String,
-        noteOwnAction: @escaping @MainActor (AccountNoticeKind) -> Void = { _ in }
+        noteOwnAction: @escaping @MainActor (AccountNoticeKind) -> Void = { _ in },
+        keepAddress: @escaping @MainActor (String) -> Void = { _ in }
     ) {
         self.repository = repository
         self.username = username
         self.accountIdB64 = accountIdB64
         self.resetProof = FreshAuthProofModel(surface: .reset, repository: repository)
         self.email = EmailRecoverModel(
-            ports: .live(repository: repository, noteOwnAction: noteOwnAction),
+            ports: .live(repository: repository, noteOwnAction: noteOwnAction, keepAddress: keepAddress),
             cachedUsername: username.isEmpty ? nil : username)
         // The block's fields decide whether the button is enabled.
         proofSink = resetProof.objectWillChange.sink { [weak self] _ in

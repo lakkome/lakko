@@ -41,7 +41,7 @@ use crate::opaque::LakkoCipherSuite;
 use crate::recall_tests::{
     b64u, build_state, call, code, finish_body, fresh_key, fresh_seed, grant, json_of, login,
     new_account, password_registration, pool, post, pubkey, recovery_login, reg_finish, reg_start,
-    roomy, statement, takeover, text, token, Account, Attempt, OWNER_DEVICE,
+    reset_keys, roomy, statement, takeover, text, token, Account, Attempt, OWNER_DEVICE,
 };
 use crate::session::now_ms;
 use crate::AppState;
@@ -85,6 +85,7 @@ fn wide() -> Limits {
         .with_name_window(Scope::HandleBind, Window::new(1000, 900))
         .with_name_window(Scope::LoginRecovery, Window::new(1000, 900))
         .with_name_window(Scope::KeyRotate, Window::new(1000, 900))
+        .with_name_window(Scope::EmailVaultStore, Window::new(1000, 900))
         .with_handle_change_interval(0)
 }
 
@@ -631,13 +632,15 @@ async fn a_change_of_login_handle_drops_the_email_and_the_vault() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(rows(&pool, "recovery_emails", &who.account.id).await, 1);
     let (_, new_handle) = crate::login_handle::random_handle();
+    // A change of handle needs the fresh-auth grant (ADR-0068); with it and
+    // without the address, the recovery email is dropped.
     let (st, body) = call(
         &rig.state,
         Method::PUT,
         "/auth/login-handle",
         Some(&bearer),
         None,
-        Some(&json!({ "handle": new_handle })),
+        Some(&json!({ "handle": new_handle, "fresh_grant": grant(&who.session) })),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{}", text(&body));
@@ -1557,6 +1560,721 @@ async fn a_rotation_that_saves_a_phrase_ends_the_mail_protected_mode() {
     .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(json_of(&body), json!({ "mode": "password" }));
+}
+
+// ----------------------------------------------------------------
+// PUT /recovery-email/vault (amended 2026-10-13)
+// ----------------------------------------------------------------
+
+async fn put_vault(
+    state: &AppState,
+    bearer: &str,
+    handle: &str,
+    address: &str,
+    salt: &[u8],
+    sealed: &[u8],
+) -> (StatusCode, Bytes) {
+    call(
+        state,
+        Method::PUT,
+        "/recovery-email/vault",
+        Some(bearer),
+        None,
+        Some(&json!({
+            "handle": handle,
+            "address": address,
+            "vault_salt": B64.encode(salt),
+            "sealed_entropy": B64.encode(sealed),
+        })),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_device_that_kept_the_address_stores_a_vault_again_after_a_reset() {
+    let pool = db_or_skip!("a_device_that_kept_the_address_stores_a_vault_again_after_a_reset");
+    let rig = rig(pool.clone());
+    let who = person(&rig.state).await;
+    let address = fresh_address();
+    let first_vault = sealed_vault();
+    enrol(&rig, &who, &address, Some(&first_vault)).await;
+    let letters = rig.mail.sent().len();
+
+    // While a vault exists nothing can be put over it, even with the right
+    // address.
+    let (st, body) = put_vault(
+        &rig.state,
+        &token(&who.session),
+        &who.account.handle,
+        &address,
+        &[9u8; 16],
+        &sealed_vault(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{}", text(&body));
+    assert_eq!(code(&body), "vault-exists");
+    let at_rest: Vec<u8> =
+        sqlx::query_scalar("SELECT body_enc FROM email_vaults WHERE account_id = ?")
+            .bind(&who.account.id[..])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        lakko_crypto::aead::open_with_key(&VAULT_KEY, &at_rest).unwrap(),
+        first_vault
+    );
+
+    // The owner resets the account keys: the vault of the old phrase goes,
+    // the confirmed address stays.
+    let (st, body) = reset_keys(&rig.state, &who.session, &fresh_seed(), &fresh_key()).await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    let after_reset = token(&json_of(&body));
+    assert_eq!(rows(&pool, "email_vaults", &who.account.id).await, 0);
+    assert_eq!(rows(&pool, "recovery_emails", &who.account.id).await, 1);
+
+    // Malformed bodies cost nothing and store nothing.
+    let good_salt = [0x5A; 16];
+    let new_vault = sealed_vault();
+    for (salt, sealed) in [
+        (&[0u8; 15][..], &new_vault[..]),
+        (&good_salt[..], &[0u8; 60][..]),
+    ] {
+        let (st, _) = put_vault(
+            &rig.state,
+            &after_reset,
+            &who.account.handle,
+            &address,
+            salt,
+            sealed,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+    let (st, body) = put_vault(
+        &rig.state,
+        &after_reset,
+        &who.account.handle,
+        "not an address",
+        &good_salt,
+        &new_vault,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(code(&body), "address-invalid");
+
+    // Another address, and another account's handle with the right address.
+    let (st, body) = put_vault(
+        &rig.state,
+        &after_reset,
+        &who.account.handle,
+        &fresh_address(),
+        &good_salt,
+        &new_vault,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{}", text(&body));
+    assert_eq!(code(&body), "address-mismatch");
+    let other = person(&rig.state).await;
+    let (st, body) = put_vault(
+        &rig.state,
+        &after_reset,
+        &other.account.handle,
+        &address,
+        &good_salt,
+        &new_vault,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(code(&body), "handle-mismatch");
+    assert_eq!(rows(&pool, "email_vaults", &who.account.id).await, 0);
+
+    // The device that kept the address: no grant, no letter, the vault is
+    // back. The address is normalised as at enrolment.
+    let (st, body) = put_vault(
+        &rig.state,
+        &after_reset,
+        &who.account.handle,
+        &format!("  {}  ", address.to_uppercase()),
+        &good_salt,
+        &new_vault,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    assert_eq!(json_of(&body), json!({ "vault": true }));
+    assert_eq!(rig.mail.sent().len(), letters, "no letter is sent");
+    let (_, body) = get(&rig.state, "/recovery-email", &after_reset).await;
+    assert_eq!(
+        json_of(&body),
+        json!({
+            "available": true, "enabled": true, "vault": true, "phrase_saved": false,
+            "totp": false,
+        })
+    );
+    // No notice for it.
+    assert_eq!(
+        notices(&rig.state, &after_reset).await,
+        ["recovery-email-added"]
+    );
+
+    // A mailed code releases exactly what was stored, under the client's salt.
+    let ticket = ticket_for(&rig, &who.account.handle, &address).await["ticket"].clone();
+    let (st, body) = post(
+        &rig.state,
+        "/recovery-email/recover/open",
+        None,
+        &json!({ "ticket": ticket }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    let opened = json_of(&body);
+    assert_eq!(opened["mode"], "vault");
+    assert_eq!(
+        B64.decode(opened["vault_salt"].as_str().unwrap()).unwrap(),
+        good_salt
+    );
+    assert_eq!(
+        B64.decode(opened["sealed_entropy"].as_str().unwrap())
+            .unwrap(),
+        new_vault
+    );
+
+    // And a second put is refused: it never replaces.
+    let (st, body) = put_vault(
+        &rig.state,
+        &after_reset,
+        &who.account.handle,
+        &address,
+        &good_salt,
+        &sealed_vault(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(code(&body), "vault-exists");
+}
+
+#[tokio::test]
+async fn a_vault_is_not_stored_without_a_confirmed_address_or_once_a_phrase_is_saved() {
+    let pool = db_or_skip!("a_vault_is_not_stored_without_a_confirmed_address");
+    let rig = rig(pool.clone());
+
+    // No recovery email at all.
+    let bare = person(&rig.state).await;
+    let (st, body) = put_vault(
+        &rig.state,
+        &token(&bare.session),
+        &bare.account.handle,
+        &fresh_address(),
+        &[1u8; 16],
+        &sealed_vault(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{}", text(&body));
+    assert_eq!(code(&body), "no-recovery-email");
+
+    // A phrase-protected account with a confirmed address and no vault.
+    let saved = person(&rig.state).await;
+    let bearer = token(&saved.session);
+    let address = fresh_address();
+    enrol(&rig, &saved, &address, None).await;
+    let (st, _) = delete(
+        &rig.state,
+        "/recovery-email/vault",
+        &bearer,
+        &json!({ "fresh_grant": grant(&saved.session) }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, body) = put_vault(
+        &rig.state,
+        &bearer,
+        &saved.account.handle,
+        &address,
+        &[1u8; 16],
+        &sealed_vault(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{}", text(&body));
+    assert_eq!(code(&body), "phrase-saved");
+    // The wrong address is told so before anything about the phrase.
+    let (st, body) = put_vault(
+        &rig.state,
+        &bearer,
+        &saved.account.handle,
+        &fresh_address(),
+        &[1u8; 16],
+        &sealed_vault(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(code(&body), "address-mismatch");
+    assert_eq!(rows(&pool, "email_vaults", &saved.account.id).await, 0);
+    assert_eq!(rows(&pool, "email_vaults", &bare.account.id).await, 0);
+
+    // No session: nothing.
+    let (st, _) = call(
+        &rig.state,
+        Method::PUT,
+        "/recovery-email/vault",
+        None,
+        None,
+        Some(&json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    // The feature off: the usual 503, before the body is read for meaning.
+    let mut off = build_state(pool.clone(), wide());
+    off.vault_enc_key = Some(Arc::new(VAULT_KEY));
+    let (st, body) = put_vault(
+        &off,
+        &bearer,
+        &saved.account.handle,
+        &address,
+        &[1u8; 16],
+        &sealed_vault(),
+    )
+    .await;
+    assert_eq!(
+        (st, text(&body).as_str()),
+        (StatusCode::SERVICE_UNAVAILABLE, DISABLED)
+    );
+}
+
+#[tokio::test]
+async fn address_guesses_against_the_stored_key_are_rationed_per_account() {
+    let pool = db_or_skip!("address_guesses_against_the_stored_key_are_rationed_per_account");
+    let rig = rig_with(
+        pool,
+        wide().with_name_window(Scope::EmailVaultStore, Window::new(3, 900)),
+    );
+    let who = person(&rig.state).await;
+    let bearer = token(&who.session);
+    enrol(&rig, &who, &fresh_address(), None).await;
+    for _ in 0..3 {
+        let (st, body) = put_vault(
+            &rig.state,
+            &bearer,
+            &who.account.handle,
+            &fresh_address(),
+            &[1u8; 16],
+            &sealed_vault(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert_eq!(code(&body), "address-mismatch");
+    }
+    let (st, body) = put_vault(
+        &rig.state,
+        &bearer,
+        &who.account.handle,
+        &fresh_address(),
+        &[1u8; 16],
+        &sealed_vault(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code(&body), "too-many-attempts");
+    assert!(json_of(&body)["retry_after_secs"].as_u64().unwrap() >= 1);
+}
+
+// ----------------------------------------------------------------
+// ADR-0068 section 2: a change of login handle
+// ----------------------------------------------------------------
+
+async fn put_handle(state: &AppState, bearer: &str, body: &Value) -> (StatusCode, Bytes) {
+    call(
+        state,
+        Method::PUT,
+        "/auth/login-handle",
+        Some(bearer),
+        None,
+        Some(body),
+    )
+    .await
+}
+
+/// `POST /auth/login-handle/check`: the `state` it answers.
+async fn handle_state(state: &AppState, bearer: &str, handle: &str) -> String {
+    let (st, body) = post(
+        state,
+        "/auth/login-handle/check",
+        Some(bearer),
+        &json!({ "handle": handle }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    json_of(&body)["state"].as_str().unwrap().to_string()
+}
+
+/// Whether a recover start for the pair sends a letter.
+async fn mail_reaches(rig: &Rig, handle: &str, address: &str) -> bool {
+    let before = rig.mail.sent().len();
+    let (st, _) = recover_start(rig, handle, address).await;
+    assert_eq!(st, StatusCode::OK);
+    for _ in 0..30 {
+        if rig.mail.sent().len() > before {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_rename_with_the_address_moves_the_recovery_email_to_the_new_handle() {
+    let pool = db_or_skip!("a_rename_with_the_address_moves_the_recovery_email");
+    let rig = rig(pool.clone());
+    let who = person(&rig.state).await;
+    let bearer = token(&who.session);
+    let old_handle = who.account.handle.clone();
+    let address = fresh_address();
+    let old_vault = sealed_vault();
+    enrol(&rig, &who, &address, Some(&old_vault)).await;
+    let letters = rig.mail.sent().len();
+    let (_, new_handle) = crate::login_handle::random_handle();
+    let new_vault = sealed_vault();
+    let new_salt = [0x6B; 16];
+    let rekey = |address: &str| {
+        json!({
+            "handle": new_handle,
+            "fresh_grant": grant(&who.session),
+            "previous_handle": old_handle,
+            "recovery_email": {
+                "address": address,
+                "vault_salt": B64.encode(new_salt),
+                "sealed_entropy": B64.encode(&new_vault),
+            },
+        })
+    };
+
+    // Another address: the whole bind is refused and nothing changes, the
+    // handle included.
+    let (st, body) = put_handle(&rig.state, &bearer, &rekey(&fresh_address())).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{}", text(&body));
+    assert_eq!(code(&body), "address-mismatch");
+    assert_eq!(handle_state(&rig.state, &bearer, &old_handle).await, "same");
+    // A previous handle that is not the bound one.
+    let mut wrong_previous = rekey(&address);
+    wrong_previous["previous_handle"] = json!(crate::login_handle::random_handle().1);
+    let (st, body) = put_handle(&rig.state, &bearer, &wrong_previous).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{}", text(&body));
+    assert_eq!(code(&body), "handle-mismatch");
+    // No previous handle at all: the stored key cannot be checked.
+    let mut no_previous = rekey(&address);
+    no_previous
+        .as_object_mut()
+        .unwrap()
+        .remove("previous_handle");
+    let (st, body) = put_handle(&rig.state, &bearer, &no_previous).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(code(&body), "handle-mismatch");
+    // Malformed: a salt without a blob, an address the rule refuses.
+    let mut half = rekey(&address);
+    half["recovery_email"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sealed_entropy");
+    assert_eq!(
+        put_handle(&rig.state, &bearer, &half).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let (st, body) = put_handle(&rig.state, &bearer, &rekey("not an address")).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(code(&body), "address-invalid");
+    // Everything is as it was: the old pair still gets a letter.
+    assert_eq!(handle_state(&rig.state, &bearer, &old_handle).await, "same");
+    assert!(mail_reaches(&rig, &old_handle, &address).await);
+    let letters = letters + 1;
+
+    // The rename with the right address: no letter, no notice, and the
+    // recovery email follows the account to the new name.
+    let (st, body) = put_handle(&rig.state, &bearer, &rekey(&address)).await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    assert_eq!(rig.mail.sent().len(), letters);
+    assert_eq!(handle_state(&rig.state, &bearer, &new_handle).await, "same");
+    assert_eq!(
+        handle_state(&rig.state, &bearer, &old_handle).await,
+        "other"
+    );
+    assert_eq!(rows(&pool, "recovery_emails", &who.account.id).await, 1);
+    assert_eq!(rows(&pool, "email_vaults", &who.account.id).await, 1);
+    assert_eq!(notices(&rig.state, &bearer).await, ["recovery-email-added"]);
+
+    // By mail under the OLD handle: nothing any more.
+    assert!(!mail_reaches(&rig, &old_handle, &address).await);
+    // Under the NEW handle: the code, and the vault re-sealed for it.
+    let ticket = ticket_for(&rig, &new_handle, &address).await["ticket"].clone();
+    let (st, body) = post(
+        &rig.state,
+        "/recovery-email/recover/open",
+        None,
+        &json!({ "ticket": ticket }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    let opened = json_of(&body);
+    assert_eq!(opened["mode"], "vault");
+    assert_eq!(
+        B64.decode(opened["vault_salt"].as_str().unwrap()).unwrap(),
+        new_salt
+    );
+    assert_eq!(
+        B64.decode(opened["sealed_entropy"].as_str().unwrap())
+            .unwrap(),
+        new_vault
+    );
+
+    // A re-key without a vault keeps the address and removes the vault that
+    // was sealed under the handle being left.
+    let (_, third_handle) = crate::login_handle::random_handle();
+    let (st, body) = put_handle(
+        &rig.state,
+        &bearer,
+        &json!({
+            "handle": third_handle,
+            "fresh_grant": grant(&who.session),
+            "previous_handle": new_handle,
+            "recovery_email": { "address": address },
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    assert_eq!(rows(&pool, "recovery_emails", &who.account.id).await, 1);
+    assert_eq!(rows(&pool, "email_vaults", &who.account.id).await, 0);
+    assert!(mail_reaches(&rig, &third_handle, &address).await);
+
+    // A phrase-protected account: the key moves, a vault sent with it is
+    // not stored.
+    let saved = person(&rig.state).await;
+    let saved_bearer = token(&saved.session);
+    let saved_address = fresh_address();
+    enrol(&rig, &saved, &saved_address, None).await;
+    let (st, _) = delete(
+        &rig.state,
+        "/recovery-email/vault",
+        &saved_bearer,
+        &json!({ "fresh_grant": grant(&saved.session) }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, saved_new) = crate::login_handle::random_handle();
+    let (st, body) = put_handle(
+        &rig.state,
+        &saved_bearer,
+        &json!({
+            "handle": saved_new,
+            "fresh_grant": grant(&saved.session),
+            "previous_handle": saved.account.handle,
+            "recovery_email": {
+                "address": saved_address,
+                "vault_salt": B64.encode([1u8; 16]),
+                "sealed_entropy": B64.encode(sealed_vault()),
+            },
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    assert_eq!(rows(&pool, "email_vaults", &saved.account.id).await, 0);
+    assert!(mail_reaches(&rig, &saved_new, &saved_address).await);
+
+    // An account without a recovery email: the object changes nothing and
+    // refuses nothing.
+    let bare = person(&rig.state).await;
+    let (_, bare_new) = crate::login_handle::random_handle();
+    let (st, body) = put_handle(
+        &rig.state,
+        &token(&bare.session),
+        &json!({
+            "handle": bare_new,
+            "fresh_grant": grant(&bare.session),
+            "previous_handle": bare.account.handle,
+            "recovery_email": { "address": fresh_address() },
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    assert_eq!(rows(&pool, "recovery_emails", &bare.account.id).await, 0);
+}
+
+#[tokio::test]
+async fn a_change_of_handle_needs_a_fresh_grant_and_a_first_bind_does_not() {
+    let pool = db_or_skip!("a_change_of_handle_needs_a_fresh_grant");
+    // Two binds an hour, and the default minute between two changes.
+    let rig = rig_with(
+        pool.clone(),
+        wide()
+            .with_name_window(Scope::HandleBind, Window::new(4, 3600))
+            .with_handle_change_interval(60),
+    );
+    let who = person(&rig.state).await;
+    let bearer = token(&who.session);
+    let fresh = grant(&who.session);
+    let first = who.account.handle.clone();
+    let (_, second) = crate::login_handle::random_handle();
+    let (_, third) = crate::login_handle::random_handle();
+
+    // A session alone cannot move the name, however often it asks: the
+    // refusal comes before the bind counter, so it spends none of it.
+    for bad in [Value::Null, json!("not-a-grant")] {
+        for _ in 0..6 {
+            let (st, body) = put_handle(
+                &rig.state,
+                &bearer,
+                &json!({ "handle": second, "fresh_grant": bad }),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{}", text(&body));
+            assert_eq!(code(&body), "fresh-auth-required");
+        }
+    }
+    assert_eq!(handle_state(&rig.state, &bearer, &first).await, "same");
+
+    // Re-binding the handle the account holds is not a change: no grant.
+    let (st, body) = put_handle(&rig.state, &bearer, &json!({ "handle": first })).await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+
+    // With the grant the name moves. (The fixture bound the first handle a
+    // moment ago; the minute between two changes is over for it.)
+    sqlx::query(
+        "UPDATE login_handle_changes SET last_changed_at = NOW(3) - INTERVAL 1 HOUR \
+         WHERE account_id = ?",
+    )
+    .bind(&who.account.id[..])
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (st, body) = put_handle(
+        &rig.state,
+        &bearer,
+        &json!({ "handle": second, "fresh_grant": fresh }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    assert_eq!(handle_state(&rig.state, &bearer, &second).await, "same");
+
+    // A stale device of the account still holds the old name. It is told
+    // `other`, and its bind of the old name, a change with no grant, is
+    // refused: it cannot revert the rename.
+    assert_eq!(handle_state(&rig.state, &bearer, &first).await, "other");
+    let (st, body) = put_handle(&rig.state, &bearer, &json!({ "handle": first })).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(code(&body), "fresh-auth-required");
+    assert_eq!(handle_state(&rig.state, &bearer, &second).await, "same");
+
+    // Inside the minute another change is refused by the interval even with
+    // the grant; restoring the handle held just before is exempt from the
+    // interval and still needs the grant (refused just above without it).
+    let (st, body) = put_handle(
+        &rig.state,
+        &bearer,
+        &json!({ "handle": third, "fresh_grant": fresh }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{}", text(&body));
+    assert_eq!(code(&body), "handle-bind-limited");
+    let (st, body) = put_handle(
+        &rig.state,
+        &bearer,
+        &json!({ "handle": first, "fresh_grant": fresh }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    assert_eq!(handle_state(&rig.state, &bearer, &first).await, "same");
+
+    // An account with no handle binds its first one with the session alone.
+    let guest = person(&rig.state).await;
+    let guest_bearer = token(&guest.session);
+    let (st, _) = call(
+        &rig.state,
+        Method::DELETE,
+        "/auth/login-handle",
+        Some(&guest_bearer),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        handle_state(&rig.state, &guest_bearer, &guest.account.handle).await,
+        "none"
+    );
+    // (The handle just released is the one a bind may restore at once.)
+    let (st, body) = put_handle(
+        &rig.state,
+        &guest_bearer,
+        &json!({ "handle": guest.account.handle }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    assert_eq!(
+        handle_state(&rig.state, &guest_bearer, &guest.account.handle).await,
+        "same"
+    );
+}
+
+#[tokio::test]
+async fn the_handle_check_answers_for_the_sessions_account_only_and_is_counted() {
+    let pool = db_or_skip!("the_handle_check_answers_for_the_sessions_account_only");
+    let rig = rig_with(
+        pool,
+        wide().with_name_window(Scope::HandleCheck, Window::new(4, 3600)),
+    );
+    let who = person(&rig.state).await;
+    let other = person(&rig.state).await;
+    let bearer = token(&who.session);
+
+    assert_eq!(
+        handle_state(&rig.state, &bearer, &who.account.handle).await,
+        "same"
+    );
+    // Another account's handle, and a handle nobody holds, read the same:
+    // the route says nothing about anyone else.
+    assert_eq!(
+        handle_state(&rig.state, &bearer, &other.account.handle).await,
+        "other"
+    );
+    assert_eq!(
+        handle_state(&rig.state, &bearer, &crate::login_handle::random_handle().1).await,
+        "other"
+    );
+    // Malformed, and no session.
+    let (st, _) = post(
+        &rig.state,
+        "/auth/login-handle/check",
+        Some(&bearer),
+        &json!({ "handle": "AAAA" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = post(
+        &rig.state,
+        "/auth/login-handle/check",
+        None,
+        &json!({ "handle": who.account.handle }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    // Its own per-account counter (three spent above; the malformed one
+    // spent none).
+    assert_eq!(
+        handle_state(&rig.state, &bearer, &who.account.handle).await,
+        "same"
+    );
+    let (st, body) = post(
+        &rig.state,
+        "/auth/login-handle/check",
+        Some(&bearer),
+        &json!({ "handle": who.account.handle }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code(&body), "too-many-attempts");
+    // The other account's counter is its own.
+    assert_eq!(
+        handle_state(&rig.state, &token(&other.session), &other.account.handle).await,
+        "same"
+    );
 }
 
 // ----------------------------------------------------------------

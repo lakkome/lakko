@@ -88,7 +88,7 @@ export class RecoveryEmailClient {
   ) {}
 
   private async send(
-    method: "GET" | "POST" | "DELETE",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     endpoint: string,
     body: unknown,
     bearer: string | null,
@@ -162,6 +162,34 @@ export class RecoveryEmailClient {
     if (args.sealedEntropy !== null) body["sealed_entropy"] = args.sealedEntropy;
     const res = await this.send("POST", "/recovery-email/enrol/finish", body, args.sessionToken);
     return { enabled: res["enabled"] === true, vault: res["vault"] === true };
+  }
+
+  /**
+   * Bearer `PUT /recovery-email/vault`: put the email vault back after the
+   * account's keys changed (the automatic re-seal). No fresh-auth grant. The
+   * salt is the client's own (16 random bytes). Every well-formed request
+   * spends one of ten a day: never called in a loop.
+   */
+  async putVault(args: {
+    readonly sessionToken: string;
+    readonly handle: string;
+    readonly address: string;
+    /** Standard base64 of 16 bytes. */
+    readonly vaultSalt: string;
+    /** Standard base64 of the 44-byte blob. */
+    readonly sealedEntropy: string;
+  }): Promise<void> {
+    await this.send(
+      "PUT",
+      "/recovery-email/vault",
+      {
+        handle: args.handle,
+        address: args.address,
+        vault_salt: args.vaultSalt,
+        sealed_entropy: args.sealedEntropy,
+      },
+      args.sessionToken,
+    );
   }
 
   /** Bearer `DELETE /recovery-email`. */

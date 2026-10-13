@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { AuthClient } from "./client";
 import { loginHandleWith } from "./login-handle";
-import { createLoginHandleSync, type LoginHandleSync } from "./login-handle-sync";
+import { createLoginHandleSync, handleSyncAction, type LoginHandleSync } from "./login-handle-sync";
 import { decideSilentRestore } from "./silent-restore";
 
 beforeAll(async () => {
@@ -33,12 +33,27 @@ interface Seen {
   readonly body: Record<string, unknown> | null;
 }
 
-function stubFetch(status: number, json: unknown): Seen[] {
+/** The handle checks the stub answered (ADR-0068), apart from `seen`. */
+let checks: Seen[] = [];
+
+/** `status` / `json` answer the PUT; the handle check answers `checkState`
+ *  (`none`: the account holds no handle, so the sync goes on to bind). */
+function stubFetch(status: number, json: unknown, checkState: "same" | "other" | "none" = "none"): Seen[] {
   const seen: Seen[] = [];
+  checks = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const headers = (init?.headers ?? {}) as Record<string, string>;
+      if (String(input).endsWith("/auth/login-handle/check")) {
+        checks.push({
+          url: String(input),
+          method: init?.method ?? "GET",
+          authorization: headers["authorization"],
+          body: typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null,
+        });
+        return new Response(JSON.stringify({ state: checkState }), { status: 200 });
+      }
       seen.push({
         url: String(input),
         method: init?.method ?? "GET",
@@ -56,6 +71,7 @@ function appSync(warn = vi.fn()): { sync: LoginHandleSync; warn: typeof warn } {
   const client = new AuthClient("/api/auth");
   const sync = createLoginHandleSync({
     handleFor: async (username) => loginHandleWith(wasm, username),
+    check: (token, handle) => client.checkLoginHandle(token, handle),
     bind: (token, handle) => client.bindLoginHandle(token, handle),
     warn,
   });
@@ -174,13 +190,63 @@ describe("a session binds its username's login handle", () => {
   });
 });
 
+// ADR-0068: the session never binds blindly.
+describe("the handle is checked before anything is bound", () => {
+  it("the rule: same is nothing, none is a first bind, other waits for the register", () => {
+    expect(handleSyncAction("same")).toBe("nothing");
+    expect(handleSyncAction("none")).toBe("bind");
+    expect(handleSyncAction("other")).toBe("wait");
+  });
+
+  it("the account holds this handle: nothing is bound", async () => {
+    const seen = stubFetch(200, { bound: true }, "same");
+    const { sync } = appSync();
+    await expect(sync.ensure("v1.tok", "alice")).resolves.toBe("same");
+    expect(seen).toHaveLength(0);
+    expect(checks.map((c) => `${c.method} ${c.authorization}`)).toEqual(["POST Bearer v1.tok"]);
+    expect(checks[0]?.body).toEqual({ handle: loginHandleWith(wasm, "alice").wire });
+    // And not asked again in this session.
+    await expect(sync.ensure("v1.tok", "alice")).resolves.toBe("already");
+    expect(checks).toHaveLength(1);
+  });
+
+  it("the account holds ANOTHER handle (renamed elsewhere): a stale device binds nothing", async () => {
+    const seen = stubFetch(200, { bound: true }, "other");
+    const { sync, warn } = appSync();
+    await expect(sync.ensure("v1.tok", "oldname")).resolves.toBe("renamed-elsewhere");
+    expect(seen).toHaveLength(0);
+    expect(warn).not.toHaveBeenCalled();
+    // It is asked again later (by then the register has brought the name).
+    await expect(sync.ensure("v1.tok", "oldname")).resolves.toBe("renamed-elsewhere");
+    expect(checks).toHaveLength(2);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("a check that got no answer binds nothing", async () => {
+    const puts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/check")) return new Response("{}", { status: 500 });
+        puts.push(init?.method ?? "GET");
+        return new Response(JSON.stringify({ bound: true }), { status: 200 });
+      }),
+    );
+    const { sync } = appSync();
+    await expect(sync.ensure("v1.tok", "alice")).resolves.toBe("failed");
+    expect(puts).toEqual([]);
+  });
+});
+
 describe("AuthContext wiring", () => {
   const src = readFileSync(fileURLToPath(new URL("./AuthContext.tsx", import.meta.url)), "utf8");
 
   it("binds on every session install, from the live session state", () => {
     expect(src).toMatch(
-      /createEffect\(\(\) => \{\s*const s = state\(\);\s*const secrets = identitySecrets\(\);\s*if \(s\.kind !== "session" \|\| secrets === null\) return;\s*void loginHandleSync\.ensure\(secrets\.sessionToken, s\.account\.username\);/,
+      /createEffect\(\(\) => \{\s*const s = state\(\);\s*const secrets = identitySecrets\(\);\s*if \(s\.kind !== "session" \|\| secrets === null\) return;\s*const accountIdB64 = s\.account\.accountId;\s*const username = s\.account\.username;\s*void loginHandleSync\.ensure\(secrets\.sessionToken, username\)/,
     );
+    // The sync checks first and binds only a first handle.
+    expect(src).toContain("check: (token, handle) => client.checkLoginHandle(token, handle),");
   });
 
   it("every sign-in by name records its re-bind", () => {
