@@ -9,7 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.launch
+import me.lakko.app.launchBound
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import me.lakko.app.auth.AuthRepository
@@ -171,6 +171,18 @@ public class ContactsRepository(
     private var boundAccountB64: String? = null
 
     /**
+     * The binding of this repository to [boundAccountB64]. It ends on [clear]
+     * and when [bindAccount] is handed another account. An operation that
+     * awaits the network captures it and asks after every await, so a request
+     * started for one account never completes into the list, the reach keys
+     * or the chats of the next.
+     */
+    private val sessionBinding = me.lakko.app.BindingEpoch()
+
+    /** The binding current now (a host test reads when it ends). */
+    internal fun captureSessionBinding(): me.lakko.app.Binding = sessionBinding.capture()
+
+    /**
      * Load [accountId]'s persisted accepted list, inbox cursor and pending
      * list into [state]. Idempotent per account. Called at construction when
      * a session is already live, from the session bootstrap, and lazily from
@@ -193,6 +205,7 @@ public class ContactsRepository(
         synchronized(bindLock) {
             if (boundAccountB64 == accountB64) return
             val switching = boundAccountB64 != null
+            if (switching) sessionBinding.advance()
             val storedAccepted = appCtx?.let { AcceptedContactsStore.load(it, accountB64) }
             val snapshot = inboxStore?.load(accountB64) ?: ContactsInboxSnapshot()
             mutableState.update { current ->
@@ -537,6 +550,7 @@ public class ContactsRepository(
                 ),
             )
 
+        val bound = sessionBinding.capture()
         return useClientWith(secrets) { client, sender ->
             val result = client.sendContactRequest(
                 senderSigningSeed = sender.signingSeed,
@@ -553,6 +567,8 @@ public class ContactsRepository(
                     reach()?.reachAuthFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
                 },
             )
+            // The request left; the "sent" row is the sending account's.
+            if (!bound.isCurrent) return@useClientWith result
             mutableState.update { state ->
                 state.copy(
                     sent = state.sent + SentContactRequest(
@@ -582,6 +598,7 @@ public class ContactsRepository(
         val secrets = authRepo.identitySecrets.value
             ?: throw ContactsError.wrap(IllegalStateException("no identity secrets — please re-enter your password"))
         val explicit = grantWire?.let(::reachAuthOfGrantWire)
+        val bound = sessionBinding.capture()
         return useClientWith(secrets) { client, sender ->
             val result = client.sendContactRequest(
                 senderSigningSeed = sender.signingSeed,
@@ -595,7 +612,7 @@ public class ContactsRepository(
                     explicit ?: reach()?.reachAuthFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
                 },
             )
-            recordSent(result.recipientUsername, result)
+            if (bound.isCurrent) recordSent(result.recipientUsername, result)
             result
         }
     }
@@ -618,6 +635,7 @@ public class ContactsRepository(
             ?: throw ContactsError.wrap(IllegalStateException("no identity secrets — please re-enter your password"))
         val explicit = grantWire?.let(::reachAuthOfGrantWire)
         val replyGrant = reach()?.mintReply(recipientSignaturePubkey)
+        val bound = sessionBinding.capture()
         return useClientWith(secrets) { client, sender ->
             val result = client.sendContactRequestToBundle(
                 senderSigningSeed = sender.signingSeed,
@@ -636,7 +654,7 @@ public class ContactsRepository(
             )
             // The Sent list shows `@username`; a person found by name alone
             // has none to show there.
-            shownUsername?.let { recordSent(it, result) }
+            if (bound.isCurrent) shownUsername?.let { recordSent(it, result) }
             result
         }
     }
@@ -702,6 +720,7 @@ public class ContactsRepository(
         // rows) BEFORE the cursor is read below; idempotent once bound.
         bindAccount(secrets.accountId)
         val accountB64 = base64Encode(secrets.accountId)
+        val bound = sessionBinding.capture()
         val isManualRefresh = waitSecs == 0
         if (isManualRefresh) {
             mutableState.update { it.copy(refreshing = true, lastError = null) }
@@ -724,6 +743,11 @@ public class ContactsRepository(
                         waitSecs = waitSecs,
                         mailboxSigner = sender.mailboxSigner,
                     )
+                    // The session ended (or switched) during the poll: nothing
+                    // of this batch reaches the reach keys, the chats or the
+                    // name directory, which by now belong to nobody or to the
+                    // next account.
+                    if (!bound.isCurrent) return@useClientWith
                     val newIncoming = result.events.filterIsInstance<
                         IncomingMailboxEvent.ContactRequest>(
                     ).map { it.request }
@@ -757,6 +781,7 @@ public class ContactsRepository(
                     // KeyPackage after every attempt, success or failure.
                     var joinFailure: InboxError? = null
                     for (welcome in welcomes) {
+                        if (!bound.isCurrent) return@useClientWith
                         if (chatRepo != null) {
                             try {
                                 val joinedHex = chatRepo.joinGroupFromWelcome(welcome.welcomeBytes)
@@ -808,7 +833,7 @@ public class ContactsRepository(
                     // The session ended (or switched) during the poll: this batch
                     // belongs to the previous account's inbox. `clear()` already
                     // reset the state; do not land the rows or the cursor in it.
-                    if (boundAccountB64 != accountB64) return@useClientWith
+                    if (!bound.isCurrent || boundAccountB64 != accountB64) return@useClientWith
 
                     var dropped: List<IncomingContactRequest> = emptyList()
                     var acceptedChanged = false
@@ -1024,7 +1049,7 @@ public class ContactsRepository(
         // this device are dropped too.
         val manager = reach() ?: return
         if (!changed) return
-        reachScope.launch {
+        reachScope.launchBound(sessionBinding) {
             try {
                 removedKey?.let { manager.forgetHeld(it) }
                 manager.rotate(me.lakko.app.reach.ReachKind.CONTACT)
@@ -1102,6 +1127,9 @@ public class ContactsRepository(
     public suspend fun acceptInviteLink(slug: String): AcceptInviteResult {
         val secrets = authRepo.identitySecrets.value
             ?: return AcceptInviteResult.RequiresReauth
+        // Asked after every await below: an accept that outlives its account
+        // must not start a chat, or file a contact, as the next one.
+        val bound = sessionBinding.capture()
         // Sealed links (2026-09-28): the argument is `<slug>#<secret>`; a
         // missing or malformed secret is refused before any request.
         val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug.trim())
@@ -1126,6 +1154,7 @@ public class ContactsRepository(
             inlineSealedInviteOrNull(link.slug) ?: return AcceptInviteResult.MalformedSlug
         }
 
+        bound.ensureCurrent()
         val cap = try {
             me.lakko.app.discovery.openSealedInviteLink(sealed, secret) { bytes, key ->
                 InviteCapability.openLink(bytes, key)
@@ -1178,6 +1207,7 @@ public class ContactsRepository(
                         ?: e.message ?: "consume failed",
                 )
             }
+            bound.ensureCurrent()
             when (consumeResult) {
                 is me.lakko.app.discovery.ConsumeInviteResult.Exhausted ->
                     return@use AcceptInviteResult.Exhausted
@@ -1219,6 +1249,7 @@ public class ContactsRepository(
             }
 
             // Drive the chat-side startGroupWith if wired.
+            bound.ensureCurrent()
             val groupIdHex = if (chatRepo != null) {
                 try {
                     chatRepo.startGroupWith(
@@ -1253,6 +1284,7 @@ public class ContactsRepository(
                 intro = null,
                 createdAt = sendResult.createdAt,
             )
+            bound.ensureCurrent()
             bindAccount(secrets.accountId)
             val accepted = AcceptedContact(request = syntheticRequest, groupIdHex = groupIdHex)
             mutableState.update { state ->
@@ -1313,6 +1345,7 @@ public class ContactsRepository(
             )
         val expiryMs = (System.currentTimeMillis() + expiryMillisFromNow).toULong()
 
+        val bound = sessionBinding.capture()
         return Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
             // ADR-0060 §6 — the link carries a `link` grant scoped to this
             // link, registered on the mailbox BEFORE the link is shared, so
@@ -1372,6 +1405,9 @@ public class ContactsRepository(
                 android.util.Log.w("ContactsRepository", "invite upload unreachable; sharing the inline link")
                 null
             }
+            // The link exists on the server; the reach keys, the secret store
+            // and the list below are the minting account's.
+            bound.ensureCurrent()
             if (blobId != null) manager.noteLinkBlob(linkId, blobId)
 
             val slug = base64UrlEncodeNoPad(blobId ?: mint.sealed)
@@ -1515,6 +1551,7 @@ public class ContactsRepository(
      *  The sent log does not persist. */
     public fun clear() {
         synchronized(bindLock) {
+            sessionBinding.advance()
             boundAccountB64 = null
             // Wipe any decrypted intro plaintext on the way out.
             // Best-effort: the `String` contents may still live in

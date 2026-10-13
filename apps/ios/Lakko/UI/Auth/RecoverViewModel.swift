@@ -232,6 +232,8 @@ public final class RecoverViewModel: ObservableObject {
                 // A bad phrase (unknown word or checksum) reads as one
                 // sentence; a wrong phrase and an unknown account too.
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 self.errorText = UiText { AuthErrorCopy.recover(error) }
             }
         }
@@ -343,6 +345,8 @@ public final class RecoverViewModel: ObservableObject {
                 totpCode = ""
             } catch {
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 let typedUsername = cachedUsername == nil
                 self.errorText = UiText { AuthErrorCopy.totp(error, typedUsername: typedUsername) }
             }
@@ -419,6 +423,8 @@ public final class RecoverViewModel: ObservableObject {
                 contactCode = ""
             } catch {
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 self.errorText = UiText { AuthErrorCopy.contact(error, sending: false) }
             }
         }

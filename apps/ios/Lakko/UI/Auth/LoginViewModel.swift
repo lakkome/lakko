@@ -77,6 +77,8 @@ public final class LoginViewModel: ObservableObject {
                 password = ""
             } catch {
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 self.errorText = UiText { AuthErrorCopy.login(error) }
             }
         }
@@ -99,6 +101,8 @@ public final class LoginViewModel: ObservableObject {
                 errorText = nil
             } catch {
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 self.errorText = UiText { AuthErrorCopy.passkey(error) }
             }
         }

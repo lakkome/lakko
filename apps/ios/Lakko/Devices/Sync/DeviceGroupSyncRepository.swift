@@ -86,6 +86,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     private var identity: Identity?
     private var group: DeviceGroup?
     private var pollTask: Task<Void, Never>?
+    /// Advanced whenever the runtime lets go of its account
+    /// (``cancelPollAndDropHandles()``: ``clear()`` and an account switch in
+    /// ``bootstrap(secrets:)``). A poll loop captures it when it starts: a
+    /// cancelled loop still runs what follows an `await` that returned, and
+    /// ``identity`` / ``group`` are by then the next account's.
+    private let binding = BindingEpoch()
     /// The pending debounced snapshot write, cancelled by the next change.
     private var persistTask: Task<Void, Never>?
     private var activeAccountIdB64: String?
@@ -334,6 +340,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     }
 
     private func cancelPollAndDropHandles() {
+        binding.advance()
         pollTask?.cancel()
         pollTask = nil
         resendTask?.cancel()
@@ -507,6 +514,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// not ready or the publish fails, the envelope is kept (one per kind) and
     /// retried by the poll loop.
     public func sendServiceEnvelope(_ envelope: Data) async {
+        // An envelope that arrives while no account is bound was composed
+        // for the account that just left (its sender hops through a `Task`).
+        // Kept, it would be flushed into whichever account's DeviceGroup
+        // bootstraps next.
+        guard activeAccountIdB64 != nil else { return }
         let slot = Self.serviceEnvelopeSlot(envelope)
         pendingServiceEnvelopes[slot] = envelope
         await flushPendingServiceEnvelopes()
@@ -604,9 +616,15 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     private func runPollLoop(accountIdB64: String, groupId: Data, startCursor: Int64 = 0) async {
         let ds = DsClient()
         var cursor: Int64 = startCursor
-        while !Task.isCancelled {
+        // This loop reads ``identity`` and ``group`` afresh after every wait.
+        // Once its binding has moved they are another account's (or the same
+        // account's next session's): the batch in hand is then dropped and
+        // the loop ends, whether or not the cancellation reached the request.
+        let bound = binding.capture()
+        while !Task.isCancelled, bound.isCurrent {
             if !pendingServiceEnvelopes.isEmpty {
                 await flushPendingServiceEnvelopes()
+                guard bound.isCurrent else { return }
             }
             let result: FetchResult
             // ADR-0053 point 1 — the read is signed under the DeviceGroup's
@@ -643,6 +661,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             // ADR-0058 / UX spec chat-folders section 6 — the fetch went
             // through, so the network is back: whatever failed to publish
             // earlier goes out now, as the whole state.
+            guard bound.isCurrent else { return }
             await flushPending()
 
             // G-13 (ADR-0015): the 32-byte verifying key peers feed to
@@ -665,6 +684,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 continue
             }
+            guard bound.isCurrent else { return }
 
             var mutated = false
             for message in result.messages {
@@ -773,7 +793,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                         groupId: groupId,
                         localEpoch: localEpoch,
                         latestEpoch: result.latestEpoch ?? 0,
-                        cursor: cursor
+                        cursor: cursor,
+                        bound: bound
                     ) {
                         // The poll loop stopped: either a new one runs over
                         // the re-founded DeviceGroup, or the repair failed
@@ -820,7 +841,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         groupId: Data,
         localEpoch: UInt64,
         latestEpoch: UInt64,
-        cursor: Int64
+        cursor: Int64,
+        bound: BindingEpoch.Captured
     ) async -> Bool {
         guard !deviceRemoved,
               let held = group,
@@ -882,7 +904,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             NSLog("DeviceGroupSync fork repair: the journal reset did not land; retried next session")
             return true
         }
-        guard !Task.isCancelled, activeAccountIdB64 == accountIdB64 else { return true }
+        // The epoch and not the account id alone: the same account signed out
+        // and in again while the claim was out has a runtime of its own.
+        guard !Task.isCancelled, bound.isCurrent, activeAccountIdB64 == accountIdB64 else { return true }
 
         identity = ensured.identity
         group = ensured.group

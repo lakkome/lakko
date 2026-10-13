@@ -78,6 +78,14 @@ public final class ContactsRepository: ObservableObject {
     private var boundAccountIdB64: String?
     private var cancellables: Set<AnyCancellable> = []
 
+    /// Advanced whenever the bound account changes (``bind(accountIdB64:)``,
+    /// ``clear()``). A flow that suspends captures it first and checks it
+    /// before it writes ``state`` or goes on: the secrets it read before the
+    /// `await` are its own account's, while ``state``, the profile directory,
+    /// the reach keys and the chat repository are by then whoever is signed
+    /// in.
+    let binding = BindingEpoch()
+
     /// Build a ``DiscoveryClient`` factory that pre-stamps every
     /// returned client with the current session's bearer token.
     /// Phase 1.5b: every protected discovery write (register,
@@ -175,6 +183,7 @@ public final class ContactsRepository: ObservableObject {
     /// loaded rows back out as an empty list for the outgoing one.
     private func bind(accountIdB64: String?) {
         guard boundAccountIdB64 != accountIdB64 else { return }
+        binding.advance()
         boundAccountIdB64 = nil
         guard let accountIdB64 else {
             // Logged out: the in-memory contacts and inbox belong to nobody
@@ -217,6 +226,7 @@ public final class ContactsRepository: ObservableObject {
         // story simple — Swift ARC drops the Rust-side handle on scope
         // exit.
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        let bound = binding.capture()
         let result = try await client.sendContactRequest(
             senderSigningSeed: identity.ed25519Seed(),
             senderAccountId: secrets.accountId,
@@ -226,6 +236,9 @@ public final class ContactsRepository: ObservableObject {
             introMessage: Data(introMessage.utf8),
             reach: Self.requestReach()
         )
+        // Sent as the account that asked; the sent log is by now another
+        // account's (or nobody's).
+        guard bound.isCurrent else { return result }
         let sent = SentContactRequest(
             recipientUsername: result.recipientUsername,
             recipientAccountIdB64: base64Encode(result.recipientAccountId),
@@ -249,10 +262,14 @@ public final class ContactsRepository: ObservableObject {
             throw ContactsError.wrap(ContactsError.simple("this person cannot be reached"))
         }
         let client = clientFactory()
+        let bound = binding.capture()
         let bundle = try await client.resolveVerifiedBundle(accountId: accountId)
         guard bundle.signaturePubkey == person.accountKey else {
             throw ContactsError.requestRefused
         }
+        // The request below carries the own profile and a reply key, both
+        // read from what is bound NOW: never another account's.
+        try bound.require()
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         let result = try await client.sendContactRequestToBundle(
             senderSigningSeed: identity.ed25519Seed(),
@@ -265,6 +282,7 @@ public final class ContactsRepository: ObservableObject {
             introMessage: Data(introMessage.utf8),
             reach: person.writeSeed.map { Self.requestReach(linkSeed: $0) } ?? Self.requestReach()
         )
+        guard bound.isCurrent else { return result }
         state = state.with(sent: state.sent + [SentContactRequest(
             recipientUsername: person.username ?? "",
             recipientAccountIdB64: base64Encode(accountId),
@@ -403,6 +421,11 @@ public final class ContactsRepository: ObservableObject {
             )
             var newPending: [IncomingContactRequest] = []
             for event in pollResult.events {
+                // The session ended (or changed account) while this batch
+                // was in flight, or while a Welcome of it was being joined:
+                // the rest belongs to the old account. Its grants, profiles
+                // and Welcomes are not filed under whoever is bound now.
+                guard boundAccountIdB64 == pollAccountIdB64 else { break }
                 switch event {
                 case .contactRequest(let req, let replyGrant):
                     newPending.append(req)
@@ -649,11 +672,13 @@ public final class ContactsRepository: ObservableObject {
         guard let accountId = contact.request.fromAccountId else {
             throw InviteContactSendError.contactHasNoAccountId
         }
+        let bound = binding.capture()
         let groupIdHex = try await chatRepository.startGroupWith(
             recipientAccountId: accountId,
             recipientSignaturePubkey: contact.request.fromPubkey,
             kind: .oneToOne
         )
+        try bound.require()
         if let next = Self.linking(
             state.accepted, signatureKey: contact.request.fromPubkey, groupIdHex: groupIdHex) {
             state = state.with(accepted: next)
@@ -832,6 +857,7 @@ public final class ContactsRepository: ObservableObject {
     /// reset is not written back to disk as an empty inbox for the account
     /// that was live; the persisted row is left for the next bind.
     public func clear() {
+        binding.advance()
         boundAccountIdB64 = nil
         state = ContactsState()
     }
@@ -866,6 +892,7 @@ public final class ContactsRepository: ObservableObject {
         // link, registered BEFORE the link exists, so revoking it removes
         // exactly its key.
         let linkId = generateLinkId()
+        let bound = binding.capture()
         let linkGrant: FfiReachGrant
         do {
             linkGrant = try await ReachCenter.shared.newLinkGrant(
@@ -873,6 +900,7 @@ public final class ContactsRepository: ObservableObject {
         } catch {
             throw ContactsError.wrap(error)
         }
+        try bound.require()
         let mint: InviteLinkMint
         do {
             mint = try composeInviteCapability(
@@ -906,6 +934,10 @@ public final class ContactsRepository: ObservableObject {
         } catch {
             throw ContactsError.wrap(error)
         }
+        // The reach record and the invite list below are the bound
+        // account's: a link made for an account that has since left is not
+        // filed under the next one.
+        try bound.require()
 
         // ADR-0060 section 6 — the link key is registered; tie it to the ledger id
         // so a revoke by blob id removes exactly its key.
@@ -945,6 +977,7 @@ public final class ContactsRepository: ObservableObject {
         }
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         let discovery = authenticatedDiscoveryClient()
+        let bound = binding.capture()
         let result: RevokeInviteResult
         do {
             result = try await discovery.revokeInvite(
@@ -953,6 +986,14 @@ public final class ContactsRepository: ObservableObject {
             )
         } catch {
             throw ContactsError.wrap(error)
+        }
+        guard bound.isCurrent else {
+            // Revoked on the server as the account that asked. This device's
+            // secret for it is filed under that account and goes; the reach
+            // record and the list are by now someone else's.
+            InviteLinkSecretStore.shared.remove(
+                accountIdB64: base64Encode(secrets.accountId), slug: base64UrlEncodeNoPad(blobId))
+            return result
         }
         // ADR-0060 — the link's key goes with it (also on "already gone").
         ReachCenter.shared.removeLink(blobId: blobId)
@@ -1074,6 +1115,12 @@ public final class ContactsRepository: ObservableObject {
             return .damaged
         }
 
+        // This accept is shielded from the screen's cancellation, so it runs
+        // to its end even after a sign-out. Every step below reads something
+        // of the BOUND account (the session token, the own profile, a reply
+        // key, the chat repository, the accepted list), so it stops as soon
+        // as the account that tapped the link is no longer the one bound.
+        let bound = binding.capture()
         let discovery = authenticatedDiscoveryClient()
         let sealed: Data?
         do {
@@ -1083,6 +1130,7 @@ public final class ContactsRepository: ObservableObject {
             return .failed(message: (error as? LocalizedError)?.errorDescription
                 ?? "fetch failed")
         }
+        guard bound.isCurrent else { return .requiresReauth }
         guard let sealed = sealed else {
             return .notFound
         }
@@ -1111,6 +1159,7 @@ public final class ContactsRepository: ObservableObject {
         // Consume — atomic counter bump + per-joiner dedup.
         let consumeResult: ConsumeInviteResult
         do {
+            guard bound.isCurrent else { return .requiresReauth }
             let discoveryConsume = authenticatedDiscoveryClient()
             consumeResult = try await discoveryConsume.consumeInvite(
                 blobId: blobId,
@@ -1122,6 +1171,7 @@ public final class ContactsRepository: ObservableObject {
             return .failed(message: (error as? LocalizedError)?.errorDescription
                 ?? "consume failed")
         }
+        guard bound.isCurrent else { return .requiresReauth }
         switch consumeResult {
         case .exhausted:
             return .exhausted
@@ -1159,6 +1209,7 @@ public final class ContactsRepository: ObservableObject {
                     ?? "ContactRequest send failed"
             )
         }
+        guard bound.isCurrent else { return .requiresReauth }
 
         // 1.14f4 lights up the chat bridge — when wired, drive
         // `ChatRepository.startGroupWith` against the invite
@@ -1183,6 +1234,7 @@ public final class ContactsRepository: ObservableObject {
         } else {
             groupIdHex = nil
         }
+        guard bound.isCurrent else { return .requiresReauth }
 
         // Append the new contact to the accepted list so the user
         // sees the result. Construct a synthetic

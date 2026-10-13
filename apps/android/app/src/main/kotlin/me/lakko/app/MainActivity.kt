@@ -742,6 +742,9 @@ private fun AppRoot(
                 nameForOneToOne = resolveOneToOneName,
                 groupNameFor = resolveGroupName,
             )
+            // Everything a session's screens keep (their ViewModels, the back
+            // stack) belongs to ONE account's session: see [SessionViewModels].
+            SessionViewModels(accountIdB64 = current.account.accountIdB64) {
             SessionRoot(
                 authRepository = authRepository,
                 contactsRepository = contactsRepository,
@@ -786,6 +789,7 @@ private fun AppRoot(
                     }
                 },
             )
+            }
         }
     }
 
@@ -903,6 +907,81 @@ internal class ForgetDeviceSlot {
 }
 
 /**
+ * The ViewModel store of the signed-in session, kept in the Activity's own
+ * store so it survives a configuration change exactly as the Activity's does.
+ *
+ * Without it the session's ViewModels outlive the session. The session root
+ * builds its `NavHost` under the Activity's store, where navigation keeps one
+ * store per back-stack entry until the entry is popped; signing out removes
+ * the `NavHost` from the composition but pops nothing, so every chat, contact
+ * and channel model of the account that left stayed alive for the rest of the
+ * Activity, its `viewModelScope` running: collecting the repositories, which
+ * by then hold the NEXT account, and acting on what they emit.
+ */
+internal class SessionViewModelStore : androidx.lifecycle.ViewModel() {
+    var store: androidx.lifecycle.ViewModelStore = androidx.lifecycle.ViewModelStore()
+        private set
+
+    /** The session ended: clear its models (cancelling their scopes) and
+     *  start an empty store for the next one. */
+    fun endSession() {
+        store.clear()
+        store = androidx.lifecycle.ViewModelStore()
+    }
+
+    override fun onCleared() {
+        store.clear()
+    }
+}
+
+/**
+ * Compose [content] as one account's session: its ViewModels live in the
+ * [SessionViewModelStore] and are cleared when the session leaves the
+ * composition for any reason but a configuration change (sign-out, forget
+ * device, the removed-device screen, the Activity finishing). Keyed on the
+ * account, so a landing for another account over a live session rebuilds the
+ * session's screens rather than showing the previous account's back stack.
+ */
+@Composable
+private fun SessionViewModels(accountIdB64: String, content: @Composable () -> Unit) {
+    val holder: SessionViewModelStore = viewModel()
+    val activityOwner = androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner.current
+    val activity = LocalContext.current as? android.app.Activity
+    androidx.compose.runtime.key(accountIdB64) {
+        val owner = remember(holder, activityOwner) {
+            object :
+                androidx.lifecycle.ViewModelStoreOwner,
+                androidx.lifecycle.HasDefaultViewModelProviderFactory {
+                private val defaults =
+                    activityOwner as? androidx.lifecycle.HasDefaultViewModelProviderFactory
+
+                override val viewModelStore: androidx.lifecycle.ViewModelStore
+                    get() = holder.store
+
+                override val defaultViewModelProviderFactory: androidx.lifecycle.ViewModelProvider.Factory
+                    get() = defaults?.defaultViewModelProviderFactory
+                        ?: androidx.lifecycle.ViewModelProvider.NewInstanceFactory()
+
+                override val defaultViewModelCreationExtras: androidx.lifecycle.viewmodel.CreationExtras
+                    get() = defaults?.defaultViewModelCreationExtras
+                        ?: androidx.lifecycle.viewmodel.CreationExtras.Empty
+            }
+        }
+        // Declared before the content, so it is disposed after it: the
+        // screens are gone when their models are cleared.
+        DisposableEffect(holder) {
+            onDispose {
+                if (activity?.isChangingConfigurations != true) holder.endSession()
+            }
+        }
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner provides owner,
+            content = content,
+        )
+    }
+}
+
+/**
  * ADR-0017 fresh-device fail-safe subgraph — renders the
  * [RestoreIdentityPrompt] that completes the session once the user
  * supplies their recovery phrase. "Sign out" routes back to the Anon
@@ -914,7 +993,10 @@ private fun RestoreIdentityRoot(
     repository: AuthRepository,
     account: SessionAccount,
 ) {
+    // Keyed on the account: the model holds what was typed for it, and this
+    // root's store lives as long as the Activity.
     val vm: me.lakko.app.ui.auth.RestoreIdentityPromptViewModel = viewModel(
+        key = "restore-identity-${account.accountIdB64}",
         factory = singletonViewModelFactory {
             me.lakko.app.ui.auth.RestoreIdentityPromptViewModel(repo = repository)
         },
@@ -1473,6 +1555,11 @@ private fun SessionRoot(
         // the publisher provider snapshot stay for the next sign-in.
         channelsState.unbind()
         subscriberAdmission.clear()
+        // Before the chat side: its poll hands the reach manager envelopes
+        // from the account's other devices, and one handed over after the
+        // reach manager let the account go would wait there for the next
+        // account to bind.
+        deviceGroupSync.clear()
         chatRepository.clear()
         authRepository.logout()
     }
@@ -1491,8 +1578,9 @@ private fun SessionRoot(
         contactsRepository.clear()
         channelsState.unbind()
         subscriberAdmission.clear()
-        chatRepository.forgetDevice()
+        // Device sync before chat, as in logout above.
         deviceGroupSync.clear()
+        chatRepository.forgetDevice()
         authRepository.forgetDevice()
     }
 

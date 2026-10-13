@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import me.lakko.app.launchBound
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.base64Encode
 import me.lakko.app.devices.DeviceAttestKey
@@ -143,6 +144,17 @@ public class DeviceGroupSyncRepository(
     private val identity = AtomicReference<Identity?>(null)
     private val group = AtomicReference<DeviceGroup?>(null)
     private val activeAccountIdB64 = AtomicReference<String?>(null)
+
+    /**
+     * The binding of this runtime to [activeAccountIdB64]: it ends when the
+     * handles are dropped ([clear], a bootstrap for another account). The poll
+     * loop asks it before every row and before its persist, because [identity]
+     * and [group] are read live and would by then be the next account's.
+     */
+    private val sessionBinding = me.lakko.app.BindingEpoch()
+
+    /** The binding current now (a host test reads when it ends). */
+    internal fun captureSessionBinding(): me.lakko.app.Binding = sessionBinding.capture()
 
     /** ADR-0057 — the DeviceGroup journal's root signer (every device of the
      *  account holds it), derived at bootstrap from the account seed. */
@@ -324,14 +336,16 @@ public class DeviceGroupSyncRepository(
         }
         installJournalSigner(groupId)
         installReachPublisher()
+        val bound = sessionBinding.capture()
         pollJob = scope.launch {
             claimJournalBestEffort(groupId, refounded = true)
             val forkedAt = runPollLoop(
+                bound = bound,
                 accountIdB64 = accountIdB64,
                 groupId = groupId,
                 startCursor = startCursor,
             )
-            if (forkedAt != null) {
+            if (forkedAt != null && bound.isCurrent) {
                 repairFork(accountIdBytes, accountIdB64, forkedAt)
             }
         }
@@ -748,7 +762,7 @@ public class DeviceGroupSyncRepository(
         val ownLeaf = runCatching { g.ownLeafIndex() }.getOrNull() ?: return
         val send = runCatching { shouldSendSnapshot(ownLeaf, priorLeaves) }.getOrDefault(false)
         if (!send) return
-        scope.launch {
+        scope.launchBound(sessionBinding) {
             delay(SyncCatchUp.resendDelayMs(kotlin.random.Random.nextDouble()))
             try {
                 publishSnapshot()
@@ -808,6 +822,7 @@ public class DeviceGroupSyncRepository(
      * `null` (cancelled, or the handle is gone).
      */
     private suspend fun runPollLoop(
+        bound: me.lakko.app.Binding,
         accountIdB64: String,
         groupId: ByteArray,
         startCursor: Long = 0L,
@@ -863,6 +878,9 @@ public class DeviceGroupSyncRepository(
 
                 var mutated = false
                 for (message in result.messages) {
+                    // The account this loop polls for is gone: the handles
+                    // read below are nobody's, or the next account's.
+                    if (!bound.isCurrent) return null
                     cursor = message.id
                     val g = group.get() ?: return null
                     val id = identity.get() ?: return null
@@ -928,6 +946,7 @@ public class DeviceGroupSyncRepository(
                     // mutation.
                 }
 
+                if (!bound.isCurrent) return null
                 if (mutated) {
                     val id = identity.get()
                     if (id != null) {
@@ -1035,7 +1054,7 @@ public class DeviceGroupSyncRepository(
     private fun installReachPublisher() {
         val publisher: (ByteArray) -> Unit = { envelope ->
             val copy = envelope.copyOf()
-            scope.launch {
+            scope.launchBound(sessionBinding) {
                 try {
                     sendServiceEnvelope(copy)
                 } catch (cancellation: CancellationException) {
@@ -1124,6 +1143,9 @@ public class DeviceGroupSyncRepository(
     }
 
     private fun cancelPollAndDropHandles() {
+        // First: the poll loop and everything launched for this account stop
+        // before the handles below are replaced.
+        sessionBinding.advance()
         // Write a change still waiting out its debounce, then let the account
         // go: the state is kept for the next sign-in, never written after.
         syncStatePersistence.stopAndFlush()

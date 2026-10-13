@@ -48,6 +48,14 @@ public final class PushSubscriber {
     private let bindingStore: PushAccountBindingStore
     private var pendingContinuation: CheckedContinuation<Data, Error>?
 
+    /// The newest ``unsubscribe(prepaidToken:)`` (each one runs after the one
+    /// before it). A ``subscribe(accountIdB64:stillSignedIn:)`` waits for it
+    /// first: the device pseudonym is one per device, so a sign-out's
+    /// unregister that is still in flight when the next account signs in
+    /// would otherwise take that account's registration off the server and
+    /// clear the pseudonym it has just been bound under.
+    private var unsubscribing: Task<Void, Never>?
+
     public init(
         client: PushClient = PushClient(),
         bindingStore: PushAccountBindingStore = .live
@@ -83,6 +91,8 @@ public final class PushSubscriber {
         accountIdB64: String,
         stillSignedIn: @MainActor () -> Bool
     ) async throws -> SubscribeResult {
+        // A sign-out's unregister still in flight finishes first.
+        await unsubscribing?.value
         // (1) Authorization prompt. If the user has previously
         // denied, the system returns `false` without showing
         // the prompt again — we surface this as
@@ -134,6 +144,16 @@ public final class PushSubscriber {
     /// unregister spends, taken by the caller before it cleared the session;
     /// without one the unregister draws from the pool.
     public func unsubscribe(prepaidToken: AnonToken? = nil) async {
+        let previous = unsubscribing
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            await self?.performUnsubscribe(prepaidToken: prepaidToken)
+        }
+        unsubscribing = task
+        await task.value
+    }
+
+    private func performUnsubscribe(prepaidToken: AnonToken?) async {
         let pseudonym: Data?
         do {
             pseudonym = try DevicePushId.peek()

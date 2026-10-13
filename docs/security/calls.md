@@ -216,7 +216,7 @@ ciphertext (no cross-stream reuse — including the two-video-stream
 pair ADR-0034 missed);
 [`sframe.rs`](../../crates/lakko-calls/src/sframe.rs)
 documents the exhaustion path. A dedicated exhaustion test
-is gap [G-17](./known-gaps.md#g-17) — too expensive to run
+is gap [G-17](./known-gaps-closed.md#g-17) — too expensive to run
 inside `cargo test`.
 
 ### C-6: AEAD AAD-binding holds across the cross-party path

@@ -944,7 +944,7 @@ public final class ReachCenter: ObservableObject {
     /// username; on leaving `public: false`. Best effort; retried on the next
     /// sync.
     public func applyEveryone(discovery: DiscoveryClient? = nil) async {
-        guard isActive, let token = sessionTokenProvider() else { return }
+        guard isActive, let token = sessionTokenProvider(), let accountIdB64 else { return }
         let wantPublic = setting.mode == .everyone
         let own = ownNameProvider()
         let name = own.displayName ?? ""
@@ -983,12 +983,20 @@ public final class ReachCenter: ObservableObject {
                 publicRecord = try composePublicRecord(
                     payload: payload, termOprfs: recordTermOutputs, issuedAtMs: Self.nowMs())
             }
+            // The account changed while the terms were being evaluated: what
+            // was composed is the old account's and is not published with
+            // whatever token is live now.
+            guard self.accountIdB64 == accountIdB64 else { return }
             try await client.putVisibility(
                 public: wantPublic, nameTermLookupKeys: nameTermLookupKeys, publicRecord: publicRecord)
+            // ...and the bookkeeping is not written into the next account's
+            // record.
+            guard self.accountIdB64 == accountIdB64 else { return }
             record.publishedEveryone = wantPublic
             publishedEveryoneFor = wantPublic ? publishKey : nil
             persist()
         } catch {
+            guard self.accountIdB64 == accountIdB64 else { return }
             NSLog("ADR-0060: Everyone publish failed: \(error)")
             if status == .applied { status = Self.isOffline(error) ? .pendingOffline : .failed }
         }
@@ -1001,7 +1009,8 @@ public final class ReachCenter: ObservableObject {
     /// term costs one OPRF evaluation (one lookup token), so it is recomposed
     /// only when the name, the username or the `fof` version changed.
     public func ownIntroductionRecord(discovery: DiscoveryClient = DiscoveryClient()) async -> Data? {
-        guard isActive, let fof = fofGrant(), let identityPk = ownAccountKey else { return nil }
+        guard isActive, let fof = fofGrant(), let identityPk = ownAccountKey,
+              let accountIdB64 else { return nil }
         let own = ownNameProvider()
         guard let accountId = own.accountId, accountId.count == 16 else { return nil }
         let cacheKey = "\(fof.version)|\(own.displayName ?? "")|\(own.username ?? "")|"
@@ -1027,6 +1036,10 @@ public final class ReachCenter: ObservableObject {
             NSLog("ADR-0060: introduction terms not evaluated: \(error)")
             return nil
         }
+        // The account changed while the terms were being evaluated: its
+        // record is neither cached in the next account's reach record nor
+        // handed to a caller that would send it.
+        guard self.accountIdB64 == accountIdB64 else { return nil }
         guard !termOutputs.isEmpty else { return nil }
         let payload = FfiIntroductionPayload(
             identityPk: identityPk, accountId: accountId, displayName: own.displayName,

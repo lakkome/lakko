@@ -98,6 +98,8 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                 phrase = ""
             } catch {
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 self.errorText = UiText { AuthErrorCopy.identityRestore(error) }
             }
         }
@@ -120,6 +122,8 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                 errorText = nil
             } catch {
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 NSLog("[restore] WARN fresh identity failed: \(error)")
                 self.errorText = .key("restore_identity.lost.error.generic")
             }

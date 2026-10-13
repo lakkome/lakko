@@ -57,7 +57,8 @@ reading is "14 entries still carry open material".
 **The `G-` class is now gated — and what is deliberately left ungated.** Both
 drifts above were possible because [`tools/audit-index-check`](../../tools/audit-index-check)
 reconciled only the `I-` / `C-` / `T-` classes. It now covers `G-` as well: every
-`### G-N:` heading in [`known-gaps.md`](./known-gaps.md) must have a row on this
+`### G-N:` heading in [`known-gaps.md`](./known-gaps.md) or
+[`known-gaps-closed.md`](./known-gaps-closed.md) must have a row on this
 page and every row must have a heading, **and the count + range in the `G-` row
 above are derived from the source and compared**, so a hand-written total cannot
 drift again. The per-category tables below were **back-filled in the same pass**:
@@ -77,10 +78,15 @@ count and range are mechanical facts; status is a human adjudication. Keep that
 one row in sync by hand, and re-derive it with:
 
 ```sh
-grep -E '^### G-[0-9]+:' docs/security/known-gaps.md | grep -vc CLOSED
+grep -cE '^### G-[0-9]+:' docs/security/known-gaps.md
 ```
 
-reading the output as a starting point to adjudicate, never as the answer.
+reading the output as a starting point to adjudicate, never as the answer. Since
+2026-10-13 the status is a `**Status:**` line under each heading, not part of the
+heading, and entries whose status names nothing left open live in
+`known-gaps-closed.md`; the command above therefore counts every entry that is not
+filed as closed, which includes deferred, out-of-scope and live-check-owed ones. The
+paragraph above describes the heading-wording problem as it stood before that move.
 
 ## MLS state machine invariants (I-1..I-8)
 
@@ -327,7 +333,8 @@ Source: [`transport.md`](./transport.md). Anti-censorship
 
 ## Known gaps (G-1..G-44 in `known-gaps.md`)
 
-Source: [`known-gaps.md`](./known-gaps.md). Items the
+Source: [`known-gaps.md`](./known-gaps.md) (with a summary table of every gap) and
+[`known-gaps-closed.md`](./known-gaps-closed.md) (closed entries). Items the
 maintainer knows are not audit-ready yet; reviewers
 should not re-discover them.
 

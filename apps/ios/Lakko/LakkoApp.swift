@@ -1267,10 +1267,17 @@ private struct SessionRoot: View, Equatable {
                 if !account.username.isEmpty,
                    ReachCenter.shared.ownUsernameCertificate == nil {
                     let token = secrets.sessionToken
+                    // The certificate names THIS account's username. A fetch
+                    // that returns after a sign-out, or after another account
+                    // signed in, stores nothing: the reach record it would be
+                    // written into is by then that account's, and every
+                    // profile it sends would carry this one's certificate.
+                    let bound = authRepository.binding.capture()
                     Task { @MainActor in
                         do {
                             let cert = try await DiscoveryClient(sessionToken: token)
                                 .fetchUsernameCertificate()
+                            guard bound.isCurrent else { return }
                             ReachCenter.shared.setOwnUsernameCertificate(cert)
                             if cert != nil { await chatRepository.publishOwnProfileToAllGroups() }
                         } catch {

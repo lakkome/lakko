@@ -60,6 +60,7 @@ Then, as references rather than narratives:
 - [`multi-device.md`](./multi-device.md) — two-tier identity
   ([ADR-0007](../adr/0007-multi-device-identity.md)), DeviceGroup pairing,
   remove-device, the history catch-up bundle, cross-device sync.
+- [`known-gaps-closed.md`](./known-gaps-closed.md) — `G-` entries with nothing left open, moved out of the file below
 - [`known-gaps.md`](./known-gaps.md) — the `G-` class: what is not audit-ready, so a
   reviewer does not spend the engagement rediscovering it. Each entry states what it
   is, why it is open, and what closes it.

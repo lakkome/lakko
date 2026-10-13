@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import me.lakko.app.BindingEpoch
+import me.lakko.app.launchBound
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.push.PushSubscriber
 import me.lakko.app.webauthn.PasskeyLoginResult
@@ -118,6 +120,53 @@ public class AuthRepository(
         MutableStateFlow(AuthState.Loading)
 
     public val state: StateFlow<AuthState> = mutableState.asStateFlow()
+
+    /**
+     * The binding of this device to the account it is signed in to (a full
+     * session, or parked after ACCESS on the phrase screens). It ends at
+     * sign-out, at forget device and when another account lands; signing the
+     * SAME account in again is a new binding.
+     *
+     * The flows below await the network and then land a session, write the
+     * account's stores or wipe the device. A flow started under one binding
+     * asks it after its awaits, so one that outlives a sign-out stands down
+     * instead of signing the account back in, and background work launched
+     * for an account ([launchBound]) stops with it.
+     */
+    private val accountBinding = BindingEpoch()
+    private val boundAccountLock = Any()
+    private var boundAccountIdB64: String? = null
+
+    /**
+     * The binding current now, for work outside this class that is started
+     * for the signed-in account and must stand down when it leaves.
+     */
+    internal fun captureAccountBinding(): me.lakko.app.Binding = accountBinding.capture()
+
+    /** Record which account is bound; a change ends the previous binding. */
+    private fun rebindAccount(accountIdB64: String?) {
+        synchronized(boundAccountLock) {
+            if (boundAccountIdB64 == accountIdB64) return
+            boundAccountIdB64 = accountIdB64
+        }
+        accountBinding.advance()
+    }
+
+    /** Every write of [state] goes through here, so the binding can never
+     *  name another account than the state does. */
+    private var landedState: AuthState
+        get() = mutableState.value
+        set(value) {
+            rebindAccount(
+                when (value) {
+                    is AuthState.Session -> value.account.accountIdB64
+                    is AuthState.NeedsRecoveryPhrase -> value.account.accountIdB64
+                    is AuthState.SaveFreshPhrase -> value.account.accountIdB64
+                    AuthState.Loading, is AuthState.Anon -> null
+                },
+            )
+            mutableState.value = value
+        }
 
     /**
      * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
@@ -316,10 +365,10 @@ public class AuthRepository(
         if (settleGuestBeforeRestore(decision, nowMs)) return
         when (decision) {
             SessionRestoreDecision.NoAccount -> {
-                mutableState.value = AuthState.Anon()
+                landedState = AuthState.Anon()
             }
             is SessionRestoreDecision.SignedOut -> {
-                mutableState.value = AuthState.Anon(cachedUsername = decision.cachedUsername)
+                landedState = AuthState.Anon(cachedUsername = decision.cachedUsername)
             }
             is SessionRestoreDecision.Restored -> {
                 // A guest account (`GuestAccount.kt`) is still a guest after a
@@ -341,7 +390,7 @@ public class AuthRepository(
                 // Secrets first, then state: an observer that reacts to the
                 // Session flip must already find the secrets it needs.
                 publishIdentitySecrets(decision.secrets)
-                mutableState.value = AuthState.Session(account = decision.account)
+                landedState = AuthState.Session(account = decision.account)
                 // A backup restore still pending from an earlier landing (a
                 // failed fetch, a process killed mid-restore) is tried now.
                 retryPendingBackupRestoreInBackground(decision.secrets)
@@ -411,7 +460,7 @@ public class AuthRepository(
                 }
 
                 override fun landSignedOut() {
-                    mutableState.value = AuthState.Anon()
+                    landedState = AuthState.Anon()
                 }
 
                 override fun log(message: String, cause: Throwable?) {
@@ -446,18 +495,29 @@ public class AuthRepository(
     }
 
     /** The server deletes and the device wipe of the live guest session. */
-    private fun guestDiscardPorts(sessionToken: String, forgetThisDevice: () -> Unit): GuestDiscardPorts =
-        object : GuestDiscardPorts {
+    private fun guestDiscardPorts(sessionToken: String, forgetThisDevice: () -> Unit): GuestDiscardPorts {
+        // Captured while the guest is the signed-in account. The wipe below
+        // forgets whichever account is signed in when it runs, so it runs
+        // only if that is still this guest.
+        val bound = accountBinding.capture()
+        return object : GuestDiscardPorts {
             override suspend fun deleteAtAuth() = deleteGuestAtAuth(sessionToken)
 
             override suspend fun deleteAtDirectory() = deleteGuestAtDirectory(sessionToken)
 
-            override fun forgetDevice() = forgetThisDevice()
+            override fun forgetDevice() {
+                if (!bound.isCurrent) {
+                    Log.w("lakko-auth", "guest account deleted; the device is no longer signed in to it")
+                    return
+                }
+                forgetThisDevice()
+            }
 
             override fun log(message: String, cause: Throwable?) {
                 Log.w("lakko-auth", message, cause)
             }
         }
+    }
 
     /** The on-device stores the cold-start decision reads. */
     private fun productionRestoreSource(): SessionRestoreSource = object : SessionRestoreSource {
@@ -527,6 +587,7 @@ public class AuthRepository(
      * reads another account's contacts; [clearIdentitySecrets] unbinds it.
      */
     private fun publishIdentitySecrets(secrets: IdentitySecrets) {
+        rebindAccount(base64Encode(secrets.accountId))
         me.lakko.app.contacts.AcceptedContactsStore.bind(secrets.accountId)
         mutableIdentitySecrets.value = secrets
     }
@@ -722,7 +783,7 @@ public class AuthRepository(
                 // marker makes the phrase screen come back after a restart
                 // (`SignupPhraseOwed.kt`). Recorded before the session lands.
                 markSignupPhraseOwed(phraseOwedMarkers, accountIdB64)
-                mutableState.value = AuthState.Session(
+                landedState = AuthState.Session(
                     account = SessionAccount(
                         accountIdB64 = accountIdB64,
                         username = normalisedUsername,
@@ -883,7 +944,7 @@ public class AuthRepository(
                                     ),
                                 )
                                 landed = true
-                                mutableState.value = AuthState.Session(
+                                landedState = AuthState.Session(
                                     account = SessionAccount(accountIdB64 = accountIdB64, username = ""),
                                 )
                                 // No push registration here: a person who was
@@ -963,6 +1024,9 @@ public class AuthRepository(
         val accountId = secrets.accountId.copyOf()
         val sessionToken = secrets.sessionToken
         val phraseKey = guestPhraseKey(accountIdB64)
+        // Each step below writes this guest's rows. One that returns after
+        // the guest left the device (declined, expired) writes nothing back.
+        val bound = accountBinding.capture()
         keepGuestAccount(
             ports = object : GuestClaimPorts {
                 override suspend fun expireIfDue(): Boolean = expireGuestIfDue(forgetThisDevice)
@@ -1008,6 +1072,7 @@ public class AuthRepository(
                 }
 
                 override fun noteUsernameClaimed(username: String) {
+                    bound.ensureCurrent()
                     noteGuestUsernameClaimed(guestMarkers, accountIdB64, username)
                     // The age is kept: taking a name does not buy another day.
                     mutableGuest.value
@@ -1016,15 +1081,19 @@ public class AuthRepository(
                     sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = username))
                 }
 
-                override suspend fun setPassword(phrase: String, password: ByteArray, username: String) =
+                override suspend fun setPassword(phrase: String, password: ByteArray, username: String) {
+                    bound.ensureCurrent()
                     recover(mnemonicPhrase = phrase, newPassword = password, username = username)
+                }
 
                 override fun owePhrase(phrase: String) {
+                    bound.ensureCurrent()
                     markSignupPhraseOwed(phraseOwedMarkers, accountIdB64)
                     me.lakko.app.ui.auth.SignupPhraseGate.park(phrase)
                 }
 
                 override fun clearGuest() {
+                    bound.ensureCurrent()
                     clearGuestAccount(guestMarkers, accountIdB64)
                     mutableGuest.value = null
                 }
@@ -1263,7 +1332,7 @@ public class AuthRepository(
                             username = resolvedUsername,
                         ),
                     )
-                    mutableState.value = AuthState.NeedsRecoveryPhrase(
+                    landedState = AuthState.NeedsRecoveryPhrase(
                         account = SessionAccount(
                             accountIdB64 = accountIdB64,
                             username = resolvedUsername,
@@ -1287,7 +1356,7 @@ public class AuthRepository(
                         sessionExpiresAtMs = result.sessionExpiresAtMs,
                     ),
                 )
-                mutableState.value = AuthState.Session(
+                landedState = AuthState.Session(
                     account = SessionAccount(
                         accountIdB64 = accountIdB64,
                         username = resolvedUsername,
@@ -1402,6 +1471,11 @@ public class AuthRepository(
         // IdentitySecrets (which owns its lifetime thereafter). When it
         // was NOT (an early throw), the `finally` wipes our copy.
         var seedHandedOff = false
+        // A recover started for a signed-in account (a guest being kept)
+        // stands down when that account left the device meanwhile. One
+        // started signed out is the sign-in itself and lands as before.
+        val bound = accountBinding.capture()
+        val startedSignedIn = signedInAccountIdB64() != null
         try {
             authClientFactory().use { client ->
                 val result = signInByName(
@@ -1410,6 +1484,7 @@ public class AuthRepository(
                     sessionTokenOf = { it.sessionToken },
                     rebind = ::rebindLoginHandleInBackground,
                 )
+                if (startedSignedIn) bound.ensureCurrent()
                 val accountIdBytes = result.accountId
                 val accountIdB64 = base64Encode(accountIdBytes)
                 val resolvedUsername = named.username
@@ -1514,6 +1589,7 @@ public class AuthRepository(
                         accountIdB64 = accountIdB64,
                         phrase = mnemonicPhrase,
                     )
+                    if (startedSignedIn) bound.ensureCurrent()
 
                     // Stash the NEW export key + the phrase seed.
                     // ADR-0017: the phrase seed is UNCHANGED across a
@@ -1535,7 +1611,7 @@ public class AuthRepository(
                     // The live IdentitySecrets now owns the seed buffer
                     // — do NOT wipe it in the `finally`.
                     seedHandedOff = true
-                    mutableState.value = AuthState.Session(
+                    landedState = AuthState.Session(
                         account = SessionAccount(
                             accountIdB64 = accountIdB64,
                             username = resolvedUsername,
@@ -1878,7 +1954,7 @@ public class AuthRepository(
                 ),
             )
             pendingRecovery.set(null)
-            mutableState.value = AuthState.Session(
+            landedState = AuthState.Session(
                 account = SessionAccount(
                     accountIdB64 = accountIdB64,
                     username = username,
@@ -1913,7 +1989,7 @@ public class AuthRepository(
                 username = username,
             ),
         )
-        mutableState.value = AuthState.NeedsRecoveryPhrase(
+        landedState = AuthState.NeedsRecoveryPhrase(
             account = SessionAccount(
                 accountIdB64 = accountIdB64,
                 username = username,
@@ -2014,6 +2090,9 @@ public class AuthRepository(
     public suspend fun provideRecoveryPhrase(mnemonicPhrase: String) {
         val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
+        // A sign-out while the checks below are out wins: it wiped `pending`
+        // in place, and nothing of this account is written or landed after it.
+        val bound = accountBinding.capture()
 
         // Parse the phrase -> derive the BIP39 seed -> derive the
         // canonical AccountIdentity pubkey from it. `fromPhrase` throws
@@ -2029,6 +2108,7 @@ public class AuthRepository(
                 sessionToken = pending.sessionToken,
                 accountIdentitySeed = accountIdentitySeed,
             )
+            bound.ensureCurrent()
 
             // ADR-0018 factor (c): a TOTP-recovered fresh device parked
             // with NO device root key (no password => no export key to
@@ -2077,6 +2157,7 @@ public class AuthRepository(
                 accountIdB64 = pending.accountIdB64,
                 phrase = mnemonicPhrase,
             )
+            bound.ensureCurrent()
 
             // Finish the session: hand the verified phrase seed into the
             // live IdentitySecrets and flip to a full Session.
@@ -2094,7 +2175,7 @@ public class AuthRepository(
             )
             seedHandedOff = true
             pendingRecovery.set(null)
-            mutableState.value = AuthState.Session(
+            landedState = AuthState.Session(
                 account = SessionAccount(
                     accountIdB64 = pending.accountIdB64,
                     username = pending.username,
@@ -2132,6 +2213,7 @@ public class AuthRepository(
     public suspend fun mintFreshIdentity(): String {
         val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
+        val bound = accountBinding.capture()
 
         // Generate a fresh 24-word recovery phrase + its seed (same client-
         // side generation signup uses).
@@ -2153,6 +2235,12 @@ public class AuthRepository(
             accountIdentitySeed = seed,
             sessionToken = pending.sessionToken,
         )
+        // Signed out while the publish was out: the device keeps nothing of
+        // the account and does not flip to the phrase screen.
+        if (!bound.isCurrent) {
+            seed.fill(0)
+            bound.ensureCurrent()
+        }
 
         // Bootstrap the device-key existence gate from the fresh seed (no
         // password on this path). No-op if a key already exists.
@@ -2186,7 +2274,7 @@ public class AuthRepository(
             ),
         )
         pendingRecovery.set(null)
-        mutableState.value = AuthState.SaveFreshPhrase(
+        landedState = AuthState.SaveFreshPhrase(
             account = SessionAccount(
                 accountIdB64 = pending.accountIdB64,
                 username = pending.username,
@@ -2276,7 +2364,7 @@ public class AuthRepository(
     ) {
         val accountId = accountIdBytes.copyOf()
         val seed = accountIdentitySeed.copyOf()
-        pushScope.launch {
+        pushScope.launchBound(accountBinding, start = kotlinx.coroutines.CoroutineStart.ATOMIC) {
             try {
                 publishIdentityFor(
                     landing = landing,
@@ -2394,7 +2482,7 @@ public class AuthRepository(
                 username = pending.username,
             ),
         )
-        mutableState.value = AuthState.Session(
+        landedState = AuthState.Session(
             account = SessionAccount(
                 accountIdB64 = pending.accountIdB64,
                 username = pending.username,
@@ -2507,6 +2595,7 @@ public class AuthRepository(
     ) {
         val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
+        val bound = accountBinding.capture()
         var seedHandedOff = false
         try {
             verifySeedAgainstPublishedIdentity(
@@ -2514,6 +2603,7 @@ public class AuthRepository(
                 sessionToken = sessionToken ?: pending.sessionToken,
                 accountIdentitySeed = phraseSeed,
             )
+            bound.ensureCurrent()
             // ADR-0018 factor (c): a TOTP-recovered fresh device parked
             // with NO device root key. Bootstrap it from the VERIFIED
             // transferred seed, strictly AFTER the fail-closed
@@ -2550,7 +2640,7 @@ public class AuthRepository(
             )
             seedHandedOff = true
             pendingRecovery.set(null)
-            mutableState.value = AuthState.Session(
+            landedState = AuthState.Session(
                 account = SessionAccount(
                     accountIdB64 = pending.accountIdB64,
                     username = pending.username,
@@ -2610,6 +2700,7 @@ public class AuthRepository(
         sessionExpiresAtMs: Long,
         persistJoin: suspend () -> Unit = {},
     ) {
+        val bound = accountBinding.capture()
         var seedHandedOff = false
         try {
             runCheckedDeviceRestore(
@@ -2626,6 +2717,9 @@ public class AuthRepository(
                 lookup = { name -> lookupWithSession(name, accountIdBytes, sessionToken) },
                 persistJoin = persistJoin,
                 land = {
+                    // The binding this restore started under is gone (a
+                    // sign-out, another landing): do not sign this one in.
+                    bound.ensureCurrent()
                     landDeviceRestore(
                         accountIdBytes = accountIdBytes,
                         accountIdB64 = accountIdB64,
@@ -2721,7 +2815,7 @@ public class AuthRepository(
             ),
         )
         pendingRecovery.set(null)
-        mutableState.value = AuthState.Session(
+        landedState = AuthState.Session(
             account = SessionAccount(
                 accountIdB64 = accountIdB64,
                 username = username,
@@ -2878,7 +2972,7 @@ public class AuthRepository(
                     username = cached.username,
                 ),
             )
-            mutableState.value = AuthState.NeedsRecoveryPhrase(
+            landedState = AuthState.NeedsRecoveryPhrase(
                 account = SessionAccount(
                     accountIdB64 = cached.accountIdB64,
                     username = cached.username,
@@ -2902,7 +2996,7 @@ public class AuthRepository(
                 sessionExpiresAtMs = assertion.sessionExpiresAtMs,
             ),
         )
-        mutableState.value = AuthState.Session(
+        landedState = AuthState.Session(
             account = SessionAccount(
                 accountIdB64 = cached.accountIdB64,
                 username = cached.username,
@@ -2963,7 +3057,7 @@ public class AuthRepository(
         clearPendingRecovery()
         // A phrase screen left unacknowledged is not owed across a sign-out.
         if (cached != null) clearSignupPhraseOwed(phraseOwedMarkers, cached.accountIdB64)
-        mutableState.value = AuthState.Anon(cachedUsername = cached?.username)
+        landedState = AuthState.Anon(cachedUsername = cached?.username)
         // After the state: the guest flag must not drop while a session is
         // still observed (the app shell would be drawn for a guest).
         mutableGuest.value = null
@@ -3008,7 +3102,7 @@ public class AuthRepository(
         me.lakko.app.anon.AnonTokens.releaseSession()
         // ADR-0017: drop any parked fresh-device fail-safe context.
         clearPendingRecovery()
-        mutableState.value = AuthState.Anon()
+        landedState = AuthState.Anon()
         // After the state, as in [logout]. The wipe above removed the guest
         // marker and the guest phrase row.
         mutableGuest.value = null
@@ -3079,19 +3173,19 @@ public class AuthRepository(
         if (!pending) return
         val accountId = secrets.accountId.copyOf()
         val sessionToken = secrets.sessionToken
-        pushScope.launch {
+        pushScope.launchBound(accountBinding) {
             val phraseBytes = try {
                 me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, accountIdB64)
             } catch (cause: Throwable) {
                 // Unreadable is not absent: stay pending for the next landing.
                 Log.w("lakko-auth", "backup restore (retry): phrase cache not readable", cause)
-                return@launch
+                return@launchBound
             }
             if (phraseBytes == null) {
                 // Definitive: this device can never open the backup.
                 Log.w("lakko-auth", "backup restore (retry): no cached phrase, restore no longer pending")
                 me.lakko.app.backup.BackupRestoreStore.setRetryPending(applicationContext, accountIdB64, false)
-                return@launch
+                return@launchBound
             }
             try {
                 me.lakko.app.backup.retryPendingBackupRestore(
@@ -3448,7 +3542,7 @@ public class AuthRepository(
             Log.w("lakko-auth", "push subscribe ($context) skipped: no signed-in account")
             return
         }
-        pushScope.launch {
+        pushScope.launchBound(accountBinding) {
             try {
                 PushSubscriber(applicationContext).subscribe(
                     accountIdB64 = accountIdB64,
@@ -3500,6 +3594,11 @@ public class AuthRepository(
         }
 
     private fun clearIdentitySecrets() {
+        // Before anything is wiped: flows and background work of the account
+        // being left stand down from here on. Unconditional: a sign-out ends
+        // the binding whatever this repository believed was bound.
+        synchronized(boundAccountLock) { boundAccountIdB64 = null }
+        accountBinding.advance()
         mutableIdentitySecrets.value?.let { secrets ->
             secrets.exportKey.fill(0)
             // ADR-0017: the AccountIdentity (phrase) seed is the

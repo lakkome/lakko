@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import Foundation
 
 /// The process-scoped repositories and call hosts, bundled as plain
@@ -32,6 +33,10 @@ final class AppServices {
     /// check. In memory, per account.
     let feedRefresh: FeedRefreshCenter
 
+    /// The subscription that lets the chat runtime go when the session ends
+    /// (``releaseRuntimesWhenTheAccountLeaves()``).
+    private var accountBinding: AnyCancellable?
+
     init(
         authRepository: AuthRepository,
         contactsRepository: ContactsRepository,
@@ -52,6 +57,35 @@ final class AppServices {
         self.deviceGroupSync = deviceGroupSync
         self.inviteIntake = inviteIntake
         self.feedRefresh = feedRefresh
+        releaseRuntimesWhenTheAccountLeaves()
+    }
+
+    /// Drop the chat runtime the moment the signed-in account leaves or is
+    /// replaced, not when a screen happens to appear.
+    ///
+    /// The chat repository lives for the process and was cleared only by the
+    /// wipe: after a plain Log out it kept the account's identity and groups,
+    /// and the foreground receive (also process-long) went on polling,
+    /// decrypting and sweeping for an account nobody was signed in to, and
+    /// rang its calls. ``ChatRepository/clear()`` keeps every store, so the
+    /// next sign-in of the same account bootstraps from disk as a relaunch
+    /// does.
+    ///
+    /// `@Published` emits before the new value is stored and on the main
+    /// actor (the repository is main-actor bound), so the runtime is gone
+    /// before anything can read the next account's secrets.
+    private func releaseRuntimesWhenTheAccountLeaves() {
+        let chat = chatRepository
+        var bound: Data?
+        accountBinding = authRepository.$identitySecrets
+            .map { $0?.accountId }
+            .sink { accountId in
+                MainActor.assumeIsolated {
+                    defer { bound = accountId }
+                    guard let leaving = bound, leaving != accountId else { return }
+                    chat.clear()
+                }
+            }
     }
 }
 
@@ -76,6 +110,10 @@ extension AppServices {
             if let own = chatRepository.ownDeviceLeafKey {
                 await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
             }
+            // The directory call waited on the network. Whoever is signed in
+            // by now, the wipe below is of the account captured above
+            // (``wipeAccountLocalData(accountIdB64:)`` keeps another
+            // account's session).
             wipeAccountLocalData(accountIdB64: accountIdB64)
         }
     }
@@ -95,6 +133,16 @@ extension AppServices {
         PushAccountBindingStore.live.clear()
         AuthRepository.removeAllDeliveredNotifications()
         let target = accountIdB64 ?? SessionStore().load()?.accountIdB64
+        // Every caller reaches this after a network wait (the directory
+        // delete, the account delete, a guest's server deletes). If ANOTHER
+        // account is signed in by now, the runtimes and the session are that
+        // account's: only the stores of the account this wipe was asked for
+        // go.
+        if case .otherAccountSignedIn = AccountWipeScope.decide(
+            target: target, signedIn: authRepository.signedInAccountIdB64) {
+            if let target { AccountLocalDataWipe.wipe(accountIdB64: target) }
+            return
+        }
         // The runtimes. `clear()` keeps the stores (it is also the logout
         // path); the wipe below is what removes them.
         CallHistoryStore.shared.unbind()
@@ -107,5 +155,20 @@ extension AppServices {
             NSLog("[account-wipe] WARN no account to wipe: no session and no session record")
         }
         authRepository.endSessionAfterLocalWipe()
+    }
+}
+
+/// What ``AppServices/wipeAccountLocalData(accountIdB64:)`` may touch.
+enum AccountWipeScope: Equatable {
+    /// The account to wipe is the one signed in, or nobody is: the runtimes
+    /// let go and the session ends, as Forget device and Delete account mean.
+    case wholeDevice
+    /// Another account signed in while the wipe's server step was out: its
+    /// runtimes and its session are not this wipe's to end.
+    case otherAccountSignedIn
+
+    static func decide(target: String?, signedIn: String?) -> AccountWipeScope {
+        guard let signedIn, let target, signedIn != target else { return .wholeDevice }
+        return .otherAccountSignedIn
     }
 }

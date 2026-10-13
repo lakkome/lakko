@@ -155,6 +155,16 @@ public final class ChatRepository: ObservableObject {
     private var currentAccountId: Data?
     private var currentSessionToken: String?
 
+    /// Advanced whenever the account this repository serves leaves or is
+    /// replaced (``wipeInMemoryState()``: ``clear()`` and an account switch
+    /// in ``bootstrap(secrets:)``). An operation that suspends captures it
+    /// first and checks it before it writes: the identity and the group it
+    /// read before the `await` belong to the binding that started it, and
+    /// ``groups`` may by then be another account's. Every region queued on
+    /// the per-group commit chain is checked in one place
+    /// (``withCommitLock(groupIdHex:_:)``).
+    let binding = BindingEpoch()
+
     /// Publishes this device's KeyPackage from ``canonicalIdentity`` —
     /// persist-before-upload, single-flight. See ``republishKeyPackage()``.
     private lazy var keyPackageRepublisher = KeyPackageRepublisher(
@@ -760,12 +770,16 @@ public final class ChatRepository: ObservableObject {
     public func clear() {
         wipeInMemoryState()
         currentAccountIdB64 = nil
+        // The bearer token was the closed session's too.
+        currentAccountId = nil
+        currentSessionToken = nil
         canonicalIdentity = nil
         accountIdentity = nil
         state = ChatRepositoryState()
     }
 
     private func wipeInMemoryState() {
+        binding.advance()
         accountIdentity = nil
         groups.removeAll()
         groupCalls.removeAll()
@@ -904,6 +918,10 @@ public final class ChatRepository: ObservableObject {
         // core verifies. ADR-0057 — remembered so the registrar appointment
         // can fetch the recipient's identity bundle.
         memberAccountIdHints[recipientSignaturePubkey] = recipientAccountId
+        // `identity` is this binding's. Checked after every wait below: a
+        // group founded under it must never be filed into the next account's
+        // list, nor claimed and announced once its account has signed out.
+        let bound = binding.capture()
         guard let recipientDevices = try await discovery.fetchKeyPackages(
             accountId: recipientAccountId
         ), !recipientDevices.isEmpty else {
@@ -911,8 +929,10 @@ public final class ChatRepository: ObservableObject {
                 "recipient has no KeyPackage uploaded yet"
             )
         }
+        try bound.require()
         // ...and this account's OTHER devices join from the first epoch too.
         let devices = recipientDevices + (await ownOtherDevices(identity: identity))
+        try bound.require()
 
         let group: Group
         let addResult: AddMember
@@ -951,6 +971,7 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("DS journal claim failed", underlying: error)
         }
+        try bound.require()
         if let accountIdB64 = currentAccountIdB64 {
             registrarSeeds.markRootHeld(
                 accountIdB64: accountIdB64, groupIdHex: DsClient.pseudonymHex(try group.groupId()))
@@ -984,6 +1005,7 @@ public final class ChatRepository: ObservableObject {
                     underlying: error
                 )
             }
+            try bound.require()
         }
 
         let groupId = try group.groupId()
@@ -1662,6 +1684,9 @@ public final class ChatRepository: ObservableObject {
         guard cap.isValidNow(nowMs: nowMs) else {
             throw ChatError.argument("group invite link has expired")
         }
+        // `identity` is this binding's: the request is never continued with
+        // another account's reply key, nor persisted into its snapshot.
+        let bound = binding.capture()
         // ADR-0028 OQ1 — when the link was a server-backed pointer, register one
         // consume against the ledger's soft `max_uses` ceiling before posting
         // the request (anti-abuse defence-in-depth; the admin approval gate
@@ -1688,6 +1713,7 @@ public final class ChatRepository: ObservableObject {
             case .consumed, .alreadyConsumed:
                 break
             }
+            try bound.require()
         }
         let groupId = cap.groupId()
         // ADR-0060 section 6 — the joiner's `reply` grant, registered before
@@ -1700,6 +1726,7 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("reply key registration failed", underlying: error)
         }
+        try bound.require()
         // ADR-0053 point 6 — the knock. A probe learns the epoch the group's
         // access key is registered at (no journal read: a non-member cannot
         // read a claimed journal, and paging one it is not in was the old
@@ -1730,6 +1757,7 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("DS knock (external-join request) failed", underlying: error)
         }
+        try bound.require()
         // The proposal's KeyPackage private key is the only thing that can open
         // the Welcome the committer will send later; persist it now rather than
         // losing it to a relaunch before then.
@@ -6354,11 +6382,25 @@ public final class ChatRepository: ObservableObject {
     /// publish is bounded anyway by `URLSession`'s own request timeout, which
     /// surfaces as a thrown publish failure with the outbox entry left un-acked
     /// — the state the restart sweep is built to recover.
+    ///
+    /// ## A region belongs to the account that queued it
+    ///
+    /// The chain is not cleared on sign-out (see ``wipeInMemoryState()``), and
+    /// a region re-reads `canonicalIdentity` and `groups` when its turn comes.
+    /// That stops it once its account has signed out. It does not stop it
+    /// when ANOTHER account has signed in meanwhile and is in the same group:
+    /// the re-read then finds that account's identity and record, and the
+    /// region (a send, a membership change, a sweep) would run as it. So a
+    /// region whose binding moved while it waited is not run at all.
     private func withCommitLock<T>(
         groupIdHex: String,
         _ body: @escaping @MainActor () async throws -> T
     ) async throws -> T {
-        try await commitLock.run(groupIdHex: groupIdHex, body)
+        let bound = binding.capture()
+        return try await commitLock.run(groupIdHex: groupIdHex) {
+            try bound.require()
+            return try await body()
+        }
     }
 
     /// Observe every moment a group's MLS chain DRAINS: the last queued
@@ -7283,12 +7325,18 @@ public final class ChatRepository: ObservableObject {
     /// and each is marked sent only after its send succeeded. Best effort.
     public func sendIntroductions() async {
         guard ReachCenter.shared.isActive else { return }
+        // The record and the relayed set read below are this binding's
+        // account's; they are never sent into another account's
+        // conversations.
+        let bound = binding.capture()
         let offer = await ReachCenter.shared.ownIntroductionRecord()
+        guard bound.isCurrent else { return }
         let offerKey = offer.map { Data(SHA256.hash(data: $0)).base64EncodedString() }
         let relayed = IntroductionBook.shared.offeredRecords()
         let bundleDigest = Self.introductionsBundleDigest(relayed)
         let capped = Self.relayBundleRecords(relayed)
         for groupIdHex in groups.keys.sorted() {
+            guard bound.isCurrent else { return }
             guard conversationKind(groupIdHex: groupIdHex) == .chat,
                   (memberCount(groupIdHex: groupIdHex) ?? 0) == 2,
                   !membershipEnded(membershipStateNow(groupIdHex: groupIdHex))
@@ -7298,6 +7346,7 @@ public final class ChatRepository: ObservableObject {
                 do {
                     try await publishApplicationMessage(
                         groupIdHex: groupIdHex, plaintextBytes: try composeIntroductionOffer(record: offer))
+                    guard bound.isCurrent else { return }
                     ReachCenter.shared.markOfferSent(groupIdHex: groupIdHex, key: offerKey)
                 } catch {
                     NSLog("ADR-0060: introduction offer not sent: \(error)")
@@ -7309,6 +7358,7 @@ public final class ChatRepository: ObservableObject {
                     let bundle = try composeIntroductionsBundle(
                         records: capped, updatedAtMs: UInt64(Self.nowMs()))
                     try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bundle)
+                    guard bound.isCurrent else { return }
                     ReachCenter.shared.markBundleSent(groupIdHex: groupIdHex, digest: bundleDigest)
                 } catch {
                     NSLog("ADR-0060: introductions bundle not sent: \(error)")

@@ -56,6 +56,9 @@ enum Cancellation {
 
     private static func isCancellation(_ error: Error, depth: Int) -> Bool {
         if error is CancellationError { return true }
+        // Work that outlived the account it was started for
+        // (``BindingEpoch``) was called off just the same.
+        if error is StaleBindingError { return true }
         if let url = error as? URLError { return url.code == .cancelled }
         guard depth < maxDepth, let inner = underlying(of: error) else { return false }
         return isCancellation(inner, depth: depth + 1)

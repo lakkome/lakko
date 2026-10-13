@@ -206,6 +206,7 @@ public class ReachManager internal constructor(
         val scope = ByteArray(REPLY_SCOPE_LEN).also(random::nextBytes)
         val scopeHex = reachHex(scope)
         lock.withLock {
+            if (binding.get() !== b) throw IllegalStateException("no session")
             doc = doc.copy(
                 replies = doc.replies + StoredReply(scopeHex, replyExpiry(nowMs), toKey?.let(::reachHex)),
             )
@@ -222,6 +223,7 @@ public class ReachManager internal constructor(
         val keyHex = reachHex(fromKey)
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 val kept = doc.replies.filterNot { it.toKeyHex == keyHex }
                 if (kept.size == doc.replies.size) return@withLock
                 doc = doc.copy(replies = kept)
@@ -240,6 +242,7 @@ public class ReachManager internal constructor(
         val b = binding.get() ?: throw IllegalStateException("no session")
         val linkHex = reachHex(linkId)
         lock.withLock {
+            if (binding.get() !== b) throw IllegalStateException("no session")
             doc = doc.copy(links = doc.links.filterNot { it.linkIdHex == linkHex } + StoredLink(linkHex, expiresAtMs))
             store.save(b.accountIdB64, doc)
             if (!syncLocked(b, System.currentTimeMillis())) throw IllegalStateException("link key not registered")
@@ -254,6 +257,7 @@ public class ReachManager internal constructor(
         val linkHex = reachHex(linkId)
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(
                     links = doc.links.map { if (it.linkIdHex == linkHex) it.copy(blobIdHex = reachHex(blobId)) else it },
                 )
@@ -274,6 +278,7 @@ public class ReachManager internal constructor(
         val b = binding.get() ?: return
         val linkHex = reachHex(linkId)
         lock.withLock {
+            if (binding.get() !== b) return@withLock
             doc = doc.copy(links = doc.links.filterNot { it.linkIdHex == linkHex })
             store.save(b.accountIdB64, doc)
             syncLocked(b, System.currentTimeMillis())
@@ -288,6 +293,7 @@ public class ReachManager internal constructor(
         if (normalised == doc.joinedGroups) return
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(joinedGroups = normalised)
                 store.save(b.accountIdB64, doc)
                 syncLocked(b, System.currentTimeMillis())
@@ -302,6 +308,7 @@ public class ReachManager internal constructor(
         if (normalised == doc.channels) return
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(channels = normalised)
                 store.save(b.accountIdB64, doc)
                 syncLocked(b, System.currentTimeMillis())
@@ -319,6 +326,7 @@ public class ReachManager internal constructor(
         val b = binding.get() ?: return
         val slot = ReachSlot(kind, if (kind.scopeless) "" else scopeHex.lowercase())
         val envelope = lock.withLock {
+            if (binding.get() !== b) return
             val next = versionOf(doc, slot) + 1
             doc = doc.copy(
                 versions = doc.versions.filterNot { it.kind == kind.name && it.scopeHex == slot.scopeHex } +
@@ -329,6 +337,9 @@ public class ReachManager internal constructor(
             syncLocked(b, System.currentTimeMillis())
             envelope
         }
+        // An envelope composed for an account that is gone is not sent
+        // through the next account's devices.
+        if (binding.get() !== b) return
         envelope?.let(::publishToDevices)
     }
 
@@ -499,6 +510,7 @@ public class ReachManager internal constructor(
             }
             decided
         }
+        if (binding.get() !== b) return
         // Sent as returned, never re-stamped here.
         adoption.sendWire?.let(::publishToDevices)
         if (adoption.storeWire != null) currentVisibility()?.let { rerunAfterAdopt(it) }
@@ -585,6 +597,11 @@ public class ReachManager internal constructor(
                     open = openChange,
                 )
             }
+            // The account signed out (or another bound) while the request was
+            // out: [doc] is no longer this account's document. Writing it
+            // here would save an empty or a foreign document under this
+            // account, losing its setting and its version counters.
+            if (binding.get() !== b) return false
             doc = doc.copy(
                 registered = desired.map { (pk, key) ->
                     StoredRegistered(pk, key.slot.kind.name, key.slot.scopeHex, key.version, key.expiresAtMs)
@@ -761,10 +778,14 @@ public class ReachManager internal constructor(
         mutableVisibility.value = stamped
         mutableStatus.value = ReachApplyStatus.APPLYING
         lock.withLock {
+            if (binding.get() !== b) return
             doc = doc.copy(visibilityHex = reachHex(envelope))
             store.save(b.accountIdB64, doc)
             syncLocked(b, System.currentTimeMillis())
         }
+        // Signed out while the mailbox was reconciled: the setting is saved
+        // for its account; nothing is sent as whoever is bound now.
+        if (binding.get() !== b) return
         // ADR-0060 §7 — the account's other devices take the same setting.
         publishToDevices(envelope)
         try {
@@ -843,6 +864,7 @@ public class ReachManager internal constructor(
         doc = doc.copy(usernameCertHex = hex)
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(usernameCertHex = hex)
                 store.save(b.accountIdB64, doc)
             }
@@ -861,6 +883,7 @@ public class ReachManager internal constructor(
         doc = doc.copy(publishedPublic = public, publishedKey = key)
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(publishedPublic = public, publishedKey = key)
                 store.save(b.accountIdB64, doc)
             }
@@ -967,6 +990,7 @@ public class ReachManager internal constructor(
         val ownerHex = reachHex(ownerKey)
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(held = doc.held.filterNot { it.ownerKeyHex == ownerHex })
                 store.save(b.accountIdB64, doc)
             }
@@ -1150,6 +1174,9 @@ public class ReachManager internal constructor(
             syncLocked(b, System.currentTimeMillis())
             envelope
         }
+        // An envelope composed for an account that is gone is not sent
+        // through the next account's devices.
+        if (binding.get() !== b) return
         envelope?.let(::publishToDevices)
     }
 
@@ -1190,6 +1217,7 @@ public class ReachManager internal constructor(
         )
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(
                     delegations = doc.delegations.filterNot {
                         it.groupHex == entry.groupHex && it.senderKeyHex == entry.senderKeyHex &&

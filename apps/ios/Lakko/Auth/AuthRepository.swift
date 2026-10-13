@@ -277,6 +277,16 @@ public final class AuthRepository: ObservableObject {
     /// and `Create account` pressed at the same moment delete it once.
     private var guestExpiryInFlight: Task<Bool, Never>?
 
+    /// Advanced whenever the account this device is bound to changes: every
+    /// session landing (``adoptIdentitySecrets(_:context:)``), every parking
+    /// in ``AuthState/needsRecoveryPhrase(_:)``, and every sign-out
+    /// (``logout()``, ``endSessionAfterLocalWipe()``). A sign-in or restore
+    /// captures it before its first `await` and checks it after each one, so
+    /// a round trip that outlives a sign-out, or that another account's
+    /// landing overtook, lands nothing. Work outside this repository that
+    /// belongs to the session captures it too.
+    let binding = BindingEpoch()
+
     /// The live `UNUserNotificationCenter` removal.
     nonisolated static func removeAllDeliveredNotifications() {
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
@@ -428,6 +438,7 @@ public final class AuthRepository: ObservableObject {
         if sessionStore.load()?.accountIdB64 == accountIdB64 { sessionStore.clear() }
         wipeAccountStores(accountIdB64)
         if case .loading = state {
+            binding.advance()
             identitySecrets = nil
             state = .anon(cachedUsername: nil)
         }
@@ -442,6 +453,7 @@ public final class AuthRepository: ObservableObject {
     /// costs the relaunch restore (the next launch lands logged out), never
     /// the current session.
     private func adoptIdentitySecrets(_ secrets: IdentitySecrets, context: String) {
+        binding.advance()
         identitySecrets = secrets
         do {
             try persistence.putSessionToken(
@@ -1111,10 +1123,14 @@ public final class AuthRepository: ObservableObject {
         )
 
         let client = authClientFactory()
+        let bound = binding.capture()
         let result = try await client.login(
             handle: name.handle,
             password: password
         )
+        // A sign-out, or another account's landing, while the round trip was
+        // out: this sign-in was overtaken and lands nothing.
+        try bound.require()
         let accountIdBytes = result.accountId
         let accountIdB64 = base64Encode(accountIdBytes)
 
@@ -1257,7 +1273,10 @@ public final class AuthRepository: ObservableObject {
     /// this error path is rare in practice.
     public func loginWithPasskey() async throws {
         let webauthn = WebauthnClient()
+        let bound = binding.capture()
         let assertion = try await webauthn.loginWithPasskey()
+        // As in ``login(username:password:)``: overtaken, lands nothing.
+        try bound.require()
         // Resolve the cached account marker. We only support
         // passkey-login for the account this device most
         // recently signed in to — multi-account on the same
@@ -1457,11 +1476,15 @@ public final class AuthRepository: ObservableObject {
             .signaturePublicKey()
 
         let client = authClientFactory()
+        let bound = binding.capture()
         let result = try await client.recover(
             handle: name.handle,
             mnemonicSeed: seed,
             newPassword: newPassword
         )
+        // A sign-out, or another account's landing, while the reset was out:
+        // the password is changed on the server, and nothing lands here.
+        try bound.require()
         let accountIdBytes = result.accountId
         let accountIdB64 = base64Encode(accountIdBytes)
 
@@ -1522,6 +1545,7 @@ public final class AuthRepository: ObservableObject {
             oldAccountPubkey: oldAccountPubkey,
             sessionToken: result.sessionToken
         )
+        try bound.require()
         // Phase 2a3b0 (ADR-0007) — DeviceIdentity seed is
         // decoupled from the OPAQUE password, so recovery does
         // NOT rotate it. `ensureDeviceIdentitySeed` returns
@@ -1570,6 +1594,9 @@ public final class AuthRepository: ObservableObject {
             phrase: canonicalPhrase,
             context: "recover"
         )
+        // The fetch suspended; the session must not land over a sign-out or
+        // another account that landed meanwhile.
+        try bound.require()
 
         // ADR-0017: also carry the phrase seed (the canonical identity
         // seed downstream callers rebuild from). Cleared on logout.
@@ -1649,6 +1676,10 @@ public final class AuthRepository: ObservableObject {
         // ADR-0054 S3 — the push unregister spends a token; take it from
         // the pool BEFORE the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
+        // A sign-in or restore still in flight must not land after this, and
+        // a restore parked on the stale-backup question is over.
+        binding.advance()
+        resolveStaleBackupOverride(false)
         identitySecrets = nil
         pendingRecovery = nil
         pendingFreshPhrase = nil
@@ -1689,6 +1720,9 @@ public final class AuthRepository: ObservableObject {
         // ADR-0054 S3 — the push unregister below spends a token; take it
         // before the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
+        // As in ``logout()``.
+        binding.advance()
+        resolveStaleBackupOverride(false)
         identitySecrets = nil
         // ADR-0017/0018 — drop any parked recovery context too (mirror of
         // logout + the Android forgetDevice), so an abandoned recover /
@@ -1788,6 +1822,7 @@ public final class AuthRepository: ObservableObject {
             // Fresh-device fail-safe (ADR-0017). Auth succeeded; the
             // identity restore is pending the phrase. Stash the context
             // and flip — `provideRecoveryPhrase` finishes from here.
+            binding.advance()
             pendingRecovery = PendingRecovery(
                 accountIdBytes: accountIdBytes,
                 accountIdB64: accountIdB64,
@@ -2033,12 +2068,16 @@ public final class AuthRepository: ObservableObject {
         // against the published bundle (shared gate).
         let mnemonic = try RecoveryMnemonic.fromPhrase(phrase: mnemonicPhrase)
         var accountIdentitySeed = mnemonic.toSeed()
+        let bound = binding.capture()
         do {
             try await verifySeedAgainstPublishedIdentity(
                 accountIdBytes: pending.accountIdBytes,
                 sessionToken: pending.sessionToken,
                 accountIdentitySeed: accountIdentitySeed
             )
+            // Signed out (or forgot the device) while the bundle was being
+            // fetched: persist nothing for the account that was parked.
+            try bound.require()
         } catch {
             // On every refusal (mismatch, 404, network) the seed never
             // reached the live IdentitySecrets — zeroize it.
@@ -2085,10 +2124,12 @@ public final class AuthRepository: ObservableObject {
             context: "provideRecoveryPhrase"
         )
         // The fetch suspended. If the parked recovery went away meanwhile
-        // (a log out), there is no session to land.
-        guard pendingRecovery?.accountIdB64 == pending.accountIdB64 else {
+        // (a log out), there is no session to land. The epoch and not the
+        // account id: signing out and parking the same account again is a
+        // new binding, with its own session token.
+        guard bound.isCurrent else {
             Self.zeroize(&accountIdentitySeed)
-            throw CancellationError()
+            throw StaleBindingError()
         }
 
         finishCanonicalSession(
@@ -2177,12 +2218,16 @@ public final class AuthRepository: ObservableObject {
             )
         }
         var seed = phraseSeed
+        let bound = binding.capture()
         do {
             try await verifySeedAgainstPublishedIdentity(
                 accountIdBytes: pending.accountIdBytes,
                 sessionToken: sessionToken ?? pending.sessionToken,
                 accountIdentitySeed: seed
             )
+            // Signed out while the bundle was being fetched: no session
+            // lands and nothing is persisted.
+            try bound.require()
         } catch {
             Self.zeroize(&seed)
             throw error
@@ -2278,11 +2323,15 @@ public final class AuthRepository: ObservableObject {
         persistJoin: () async -> Void = {}
     ) async throws {
         let seed = phraseSeed
+        // Another sign-in that lands while the checks below are out owns the
+        // device: this restore then writes nothing and lands nothing.
+        let bound = binding.capture()
         try await verifySeedAgainstPublishedIdentity(
             accountIdBytes: accountIdBytes,
             sessionToken: sessionToken,
             accountIdentitySeed: seed
         )
+        try bound.require()
         try await TypedNameCheck.check(
             username: username,
             accountIdBytes: accountIdBytes
@@ -2293,9 +2342,11 @@ public final class AuthRepository: ObservableObject {
                 sessionToken: sessionToken
             )
         }
+        try bound.require()
         // Both checks passed: the pairing's held state lands first, so the
         // DeviceGroup snapshot is on disk before the session bootstraps.
         await persistJoin()
+        try bound.require()
         // Bootstrap the device root key from the identity seed so the
         // next-launch rehydrate gate sees a key on this device.
         // Best-effort: a Keychain failure leaves the in-memory session
@@ -2390,10 +2441,13 @@ public final class AuthRepository: ObservableObject {
         )
 
         let client = authClientFactory()
+        let bound = binding.capture()
         let result = try await client.totpRecover(
             handle: name.handle,
             code: code
         )
+        // As in ``login(username:password:)``: overtaken, lands nothing.
+        try bound.require()
         let accountIdBytes = result.accountId
         let accountIdB64 = base64Encode(accountIdBytes)
         let resolvedUsername = name.canonical
@@ -2487,6 +2541,7 @@ public final class AuthRepository: ObservableObject {
         // succeeded, identity restore is pending. exportKey EMPTY (no
         // password); the completion paths bootstrap the device key
         // from the VERIFIED seed.
+        binding.advance()
         pendingRecovery = PendingRecovery(
             accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
@@ -2544,10 +2599,18 @@ public final class AuthRepository: ObservableObject {
         // hard-block against the stale published key). Publishing before any
         // local mutation keeps a failure fully recoverable: the device is
         // untouched and the user can retry.
+        //
+        // The publish cannot be taken back. Signed out before it: stop there,
+        // with the old identity still the published one. Once it HAS been
+        // published the flow goes on to the phrase screen whatever happened
+        // meanwhile: an identity whose phrase nobody was shown is the worse
+        // outcome (the web decision).
+        let bound = binding.capture()
         try await publishFreshIdentityBundle(
             accountId: pending.accountIdBytes,
             sessionToken: pending.sessionToken,
-            seed: seed
+            seed: seed,
+            beforePublish: { try bound.require() }
         )
 
         // Bootstrap the device-key existence gate from the fresh seed
@@ -2657,10 +2720,14 @@ public final class AuthRepository: ObservableObject {
     /// published only from the long-lived identity
     /// (``ChatRepository/republishKeyPackage()``), once the session lands and
     /// the chat bootstrap has run.
+    ///
+    /// `beforePublish` runs after the last `await` ahead of the upload; a
+    /// throw from it stops the publish.
     private func publishFreshIdentityBundle(
         accountId: Data,
         sessionToken: String,
-        seed: Data
+        seed: Data,
+        beforePublish: @MainActor () throws -> Void = {}
     ) async throws {
         let identity = try Identity.fromSeed(seed: seed)
         // G-30 #2 (ADR-0019): a fresh-start mint publishes a NEW key with no
@@ -2678,6 +2745,7 @@ public final class AuthRepository: ObservableObject {
             sessionToken: sessionToken,
             client: authClientFactory()
         )
+        try beforePublish()
         try await accountDirectory.publishIdentityBundle(
             accountId: accountId,
             signaturePubkey: identity.signaturePublicKey(),
@@ -2754,11 +2822,14 @@ public final class AuthRepository: ObservableObject {
             )
         }
         let client = authClientFactory()
+        let bound = binding.capture()
         let result = try await client.recoveryContactRecoverFinish(
             handle: pending.name.handle,
             kind: pending.kind,
             code: code
         )
+        // As in ``login(username:password:)``: overtaken, lands nothing.
+        try bound.require()
         // Consume the stash — the code is single-use server-side; a
         // retry must re-send.
         pendingContactRecover = nil
@@ -3006,8 +3077,17 @@ public final class AuthRepository: ObservableObject {
                 return await self.awaitStaleBackupOverride(reason: reason)
             }
         )
+        let bound = binding.capture()
         let outcome = await backupRestoreSource.restore(
             sessionToken: sessionToken, phraseBytes: phraseBytes, gate: gate)
+        // Signed out, or another account landed, while the fetch was out:
+        // the answer is not this session's. Nothing is applied, no alarm is
+        // raised on whoever is signed in now, and the restore stays owed for
+        // this account's next landing.
+        guard bound.isCurrent else {
+            NSLog("backup restore (\(context)): the session ended meanwhile, still owed")
+            return .fetchFailed
+        }
 
         let result: PhraseRestoreBackupOutcome
         switch outcome {

@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import me.lakko.app.BindingEpoch
+import me.lakko.app.launchBound
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -261,6 +263,25 @@ public class ChatRepository(
      *  here: since ADR-0054 it rides the signed DS publish. */
     private val pushScope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * The binding of this repository to the account it was bootstrapped
+     * with. It ends on [clear] and when [bootstrap] is handed another
+     * account. Every fire-and-forget coroutine below is launched with
+     * [launchBound], so work started for one account stops at its next
+     * suspension once that account is gone, instead of resuming into the
+     * stores, the reach manager or the groups of the next one; [bootstrap]
+     * captures it so a sign-out that lands while it restores wins.
+     */
+    private val sessionBinding = BindingEpoch()
+
+    /** The binding current now (a host test reads when it ends). */
+    internal fun captureSessionBinding(): me.lakko.app.Binding = sessionBinding.capture()
+
+    /** [launchBound] on this repository's binding (a host test launches work
+     *  the way the fire-and-forget paths do). */
+    internal fun launchForSession(block: suspend CoroutineScope.() -> Unit): kotlinx.coroutines.Job =
+        pushScope.launchBound(sessionBinding, block = block)
 
     /** ADR-0057 — the owner's journal claims launched on open, awaited by a
      *  sweep before it registers an epoch. */
@@ -559,20 +580,32 @@ public class ChatRepository(
      * conversation list on this device, and peers re-bootstrap
      * via fresh KeyPackages.
      */
-    public suspend fun bootstrap(secrets: IdentitySecrets): Unit =
-        withContext(mlsDispatcher) { bootstrapOnMlsThread(secrets) }
+    public suspend fun bootstrap(secrets: IdentitySecrets) {
+        // On the caller's thread, before the hop: another account's work ends
+        // here, and the binding this bootstrap runs for is captured before
+        // [clear] can land. The restore below is one long blocking stretch
+        // that no cancellation interrupts, so it asks the binding instead.
+        val switching = currentAccountIdB64.get()
+            ?.let { it != base64UrlSafe(secrets.accountId) } ?: false
+        if (switching) sessionBinding.advance()
+        val bound = sessionBinding.capture()
+        withContext(mlsDispatcher) { bootstrapOnMlsThread(secrets, bound) }
+    }
 
-    private suspend fun bootstrapOnMlsThread(secrets: IdentitySecrets) {
+    private suspend fun bootstrapOnMlsThread(secrets: IdentitySecrets, bound: me.lakko.app.Binding) {
         val newAccountIdB64 = base64UrlSafe(secrets.accountId)
         // Refresh the publish credentials even on the same-account early
         // return below: a re-authentication hands us a newer token.
-        keyPackageAccount.set(
-            KeyPackageAccount(
-                accountIdB64 = newAccountIdB64,
-                accountId = secrets.accountId.copyOf(),
-                sessionToken = secrets.sessionToken,
-            ),
+        val publishAccount = KeyPackageAccount(
+            accountIdB64 = newAccountIdB64,
+            accountId = secrets.accountId.copyOf(),
+            sessionToken = secrets.sessionToken,
         )
+        keyPackageAccount.set(publishAccount)
+        if (!bound.isCurrent) {
+            keyPackageAccount.compareAndSet(publishAccount, null)
+            return
+        }
         val existing = currentAccountIdB64.get()
         if (existing == newAccountIdB64) {
             // ADR-0053 — a re-authentication of the same account still claims
@@ -630,6 +663,14 @@ public class ChatRepository(
         // against a half-populated record set. Polls are additionally gated
         // on `bootstrapped`, which flips only at the end of this region.
         providerLock.withLock {
+            // The account signed out (or another landed) while this waited:
+            // install nothing.
+            if (!bound.isCurrent) {
+                keyPackageAccount.compareAndSet(publishAccount, null)
+                identity.close()
+                account.close()
+                return
+            }
             // Restore the snapshot — best-effort. The Identity is
             // valid even if the restore fails (we just lose the
             // prior MLS state, peers re-bootstrap).
@@ -690,6 +731,9 @@ public class ChatRepository(
             // (no logger plumbed yet; 1.15d7 wires a tracing sink).
             if (restored) {
                 for (groupIdHex in knownGroupsStore.load(newAccountIdB64)) {
+                    // Stale: stop opening journals and provisioning push
+                    // routing for an account that is gone (undone below).
+                    if (!bound.isCurrent) break
                     try {
                         val groupId = hexToBytes(groupIdHex) ?: continue
                         val group = loadGroup(identity, groupId) ?: continue
@@ -730,8 +774,16 @@ public class ChatRepository(
                 publishThreadList()
             }
 
+            // [clear] ran while the region above was installing this account
+            // (it takes no lock): take everything back out, still under the
+            // provider lock, so the next bootstrap starts from nothing.
+            if (!bound.isCurrent) {
+                standDownStaleBootstrap(newAccountIdB64, publishAccount)
+                return
+            }
             mutableState.update { it.copy(bootstrapped = true) }
         }
+        if (!bound.isCurrent) return
         // ADR-0053 — sign reads of both own mailboxes and claim them.
         claimOwnMailboxesBestEffort()
         // ADR-0060 — bind the reach keys to this account and reconcile its
@@ -768,7 +820,7 @@ public class ChatRepository(
      */
     public fun requestKeyPackageRepublish() {
         val ticket = keyPackageRepublisher.markRequested()
-        keyPackageScope.launch {
+        keyPackageScope.launchBound(sessionBinding) {
             val outcome = keyPackageRepublisher.serve(ticket)
             if (outcome != KeyPackageRepublishOutcome.UPLOADED &&
                 outcome != KeyPackageRepublishOutcome.COVERED
@@ -1101,7 +1153,7 @@ public class ChatRepository(
     private fun retryOwedWelcomesFor(ownerKey: ByteArray) {
         val groupsOwed = undeliveredWelcomeGroups.remove(DsClient.pseudonymHex(ownerKey)) ?: return
         for (groupIdHex in groupsOwed) {
-            pushScope.launch {
+            pushScope.launchBound(sessionBinding) {
                 try {
                     sweepIfCommitter(groupIdHex)
                 } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -1153,12 +1205,12 @@ public class ChatRepository(
         candidates: List<ByteArray>,
     ) {
         if (candidates.isEmpty()) return
-        reachScope.launch {
+        reachScope.launchBound(sessionBinding) {
             try {
                 val envelope = me.lakko.app.reach.ReachManager.get(applicationContext)
-                    .composeDelegations(addedAccount, candidates) ?: return@launch
-                val identity = canonicalIdentity.get() ?: return@launch
-                val record = groups[groupIdHex] ?: return@launch
+                    .composeDelegations(addedAccount, candidates) ?: return@launchBound
+                val identity = canonicalIdentity.get() ?: return@launchBound
+                val record = groups[groupIdHex] ?: return@launchBound
                 broadcastControlToGroup(
                     identity = identity,
                     groupIdHex = groupIdHex,
@@ -1217,12 +1269,17 @@ public class ChatRepository(
             // first certificate republishes the profile everywhere.
             val token = keyPackageAccount.get()?.sessionToken
             if (token != null && reach.usernameCertificate() == null) {
-                reachScope.launch {
+                val certFor = sessionBinding.capture()
+                reachScope.launchBound(sessionBinding) {
                     try {
                         val cert = keyPackageDiscoveryFactory().use { client ->
                             client.setSessionToken(token)
                             client.fetchUsernameCertificate()
-                        } ?: return@launch
+                        } ?: return@launchBound
+                        // The certificate is the account's it was fetched
+                        // for; the reach manager keeps it for whichever
+                        // account is bound when it is handed over.
+                        if (!certFor.isCurrent) return@launchBound
                         if (reach.keepUsernameCertificate(cert)) publishOwnProfileToAllGroups()
                     } catch (cause: kotlinx.coroutines.CancellationException) {
                         throw cause
@@ -1362,7 +1419,7 @@ public class ChatRepository(
         // growth re-sends fire on the OTHER devices, and one that is away when
         // this join lands never re-sends. Launched, never awaited: the publish
         // takes the per-group lock itself.
-        profileRequestScope.launch { requestProfilesBestEffort(groupIdHex, joinedJustNow = true) }
+        profileRequestScope.launchBound(sessionBinding) { requestProfilesBestEffort(groupIdHex, joinedJustNow = true) }
         // ADR-0060 §4 — a new one-to-one gets the introduction record and the
         // relayed bundle.
         runIntroductionsBestEffort()
@@ -1481,9 +1538,9 @@ public class ChatRepository(
      */
     private fun persistGroupCall(groupIdHex: String) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
-        pushScope.launch {
+        pushScope.launchBound(sessionBinding) {
             synchronized(groupCallPersistLock) {
-                if (currentAccountIdB64.get() != accountIdB64) return@launch
+                if (currentAccountIdB64.get() != accountIdB64) return@launchBound
                 val row = mutableGroupCalls.value[groupIdHex]?.toRow()
                 try {
                     groupCallStore.save(accountIdB64, groupIdHex, row)
@@ -4271,10 +4328,10 @@ public class ChatRepository(
      */
     private fun refreshEveryoneBestEffort() {
         val account = keyPackageAccount.get() ?: return
-        reachScope.launch {
+        reachScope.launchBound(sessionBinding) {
             try {
                 val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
-                val setting = reach.currentVisibility() ?: return@launch
+                val setting = reach.currentVisibility() ?: return@launchBound
                 val everyone = setting.mode == uniffi.lakko_ffi_uniffi.FfiVisibilityMode.EVERYONE
                 val own = me.lakko.app.profile.OwnProfileStore.load(applicationContext, account.accountId)
                 val name = own?.displayName?.takeIf { it.isNotBlank() }
@@ -4282,11 +4339,11 @@ public class ChatRepository(
                 val key = me.lakko.app.reach.everyonePublishKey(name, own?.username, certificate)
                 val (published, publishedKey) = reach.publishedEveryone()
                 when (me.lakko.app.reach.everyoneAction(everyone, published, publishedKey, key)) {
-                    me.lakko.app.reach.EveryoneAction.NONE -> return@launch
+                    me.lakko.app.reach.EveryoneAction.NONE -> return@launchBound
                     me.lakko.app.reach.EveryoneAction.NOTE_WITHDRAWN -> {
                         // Never published: nothing to withdraw beyond the default.
                         reach.notePublishedEveryone(false, null)
-                        return@launch
+                        return@launchBound
                     }
                     me.lakko.app.reach.EveryoneAction.PUT -> Unit
                 }
@@ -4361,10 +4418,10 @@ public class ChatRepository(
      */
     public fun runIntroductionsBestEffort() {
         val account = keyPackageAccount.get() ?: return
-        reachScope.launch {
+        reachScope.launchBound(sessionBinding) {
             if (!introductionMutex.tryLock()) {
                 introductionsAgain = true
-                return@launch
+                return@launchBound
             }
             try {
                 do {
@@ -4443,7 +4500,7 @@ public class ChatRepository(
     /** Start the periodic introductions re-check for this session. */
     private fun startIntroductionTicker() {
         introductionTicker?.cancel()
-        introductionTicker = reachScope.launch {
+        introductionTicker = reachScope.launchBound(sessionBinding) {
             while (true) {
                 kotlinx.coroutines.delay(INTRODUCTIONS_TICK_MS)
                 runIntroductionsBestEffort()
@@ -4515,7 +4572,7 @@ public class ChatRepository(
      * arrived.
      */
     public fun requestProfilesIfNeeded(groupIdHex: String) {
-        profileRequestScope.launch { requestProfilesBestEffort(groupIdHex, joinedJustNow = false) }
+        profileRequestScope.launchBound(sessionBinding) { requestProfilesBestEffort(groupIdHex, joinedJustNow = false) }
     }
 
     /**
@@ -5204,7 +5261,7 @@ public class ChatRepository(
         } catch (_: Throwable) {
             false
         }
-        pushScope.launch {
+        pushScope.launchBound(sessionBinding) {
             try {
                 GroupPushRouting.ensure(
                     accountIdB64 = accountIdB64,
@@ -5320,7 +5377,7 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "push routing: epoch read failed", cause)
             null
         }
-        pushScope.launch {
+        pushScope.launchBound(sessionBinding) {
             try {
                 val verdict = GroupPushRouting.receiveGated(
                     accountIdB64 = accountIdB64,
@@ -5501,7 +5558,7 @@ public class ChatRepository(
         // is sealed at an epoch the evicted member cannot open (the C-61
         // shape). Every member does this for its own keys, whatever its role.
         if (me.lakko.app.reach.reachRotationOnShrink(previousMemberKeys, currentMemberKeys, selfEvicted)) {
-            reachScope.launch {
+            reachScope.launchBound(sessionBinding) {
                 try {
                     val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
                     reach.rotate(me.lakko.app.reach.ReachKind.MEMBER, groupIdHex)
@@ -5515,10 +5572,10 @@ public class ChatRepository(
             }
         }
         val role = rotationRole(group, identity)
-        pushScope.launch {
+        pushScope.launchBound(sessionBinding) {
             try {
                 GroupPushRouting.rotateIfMembershipShrank(
-                    accountIdB64 = currentAccountIdB64.get() ?: return@launch,
+                    accountIdB64 = currentAccountIdB64.get() ?: return@launchBound,
                     groupIdHex = groupIdHex,
                     ownRole = role,
                     previousMemberKeys = previousMemberKeys,
@@ -5542,7 +5599,7 @@ public class ChatRepository(
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
         val accountIdB64 = currentAccountIdB64.get() ?: return
-        pushScope.launch {
+        pushScope.launchBound(sessionBinding) {
             try {
                 GroupPushRouting.redistribute(
                     accountIdB64,
@@ -6268,7 +6325,7 @@ public class ChatRepository(
      *  the new device's KeyPackage outlives the pairing screen. */
     public fun requestAdmitDevice(deviceKey: ByteArray) {
         val key = deviceKey.copyOf()
-        keyPackageScope.launch {
+        keyPackageScope.launchBound(sessionBinding) {
             try {
                 val result = admitDevice(key)
                 android.util.Log.i("ChatRepository", "ADR-0050 admit device: $result")
@@ -6281,7 +6338,7 @@ public class ChatRepository(
     /** Fire-and-forget [retireDevice] on a process-lifetime scope. */
     public fun requestRetireDevice(deviceKey: ByteArray) {
         val key = deviceKey.copyOf()
-        keyPackageScope.launch {
+        keyPackageScope.launchBound(sessionBinding) {
             try {
                 val result = retireDevice(key)
                 android.util.Log.i("ChatRepository", "ADR-0050 retire device: $result")
@@ -6545,6 +6602,9 @@ public class ChatRepository(
      * full-wipe path. Called from `AuthRepository.logout`.
      */
     public fun clear() {
+        // First: everything launched for this account stops at its next
+        // suspension, and a bootstrap still restoring it stands down.
+        sessionBinding.advance()
         introductionTicker?.cancel()
         introductionTicker = null
         me.lakko.app.reach.ReachManager.peek()?.clear()
@@ -6586,6 +6646,8 @@ public class ChatRepository(
         }
         val token = keyPackageAccount.get()?.sessionToken
         if (ownLeafKey != null && token != null) {
+            // Not bound to the session: it is the departure itself, and
+            // [clear] just below ends the binding.
             keyPackageScope.launch {
                 try {
                     keyPackageDiscoveryFactory().use { client ->
@@ -6619,6 +6681,22 @@ public class ChatRepository(
     // -----------------------------------------------------------------
     // Internals
     // -----------------------------------------------------------------
+
+    /**
+     * [bootstrap] found its binding gone after it had installed
+     * [accountIdB64]: undo the install. What [clear] does, without ending the
+     * binding again (the one current now may already be the next account's,
+     * waiting on the provider lock this runs under).
+     */
+    private fun standDownStaleBootstrap(accountIdB64: String, publishAccount: KeyPackageAccount) {
+        wipeInMemoryState()
+        keyPackageAccount.compareAndSet(publishAccount, null)
+        snapshotUnreadable.set(false)
+        currentAccountIdB64.compareAndSet(accountIdB64, null)
+        accountIdentity.getAndSet(null)?.close()
+        feedRefresh.reset()
+        mutableState.value = ChatRepositoryState()
+    }
 
     private fun wipeInMemoryState() {
         synchronized(groups) {
@@ -7367,7 +7445,7 @@ public class ChatRepository(
                 false
             }
         }
-        pushScope.launch {
+        pushScope.launchBound(sessionBinding) {
             claim.join()
             // Finding 2 — the owner converges the registrar set once per group
             // per session (a no-op for a non-owner), whatever the claim said: a
@@ -7638,7 +7716,7 @@ public class ChatRepository(
 
     /** [reconcileAppointments] launched on the push scope, best effort. */
     private fun reconcileAppointmentsBestEffort(groupIdHex: String, force: Boolean = false) {
-        pushScope.launch {
+        pushScope.launchBound(sessionBinding) {
             try {
                 reconcileAppointments(groupIdHex, force)
             } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -7915,7 +7993,7 @@ public class ChatRepository(
             running.set(true)
             return
         }
-        pushScope.launch {
+        pushScope.launchBound(sessionBinding) {
             try {
                 do {
                     rerun.set(false)
@@ -8058,10 +8136,10 @@ public class ChatRepository(
             seed.fill(0)
             return
         }
-        pushScope.launch(start = kotlinx.coroutines.CoroutineStart.ATOMIC) {
+        pushScope.launchBound(sessionBinding, start = kotlinx.coroutines.CoroutineStart.ATOMIC) {
             try {
-                val outcome = runRootTakeover(groupIdHex, seed) ?: return@launch
-                if (currentAccountIdB64.get() != accountIdB64) return@launch
+                val outcome = runRootTakeover(groupIdHex, seed) ?: return@launchBound
+                if (currentAccountIdB64.get() != accountIdB64) return@launchBound
                 if (outcome.dropsPendingSeed()) {
                     takeoverNotBeforeMs.remove(groupIdHex)
                     try {
@@ -8208,7 +8286,7 @@ public class ChatRepository(
                 continue
             }
             dsSigners.installStatic(dsMailboxKey(pseudonym), signer, owner = DS_SIGNER_OWNER)
-            pushScope.launch {
+            pushScope.launchBound(sessionBinding) {
                 try {
                     dsClient.claimMailbox(pseudonym, signer)
                 } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -9665,10 +9743,10 @@ public class ChatRepository(
     ) {
         if (events.none { it is IncomingChatEvent.ReadReceipt }) return
         val accountIdB64 = currentAccountIdB64.get() ?: return
-        pushScope.launch {
+        pushScope.launchBound(sessionBinding) {
             val snapshot = record.readUpToSnapshot()
-            if (snapshot.isEmpty()) return@launch
-            if (currentAccountIdB64.get() != accountIdB64) return@launch
+            if (snapshot.isEmpty()) return@launchBound
+            if (currentAccountIdB64.get() != accountIdB64) return@launchBound
             try {
                 readWatermarkStore.merge(accountIdB64, groupIdHex.lowercase(), snapshot)
             } catch (cause: Throwable) {
@@ -9718,7 +9796,7 @@ public class ChatRepository(
         // written when the row is, never a walk of every transcript. Written on
         // the same dispatcher as the transcript persist and after it, so a
         // failure here can never cost the conversation its row.
-        callRowScope.launch {
+        callRowScope.launchBound(sessionBinding) {
             persistMessageLogBestEffort()
             recordCallHistoryEntry(groupIdHex, entry, now.toEpochMilli())
         }
@@ -9771,7 +9849,7 @@ public class ChatRepository(
      */
     public fun backfillCallHistory() {
         val accountIdB64 = currentAccountIdB64.get() ?: return
-        callRowScope.launch {
+        callRowScope.launchBound(sessionBinding) {
             me.lakko.app.calls.CallHistoryStore.backfillOnce(
                 context = applicationContext,
                 accountIdB64 = accountIdB64,
