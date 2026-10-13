@@ -18,6 +18,7 @@
  * rule is the core's to say when the feed is opened.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 
 export const FEED_STATE_VERSION = 1;
@@ -157,6 +158,7 @@ export async function saveFeedState(
   ciphertext.set(ct, IV_LEN);
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put({ accountId: accountIdB64, ciphertext });
     await done(tx);

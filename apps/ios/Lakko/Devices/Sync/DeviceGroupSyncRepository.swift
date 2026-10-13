@@ -591,6 +591,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             )
         }
         let wireBytes = try compose(group, identity)
+        // The message took a step of this device's sender ratchet. That
+        // state is on disk before the ciphertext is published, or nothing is
+        // published: a failed write, a session that ended, or a handle of an
+        // earlier session all stop here.
+        try DeviceGroupLifecycle.persistSnapshotOrThrow(
+            identity: identity, accountIdB64: accountIdB64)
         let groupId = try group.groupId()
         let ds = DsClient()
         // G-13 (ADR-0015): wrap in the journal envelope (application messages

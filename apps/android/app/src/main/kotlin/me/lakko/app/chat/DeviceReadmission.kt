@@ -128,7 +128,6 @@ public object DeviceReadmission {
             } catch (cause: Throwable) {
                 android.util.Log.w("DeviceReadmission", "removed-device memory not written", cause)
             }
-    
         }
     }
 

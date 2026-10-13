@@ -20,6 +20,7 @@
  * (`root-handover.ts`, the second security pass, finding 4).
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import {
   decodeRegistrarSeedRows,
   encodeRegistrarSeedRows,
@@ -134,6 +135,7 @@ class IdbEncryptedRows<T> {
     const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(this.encode(rows)));
     const db = await openDb(this.dbName);
     try {
+      if (!accountStoresWritable(accountId)) return;
       const tx = db.transaction(STORE, "readwrite");
       tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
       await awaitTx(tx);

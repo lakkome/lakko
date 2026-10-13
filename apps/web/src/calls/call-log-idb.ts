@@ -17,6 +17,7 @@
  * {@link encodeCallLogRow}.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import {
   decodeCallLogRow,
   encodeCallLogRow,
@@ -135,6 +136,7 @@ export class IdbCallLogBackend implements CallLogBackend {
     const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(json));
     const db = await openDb();
     try {
+      if (!accountStoresWritable(accountId)) return;
       const tx = db.transaction(STORE, "readwrite");
       tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
       await awaitTx(tx);

@@ -80,6 +80,8 @@ public final class KnownGroupsStore {
     /// No-op when already present. ADR-0041 — writes go to the shared
     /// suite when available, else `.standard`.
     public func add(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var current = load(accountIdB64: accountIdB64)
         let (inserted, _) = current.insert(groupIdHex)
         if !inserted { return }
@@ -109,6 +111,8 @@ public final class KnownGroupsStore {
     ///
     /// No-op when absent.
     public func remove(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         let key = Self.keyFor(accountIdB64)
         for defaults in [sharedDefaults, standardDefaults].compactMap({ $0 }) {
             guard let array = defaults.stringArray(forKey: key) else { continue }

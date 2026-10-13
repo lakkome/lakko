@@ -572,6 +572,7 @@ public enum PairingOrchestrator {
             accountIdB64: accountIdB64
         )
         let identity = try Identity.fromSeed(seed: seed)
+        DeviceGroupLifecycle.noteHandle(identity, accountIdB64: accountIdB64)
         let keyPackage = try identity.createKeyPackage()
         let rendezvous = PairingCodec.generateRendezvousPseudonym()
         let qrPayload = try PairingCodec.buildPairingQrPayload(
@@ -756,8 +757,10 @@ public enum PairingOrchestrator {
                 // it to disk first closes the window where a crash between
                 // the publishes and the persist leaves the on-disk envelope
                 // an epoch behind (which would make the next launch try to
-                // add the same device twice).
-                DeviceGroupLifecycle.persistSnapshot(
+                // add the same device twice). Fail closed: a write that did
+                // not land, or was refused because the session ended, stops
+                // the publish.
+                try DeviceGroupLifecycle.persistSnapshotOrThrow(
                     identity: ensured.identity,
                     accountIdB64: accountIdB64
                 )

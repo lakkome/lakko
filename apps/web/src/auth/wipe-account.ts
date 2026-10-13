@@ -35,6 +35,12 @@
  * - the app-shell cache of the service worker: code, no account data.
  */
 import { base64Decode, base64UrlEncodeNoPad } from "./account-id";
+import {
+  WIPED_MARKER_TTL_MS,
+  finishAccountWipe,
+  pruneWipedMarker,
+  sealAccountStoresForWipe,
+} from "./account-store-gate";
 import { deleteDeviceKey } from "./key-store";
 import { deleteSessionToken } from "./session-token-store";
 import { deleteExportKey } from "./export-key-store";
@@ -130,6 +136,14 @@ function urlKeyOf(accountIdB64: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Every form `accountIdB64`'s rows are filed under: the standard base64
+ *  the auth state carries and the base64url two stores use. What the store
+ *  gate (`account-store-gate.ts`) seals and opens. */
+export function accountStoreIds(accountIdB64: string): string[] {
+  const urlKey = urlKeyOf(accountIdB64);
+  return urlKey === null || urlKey === accountIdB64 ? [accountIdB64] : [accountIdB64, urlKey];
 }
 
 function removeLocal(key: string): void {
@@ -254,6 +268,27 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
  */
 export async function wipeAccountLocalData(accountIdB64: string): Promise<WipeReport> {
   const failed: string[] = [];
+  // Seal FIRST: from here no store accepts a write of this account's data,
+  // in this tab or another, so a write still suspended on an `await` cannot
+  // put a row back behind a delete below. A write whose transaction already
+  // exists is ordered ahead of the delete by IndexedDB itself.
+  const ids = accountStoreIds(accountIdB64);
+  sealAccountStoresForWipe(ids);
+  try {
+    await runWipeSteps(accountIdB64, failed);
+  } finally {
+    finishAccountWipe(ids);
+    // The cross-tab marker names the account; it goes once every open tab
+    // has heard of the wipe. A page that closes first leaves it to the next
+    // page start (`installAccountStorageGate`).
+    if (typeof setTimeout === "function") {
+      setTimeout(() => pruneWipedMarker(), WIPED_MARKER_TTL_MS + 1_000);
+    }
+  }
+  return { failed };
+}
+
+async function runWipeSteps(accountIdB64: string, failed: string[]): Promise<void> {
   for (const step of accountWipeSteps(accountIdB64)) {
     try {
       await step.run();
@@ -265,5 +300,4 @@ export async function wipeAccountLocalData(accountIdB64: string): Promise<WipeRe
       );
     }
   }
-  return { failed };
 }

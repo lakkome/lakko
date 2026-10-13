@@ -277,7 +277,6 @@ internal class SharedPrefsUnappliedRequestStore(context: Context) : UnappliedReq
             } catch (_: Throwable) {
                 // best-effort
             }
-    
         }
     }
 
@@ -302,7 +301,6 @@ internal class SharedPrefsUnappliedRequestStore(context: Context) : UnappliedReq
             } catch (_: Throwable) {
                 // best-effort
             }
-    
         }
     }
 

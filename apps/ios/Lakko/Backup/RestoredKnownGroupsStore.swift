@@ -104,6 +104,8 @@ public enum RestoredKnownGroupsStore {
     }
 
     private static func save(_ ids: Set<String>, accountIdB64: String, defaults: UserDefaults) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         let key = key(accountIdB64: accountIdB64)
         if ids.isEmpty {
             defaults.removeObject(forKey: key)

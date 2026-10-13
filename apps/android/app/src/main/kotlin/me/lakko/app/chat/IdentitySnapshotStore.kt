@@ -145,7 +145,6 @@ public object IdentitySnapshotStore {
             System.arraycopy(ciphertext, 0, out, GCM_IV_LEN, ciphertext.size)
 
             envelopeFile(context, accountIdB64).writeBytes(out)
-    
         }
     }
 
@@ -214,7 +213,6 @@ public object IdentitySnapshotStore {
             val file = leafKeyFile(context, accountIdB64)
             if (file.exists() && runCatching { file.readText() }.getOrNull() == encoded) return
             file.writeText(encoded)
-    
         }
     }
 

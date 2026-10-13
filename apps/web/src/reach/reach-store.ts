@@ -20,6 +20,7 @@
  * tests) every read is `null` and every write a no-op: callers keep their
  * state in memory for the session.
  */
+import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 
 const DB_NAME = "lakko-reach";
@@ -133,6 +134,7 @@ export async function saveReachRow(
     const ciphertext = await encrypt(deviceKey, new TextEncoder().encode(json));
     const db = await openDb();
     try {
+      if (!accountStoresWritable(accountIdB64)) return;
       const tx = db.transaction(STORE, "readwrite");
       tx.objectStore(STORE).put({ key: rowKey(accountIdB64, kind), ciphertext } satisfies PersistedRow);
       await awaitTx(tx);

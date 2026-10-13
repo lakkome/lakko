@@ -27,6 +27,7 @@
  * `null` and every write a no-op: a link minted there still works, it just
  * cannot be copied again from the list.
  */
+import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 import { base64Decode, base64Encode } from "../auth/account-id";
 
@@ -109,6 +110,7 @@ export async function rememberMintedLink(
     blob.set(ct, IV_LEN);
     const db = await openDb();
     try {
+      if (!accountStoresWritable(accountIdB64)) return;
       const tx = db.transaction(STORE, "readwrite");
       const row: PersistedRow = { key: rowKey(accountIdB64, kind, blobIdSlug), ciphertext: blob };
       tx.objectStore(STORE).put(row);

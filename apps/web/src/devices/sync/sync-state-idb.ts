@@ -18,6 +18,7 @@
  * written in the clear.
  */
 
+import { accountStoresWritable } from "../../auth/account-store-gate";
 import {
   decodeSyncState,
   encodeSyncState,
@@ -154,6 +155,7 @@ export async function saveSyncState(
     if (onlyIfGeneration !== undefined && syncStateGeneration(accountId) !== onlyIfGeneration) {
       return;
     }
+    if (!accountStoresWritable(accountId)) return;
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
     await awaitTx(tx);

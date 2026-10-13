@@ -6566,6 +6566,10 @@
       "text": "Não foi possível criar uma nova identidade. Tente novamente.",
       "status": "machine"
     },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "Não foi possível salvar a nova frase de recuperação neste dispositivo. Nada foi alterado.",
+      "status": "machine"
+    },
     "restore_identity.lost.sub": {
       "text": "Começar com uma nova identidade",
       "status": "machine"

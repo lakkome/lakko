@@ -56,6 +56,8 @@ public final class SharedPinStore {
     /// caller decides whether the write is allowed (``PinGate``); the store
     /// itself is a plain map.
     public func record(accountIdB64: String, groupIdHex: String, messageId: Int64, value: StoredSharedPin) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var groups = accountMap(accountIdB64: accountIdB64)
         var rows = groups[groupIdHex] ?? [:]
         rows[String(messageId)] = [
@@ -70,6 +72,8 @@ public final class SharedPinStore {
     /// of a message that no longer exists has nothing left to order (UX spec
     /// section 4.1: "its shared pin record is dropped with the message").
     public func remove(accountIdB64: String, groupIdHex: String, messageId: Int64) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var groups = accountMap(accountIdB64: accountIdB64)
         var rows = groups[groupIdHex] ?? [:]
         rows[String(messageId)] = nil
@@ -79,6 +83,8 @@ public final class SharedPinStore {
 
     /// Forget a whole conversation's pins (the chat was deleted locally).
     public func removeGroup(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var groups = accountMap(accountIdB64: accountIdB64)
         groups[groupIdHex] = nil
         defaults.set(groups, forKey: Self.key(accountIdB64))
@@ -124,6 +130,8 @@ public final class PersonalPinStore {
     }
 
     public func set(accountIdB64: String, groupIdHex: String, messageId: Int64, pinnedAtMs: UInt64) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var groups = accountMap(accountIdB64: accountIdB64)
         var rows = groups[groupIdHex] ?? [:]
         rows[String(messageId)] = NSNumber(value: pinnedAtMs)
@@ -132,6 +140,8 @@ public final class PersonalPinStore {
     }
 
     public func remove(accountIdB64: String, groupIdHex: String, messageId: Int64) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var groups = accountMap(accountIdB64: accountIdB64)
         var rows = groups[groupIdHex] ?? [:]
         rows[String(messageId)] = nil
@@ -140,6 +150,8 @@ public final class PersonalPinStore {
     }
 
     public func removeGroup(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var groups = accountMap(accountIdB64: accountIdB64)
         groups[groupIdHex] = nil
         defaults.set(groups, forKey: Self.key(accountIdB64))

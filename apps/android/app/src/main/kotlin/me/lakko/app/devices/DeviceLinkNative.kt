@@ -92,7 +92,11 @@ public fun deviceLinkAnswerLimit(context: Context, accountIdB64: String): Device
     val key = answerLimitKey(accountIdB64)
     return DeviceLinkAnswerLimit(
         load = { decodeAnswerTimes(prefs.getString(key, null)) },
-        save = { times -> prefs.edit().putString(key, encodeAnswerTimes(times)).apply() },
+        save = { times ->
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+                prefs.edit().putString(key, encodeAnswerTimes(times)).apply()
+            }
+        },
     )
 }
 

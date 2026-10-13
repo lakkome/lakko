@@ -266,6 +266,8 @@ public final class CommitOutboxStore {
     /// Writes one `<id>.json` file atomically. Building block for
     /// `putNewDurable` + the store round-trip test.
     public func putEntryDurable(accountIdB64: String, entry: PendingCommitEntry) throws {
+        let gate = try AccountStoreGate.enterOrEnd(accountIdB64)
+        defer { gate.leave() }
         guard let dir = accountDir(accountIdB64) else {
             throw CommitOutboxStoreError.unavailable(
                 "no application-support directory to persist the commit outbox"
@@ -288,6 +290,8 @@ public final class CommitOutboxStore {
     /// `acked: false`. THROWS on failure (fail-closed) — this is the write a
     /// commit path runs (entry-first) BEFORE the snapshot + before any publish.
     public func putNewDurable(accountIdB64: String, entry: NewCommitEntry) throws {
+        let gate = try AccountStoreGate.enterOrEnd(accountIdB64)
+        defer { gate.leave() }
         let full = PendingCommitEntry(
             id: entry.id,
             accountId: accountIdB64,

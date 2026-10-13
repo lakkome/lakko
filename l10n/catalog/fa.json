@@ -6566,6 +6566,10 @@
       "text": "ساخت هویت جدید ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
     },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "ذخیره عبارت بازیابی جدید در این دستگاه ممکن نشد. چیزی تغییر نکرد.",
+      "status": "machine"
+    },
     "restore_identity.lost.sub": {
       "text": "شروع با هویت جدید",
       "status": "machine"

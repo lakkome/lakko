@@ -699,7 +699,6 @@ internal class SharedPrefsPendingRequestStore(context: Context) : PendingRequest
             } catch (_: Throwable) {
                 // the quiet window is best-effort
             }
-    
         }
     }
 

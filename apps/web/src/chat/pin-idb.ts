@@ -18,6 +18,7 @@
  * `pin-store.ts`'s {@link encodePinRow}.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import { decodePinRow, encodePinRow, type PinBackend, type PinRows } from "./pin-store";
 
 const DB_NAME = "lakko-pins";
@@ -121,6 +122,7 @@ export class IdbPinBackend implements PinBackend {
     const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(json));
     const db = await openDb();
     try {
+      if (!accountStoresWritable(accountId)) return;
       const tx = db.transaction(STORE, "readwrite");
       tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
       await awaitTx(tx);

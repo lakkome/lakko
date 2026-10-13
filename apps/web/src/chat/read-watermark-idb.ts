@@ -16,6 +16,7 @@
  * `read-watermark-store.ts`'s {@link encodeReadWatermarkRow}.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import {
   decodeReadWatermarkRow,
   encodeReadWatermarkRow,
@@ -134,6 +135,7 @@ export class IdbReadWatermarkBackend implements ReadWatermarkBackend {
     const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(json));
     const db = await openDb();
     try {
+      if (!accountStoresWritable(accountId)) return;
       const tx = db.transaction(STORE, "readwrite");
       tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
       await awaitTx(tx);

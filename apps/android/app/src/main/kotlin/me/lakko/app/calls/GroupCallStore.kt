@@ -148,7 +148,6 @@ public class SharedPreferencesGroupCallStore(context: Context) : GroupCallStore 
             val editor = prefs.edit()
             if (record == null) editor.remove(key) else editor.putString(key, encodeGroupCallRow(record))
             editor.apply()
-    
         }
     }
 

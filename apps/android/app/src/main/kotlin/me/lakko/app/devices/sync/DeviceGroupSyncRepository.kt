@@ -310,7 +310,9 @@ public class DeviceGroupSyncRepository(
             }
             val prefs = applicationContext.getSharedPreferences(PENDING_PREFS, Context.MODE_PRIVATE)
             pendingFlag = PendingSyncFlag(prefs.getBoolean(accountIdB64, false)) { value ->
-                prefs.edit().putBoolean(accountIdB64, value).apply()
+                me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+                    prefs.edit().putBoolean(accountIdB64, value).apply()
+                }
                 mutablePending.value = value
             }.also { mutablePending.value = it.pending }
             republish()

@@ -63,7 +63,6 @@ public class PushRouteStore(context: Context) {
             prefs.edit()
                 .putString(keyFor(accountIdB64, pushGidHex), groupIdHex.lowercase())
                 .apply()
-    
         }
     }
 
@@ -86,7 +85,6 @@ public class PushRouteStore(context: Context) {
     public fun remove(accountIdB64: String, pushGidHex: String) {
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             prefs.edit().remove(keyFor(accountIdB64, pushGidHex)).apply()
-    
         }
     }
 

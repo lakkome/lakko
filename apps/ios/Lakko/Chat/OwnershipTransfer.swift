@@ -635,6 +635,8 @@ public final class LastObservedOwnerStore {
     /// has been decided, so the decision always compares against the PREVIOUS
     /// reading.
     public func remember(accountIdB64: String, groupIdB64: String, ownerKeyB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(
             ownerKeyB64, forKey: storeKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64))
     }

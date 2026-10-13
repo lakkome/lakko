@@ -454,6 +454,8 @@ public final class AuthRepository: ObservableObject {
     /// the current session.
     private func adoptIdentitySecrets(_ secrets: IdentitySecrets, context: String) {
         binding.advance()
+        // The account landed: its stores are written again.
+        AccountStoreGate.open(base64Encode(secrets.accountId))
         identitySecrets = secrets
         do {
             try persistence.putSessionToken(
@@ -1666,6 +1668,7 @@ public final class AuthRepository: ObservableObject {
         pushBinding.clear()
         removeDeliveredNotifications()
         let cached = sessionStore.load()
+        let leaving = signedInAccountIdB64 ?? cached?.accountIdB64
         // Drop the persisted session token so a relaunch after logout lands
         // logged out instead of silently restoring the session this call
         // just ended (``rehydrate(nowMs:)`` requires the token). The seed and
@@ -1693,6 +1696,10 @@ public final class AuthRepository: ObservableObject {
         // reload doesn't silently keep accepting pushes against
         // a logged-out session.
         Task { await PushSubscriber.shared.unsubscribe(prepaidToken: unregisterToken) }
+        // Last, after the runtimes let go above: wait for this account's
+        // store writes in flight and refuse the later ones until it lands
+        // here again. Nothing is deleted.
+        if let leaving { AccountStoreGate.seal(leaving) }
     }
 
     /// The session half of Forget device and Delete account: end the session
@@ -1823,6 +1830,9 @@ public final class AuthRepository: ObservableObject {
             // identity restore is pending the phrase. Stash the context
             // and flip — `provideRecoveryPhrase` finishes from here.
             binding.advance()
+            // ACCESS is granted: the restore that follows writes this
+            // account's stores before the session lands.
+            AccountStoreGate.open(accountIdB64)
             pendingRecovery = PendingRecovery(
                 accountIdBytes: accountIdBytes,
                 accountIdB64: accountIdB64,
@@ -2327,6 +2337,9 @@ public final class AuthRepository: ObservableObject {
         // Another sign-in that lands while the checks below are out owns the
         // device: this restore then writes nothing and lands nothing.
         let bound = binding.capture()
+        // The pairing's held state (`persistJoin`) is written before the
+        // session lands.
+        AccountStoreGate.open(base64Encode(accountIdBytes))
         try await verifySeedAgainstPublishedIdentity(
             accountIdBytes: accountIdBytes,
             sessionToken: sessionToken,
@@ -2543,6 +2556,7 @@ public final class AuthRepository: ObservableObject {
         // password); the completion paths bootstrap the device key
         // from the VERIFIED seed.
         binding.advance()
+        AccountStoreGate.open(accountIdB64)
         pendingRecovery = PendingRecovery(
             accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
@@ -2662,6 +2676,14 @@ public final class AuthRepository: ObservableObject {
             kept.undo()
             throw error
         }
+        // The account was forgotten on this device (Forget device, Delete
+        // account) while the publish was out: its stores were wiped, the
+        // phrase kept above with them, and nothing of it is written back.
+        guard let gate = AccountStoreGate.enterUnlessWiped(pending.accountIdB64) else {
+            NSLog("[auth] fresh identity published after its account was removed from this device; nothing is kept here")
+            throw StaleBindingError()
+        }
+        defer { gate.leave() }
         // Published. The phrase is owed until the person confirms it
         // (``confirmFreshPhraseSaved()``), on every route from here: shown
         // now, or at this account's next sign-in.
@@ -3157,6 +3179,10 @@ public final class AuthRepository: ObservableObject {
             }
         )
         let bound = binding.capture()
+        // A restore runs for an account whose ACCESS was just granted, on
+        // some routes before its session lands; what it restores is written
+        // to that account's stores.
+        AccountStoreGate.open(accountIdB64)
         let outcome = await backupRestoreSource.restore(
             sessionToken: sessionToken, phraseBytes: phraseBytes, gate: gate)
         // Signed out, or another account landed, while the fetch was out:

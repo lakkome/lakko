@@ -711,7 +711,6 @@ internal class SharedPrefsLastObservedOwnerStore(context: Context) : LastObserve
             } catch (_: Throwable) {
                 // best-effort — losing it costs one notice
             }
-    
         }
     }
 

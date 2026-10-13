@@ -59,6 +59,9 @@ enum Cancellation {
         // Work that outlived the account it was started for
         // (``BindingEpoch``) was called off just the same.
         if error is StaleBindingError { return true }
+        // ...and so was a durable write refused for an account whose session
+        // ended (``AccountStoreGate``).
+        if error is AccountStoreGate.Sealed { return true }
         if let url = error as? URLError { return url.code == .cancelled }
         guard depth < maxDepth, let inner = underlying(of: error) else { return false }
         return isCancellation(inner, depth: depth + 1)

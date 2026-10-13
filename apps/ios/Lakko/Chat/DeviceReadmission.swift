@@ -138,6 +138,8 @@ public enum DeviceReadmissionMemory {
         after: [String]?,
         defaults: UserDefaults = .standard
     ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let before, let after else { return }
         let now = Set(after)
         let gone = before.filter { !now.contains($0) }

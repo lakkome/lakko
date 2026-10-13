@@ -6726,6 +6726,10 @@
       "text": "Could not create a new identity. Try again.",
       "comment": "Creating a new identity failed."
     },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "The new recovery phrase could not be stored on this device. Nothing was changed.",
+      "comment": "Creating a new identity was refused before anything changed: the device could not store the new recovery phrase, so the old identity is still in place."
+    },
     "restore_identity.lost.sub": {
       "text": "Start with a new identity",
       "comment": "Subtitle of the option for someone who has neither the recovery phrase nor another device; also the title of that screen.",

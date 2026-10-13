@@ -6566,6 +6566,10 @@
       "text": "Yeni kimlik oluşturulamadı. Tekrar deneyin.",
       "status": "machine"
     },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "Yeni kurtarma ifadesi bu cihaza kaydedilemedi. Hiçbir şey değiştirilmedi.",
+      "status": "machine"
+    },
     "restore_identity.lost.sub": {
       "text": "Yeni bir kimlikle başla",
       "status": "machine"

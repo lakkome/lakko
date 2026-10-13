@@ -34,6 +34,42 @@ public enum DeviceGroupLifecycle {
         public let bootstrapped: Bool
     }
 
+    /// The account session each DeviceGroup identity handle was made in.
+    ///
+    /// A handle carries the whole MLS provider, and a snapshot write
+    /// persists all of it. One made in an earlier session of the account (a
+    /// pairing, a removal or a sync pass that was still running at Log out)
+    /// would, resumed after the same account signed in again, write that
+    /// session's state over what the new session persisted. Its writes are
+    /// entered with the session it was made in and are refused once that has
+    /// ended (``AccountStoreGate/Session``). Weak keys: an entry goes with
+    /// its handle.
+    private static let handleSessions = NSMapTable<Identity, SessionBox>.weakToStrongObjects()
+    private static let handleSessionsLock = NSLock()
+
+    private final class SessionBox {
+        let session: AccountStoreGate.Session
+        init(_ session: AccountStoreGate.Session) { self.session = session }
+    }
+
+    /// Record that `identity` was made now, in the current session of
+    /// `accountIdB64`. Called where a DeviceGroup identity handle is created.
+    public static func noteHandle(_ identity: Identity, accountIdB64: String) {
+        let box = SessionBox(AccountStoreGate.session(accountIdB64))
+        handleSessionsLock.lock()
+        handleSessions.setObject(box, forKey: identity)
+        handleSessionsLock.unlock()
+    }
+
+    /// The session `identity` was made in; the current one for a handle
+    /// nobody recorded.
+    static func session(of identity: Identity, accountIdB64: String) -> AccountStoreGate.Session {
+        handleSessionsLock.lock()
+        defer { handleSessionsLock.unlock() }
+        return handleSessions.object(forKey: identity)?.session
+            ?? AccountStoreGate.session(accountIdB64)
+    }
+
     /// Resolve the local DeviceGroup state: either restore
     /// the cached snapshot or bootstrap a fresh founder leaf.
     ///
@@ -51,6 +87,7 @@ public enum DeviceGroupLifecycle {
         // This is the DeviceIdentity (ADR-0007), NOT the
         // AccountIdentity ChatRepository holds.
         let identity = try Identity.fromSeed(seed: deviceIdentitySeed)
+        noteHandle(identity, accountIdB64: accountIdB64)
 
         // Try to restore prior MLS state.
         if let snapshot = snapshotStore.getSnapshot(accountIdB64: accountIdB64) {
@@ -84,7 +121,9 @@ public enum DeviceGroupLifecycle {
             accountId: accountIdBytes
         )
         let fresh = try identity.snapshotStorage()
-        snapshotStore.putSnapshot(accountIdB64: accountIdB64, blob: fresh)
+        snapshotStore.putSnapshot(
+            accountIdB64: accountIdB64, blob: fresh,
+            session: session(of: identity, accountIdB64: accountIdB64))
         // ADR-0057 obligation 7 — founded HERE: the next claim may reset the
         // journal if the same root claimed this deterministic id before (a
         // DeviceGroup lost with the local state and founded again).
@@ -105,9 +144,27 @@ public enum DeviceGroupLifecycle {
     ) {
         do {
             let snapshot = try identity.snapshotStorage()
-            snapshotStore.putSnapshot(accountIdB64: accountIdB64, blob: snapshot)
+            snapshotStore.putSnapshot(
+                accountIdB64: accountIdB64, blob: snapshot,
+                session: session(of: identity, accountIdB64: accountIdB64))
         } catch {
             NSLog("DeviceGroup snapshot persist failed: \(error)")
         }
+    }
+
+    /// Persist the MLS provider snapshot BEFORE a DeviceGroup message built
+    /// from it is published, and throw when it did not land: a disk or
+    /// Keychain failure, the account's session ended
+    /// (``AccountStoreGate/Sealed``), or `identity` is a handle of an earlier
+    /// session. The caller publishes nothing then.
+    public static func persistSnapshotOrThrow(
+        identity: Identity,
+        accountIdB64: String,
+        snapshotStore: DeviceGroupSnapshotStore = DeviceGroupSnapshotStore()
+    ) throws {
+        let snapshot = try identity.snapshotStorage()
+        try snapshotStore.putSnapshotDurable(
+            accountIdB64: accountIdB64, blob: snapshot,
+            session: session(of: identity, accountIdB64: accountIdB64))
     }
 }

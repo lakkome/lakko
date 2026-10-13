@@ -165,6 +165,10 @@ public final class ChatRepository: ObservableObject {
     /// (``withCommitLock(groupIdHex:_:)``).
     let binding = BindingEpoch()
 
+    /// The binding a send was sealed under, for the ratchet persist that
+    /// runs between the seal and the publish (``ChatClient/ratchetPersister``).
+    @TaskLocal private static var sendBinding: BindingEpoch.Captured?
+
     /// Publishes this device's KeyPackage from ``canonicalIdentity`` —
     /// persist-before-upload, single-flight. See ``republishKeyPackage()``.
     private lazy var keyPackageRepublisher = KeyPackageRepublisher(
@@ -607,6 +611,12 @@ public final class ChatRepository: ObservableObject {
                     "ChatRepository deallocated — send aborted before publish"
                 )
             }
+            // A send started by this repository carries the binding it was
+            // sealed under. The seal runs off the main actor, so the account
+            // can have left before this persist: then the identity read below
+            // is nobody's (the persist would do nothing) or the next
+            // account's, and the ciphertext must not go out.
+            try Self.sendBinding?.require()
             try await self.persistSnapshotDurableOrThrow()
         }
         // ADR-0053 — every publish ChatClient makes to a group journal is
@@ -3016,8 +3026,9 @@ public final class ChatRepository: ObservableObject {
         }
         // Best-effort, like every other propose path: a proposal advances no
         // epoch, so a snapshot that does not land costs a re-fetch of a journal
-        // row, never a desync.
-        persistSnapshotBestEffort()
+        // row, never a desync. A REFUSED write is not that case: see
+        // ``persistSnapshotBeforePublish()``.
+        try persistSnapshotBeforePublish()
 
         let bound = binding.capture()
         let publish: PublishResult
@@ -3701,12 +3712,17 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
         let bound = binding.capture()
-        let result = try await chatClient.sendMessage(
-            identity: identity,
-            group: record.group,
-            plaintext: plaintextBytes,
-            wake: wake.flatMap { pushWake(groupIdHex: groupIdHex, kind: $0) }
-        )
+        let pushWake = wake.flatMap { pushWake(groupIdHex: groupIdHex, kind: $0) }
+        let client = chatClient
+        let group = record.group
+        let result = try await Self.$sendBinding.withValue(bound) {
+            try await client.sendMessage(
+                identity: identity,
+                group: group,
+                plaintext: plaintextBytes,
+                wake: pushWake
+            )
+        }
         // What a caller does with the result inside its region (apply an
         // edit, a deletion or a reaction to `groups[groupIdHex]`) is done to
         // the record that is there now.
@@ -4108,11 +4124,15 @@ public final class ChatRepository: ObservableObject {
                 throw ChatError.argument("no live Group handle for \(groupIdHex)")
             }
             let bound = binding.capture()
-            let result = try await chatClient.broadcastControl(
-                identity: identity,
-                group: record.group,
-                controlBytes: bytes
-            )
+            let client = chatClient
+            let group = record.group
+            let result = try await Self.$sendBinding.withValue(bound) {
+                try await client.broadcastControl(
+                    identity: identity,
+                    group: group,
+                    controlBytes: bytes
+                )
+            }
             try requireCommitRegion(bound)
             return result
         }
@@ -5420,7 +5440,7 @@ public final class ChatRepository: ObservableObject {
         proposalBytes: Data,
         transferToB64: String? = nil
     ) async throws -> MembershipOutcome {
-        persistSnapshotBestEffort()
+        try persistSnapshotBeforePublish()
         let bound = binding.capture()
         let publish: PublishResult
         do {
@@ -8104,6 +8124,22 @@ public final class ChatRepository: ObservableObject {
     /// behind and any successful one flushes them all. See
     /// `Chat/DurableCursor.swift`.
     private let cursorGate = DurableCursorGate()
+
+    /// The persist a proposal makes before it is published.
+    ///
+    /// Best effort against a disk or Keychain failure, as it always was (a
+    /// proposal advances no epoch). NOT best effort against a refusal: when
+    /// no account is bound, or the account's session has ended
+    /// (``AccountStoreGate``), the proposal's state was not written and the
+    /// account that built it is gone, so this throws and nothing is
+    /// published. A refused persist always means nothing went out.
+    private func persistSnapshotBeforePublish() throws {
+        guard canonicalIdentity != nil, let accountIdB64 = currentAccountIdB64 else {
+            throw StaleBindingError()
+        }
+        if AccountStoreGate.isSealed(accountIdB64) { throw AccountStoreGate.Sealed() }
+        persistSnapshotBestEffort()
+    }
 
     private func persistSnapshotBestEffort() {
         guard let identity = canonicalIdentity,

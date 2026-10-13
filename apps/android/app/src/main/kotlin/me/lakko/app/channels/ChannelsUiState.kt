@@ -345,8 +345,10 @@ public class ChannelsUiState(
     /** Persist the rotation heartbeat state for [channelId]. No-op when
      *  unbound. */
     public fun saveRotationState(channelId: String, state: StoredRotationState) {
-        val acct = boundAccountIdB64 ?: return
-        logStore?.saveRotationState(acct, channelId, state)
+        me.lakko.app.account.AccountStoreGate.write(boundAccountIdB64 ?: return) {
+            val acct = boundAccountIdB64 ?: return
+            logStore?.saveRotationState(acct, channelId, state)
+        }
     }
 
     /** Per-channel persisted publisher **signing** seed (G-29),
@@ -376,7 +378,9 @@ public class ChannelsUiState(
         _subscribedSeedsByChannel.update { it - channelId }
         persistChannels()
         persistSubscribedSeeds()
-        boundAccountIdB64?.let { acct -> logStore?.deleteRotationState(acct, channelId) }
+        boundAccountIdB64?.let { acct ->
+            me.lakko.app.account.AccountStoreGate.write(acct) { logStore?.deleteRotationState(acct, channelId) }
+        }
         // Deliberately KEEP this channel's publish counter (in-memory + at
         // rest): un-publishing does NOT destroy the MLS PublisherGroup content
         // seed, so a re-add of the same channel_id re-derives the same content
@@ -564,22 +568,26 @@ public class ChannelsUiState(
      *  mutation before [bind] stays in memory (there is no account to key
      *  it by) and is replaced by the persisted list when bind runs. */
     private fun persistChannels() {
-        val acct = boundAccountIdB64 ?: return
-        val store = logStore ?: return
-        try {
-            store.saveChannels(acct, _channels.value)
-        } catch (e: Throwable) {
-            Log.w(TAG, "channel list not persisted", e)
+        me.lakko.app.account.AccountStoreGate.write(boundAccountIdB64 ?: return) {
+            val acct = boundAccountIdB64 ?: return
+            val store = logStore ?: return
+            try {
+                store.saveChannels(acct, _channels.value)
+            } catch (e: Throwable) {
+                Log.w(TAG, "channel list not persisted", e)
+            }
         }
     }
 
     private fun persistSubscribedSeeds() {
-        val acct = boundAccountIdB64 ?: return
-        val store = logStore ?: return
-        try {
-            store.saveSubscribedSeeds(acct, _subscribedSeedsByChannel.value)
-        } catch (e: Throwable) {
-            Log.w(TAG, "subscriber seeds not persisted", e)
+        me.lakko.app.account.AccountStoreGate.write(boundAccountIdB64 ?: return) {
+            val acct = boundAccountIdB64 ?: return
+            val store = logStore ?: return
+            try {
+                store.saveSubscribedSeeds(acct, _subscribedSeedsByChannel.value)
+            } catch (e: Throwable) {
+                Log.w(TAG, "subscriber seeds not persisted", e)
+            }
         }
     }
 
@@ -593,20 +601,22 @@ public class ChannelsUiState(
      *  device-group-keyed cache can import all three at
      *  once. */
     private fun persistSubscriberKeys() {
-        val sink = prefs ?: return
-        val acct = boundAccountIdB64 ?: return
-        val arr = JSONArray()
-        for ((channelId, keys) in _subscriberKeysByChannel.value) {
-            val row = JSONObject()
-            row.put("channelId", channelId)
-            row.put("secretHex", ChannelsComposer.bytesToHex(keys.secret))
-            row.put("publicHex", ChannelsComposer.bytesToHex(keys.publicKey))
-            // ADR-0060 section 3 - the key scheme: Ed25519 since the
-            // member-card amendment. A row without it holds an older key.
-            row.put("scheme", SUBSCRIBER_KEY_SCHEME_ED25519)
-            arr.put(row)
+        me.lakko.app.account.AccountStoreGate.write(boundAccountIdB64 ?: return) {
+            val sink = prefs ?: return
+            val acct = boundAccountIdB64 ?: return
+            val arr = JSONArray()
+            for ((channelId, keys) in _subscriberKeysByChannel.value) {
+                val row = JSONObject()
+                row.put("channelId", channelId)
+                row.put("secretHex", ChannelsComposer.bytesToHex(keys.secret))
+                row.put("publicHex", ChannelsComposer.bytesToHex(keys.publicKey))
+                // ADR-0060 section 3 - the key scheme: Ed25519 since the
+                // member-card amendment. A row without it holds an older key.
+                row.put("scheme", SUBSCRIBER_KEY_SCHEME_ED25519)
+                arr.put(row)
+            }
+            sink.edit().putString(accountKey(SUBSCRIBER_KEYS_PREF_KEY, acct), arr.toString()).apply()
         }
-        sink.edit().putString(accountKey(SUBSCRIBER_KEYS_PREF_KEY, acct), arr.toString()).apply()
     }
 
     private fun loadSubscriberKeys(accountIdB64: String): Map<String, ChannelSubscriberKeys> {
@@ -642,16 +652,18 @@ public class ChannelsUiState(
      *  hex-row shape the subscriber blob uses, so an on-device audit
      *  grep reads both publisher + subscriber stores identically. */
     private fun persistPublisherSigningSeeds() {
-        val sink = publisherPrefs ?: return
-        val acct = boundAccountIdB64 ?: return
-        val arr = JSONArray()
-        for ((channelId, seed) in publisherSigningSeedByChannel) {
-            val row = JSONObject()
-            row.put("channelId", channelId)
-            row.put("signingSeedHex", ChannelsComposer.bytesToHex(seed))
-            arr.put(row)
+        me.lakko.app.account.AccountStoreGate.write(boundAccountIdB64 ?: return) {
+            val sink = publisherPrefs ?: return
+            val acct = boundAccountIdB64 ?: return
+            val arr = JSONArray()
+            for ((channelId, seed) in publisherSigningSeedByChannel) {
+                val row = JSONObject()
+                row.put("channelId", channelId)
+                row.put("signingSeedHex", ChannelsComposer.bytesToHex(seed))
+                arr.put(row)
+            }
+            sink.edit().putString(accountKey(PUBLISHER_SIGNING_SEEDS_PREF_KEY, acct), arr.toString()).apply()
         }
-        sink.edit().putString(accountKey(PUBLISHER_SIGNING_SEEDS_PREF_KEY, acct), arr.toString()).apply()
     }
 
     private fun loadPublisherSigningSeeds(accountIdB64: String): Map<String, ByteArray> {
@@ -678,16 +690,18 @@ public class ChannelsUiState(
      *  seeds) whenever the counter map changes, so the forever-monotone
      *  floor survives a relaunch. */
     private fun persistPublisherCounters() {
-        val sink = publisherPrefs ?: return
-        val acct = boundAccountIdB64 ?: return
-        val arr = JSONArray()
-        for ((channelId, counter) in _counterByChannel.value) {
-            val row = JSONObject()
-            row.put("channelId", channelId)
-            row.put("counter", counter.toString())
-            arr.put(row)
+        me.lakko.app.account.AccountStoreGate.write(boundAccountIdB64 ?: return) {
+            val sink = publisherPrefs ?: return
+            val acct = boundAccountIdB64 ?: return
+            val arr = JSONArray()
+            for ((channelId, counter) in _counterByChannel.value) {
+                val row = JSONObject()
+                row.put("channelId", channelId)
+                row.put("counter", counter.toString())
+                arr.put(row)
+            }
+            sink.edit().putString(accountKey(PUBLISHER_COUNTERS_PREF_KEY, acct), arr.toString()).apply()
         }
-        sink.edit().putString(accountKey(PUBLISHER_COUNTERS_PREF_KEY, acct), arr.toString()).apply()
     }
 
     private fun loadPublisherCounters(accountIdB64: String): Map<String, ULong> {

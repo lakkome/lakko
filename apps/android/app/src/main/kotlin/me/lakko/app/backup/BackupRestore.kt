@@ -287,7 +287,6 @@ public object BackupRestoreStore {
             val id = groupIdHex.lowercase()
             if (id !in current) return
             saveGroups(context, accountIdB64, current - id)
-    
         }
     }
 

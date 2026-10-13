@@ -40,6 +40,13 @@ public object DeviceGroupLifecycle {
 
     private const val LOG_TAG = "DeviceGroupLifecycle"
 
+    /**
+     * The store session each handle built by [ensureDeviceGroup] was loaded
+     * in. Weak: an entry goes with its handle.
+     */
+    private val storeSessions: MutableMap<Identity, me.lakko.app.account.AccountStoreGate.Session> =
+        java.util.Collections.synchronizedMap(java.util.WeakHashMap())
+
     /** Result of [ensureDeviceGroup]. */
     public data class Ensured(
         /** Identity built from the DeviceIdentity seed,
@@ -85,6 +92,10 @@ public object DeviceGroupLifecycle {
         // This is the DeviceIdentity (ADR-0007), NOT the
         // AccountIdentity ChatRepository holds.
         val identity = Identity.fromSeed(deviceIdentitySeed)
+        // The provider state this handle is about to load is the state of
+        // the account's session as it is open NOW; [persistSnapshot] writes
+        // the handle back only into that same session.
+        storeSessions[identity] = me.lakko.app.account.AccountStoreGate.session(accountIdB64)
 
         // Try to restore prior MLS state.
         val snapshot = try {
@@ -151,7 +162,20 @@ public object DeviceGroupLifecycle {
     ) {
         try {
             val snapshot = identity.snapshotStorage()
-            DeviceGroupSnapshotStore.putSnapshot(context, accountIdB64, snapshot)
+            val session = storeSessions[identity]
+            if (session == null) {
+                DeviceGroupSnapshotStore.putSnapshot(context, accountIdB64, snapshot)
+            } else {
+                // A handle loaded in an EARLIER session of this account (it
+                // signed out and in again meanwhile) holds that session's
+                // DeviceGroup state: an older epoch, an older ratchet. The
+                // gate is open for the account again, so only the session
+                // the handle was loaded in stops it from rolling the
+                // snapshot back.
+                me.lakko.app.account.AccountStoreGate.writeOrEnd(session) {
+                    DeviceGroupSnapshotStore.putSnapshot(context, accountIdB64, snapshot)
+                }
+            }
         } catch (cause: Throwable) {
             Log.w(LOG_TAG, "DeviceGroup snapshot persist failed", cause)
         }

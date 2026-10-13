@@ -256,6 +256,8 @@ public enum StateBundle {
         defaults: UserDefaults = .standard
     ) {
         guard let accountIdB64 else { return }
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         let key = knownGroupsKey(accountIdB64: accountIdB64)
         if idsB64.isEmpty {
             defaults.removeObject(forKey: key)

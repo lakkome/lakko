@@ -41,6 +41,7 @@
  * the MLS snapshot blob.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import { publishMessageLogChanged } from "./message-log-events";
 
 const DB_NAME = "lakko-message-log";
@@ -348,6 +349,7 @@ export async function saveMessageLog(
   const row: PersistedRow = { accountId: accountIdB64, ciphertext };
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put(row);
     await awaitTx(tx, undefined);

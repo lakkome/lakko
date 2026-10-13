@@ -22,6 +22,7 @@
  * flush chain per page); this module is plain CRUD.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import type { ChannelLogPayload } from "./channel-log-codec";
 
 const DB_NAME = "lakko-channel-log";
@@ -93,6 +94,7 @@ export async function saveChannelLog(
   const row: PersistedRow = { accountId: accountIdB64, ciphertext };
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put(row);
     await awaitTx(tx, undefined);

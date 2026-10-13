@@ -115,7 +115,6 @@ public class InMemoryProfileRequestStore : ProfileRequestStore {
     override fun markRequested(accountIdB64: String, groupIdHex: String, atMs: ULong) {
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             synchronized(rows) { rows[accountIdB64 + ":" + groupIdHex.lowercase()] = atMs }
-    
         }
     }
 

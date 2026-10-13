@@ -60,6 +60,17 @@ public object FloorStore {
         context: Context,
         accountIdB64: String,
         floor: BackupFloor,
+    ): Boolean =
+        // `false` as well when the account's session has ended (see
+        // [me.lakko.app.account.AccountStoreGate]).
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            putFloorWhileOpen(context, accountIdB64, floor)
+        } ?: false
+
+    private fun putFloorWhileOpen(
+        context: Context,
+        accountIdB64: String,
+        floor: BackupFloor,
     ): Boolean {
         val existing = getFloor(context, accountIdB64)
         // Never lower an existing, cleanly-read floor (ULong comparison). A

@@ -18,6 +18,7 @@
  * lists (`shared-channels.ts`). Both are wiped by `forgetDevice`.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import type { DirectoryItemWire } from "./cards";
 import type { DecoyDraw } from "./decoys";
 
@@ -254,6 +255,7 @@ export async function saveDiscoverRow(
   ciphertext.set(ct, IV_LEN);
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountId)) return;
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put({ key: rowKey(accountId, kind), ciphertext });
     await done(tx);

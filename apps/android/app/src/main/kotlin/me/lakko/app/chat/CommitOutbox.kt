@@ -491,7 +491,6 @@ public object CommitOutboxStore {
     public fun putEntry(context: Context, entry: PendingCommitEntry) {
         me.lakko.app.account.AccountStoreGate.writeOrEnd(entry.accountId) {
             putEntryIn(dir(context), entry)
-    
         }
     }
 

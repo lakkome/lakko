@@ -64,10 +64,20 @@ public object AccountStoreGate {
      * `null` when it was refused: for a best-effort write, which is then
      * simply not made.
      */
-    public inline fun <T : Any> write(accountIdB64: String, write: () -> T): T? =
+    public inline fun <T> write(accountIdB64: String, write: () -> T): T? =
         lock.read {
-            if (key(accountIdB64) in sealed) null else write()
+            if (refused(accountIdB64)) null else write()
         }
+
+    /**
+     * Whether a write of [accountIdB64] is refused now. Call under [lock].
+     * The thread that is sealing is the wipe itself (it holds the exclusive
+     * lock): a store that deletes by writing an empty row must not be told
+     * its account is gone.
+     */
+    @PublishedApi
+    internal fun refused(accountIdB64: String): Boolean =
+        key(accountIdB64) in sealed && !lock.isWriteLockedByCurrentThread
 
     /**
      * [write] for a write its caller must not go on without (the ratchet
@@ -78,7 +88,40 @@ public object AccountStoreGate {
      */
     public inline fun <T> writeOrEnd(accountIdB64: String, write: () -> T): T =
         lock.read {
-            if (key(accountIdB64) in sealed) throw StaleBindingException()
+            if (refused(accountIdB64)) throw StaleBindingException()
+            write()
+        }
+
+    /**
+     * One session of an account as the gate saw it open, for a writer that
+     * holds state of its own for that session (its own MLS provider handle)
+     * and writes the WHOLE of it. Such a writer is not stopped by a seal that
+     * was lifted again: the same account signed out and in, the gate is open,
+     * and what the old writer holds is the previous session's state. It
+     * captures this when it starts and presents it with every write.
+     */
+    public class Session internal constructor(
+        @PublishedApi internal val accountIdB64: String,
+        @PublishedApi internal val sealsSeen: Long,
+    )
+
+    /** How often each account was sealed. Guarded by [lock]. */
+    @PublishedApi
+    internal val seals: HashMap<String, Long> = HashMap()
+
+    /** The session of [accountIdB64] that is open now. */
+    public fun session(accountIdB64: String): Session =
+        lock.read { Session(accountIdB64, seals[key(accountIdB64)] ?: 0L) }
+
+    /**
+     * [writeOrEnd] for the writer of one [session]: refused as well when the
+     * account was sealed since the session was captured, even if it has been
+     * opened again.
+     */
+    public inline fun <T> writeOrEnd(session: Session, write: () -> T): T =
+        lock.read {
+            val current = seals[key(session.accountIdB64)] ?: 0L
+            if (current != session.sealsSeen || refused(session.accountIdB64)) throw StaleBindingException()
             write()
         }
 
@@ -89,7 +132,12 @@ public object AccountStoreGate {
      */
     public fun <T> seal(accountIdB64: String, during: () -> T): T =
         lock.write {
-            if (accountIdB64.isNotEmpty()) sealed.add(key(accountIdB64))
+            if (accountIdB64.isNotEmpty()) {
+                val account = key(accountIdB64)
+                // Counted once per ended session, not per call: the runtimes
+                // each seal the account on the way out.
+                if (sealed.add(account)) seals[account] = (seals[account] ?: 0L) + 1L
+            }
             during()
         }
 
@@ -108,6 +156,9 @@ public object AccountStoreGate {
 
     /** Open every account (a test starts from a new process's state). */
     internal fun resetForTest() {
-        lock.write { sealed.clear() }
+        lock.write {
+            sealed.clear()
+            seals.clear()
+        }
     }
 }

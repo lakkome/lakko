@@ -56,6 +56,11 @@ final class AccountLocalDataWipeTests: XCTestCase {
         savedMarks = JournalFoundingMarks.shared.all()
         wipeQuietly(a)
         wipeQuietly(b)
+        // The clean-up above is a wipe like any other and seals both
+        // accounts. Each test then seeds them as a signed-in account's own
+        // stores, which is the account landing again.
+        AccountStoreGate.open(a)
+        AccountStoreGate.open(b)
     }
 
     override func tearDown() async throws {

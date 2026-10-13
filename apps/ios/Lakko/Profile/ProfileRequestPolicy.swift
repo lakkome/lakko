@@ -154,6 +154,8 @@ public final class ProfileRequestStore {
     }
 
     public func record(accountIdB64: String, groupIdHex: String, atMs: UInt64) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var current = map(accountIdB64: accountIdB64)
         current[groupIdHex] = String(atMs)
         defaults.set(current, forKey: Self.key(accountIdB64))

@@ -78,14 +78,12 @@ public class SharedPreferencesContactsInboxStore(context: Context) : ContactsInb
             val key = cursorKey(accountIdB64)
             val advanced = advanceInboxCursor(prefs.getLong(key, 0L), cursor)
             prefs.edit().putLong(key, advanced).apply()
-    
         }
     }
 
     override fun savePending(accountIdB64: String, pending: List<IncomingContactRequest>) {
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             prefs.edit().putString(pendingKey(accountIdB64), encodePendingRequests(pending)).apply()
-    
         }
     }
 

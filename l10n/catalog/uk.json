@@ -6566,6 +6566,10 @@
       "text": "Не вдалося створити нову ідентичність. Спробуйте ще раз.",
       "status": "machine"
     },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "Не вдалося зберегти нову фразу відновлення на цьому пристрої. Нічого не змінено.",
+      "status": "machine"
+    },
     "restore_identity.lost.sub": {
       "text": "Почати з новою ідентичністю",
       "status": "machine"

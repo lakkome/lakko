@@ -241,6 +241,8 @@ public final class BeaconObservationStore {
     }
 
     private func save(accountIdB64: String, groupIdB64: String, _ observations: [String: Int64]) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var raw: [String: NSNumber] = [:]
         for (key, value) in observations { raw[key] = NSNumber(value: value) }
         defaults.set(raw, forKey: storeKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64))

@@ -149,7 +149,6 @@ public object DeviceGroupSnapshotStore {
             System.arraycopy(ciphertext, 0, out, GCM_IV_LEN, ciphertext.size)
 
             envelopeFile(context, accountIdB64, dir).writeBytes(out)
-    
         }
     }
 

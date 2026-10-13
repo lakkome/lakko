@@ -230,7 +230,6 @@ public object PushRoutingSecretStore {
                     encodeValue(secret, distributed, mintEpoch),
                 )
                 .apply()
-    
         }
     }
 
@@ -297,7 +296,6 @@ public object PushRoutingSecretStore {
                 distributed = true,
                 mintEpoch = current.mintEpoch,
             )
-    
         }
     }
 
@@ -345,7 +343,6 @@ public object PushRoutingSecretStore {
                 distributed = false,
                 mintEpoch = current.mintEpoch,
             )
-    
         }
     }
 

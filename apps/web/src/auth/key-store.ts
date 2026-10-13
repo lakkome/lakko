@@ -24,6 +24,8 @@
  * `wasm-bindgen-test` lands in 1.16f we add a real round-trip.
  */
 
+import { accountStoresWritable } from "./account-store-gate";
+
 const DB_NAME = "lakko-auth";
 const DB_VERSION = 1;
 const STORE = "device_keys";
@@ -77,6 +79,7 @@ export async function putDeviceKey(
 ): Promise<void> {
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     const tx = db.transaction(STORE, "readwrite");
     const record: DeviceKeyRecord = { accountId: accountIdB64, key };
     tx.objectStore(STORE).put(record);

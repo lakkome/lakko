@@ -768,6 +768,8 @@ public final class RegistrarSeedStore {
 
     /// Keep a newly received seed; a newer envelope replaces the older one.
     public func put(accountIdB64: String, groupIdHex: String, seed: Data, rank: DsRegistrarRank) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard seed.count == Self.seedLen else { return }
         var plain = Data([rank == .admin ? 1 : 0])
         plain.append(seed)
@@ -815,6 +817,8 @@ public final class RegistrarSeedStore {
     public func saveDelivered(
         accountIdB64: String, groupIdHex: String, _ record: [Data: DsRegistrarRank]
     ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var raw: [String: String] = [:]
         for (key, rank) in record { raw[key.base64EncodedString()] = rank == .admin ? "admin" : "member" }
         defaults.set(raw, forKey: Self.ledgerPrefix + accountIdB64 + " " + groupIdHex)
@@ -864,6 +868,8 @@ public final class RegistrarSeedStore {
         accountIdB64: String, groupIdHex: String, accountKey: Data, publicKey: Data,
         rank: DsRegistrarRank
     ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard publicKey.count == Self.seedLen else { return }
         let storeKey = Self.knownPrefix + accountIdB64 + " " + groupIdHex.lowercased()
         var raw = defaults.dictionary(forKey: storeKey) as? [String: String] ?? [:]
@@ -883,12 +889,16 @@ public final class RegistrarSeedStore {
     }
 
     public func markRootHeld(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var held = Set(defaults.stringArray(forKey: Self.rootHeldPrefix + accountIdB64) ?? [])
         guard held.insert(groupIdHex.lowercased()).inserted else { return }
         defaults.set(held.sorted(), forKey: Self.rootHeldPrefix + accountIdB64)
     }
 
     public func clearRootHeld(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var held = Set(defaults.stringArray(forKey: Self.rootHeldPrefix + accountIdB64) ?? [])
         guard held.remove(groupIdHex.lowercased()) != nil else { return }
         defaults.set(held.sorted(), forKey: Self.rootHeldPrefix + accountIdB64)
@@ -901,6 +911,8 @@ public final class RegistrarSeedStore {
     /// under the same Keychain wrap key as the registrar seeds; never logged,
     /// never synced, never in the registrar-seed rows.
     public func putPendingRootSeed(accountIdB64: String, groupIdHex: String, seed: Data) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard seed.count == Self.seedLen else { return }
         let key = SymmetricKey(data: KeychainWrapKey.loadOrCreate(
             service: Self.wrapKeyService, account: Self.wrapKeyAccount))
@@ -941,12 +953,16 @@ public final class RegistrarSeedStore {
     }
 
     public func markHandoverOwed(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var owed = owedHandovers(accountIdB64: accountIdB64)
         guard owed.insert(groupIdHex.lowercased()).inserted else { return }
         defaults.set(owed.sorted(), forKey: Self.owedPrefix + accountIdB64)
     }
 
     public func clearHandoverOwed(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var owed = owedHandovers(accountIdB64: accountIdB64)
         guard owed.remove(groupIdHex.lowercased()) != nil else { return }
         if owed.isEmpty {

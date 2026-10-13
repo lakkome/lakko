@@ -72,6 +72,22 @@ enum AccountLocalDataWipe {
         accountIdB64: String,
         removeDeliveredNotifications: () -> Void = AuthRepository.removeAllDeliveredNotifications
     ) -> Report {
+        // The account is sealed for the whole wipe (``AccountStoreGate``): a
+        // store write already in flight finishes first and is then removed
+        // with the rest; one that starts later is refused. Without it such a
+        // write could land after its store's step and leave a forgotten
+        // account's data on the device.
+        AccountStoreGate.seal(accountIdB64, wiping: true) {
+            wipeSealed(
+                accountIdB64: accountIdB64,
+                removeDeliveredNotifications: removeDeliveredNotifications)
+        }
+    }
+
+    private static func wipeSealed(
+        accountIdB64: String,
+        removeDeliveredNotifications: () -> Void
+    ) -> Report {
         var report = Report()
         func step(_ name: String, _ body: () throws -> Void) {
             do {

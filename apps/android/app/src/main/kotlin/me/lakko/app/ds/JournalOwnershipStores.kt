@@ -276,14 +276,12 @@ public class EncryptedJournalOwnershipStore(context: Context) : RegistrarSeedSto
             prefs.edit()
                 .putString(SEED_PREFIX + rowKey(accountIdB64, groupIdHex), java.util.Base64.getEncoder().encodeToString(seed))
                 .apply()
-    
         }
     }
 
     override fun remove(accountIdB64: String, groupIdHex: String) {
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             prefs.edit().remove(SEED_PREFIX + rowKey(accountIdB64, groupIdHex)).apply()
-    
         }
     }
 
@@ -316,7 +314,6 @@ public class EncryptedJournalOwnershipStore(context: Context) : RegistrarSeedSto
                 prefs.edit()
                     .putString(APPOINTED_PREFIX + rowKey(accountIdB64, groupIdHex), encodeAppointments(appointed))
                     .apply()
-        
             }
         }
 
@@ -336,7 +333,6 @@ public class EncryptedJournalOwnershipStore(context: Context) : RegistrarSeedSto
                 prefs.edit()
                     .putString(REGISTRAR_LIST_PREFIX + rowKey(accountIdB64, groupIdHex), encodeRegistrarList(listed))
                     .apply()
-        
             }
         }
 
@@ -356,14 +352,12 @@ public class EncryptedJournalOwnershipStore(context: Context) : RegistrarSeedSto
         override fun add(accountIdB64: String, groupIdHex: String) {
             me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
                 prefs.edit().putString(OWED_HANDOVER_PREFIX + rowKey(accountIdB64, groupIdHex), "1").apply()
-        
             }
         }
 
         override fun remove(accountIdB64: String, groupIdHex: String) {
             me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
                 prefs.edit().remove(OWED_HANDOVER_PREFIX + rowKey(accountIdB64, groupIdHex)).apply()
-        
             }
         }
 
@@ -380,14 +374,12 @@ public class EncryptedJournalOwnershipStore(context: Context) : RegistrarSeedSto
         override fun mark(accountIdB64: String, groupIdHex: String) {
             me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
                 prefs.edit().putString(ROOT_HELD_PREFIX + rowKey(accountIdB64, groupIdHex), "1").apply()
-        
             }
         }
 
         override fun clear(accountIdB64: String, groupIdHex: String) {
             me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
                 prefs.edit().remove(ROOT_HELD_PREFIX + rowKey(accountIdB64, groupIdHex)).apply()
-        
             }
         }
 
@@ -415,14 +407,12 @@ public class EncryptedJournalOwnershipStore(context: Context) : RegistrarSeedSto
                         java.util.Base64.getEncoder().encodeToString(seed),
                     )
                     .commit()
-        
             }
         }
 
         override fun remove(accountIdB64: String, groupIdHex: String) {
             me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
                 prefs.edit().remove(PENDING_ROOT_SEED_PREFIX + rowKey(accountIdB64, groupIdHex)).commit()
-        
             }
         }
 

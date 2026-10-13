@@ -70,7 +70,13 @@ public class ChannelPublisherIdentity(
             val app = context.applicationContext
             return ChannelPublisherIdentity(
                 loadSnapshot = { acct -> IdentitySnapshotStore.getSnapshot(app, acct + SNAPSHOT_SCOPE_SUFFIX) },
-                saveSnapshot = { acct, bytes -> IdentitySnapshotStore.putSnapshot(app, acct + SNAPSHOT_SCOPE_SUFFIX, bytes) },
+                saveSnapshot = { acct, bytes ->
+                    // Gated on the ACCOUNT: the row's own key carries a scope
+                    // suffix, which the gate would not recognise as it.
+                    me.lakko.app.account.AccountStoreGate.writeOrEnd(acct) {
+                        IdentitySnapshotStore.putSnapshot(app, acct + SNAPSHOT_SCOPE_SUFFIX, bytes)
+                    }
+                },
             )
         }
 

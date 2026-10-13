@@ -6566,6 +6566,10 @@
       "text": "无法创建新身份。请重试。",
       "status": "machine"
     },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "无法在此设备上保存新的恢复短语。未作任何更改。",
+      "status": "machine"
+    },
     "restore_identity.lost.sub": {
       "text": "以新身份重新开始",
       "status": "machine"

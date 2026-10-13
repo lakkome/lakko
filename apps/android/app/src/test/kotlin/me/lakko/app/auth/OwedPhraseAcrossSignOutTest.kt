@@ -46,7 +46,10 @@ class OwedPhraseAcrossSignOutTest {
     }
 
     @After
-    fun tearDown() = AcceptedContactsStore.unbind()
+    fun tearDown() {
+        AcceptedContactsStore.unbind()
+        me.lakko.app.account.AccountStoreGate.resetForTest()
+    }
 
     @Test
     fun `a sign-out keeps the phrase owed`() {
@@ -89,5 +92,62 @@ class OwedPhraseAcrossSignOutTest {
         assertTrue(mint.indexOf("staged.rollback()") > publish)
         // Owed in every case: marked before the branch on where the device is.
         assertTrue(owed in (publish + 1) until decide)
+    }
+
+    @Test
+    fun `a typed phrase is no longer owed and one the person has not seen still is`() {
+        val source = java.io.File("src/main/kotlin/me/lakko/app/auth/AuthRepository.kt").readText()
+        // The restore prompt: typed by the person.
+        assertTrue(
+            "restoreFromPhrase(mnemonicPhrase, phraseHeldByPerson = true)" in
+                source.substringAfter("    public suspend fun provideRecoveryPhrase(").substringBefore("\n    /**"),
+        )
+        // Finishing a parked sign-in from the phrase the device owes: not typed.
+        val park = source.substringAfter("    private suspend fun completeParkFromOwedPhrase(")
+            .substringBefore("\n    }\n")
+        assertTrue("restoreFromPhrase(phrase, phraseHeldByPerson = false)" in park)
+        // A guest being kept: its phrase comes from the guest's own store.
+        val guest = source.substringAfter("override suspend fun setPassword(").substringBefore("override fun owePhrase(")
+        assertTrue("phraseHeldByPerson = false" in guest)
+        // Cleared before the landing parks what is owed, on both typed routes.
+        for (route in listOf("    private suspend fun restoreFromPhrase(", "    public suspend fun recover(")) {
+            val body = source.substringAfter(route).substringBefore("\n    }\n")
+            val cleared = body.indexOf("if (phraseHeldByPerson) acknowledgePhraseTyped(")
+            val parked = body.indexOf("restoreOwedSignupPhrase(")
+            assertTrue(route, cleared in 0 until parked)
+        }
+    }
+
+    @Test
+    fun `a refusal with its own sentence shows it and any other failure shows the generic one`() {
+        val named = AuthClientArgError(
+            "stored nothing",
+            me.lakko.app.l10n.UiText("restore_identity.lost.error.phrase_not_stored"),
+        )
+        assertTrue(
+            me.lakko.app.ui.auth.freshIdentityFailureText(named) ==
+                me.lakko.app.l10n.UiText("restore_identity.lost.error.phrase_not_stored"),
+        )
+        assertTrue(
+            me.lakko.app.ui.auth.freshIdentityFailureText(IllegalStateException("network")) ==
+                me.lakko.app.l10n.UiText("restore_identity.lost.error.generic"),
+        )
+        // The key is in the catalog the app embeds.
+        val catalog = java.io.File("src/main/assets/l10n/source.json").readText()
+        assertTrue("restore_identity.lost.error.phrase_not_stored" in catalog)
+    }
+
+    @Test
+    fun `a sign-out seals the account's stores and its next landing opens them`() {
+        val markers = MemoryStorage()
+        val sessions = SessionStore(context)
+        sessions.save(PersistedSession(accountIdB64 = account, username = "alice"))
+        val auth = AuthRepository(context, sessionStore = sessions, phraseOwedMarkers = markers)
+
+        auth.logout()
+
+        assertTrue(me.lakko.app.account.AccountStoreGate.isSealed(account))
+        // Nothing durable was deleted: the session record is still there.
+        assertTrue(sessions.load()?.accountIdB64 == account)
     }
 }

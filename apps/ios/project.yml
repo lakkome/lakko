@@ -516,6 +516,11 @@ targets:
       - path: Lakko/Shared/KeychainWrapKey.swift
         type: file
         buildPhase: sources
+      # The per-account write gate the store sources below consult. The
+      # extension writes none of them; it is here only so they compile.
+      - path: Lakko/Shared/AccountStoreGate.swift
+        type: file
+        buildPhase: sources
       # The build's API base URL resolver, so the NSE's DS fetch follows
       # the same deployment as the app (Foundation only).
       - path: Lakko/Shared/ApiEndpoints.swift
@@ -672,6 +677,10 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         PRODUCT_BUNDLE_IDENTIFIER: me.lakko.dev.LakkoTests
         GENERATE_INFOPLIST_FILE: YES
+        # Opens every account in `AccountStoreGate` before each test: a
+        # sign-out or a wipe in one test would otherwise refuse the store
+        # writes of every later test that reuses its account id.
+        INFOPLIST_KEY_NSPrincipalClass: StoreGateTestReset
         # Host-app bundle loader so the test binary can resolve
         # symbols against the running Lakko.app on the
         # simulator (standard app-hosted XCTest pattern).

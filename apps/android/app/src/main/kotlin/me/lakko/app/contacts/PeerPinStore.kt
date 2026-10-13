@@ -333,7 +333,9 @@ public class PeerPinStore(
     }
 
     override fun removePin(accountIdB64: String) {
-        openPrefs(appContext).edit().remove(keyOf(accountIdB64)).apply()
+        me.lakko.app.account.AccountStoreGate.write(ownerAccountIdB64) {
+            openPrefs(appContext).edit().remove(keyOf(accountIdB64)).apply()
+        }
     }
 
     override fun recordLogStatus(accountIdB64: String, logStatus: LogVerifyStatus): Boolean {
@@ -395,8 +397,13 @@ public class PeerPinStore(
         isReset: Boolean?,
         pinnedLogVersion: Long?,
     ) {
-        val value = serializePin(pubkeyB64, marker, logStatus, isReset, pinnedLogVersion)
-        openPrefs(appContext).edit().putString(keyOf(accountIdB64), value).apply()
+        // The pins are the OWNER's rows ([accountIdB64] here is the peer):
+        // none is written for an owner whose session has ended, so a pin
+        // check still in flight at a forget-device writes nothing back.
+        me.lakko.app.account.AccountStoreGate.write(ownerAccountIdB64) {
+            val value = serializePin(pubkeyB64, marker, logStatus, isReset, pinnedLogVersion)
+            openPrefs(appContext).edit().putString(keyOf(accountIdB64), value).apply()
+        }
     }
 
     public companion object {

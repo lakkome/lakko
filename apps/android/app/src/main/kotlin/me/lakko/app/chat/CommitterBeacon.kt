@@ -456,7 +456,6 @@ internal class SharedPrefsBeaconObservationStore(context: Context) : BeaconObser
                 // Best-effort — losing the store costs a takeover's promptness,
                 // never its correctness.
             }
-    
         }
     }
 

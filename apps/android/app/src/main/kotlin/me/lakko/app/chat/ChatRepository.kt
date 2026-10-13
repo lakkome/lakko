@@ -7020,6 +7020,15 @@ public class ChatRepository(
             val blob = identity.snapshotStorage()
             writeSnapshot(identity, accountIdB64, blob)
             snapshotUnreadable.set(false)
+        } catch (ended: me.lakko.app.StaleBindingException) {
+            // Not a failed write: the account's session has ended and its
+            // store refused it ([me.lakko.app.account.AccountStoreGate]).
+            // Passed on, because several callers publish right after this
+            // (a membership proposal takes its handshake-ratchet step in
+            // memory, persists here and then goes to the wire): swallowed,
+            // the step would be published with nothing on disk behind it,
+            // and the account's next sign-in would take the same step again.
+            throw ended
         } catch (_: Throwable) {
             // Best-effort. 1.15d7 will plumb a `tracing`-
             // equivalent logger so failures here surface to

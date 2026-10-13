@@ -276,7 +276,6 @@ public object PinStore {
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             prefs(context).edit().putString(sharedKey(accountIdB64, groupIdHex), encodeSharedPins(value)).apply()
             mutableVersion.value += 1
-    
         }
     }
 
@@ -290,7 +289,6 @@ public object PinStore {
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             prefs(context).edit().putString(personalKey(accountIdB64, groupIdHex), encodePersonalPins(value)).apply()
             mutableVersion.value += 1
-    
         }
     }
 
@@ -302,7 +300,6 @@ public object PinStore {
                 .remove(personalKey(accountIdB64, groupIdHex))
                 .apply()
             mutableVersion.value += 1
-    
         }
     }
 

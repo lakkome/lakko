@@ -162,7 +162,9 @@ public class RestoreIdentityPromptViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = UiText("restore_identity.lost.error.generic"),
+                        // A refusal that names its own sentence (the phrase
+                        // could not be stored: nothing changed) says so.
+                        error = freshIdentityFailureText(err),
                     )
                 }
             }
@@ -177,3 +179,8 @@ public data class RestoreIdentityUiState(
     /** The form's error sentence (ADR-0061: rendered from its key). */
     val error: UiText? = null,
 )
+
+/** What the restore prompt shows when creating a new identity failed. */
+internal fun freshIdentityFailureText(cause: Throwable): UiText =
+    (cause as? me.lakko.app.auth.AuthClientArgError)?.text
+        ?: UiText("restore_identity.lost.error.generic")

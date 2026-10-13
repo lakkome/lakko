@@ -55,6 +55,8 @@
  * server-side `exp`).
  */
 
+import { accountSessionWritable } from "./account-store-gate";
+
 const DB_NAME = "lakko-session-tokens";
 const DB_VERSION = 1;
 const STORE = "tokens";
@@ -126,6 +128,7 @@ export async function putSessionToken(
 
   const db = await openDb();
   try {
+    if (!accountSessionWritable(accountIdB64)) return;
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
       tx.oncomplete = (): void => resolve();

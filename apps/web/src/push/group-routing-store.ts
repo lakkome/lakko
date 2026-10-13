@@ -149,6 +149,7 @@
  * - #7 — the secret is wrapped under the hardware-backed device root key.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 
 const DB_NAME = "lakko-push-routing";
@@ -364,6 +365,7 @@ export async function putGroupRouting(
   };
   const db = await openPushRoutingDb();
   try {
+    if (!accountStoresWritable(args.accountId)) return;
     const tx = db.transaction([SECRETS_STORE, ROUTES_STORE], "readwrite");
     tx.objectStore(SECRETS_STORE).put(secretRow);
     tx.objectStore(ROUTES_STORE).put(routeRow);
@@ -495,6 +497,7 @@ async function setDistributedFlag(
 ): Promise<void> {
   const db = await openPushRoutingDb();
   try {
+    if (!accountStoresWritable(accountId)) return;
     const tx = db.transaction(SECRETS_STORE, "readwrite");
     const store = tx.objectStore(SECRETS_STORE);
     const req = store.get(secretRowKey(accountId, groupIdB64));
@@ -704,6 +707,7 @@ export async function putWakeBinding(binding: WakeBinding): Promise<void> {
   };
   const db = await openPushRoutingDb();
   try {
+    if (!accountStoresWritable(binding.accountId)) return;
     const tx = db.transaction(WAKE_BINDING_STORE, "readwrite");
     tx.objectStore(WAKE_BINDING_STORE).put(row);
     await awaitTx(tx);

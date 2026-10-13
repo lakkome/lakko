@@ -420,6 +420,8 @@ public final class PendingRequestStore {
         groupIdB64: String,
         _ observations: [String: RequestObservation]
     ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var raw: [String: [String: Any]] = [:]
         for (key, value) in observations {
             var entry: [String: Any] = [
@@ -524,6 +526,8 @@ public final class PendingRequestStore {
     /// slot replaces the earlier one: the latest thing the user asked for about
     /// that subject is the intent.
     public func recordIntent(accountIdB64: String, groupIdB64: String, _ intent: MembershipIntent) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         let key = intentStoreKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         var raw = defaults.dictionary(forKey: key) ?? [:]
         raw[intent.slot] = intent.plist
@@ -533,6 +537,8 @@ public final class PendingRequestStore {
     /// Forget the intent in `slot` — it landed, its subject left, or the
     /// re-request stopped.
     public func removeIntent(accountIdB64: String, groupIdB64: String, slot: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         let key = intentStoreKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         guard var raw = defaults.dictionary(forKey: key), raw[slot] != nil else { return }
         raw.removeValue(forKey: slot)

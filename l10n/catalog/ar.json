@@ -6566,6 +6566,10 @@
       "text": "تعذّر إنشاء هوية جديدة. حاول مجددًا.",
       "status": "machine"
     },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "تعذّر حفظ عبارة الاسترداد الجديدة على هذا الجهاز. لم يتغيّر شيء.",
+      "status": "machine"
+    },
     "restore_identity.lost.sub": {
       "text": "البدء بهوية جديدة",
       "status": "machine"

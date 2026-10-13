@@ -632,6 +632,8 @@ public final class LeaveRequestStore {
     /// useful. The FIRST stamp wins, for the same reason ``PendingRequestStore``'s
     /// does: a re-request is the same intent, not a new one.
     public func remember(accountIdB64: String, groupIdB64: String, atMs: Int64) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         let key = storeKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         guard defaults.object(forKey: key) == nil else { return }
         defaults.set(NSNumber(value: atMs), forKey: key)

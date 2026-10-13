@@ -615,7 +615,6 @@ internal class SharedPrefsLeaveRecordStore(context: Context) : LeaveRecordStore 
             } catch (_: Throwable) {
                 // best-effort — see [recordLeaveRequested]
             }
-    
         }
     }
 
@@ -626,7 +625,6 @@ internal class SharedPrefsLeaveRecordStore(context: Context) : LeaveRecordStore 
             } catch (_: Throwable) {
                 // best-effort
             }
-    
         }
     }
 

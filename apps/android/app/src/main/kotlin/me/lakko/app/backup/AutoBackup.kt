@@ -139,7 +139,6 @@ public object AutoBackupStore {
                 .put("dirtySinceMs", state.dirtySinceMs ?: JSONObject.NULL)
                 .put("lastGroupsKey", state.lastGroupsKey ?: JSONObject.NULL)
             prefs(context).edit().putString(accountIdB64, o.toString()).apply()
-    
         }
     }
 

@@ -176,6 +176,17 @@ public class AuthRepository(
     private fun signInStart(): SignInStart =
         SignInStart(bound = accountBinding.capture(), startedSignedIn = signedInAccountIdB64() != null)
 
+    /**
+     * A sign-in for [accountIdB64] has passed its checks and is about to
+     * write and land: its stores are written again. Before the landing
+     * itself, because a sign-in writes on the way (a backup restored on the
+     * phrase route, the join state of a device restore) and the account may
+     * still be sealed from its last sign-out in this process.
+     */
+    private fun openStoresFor(accountIdB64: String) {
+        me.lakko.app.account.AccountStoreGate.open(accountIdB64)
+    }
+
     /** Record which account is bound; a change ends the previous binding. */
     private fun rebindAccount(accountIdB64: String?) {
         // Its stores are written again from here: a sign-out or a forget
@@ -1341,6 +1352,7 @@ public class AuthRepository(
                 // Overtaken while the round trip was out (see
                 // [standDownIfOvertaken]): nothing is written, nothing lands.
                 start.standDownIfOvertaken()
+                openStoresFor(accountIdB64)
                 // Re-derive + upsert the device key. Deterministic
                 // for the same password — the on-disk envelope is
                 // overwritten with byte-equivalent content; harmless
@@ -1597,6 +1609,7 @@ public class AuthRepository(
                     rebind = ::rebindLoginHandleInBackground,
                 )
                 bound.ensureCurrent()
+                openStoresFor(base64Encode(result.accountId))
                 val accountIdBytes = result.accountId
                 val accountIdB64 = base64Encode(accountIdBytes)
                 val resolvedUsername = named.username
@@ -2025,6 +2038,7 @@ public class AuthRepository(
         sessionExpiresAtMs: Long,
         pushContext: String,
     ) {
+        openStoresFor(accountIdB64)
         // Persist the account marker — important on a fresh device
         // where no row existed (idempotent upsert otherwise).
         sessionStore.save(
@@ -2898,6 +2912,8 @@ public class AuthRepository(
         persistJoin: suspend () -> Unit = {},
     ) {
         val start = signInStart()
+        // Its join state is written before the landing.
+        openStoresFor(accountIdB64)
         var seedHandedOff = false
         try {
             runCheckedDeviceRestore(
@@ -3125,6 +3141,7 @@ public class AuthRepository(
             exportKey.fill(0)
             throw stale
         }
+        openStoresFor(cached.accountIdB64)
         val deviceRootKey = deriveDeviceRootKey(exportKey, cached.accountIdB64)
         try {
             deviceKeyStore.putDeviceKey(
@@ -3311,6 +3328,11 @@ public class AuthRepository(
             // while it deletes or after it, so nothing of a forgotten account
             // is written back.
             me.lakko.app.account.AccountStoreGate.seal(accountIdB64) {
+                // The stores that file under "the bound account" (peer
+                // profiles, played-media marks, the folder tab) read it at
+                // write time: unbound BEFORE the wipe, so none of them writes
+                // the forgotten account's rows back after it.
+                me.lakko.app.contacts.AcceptedContactsStore.unbind()
                 me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
             }
         }

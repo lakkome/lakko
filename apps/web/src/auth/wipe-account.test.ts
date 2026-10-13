@@ -28,6 +28,7 @@ import { join, relative } from "node:path";
 import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
 import { base64Encode, base64UrlEncodeNoPad } from "./account-id";
 import { accountWipeSteps, wipeAccountLocalData } from "./wipe-account";
+import { openAccountStores, resetAccountStoreGateForTests } from "./account-store-gate";
 import { savePersistedAccount, loadPersistedAccount } from "./persisted-account";
 import { markSignupPhraseOwed } from "./phrase-gate";
 import { guestPhraseKey, markGuestAccount } from "./guest-account";
@@ -77,6 +78,9 @@ beforeEach(() => {
   g["localStorage"] = local;
   g["sessionStorage"] = session;
   g["indexedDB"] = idb;
+  // A wipe seals the account's stores until it lands again
+  // (`account-store-gate.ts`); every test starts with nothing sealed.
+  resetAccountStoreGateForTests();
 });
 
 afterEach(() => {
@@ -300,6 +304,8 @@ describe("wipeAccountLocalData", () => {
     await wipeAccountLocalData(A);
     expect(loadPersistedAccount()?.accountIdB64).toBe(B);
 
+    // The account lands on this browser again (the first wipe sealed it).
+    openAccountStores([A]);
     savePersistedAccount({ v: 1, accountIdB64: A, username: "alice" });
     await wipeAccountLocalData(A);
     expect(loadPersistedAccount()).toBeNull();
@@ -480,6 +486,9 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   // ADR-0061: the interface language is chosen per device.
   "lakko.language": "device",
   "lakko.transparency.last-seen-root.v1": "device",
+  // The store gate's cross-tab marker: digests of the accounts wiped in the
+  // last minute, never an account id; it prunes itself.
+  "lakko.account-store-gate.wiped.v1": "device",
   "lakko.push.device.v1": "device",
   "lakko.composer.recordMode": "device",
   "lakko.media.autoplayVideoNotes": "device",

@@ -334,7 +334,6 @@ public object StateBundle {
             } catch (_: Throwable) {
                 // storage unavailable: the label falls back to "no chats yet"
             }
-    
         }
     }
 

@@ -6566,6 +6566,10 @@
       "text": "Не удалось создать новые ключи аккаунта. Попробуйте ещё раз.",
       "status": "machine"
     },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "Не удалось сохранить новую фразу восстановления на этом устройстве. Ничего не изменено.",
+      "status": "machine"
+    },
     "restore_identity.lost.sub": {
       "text": "Начать с новыми ключами аккаунта",
       "status": "machine"

@@ -64,7 +64,12 @@ import {
 
 import { AuthClient } from "./client";
 import { loadPersistedAccount, savePersistedAccount } from "./persisted-account";
-import { wipeAccountLocalData } from "./wipe-account";
+import { accountStoreIds, wipeAccountLocalData } from "./wipe-account";
+import {
+  installAccountStorageGate,
+  openAccountStores,
+  sealAccountSession,
+} from "./account-store-gate";
 import type { ContactKind } from "./wire";
 import { base64Decode, base64Encode } from "./account-id";
 import { resolveRecoverUsername } from "./recover-resolution";
@@ -776,6 +781,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // An account landed (a session, or its restore / new-phrase prompt):
       // every sign-in round trip that started before this is overtaken.
       binding.landed();
+      openStoresFor(next.account.accountId);
       // Whatever was parked for a DIFFERENT account goes with it. A parked
       // new phrase is not lost by this: it was cached and marked owed before
       // its screen was shown (`mintFreshIdentity`).
@@ -791,6 +797,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     bindContactsAccount(next.kind === "session" ? next.account.accountId : null);
     setStateSignal(next);
   };
+  // The storage-level backstop of the binding below (`account-store-gate.ts`):
+  // Forget device seals an account's stores before it deletes them, a
+  // sign-out seals its session-token row, and a landing opens them again.
+  onCleanup(installAccountStorageGate());
+  /** `accountIdB64` is landing on this browser: its local stores accept
+   *  writes again. Called where a flow first holds the account id of a
+   *  session it was just given, and at every landing. */
+  function openStoresFor(accountIdB64: string): void {
+    openAccountStores(accountStoreIds(accountIdB64));
+  }
   /** The binding of this browser to an account (`binding-epoch.ts`): ended by
    *  every sign-out (`logout`, `forgetDevice`) and by every landing
    *  (`setState` above). A sign-in flow captures it before its first await
@@ -1282,6 +1298,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       throw new StaleBindingError();
     };
+    openStoresFor(args.accountIdB64);
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
     await installSessionIdentities(args.wasm, canonical, args.accountIdB64, stillBound);
     requireNotSignedOut();
@@ -1436,6 +1453,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
      *  just checked it. */
     flow: FlowBinding,
   ): Promise<void> {
+    openStoresFor(accountIdB64);
     // Phase 1.5b: install the fresh bearer token on the
     // DiscoveryClient for any protected reads/writes that follow.
     installFlowToken(triple.sessionToken);
@@ -1794,6 +1812,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // DiscoveryClient so the registerUsername /
       // uploadIdentityBundle / uploadKeyPackage round-trip below
       // sails through the auth::require_session middleware.
+      openStoresFor(accountIdB64);
       installFlowToken(result.sessionToken);
 
       // 1.16d2 + ADR-0054 S5: claim the username server-side, AFTER the
@@ -2064,6 +2083,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // itself stops it (`registered` below).
       const accountIdB64 = base64Encode(result.accountId);
       // Install the fresh bearer token for the protected writes below.
+      openStoresFor(accountIdB64);
       installFlowToken(result.sessionToken);
 
       if (result.recoveryPhrase === undefined) {
@@ -2343,6 +2363,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const accountIdB64 = base64Encode(accountIdBytes);
       // Phase 1.5b: install the fresh bearer token on the
       // DiscoveryClient for any protected writes that follow.
+      openStoresFor(accountIdB64);
       installFlowToken(result.sessionToken);
 
       // ADR-0018: PREFER an already-stored device root key over
@@ -2508,6 +2529,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
       const accountIdB64 = assertion.account_id_b64;
       const accountIdBytes = base64Decode(accountIdB64);
+      openStoresFor(accountIdB64);
       const cachedAny = loadPersisted();
       const sameDevice =
         cachedAny !== null && cachedAny.accountIdB64 === accountIdB64;
@@ -2995,6 +3017,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // gate below passed.
       const landDeviceRestore = async (): Promise<void> => {
         requireCurrent();
+        openStoresFor(accountIdB64);
         // Bootstrap the device root key FROM the identity seed — there
         // is no password (hence no OPAQUE export key) on this device
         // yet. Later password logins PREFER this stored key over
@@ -3435,6 +3458,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         const accountIdB64 = base64Encode(accountIdBytes);
         // Phase 1.5b: install the fresh bearer token on the
         // DiscoveryClient.
+        openStoresFor(accountIdB64);
         installFlowToken(result.sessionToken);
         // Re-derive the device root key from the NEW export key.
         // The previous device key (if any) is no longer reachable
@@ -3886,6 +3910,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // key stays in IDB so the next login is still cheap; only
       // the per-session bearer dies. Fire-and-forget — the API
       // contract is sync and the deletion is best-effort.
+      //
+      // Sealed first (`account-store-gate.ts`): a token write still in
+      // flight when this runs (a sign-in's best-effort persist) must not
+      // put the row back after the delete. Nothing else of the account is
+      // closed by a sign-out; its next landing opens the row again.
+      {
+        const signedOut = boundAccountId();
+        if (signedOut !== null) sealAccountSession(signedOut);
+        if (cached !== null) sealAccountSession(cached.accountIdB64);
+      }
       if (cached !== null) {
         void deleteSessionToken(cached.accountIdB64).catch(() => {
           /* best-effort */

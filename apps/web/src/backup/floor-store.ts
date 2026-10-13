@@ -27,6 +27,7 @@
  * - `updatedAtMs` (number) — plaintext write time for cheap diagnostics.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import { base64Decode, base64Encode } from "../auth/account-id";
 
 const DB_NAME = "lakko.backup.floor";
@@ -124,6 +125,7 @@ export async function putFloor(
 
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
       tx.oncomplete = (): void => resolve();

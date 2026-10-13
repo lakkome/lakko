@@ -196,7 +196,6 @@ public object GroupNameStore {
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             prefs(context).edit().putString(key(accountIdB64, groupIdHex), encodeStoredGroupName(value)).apply()
             mutableVersion.value += 1
-    
         }
     }
 

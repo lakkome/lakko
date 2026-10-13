@@ -182,7 +182,6 @@ internal class EncryptedReachDocStore(context: Context) : ReachDocStore {
     override fun save(accountIdB64: String, doc: ReachDoc) {
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             prefs.edit().putString(KEY_PREFIX + accountIdB64, json.encodeToString(ReachDoc.serializer(), doc)).apply()
-    
         }
     }
 

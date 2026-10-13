@@ -68,7 +68,6 @@ public class KnownGroupsStore(context: Context) {
             val current = load(accountIdB64).toMutableSet()
             if (!current.add(groupIdHex)) return
             prefs.edit().putStringSet(keyFor(accountIdB64), current).apply()
-    
         }
     }
 
@@ -84,7 +83,6 @@ public class KnownGroupsStore(context: Context) {
             val current = load(accountIdB64).toMutableSet()
             if (!current.remove(groupIdHex)) return
             prefs.edit().putStringSet(keyFor(accountIdB64), current).apply()
-    
         }
     }
 

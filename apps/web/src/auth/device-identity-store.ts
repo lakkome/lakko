@@ -58,6 +58,8 @@
  * contract, no length prefix needed.
  */
 
+import { accountStoresWritable } from "./account-store-gate";
+
 const DB_NAME = "lakko-device-identity";
 const DB_VERSION = 1;
 const STORE = "seeds";
@@ -125,6 +127,7 @@ export async function putDeviceIdentitySeed(
 
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
       tx.oncomplete = (): void => resolve();
@@ -280,6 +283,7 @@ export async function putDeviceBinding(
 ): Promise<void> {
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
       const store = tx.objectStore(STORE);

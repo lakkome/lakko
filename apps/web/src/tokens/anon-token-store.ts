@@ -35,6 +35,7 @@
  * under the device key: a token names no account and grants one anonymous
  * request of a rationed kind, and the pool holds no device key.
  */
+import { accountStoresWritable } from "../auth/account-store-gate";
 import type { AnonTokenContext } from "./anon-token-pool";
 
 /** One stored token. `epoch` is a decimal string (a bigint in memory). */
@@ -129,6 +130,8 @@ export function indexedDbAnonTokenStore(): AnonTokenStore {
     },
     async save(account, context, tokens) {
       const conn = await open();
+      // An empty set is a delete and always goes through.
+      if (tokens.length > 0 && !accountStoresWritable(account)) return;
       const tx = conn.transaction(STORE, "readwrite");
       const store = tx.objectStore(STORE);
       if (tokens.length === 0) store.delete([account, context]);
