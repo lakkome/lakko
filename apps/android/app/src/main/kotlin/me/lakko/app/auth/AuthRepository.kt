@@ -1203,49 +1203,16 @@ public class AuthRepository(
         me.lakko.app.ui.auth.SignupPhraseGate.clear()
     }
 
-    /**
-     * [mintFreshIdentity] could not show [phrase]: keep it for [accountIdB64]
-     * so the account's next sign-in on this device shows it first.
-     *
-     * The same mechanism a signup phrase left unacknowledged uses
-     * (`SignupPhraseOwed.kt`): the phrase in the Keystore-backed
-     * [me.lakko.app.backup.PhraseStore] row of the account, and the owed
-     * marker, which is set only once the phrase is stored (an owed marker
-     * with no phrase behind it can show nothing). The seed is cached as well,
-     * best-effort, so that sign-in lands a session; without it the account
-     * parks on its restore screen and [completeParkFromOwedPhrase] finishes
-     * from the kept phrase.
-     *
-     * `false` when the phrase could not be stored (the Keystore or the
-     * preferences refused). Then it is gone with this call, and the account's
-     * owner mints again the next time they are parked on its restore screen.
-     */
-    private fun keepFreshPhraseOwed(accountIdB64: String, phrase: String, seed: ByteArray): Boolean {
-        val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
-        try {
-            me.lakko.app.backup.PhraseStore.putPhrase(applicationContext, accountIdB64, phraseBytes)
-        } catch (cause: Throwable) {
-            Log.w("lakko-auth", "fresh-identity phrase not kept", cause)
-            return false
-        } finally {
-            phraseBytes.fill(0)
-        }
-        markSignupPhraseOwed(phraseOwedMarkers, accountIdB64)
-        if (!isSignupPhraseOwed(phraseOwedMarkers, accountIdB64)) {
-            Log.w("lakko-auth", "fresh-identity phrase kept, but not marked as owed")
-            return false
-        }
-        bootstrapDeviceKeyFromSeedBestEffort(
-            accountIdB64 = accountIdB64,
-            accountIdentitySeed = seed,
-            context = "mintFreshIdentity (owed)",
-        )
-        try {
-            AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, seed)
-        } catch (cause: Throwable) {
-            Log.w("lakko-auth", "fresh-identity seed persist (owed) failed", cause)
-        }
-        return true
+    /** [accountIdB64]'s row of the cached recovery phrase. */
+    private fun phraseRow(accountIdB64: String): PhraseRow = object : PhraseRow {
+        override fun read(): ByteArray? =
+            me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, accountIdB64)
+
+        override fun write(phrase: ByteArray) =
+            me.lakko.app.backup.PhraseStore.putPhrase(applicationContext, accountIdB64, phrase)
+
+        override fun delete() =
+            me.lakko.app.backup.PhraseStore.deletePhrase(applicationContext, accountIdB64)
     }
 
     /**
@@ -2354,76 +2321,92 @@ public class AuthRepository(
             mnemonic.phrase() to mnemonic.toSeed()
         }
 
-        // Publish the NEW bundle WITHOUT a supersession proof FIRST, and FAIL
-        // the flow if it does not land — otherwise a transient network error
-        // would leave the device with a cached fresh seed while the server
-        // still serves the OLD bundle, a torn state the user cannot self-heal
-        // (provideRecoveryPhrase with the new phrase would then hard-block
-        // against the stale published key). Publishing before any local
-        // mutation keeps a failure fully recoverable: the device is untouched
-        // and the user can retry.
+        // The phrase goes into this account's own protected row BEFORE the
+        // publish (one rule on web, iOS and Android). From the publish on it
+        // is the account's only way back, and it must not exist in this call
+        // alone: the app can be killed on the phrase screen, the session can
+        // change underneath. A row that cannot be written refuses the mint
+        // here, where nothing irreversible has happened.
+        val staged = StagedPhrase(phraseRow(accountIdB64), phrase)
         try {
-            publishIdentityFor(
-                landing = IdentityLanding.FRESH_IDENTITY,
-                accountId = accountIdBytes,
-                accountIdentitySeed = seed,
-                sessionToken = sessionToken,
-            )
+            try {
+                staged.stage()
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "fresh identity refused: the new phrase could not be stored on this device", cause)
+                throw AuthClientArgError(
+                    "The new recovery phrase could not be stored on this device. Nothing was changed.",
+                )
+            }
+            try {
+                // Signed out (or another landing) while the phrase was being
+                // stored: stop here, with the old identity still published.
+                bound.ensureCurrent()
+                // Publish the NEW bundle WITHOUT a supersession proof, and
+                // FAIL the flow if it does not land: the device then holds
+                // nothing of the new identity (the row is put back below) and
+                // the person can retry.
+                publishIdentityFor(
+                    landing = IdentityLanding.FRESH_IDENTITY,
+                    accountId = accountIdBytes,
+                    accountIdentitySeed = seed,
+                    sessionToken = sessionToken,
+                )
+            } catch (cause: Throwable) {
+                if (!staged.rollback()) {
+                    Log.w("lakko-auth", "fresh identity not published, and the phrase row could not be put back")
+                }
+                throw cause
+            }
         } catch (cause: Throwable) {
             seed.fill(0)
+            staged.close()
             throw cause
         }
         // The publish cannot be taken back: the account's identity is the new
-        // one now, and its phrase exists only in this call. The flow goes on
-        // to the phrase screen whatever happened to the session meanwhile - an
-        // identity whose phrase nobody was shown is the worse outcome - with
-        // ONE exception: the phrase screen of this account is never put over
-        // another account's session. Then the phrase is kept owed instead.
-        // (Web presents the screen in that case too; the maintainer decided
-        // against it for every client, 2026-10-13.)
+        // one now. The phrase is owed until the person confirms they saved it
+        // ([confirmFreshPhraseSaved], or the phrase screen of a later sign-in),
+        // in EVERY case below. Marked only while the row still holds it: a
+        // forget-device in between wiped the row, and nothing is written back
+        // for an account the device was told to forget.
+        val held = staged.isHeld()
+        staged.close()
+        if (held) markSignupPhraseOwed(phraseOwedMarkers, accountIdB64)
+        // The flow goes on to the phrase screen whatever happened to the
+        // session meanwhile, with ONE exception: the phrase screen of this
+        // account is never put over another account's session. Then the
+        // account's next sign-in on this device shows it first.
         val after = freshIdentityAfterPublish(
             stillBound = bound.isCurrent,
             now = mutableState.value,
             accountIdB64 = accountIdB64,
         )
-        if (after == FreshIdentityAfterPublish.KEEP_OWED) {
-            // Another account is signed in (or parked) on this device: its
-            // screen stays. The phrase is not lost with this call: it is kept
-            // in this account's own stores, owed, and shown first at the
-            // account's next sign-in here.
-            val kept = keepFreshPhraseOwed(accountIdB64, phrase, seed)
-            Log.w(
-                "lakko-auth",
-                "fresh identity published while another account is signed in; " +
-                    if (kept) "its phrase is kept, owed to the account" else "its phrase could NOT be kept",
-            )
-            seed.fill(0)
-            bound.ensureCurrent()
-        }
-
-        // Signed out (or the device forgotten) while the publish was out:
-        // nothing of the account is written back to the device. The phrase
-        // screen below still comes up, and the seed is cached when the person
-        // types the phrase at the next sign-in.
-        if (after == FreshIdentityAfterPublish.SHOW_AND_KEEP) {
-            // Bootstrap the device-key existence gate from the fresh seed (no
-            // password on this path). No-op if a key already exists.
+        // The seed cache and the device-key gate make that sign-in (or a
+        // relaunch) land a session. Not after a mere sign-out: a forget-device
+        // looks the same from here, and without them the account parks on its
+        // restore screen and [completeParkFromOwedPhrase] finishes from the
+        // kept phrase.
+        if (after == FreshIdentityAfterPublish.SHOW_AND_KEEP ||
+            (after == FreshIdentityAfterPublish.KEEP_OWED && held)
+        ) {
             bootstrapDeviceKeyFromSeedBestEffort(
                 accountIdB64 = accountIdB64,
                 accountIdentitySeed = seed,
                 context = "mintFreshIdentity",
             )
-
-            // Cache the fresh seed locally (best-effort) so warm relaunch works.
             try {
-                AccountIdentitySeedStore.putAccountIdentitySeed(
-                    applicationContext,
-                    accountIdB64,
-                    seed,
-                )
+                AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, seed)
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "fresh-identity seed persist failed", cause)
             }
+        }
+        if (after == FreshIdentityAfterPublish.KEEP_OWED) {
+            Log.w(
+                "lakko-auth",
+                "fresh identity published while another account holds the device; " +
+                    if (held) "its phrase is owed to the account" else "its phrase is no longer on this device",
+            )
+            seed.fill(0)
+            throw me.lakko.app.StaleBindingException()
         }
 
         // Stash the completion + phrase; flip to the save-phrase state.
@@ -2631,6 +2614,9 @@ public class AuthRepository(
     public fun confirmFreshPhraseSaved() {
         val pending = pendingFreshPhrase.getAndSet(null)
             ?: throw AuthClientArgError("no fresh identity to confirm")
+        // The person confirmed they saved it: no longer owed. Before the
+        // landing, so the session does not open on the same phrase again.
+        clearSignupPhraseOwed(phraseOwedMarkers, pending.accountIdB64)
         installIdentitySecrets(
             pending.accountIdB64,
             IdentitySecrets(
@@ -3237,8 +3223,10 @@ public class AuthRepository(
         // ADR-0017: drop any parked fresh-device fail-safe context
         // (a NeedsRecoveryPhrase user who backed out via Sign out).
         clearPendingRecovery()
-        // A phrase screen left unacknowledged is not owed across a sign-out.
-        if (cached != null) clearSignupPhraseOwed(phraseOwedMarkers, cached.accountIdB64)
+        // A phrase the person has not confirmed stays owed across a sign-out
+        // (the marker and the cached phrase are kept): the account's next
+        // sign-in on this device shows it again. Only the confirmation and
+        // forget-device end it.
         landedState = AuthState.Anon(cachedUsername = cached?.username)
         // After the state: the guest flag must not drop while a session is
         // still observed (the app shell would be drawn for a guest).
@@ -4133,12 +4121,13 @@ internal enum class FreshIdentityAfterPublish {
     SHOW_AND_KEEP,
 
     /** Signed out meanwhile and nobody else signed in: show the phrase, write
-     *  nothing of the account to the device. */
+     *  nothing more of the account to the device (the phrase itself was
+     *  stored before the publish). */
     SHOW_ONLY,
 
     /** Another account holds the device: this account's phrase screen is not
-     *  put over it. The phrase is kept in the minting account's own stores,
-     *  owed, for its next sign-in on this device. */
+     *  put over it. The phrase, stored before the publish and owed, is shown
+     *  first at that account's next sign-in on this device. */
     KEEP_OWED,
 }
 

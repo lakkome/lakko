@@ -636,3 +636,52 @@ final class ReachSyncBindingTests: XCTestCase {
         ds.releaseAll()
     }
 }
+
+// MARK: - The fresh phrase is kept before its identity is published
+
+final class FreshPhraseKeepTests: XCTestCase {
+
+    private final class Row {
+        var value: Data?
+        var failWrites = false
+        var ports: FreshPhraseKeep.Ports {
+            FreshPhraseKeep.Ports(
+                read: { self.value },
+                write: {
+                    if self.failWrites { throw AuthClientError.argument("keychain") }
+                    self.value = $0
+                },
+                delete: { self.value = nil })
+        }
+    }
+
+    func testThePhraseIsInTheCacheBeforeAnythingElseHappens() throws {
+        let row = Row()
+        _ = try FreshPhraseKeep.keep(phrase: "fresh words", ports: row.ports)
+        XCTAssertEqual(row.value, Data("fresh words".utf8))
+    }
+
+    /// Nothing is published for a phrase that could not be kept.
+    func testAPhraseThatCannotBeKeptRefusesTheMint() {
+        let row = Row()
+        row.value = Data("older words".utf8)
+        row.failWrites = true
+        XCTAssertThrowsError(try FreshPhraseKeep.keep(phrase: "fresh words", ports: row.ports))
+        XCTAssertEqual(row.value, Data("older words".utf8), "the row is as it was")
+    }
+
+    func testAMintThatDidNotPublishPutsThePreviousRowBack() throws {
+        let row = Row()
+        row.value = Data("older words".utf8)
+        let kept = try FreshPhraseKeep.keep(phrase: "fresh words", ports: row.ports)
+        kept.undo()
+        XCTAssertEqual(row.value, Data("older words".utf8))
+    }
+
+    func testAMintThatDidNotPublishLeavesNoRowWhereThereWasNone() throws {
+        let row = Row()
+        let kept = try FreshPhraseKeep.keep(phrase: "fresh words", ports: row.ports)
+        kept.undo()
+        XCTAssertNil(row.value)
+    }
+}

@@ -184,3 +184,19 @@ export function freshPhraseDisposition(args: {
   if (args.boundAccount === null) return "show";
   return args.boundAccount === args.mintedFor ? "show" : "owe";
 }
+
+/**
+ * Whether a sign-in that would park in the restore prompt (no readable
+ * AccountIdentity seed on this device) is completed from the phrase this
+ * device kept instead. Only for an account whose phrase screen is still owed:
+ * that phrase was never shown, so the person cannot type it. And only with a
+ * device key, which is what the kept phrase is wrapped under. The completion
+ * itself is the ordinary phrase path, which refuses a phrase the published
+ * identity does not confirm.
+ */
+export function owedPhraseCompletesPark(args: {
+  readonly owed: boolean;
+  readonly deviceKeyPresent: boolean;
+}): boolean {
+  return args.owed && args.deviceKeyPresent;
+}

@@ -14,6 +14,11 @@ package me.lakko.app.auth
  * phrase is NOT written here; it is already kept in the Keystore-backed
  * [me.lakko.app.backup.PhraseStore] under the account's key, and a restart
  * reads it back from there ([owedSignupPhrase]).
+ *
+ * The same marker covers the phrase of a fresh identity
+ * (`AuthRepository.mintFreshIdentity`). It is cleared when the person confirms
+ * they saved the phrase, and by forget-device; a sign-out keeps it, so an
+ * unconfirmed phrase is shown again at the account's next sign-in.
  */
 
 /** The preferences file of the owed marker. */

@@ -1834,6 +1834,7 @@ public final class AuthRepository: ObservableObject {
             state = .needsRecoveryPhrase(
                 SessionAccount(accountIdB64: accountIdB64, username: username)
             )
+            completeParkFromOwedPhrase(accountIdB64: accountIdB64)
             return
         }
         finishCanonicalSession(
@@ -2556,6 +2557,41 @@ public final class AuthRepository: ObservableObject {
                 username: username
             )
         )
+        completeParkFromOwedPhrase(accountIdB64: accountIdB64)
+    }
+
+    /// A sign-in parked in the restore prompt because this device holds no
+    /// identity seed for the account, while a recovery phrase the person was
+    /// never shown is still owed and in this account's phrase cache (a fresh
+    /// identity whose seed did not persist, or whose phrase screen never
+    /// came up). Asking for that phrase would ask for something nobody has
+    /// seen, so the park is completed from the kept phrase, through
+    /// ``provideRecoveryPhrase(mnemonicPhrase:)`` and its check against the
+    /// published identity. The landing then shows the owed phrase first.
+    ///
+    /// Any failure leaves the account parked in the prompt as before.
+    private func completeParkFromOwedPhrase(accountIdB64: String) {
+        guard signupPhraseOwed.isOwed(accountIdB64: accountIdB64) else { return }
+        let phrase: String
+        do {
+            guard var bytes = try phraseStore.getPhrase(accountIdB64: accountIdB64) else { return }
+            defer { bytes.resetBytes(in: 0..<bytes.count) }
+            guard let text = String(data: bytes, encoding: .utf8) else { return }
+            phrase = text
+        } catch {
+            NSLog("[auth] reading the owed recovery phrase failed: \(error)")
+            return
+        }
+        let bound = binding.capture()
+        Task { @MainActor [weak self] in
+            guard let self, bound.isCurrent else { return }
+            do {
+                try await self.provideRecoveryPhrase(mnemonicPhrase: phrase)
+            } catch {
+                if error is StaleBindingError { return }
+                NSLog("[auth] the kept recovery phrase did not complete the restore: \(error)")
+            }
+        }
     }
 
     /// The just-minted fresh recovery phrase, for the
@@ -2606,13 +2642,30 @@ public final class AuthRepository: ObservableObject {
         // sign-out: an identity whose phrase nobody was shown is the worse
         // outcome (the web decision). The one exception is another account
         // signed in by then (``FreshIdentityLanding``).
+        //
+        // So BEFORE the publish the phrase goes into this account's own
+        // Keychain phrase cache: from here on it can be shown again whatever
+        // happens to the app or to the screen. Fail loud: if it cannot be
+        // kept, nothing is published. The row it replaces is put back when
+        // the publish does not happen.
+        let kept = try FreshPhraseKeep.keep(
+            phrase: phrase, accountIdB64: pending.accountIdB64, store: phraseStore)
         let bound = binding.capture()
-        try await publishFreshIdentityBundle(
-            accountId: pending.accountIdBytes,
-            sessionToken: pending.sessionToken,
-            seed: seed,
-            beforePublish: { try bound.require() }
-        )
+        do {
+            try await publishFreshIdentityBundle(
+                accountId: pending.accountIdBytes,
+                sessionToken: pending.sessionToken,
+                seed: seed,
+                beforePublish: { try bound.require() }
+            )
+        } catch {
+            kept.undo()
+            throw error
+        }
+        // Published. The phrase is owed until the person confirms it
+        // (``confirmFreshPhraseSaved()``), on every route from here: shown
+        // now, or at this account's next sign-in.
+        signupPhraseOwed.mark(accountIdB64: pending.accountIdB64)
 
         // Bootstrap the device-key existence gate from the fresh seed
         // (no password on this path); no-op if a key already exists.
@@ -2645,16 +2698,10 @@ public final class AuthRepository: ObservableObject {
         case .keepForNextSignIn:
             // Another account signed in while the publish was out. Its
             // session and its screens are not this flow's: nothing of the
-            // state is touched. The phrase is kept under THIS account's own
-            // keys and marked owed, so this account's next sign-in on this
-            // device (warm, from the seed cached above) shows it before
-            // anything else (``restoreOwedSignupPhrase(accountIdB64:)``).
-            cacheBackupPhraseBestEffort(
-                accountIdB64: pending.accountIdB64,
-                phrase: phrase,
-                context: "mintFreshIdentity, another account signed in"
-            )
-            signupPhraseOwed.mark(accountIdB64: pending.accountIdB64)
+            // state is touched. The phrase is in THIS account's cache and
+            // owed (above), so this account's next sign-in on this device
+            // shows it before anything else
+            // (``restoreOwedSignupPhrase(accountIdB64:)``).
             NSLog("[auth] fresh identity published after another account signed in; its phrase is owed at that account's next sign-in")
             throw StaleBindingError()
         }
@@ -2687,6 +2734,10 @@ public final class AuthRepository: ObservableObject {
             throw AuthClientError.argument("no fresh identity to confirm")
         }
         pendingFreshPhrase = nil
+        // Confirmed: no longer owed. Before the session lands, so the landing
+        // does not show the same phrase again. The cached phrase stays, as
+        // after a sign-up: it is what this device seals its backup with.
+        signupPhraseOwed.clear(accountIdB64: pending.accountIdB64)
         sessionStore.save(
             PersistedSession(
                 accountIdB64: pending.accountIdB64,
@@ -3525,6 +3576,63 @@ struct PendingFreshPhrase {
     let sessionExpiresAtMs: Int64
     let username: String
     let phrase: String
+}
+
+/// The fresh phrase, written to the minting account's phrase cache before the
+/// identity it derives is published (``AuthRepository/mintFreshIdentity()``).
+struct FreshPhraseKeep {
+    /// The account's phrase-cache row.
+    struct Ports {
+        var read: () throws -> Data?
+        var write: (Data) throws -> Void
+        var delete: () throws -> Void
+    }
+
+    /// Put the row back as it was before ``keep(phrase:ports:)``: the phrase
+    /// it replaced, or no row. For a mint that stopped before its publish.
+    /// Best effort.
+    let undo: () -> Void
+
+    /// Write `phrase` to the row. Throws when it cannot be written: the
+    /// caller then publishes nothing.
+    static func keep(phrase: String, ports: Ports) throws -> FreshPhraseKeep {
+        // A row that cannot be read is treated as absent: the write below
+        // replaces it either way.
+        var replaced = (try? ports.read()) ?? nil
+        var bytes = Data(phrase.utf8)
+        defer { bytes.resetBytes(in: 0..<bytes.count) }
+        do {
+            try ports.write(bytes)
+        } catch {
+            Self.zero(&replaced)
+            throw error
+        }
+        return FreshPhraseKeep(undo: {
+            do {
+                if let replaced {
+                    try ports.write(replaced)
+                } else {
+                    try ports.delete()
+                }
+            } catch {
+                NSLog("[auth] phrase cache rollback (mintFreshIdentity) failed: \(error)")
+            }
+            Self.zero(&replaced)
+        })
+    }
+
+    private static func zero(_ data: inout Data?) {
+        guard var bytes = data else { return }
+        bytes.resetBytes(in: 0..<bytes.count)
+        data = bytes
+    }
+
+    static func keep(phrase: String, accountIdB64: String, store: PhraseStore) throws -> FreshPhraseKeep {
+        try keep(phrase: phrase, ports: Ports(
+            read: { try store.getPhrase(accountIdB64: accountIdB64) },
+            write: { try store.putPhrase(accountIdB64: accountIdB64, phraseBytes: $0) },
+            delete: { try store.deletePhrase(accountIdB64: accountIdB64) }))
+    }
 }
 
 /// Where ``AuthRepository/mintFreshIdentity()`` goes once the fresh identity

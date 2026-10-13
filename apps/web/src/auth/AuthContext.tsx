@@ -174,6 +174,7 @@ import {
   clearSignupPhraseOwed,
   freshPhraseDisposition,
   isSignupPhraseOwed,
+  owedPhraseCompletesPark,
   markSignupPhraseOwed,
 } from "./phrase-gate";
 import { restoreAccountBackup, restoreOwedAccountBackup } from "../backup/restore";
@@ -1527,19 +1528,90 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // prior password login on this browser whose seed cache is
     // missing), carry it — overwriting it with an identity-seed-
     // derived key would orphan every wrapped store.
-    setPendingRecovery({
-      accountIdBytes,
-      accountIdB64,
-      exportKey: new Uint8Array(0),
-      deviceKey,
-      sessionToken: triple.sessionToken,
-      sessionExpiresAtMs: triple.sessionExpiresAtMs,
-      username,
-    });
+    await parkForRestore(
+      {
+        accountIdBytes,
+        accountIdB64,
+        exportKey: new Uint8Array(0),
+        deviceKey,
+        sessionToken: triple.sessionToken,
+        sessionExpiresAtMs: triple.sessionExpiresAtMs,
+        username,
+      },
+      flow,
+    );
+  }
+
+  /**
+   * Park an authenticated account whose AccountIdentity seed is not readable
+   * on this device, and show the restore prompt - unless this device itself
+   * still holds a phrase that account was never shown.
+   *
+   * That is the account whose phrase screen is owed (`owePhraseScreen`): the
+   * phrase sits in its device-key-wrapped cache, and asking the person to
+   * type a phrase they have not seen would lock them out of an identity this
+   * browser can restore. So the park is completed from the kept phrase through
+   * the ordinary `provideRecoveryPhrase` path, with its fail-closed check
+   * against the published identity; the landing then shows the phrase first.
+   * Anything short of that (no marker, no device key, an unreadable row, a
+   * phrase the directory does not confirm, a network failure) falls back to
+   * the prompt.
+   */
+  async function parkForRestore(parked: PendingRecovery, flow: FlowBinding): Promise<void> {
+    setPendingRecovery(parked);
+    if (await completeParkFromOwedPhrase(parked, flow)) return;
     setState({
       kind: "needs-recovery-phrase",
-      account: { accountId: accountIdB64, username },
+      account: { accountId: parked.accountIdB64, username: parked.username },
     });
+  }
+  async function completeParkFromOwedPhrase(
+    parked: PendingRecovery,
+    flow: FlowBinding,
+  ): Promise<boolean> {
+    const deviceKey = parked.deviceKey;
+    const owed =
+      isSignupPhraseOwed(guestStorage(), parked.accountIdB64) ||
+      phraseOwedInMemory.has(parked.accountIdB64);
+    if (deviceKey === null || !owedPhraseCompletesPark({ owed, deviceKeyPresent: true })) {
+      return false;
+    }
+    let phrase: string | null = null;
+    try {
+      const cached = await getPhrase(parked.accountIdB64, deviceKey);
+      if (cached !== null) {
+        phrase = new TextDecoder().decode(cached.phrase);
+        cached.phrase.fill(0);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("reading the owed recovery phrase for a parked sign-in failed", err);
+    }
+    // Overtaken while the cache was read: what this flow parked goes.
+    if (!flow.current()) {
+      if (pendingRecovery() === parked) setPendingRecovery(null);
+      throw new StaleBindingError();
+    }
+    if (phrase === null) return false;
+    try {
+      await api.provideRecoveryPhrase(phrase);
+      return true;
+    } catch (err) {
+      if (err instanceof StaleBindingError) throw err;
+      // eslint-disable-next-line no-console
+      console.warn(
+        "completing a parked sign-in from the owed recovery phrase failed; showing the restore prompt",
+        err instanceof Error ? err.name : "unknown",
+      );
+      if (!flow.current()) {
+        if (pendingRecovery() === parked) setPendingRecovery(null);
+        throw new StaleBindingError();
+      }
+      // `provideRecoveryPhrase` leaves the parked context in place when it
+      // refuses; park again if it did not.
+      if (pendingRecovery() !== parked) setPendingRecovery(parked);
+      return false;
+    }
   }
 
   onMount(() => {
@@ -2364,19 +2436,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // Fresh-device fail-safe (ADR-0017). Auth succeeded; identity
         // restore is pending the phrase. Stash the context and flip
         // state — `provideRecoveryPhrase` finishes from here.
-        setPendingRecovery({
-          accountIdBytes,
-          accountIdB64,
-          exportKey: result.exportKey,
-          deviceKey,
-          sessionToken: result.sessionToken,
-          sessionExpiresAtMs: result.sessionExpiresAtMs,
-          username: resolvedUsername,
-        });
-        setState({
-          kind: "needs-recovery-phrase",
-          account: { accountId: accountIdB64, username: resolvedUsername },
-        });
+        await parkForRestore(
+          {
+            accountIdBytes,
+            accountIdB64,
+            exportKey: result.exportKey,
+            deviceKey,
+            sessionToken: result.sessionToken,
+            sessionExpiresAtMs: result.sessionExpiresAtMs,
+            username: resolvedUsername,
+          },
+          flow,
+        );
         return;
       }
 
@@ -2581,19 +2652,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
 
       if (accountIdentitySeed === null) {
-        setPendingRecovery({
-          accountIdBytes,
-          accountIdB64,
-          exportKey,
-          deviceKey: newDeviceKey,
-          sessionToken: assertion.session_token,
-          sessionExpiresAtMs: assertion.session_expires_at_ms,
-          username: cached.username,
-        });
-        setState({
-          kind: "needs-recovery-phrase",
-          account: { accountId: accountIdB64, username: cached.username },
-        });
+        await parkForRestore(
+          {
+            accountIdBytes,
+            accountIdB64,
+            exportKey,
+            deviceKey: newDeviceKey,
+            sessionToken: assertion.session_token,
+            sessionExpiresAtMs: assertion.session_expires_at_ms,
+            username: cached.username,
+          },
+          flow,
+        );
         return;
       }
 

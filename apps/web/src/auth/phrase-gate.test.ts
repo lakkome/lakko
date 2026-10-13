@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
   freshPhraseDisposition,
+  owedPhraseCompletesPark,
   anonymousGuardView,
   clearSignupPhraseOwed,
   isSignupPhraseOwed,
@@ -159,5 +163,44 @@ describe("a freshly minted phrase after its identity was published", () => {
     expect(sessionGuardView("session", true)).toBe("save-signup-phrase");
     clearSignupPhraseOwed(storage, "alice");
     expect(isSignupPhraseOwed(storage, "alice")).toBe(false);
+  });
+});
+
+describe("a sign-in that would park while its phrase is still owed", () => {
+  it("is completed from the kept phrase only when it is owed and a device key holds it", () => {
+    expect(owedPhraseCompletesPark({ owed: true, deviceKeyPresent: true })).toBe(true);
+    expect(owedPhraseCompletesPark({ owed: false, deviceKeyPresent: true })).toBe(false);
+    expect(owedPhraseCompletesPark({ owed: true, deviceKeyPresent: false })).toBe(false);
+  });
+
+  // `AuthContext.tsx` needs a Solid runtime this suite does not have.
+  const src = readFileSync(fileURLToPath(new URL("./AuthContext.tsx", import.meta.url)), "utf8");
+
+  it("every park with a device key goes through the owed-phrase completion", () => {
+    // login, passkey (same device), and the access-recovery landing.
+    expect(src.match(/await parkForRestore\(/g)?.length).toBe(3);
+    // The one direct park left is the passkey fresh-device branch, which has
+    // no device key and so no readable phrase cache.
+    expect(src.match(/kind: "needs-recovery-phrase",\n/g)?.length).toBe(2);
+    expect(src).toMatch(
+      /if \(await completeParkFromOwedPhrase\(parked, flow\)\) return;\s*setState\(\{\s*kind: "needs-recovery-phrase"/,
+    );
+    // Through the ordinary, fail-closed phrase path - never a second one.
+    expect(src).toMatch(/await api\.provideRecoveryPhrase\(phrase\);\s*return true;/);
+  });
+
+  it("a plain sign-out keeps the owed marker and the cached phrase", () => {
+    const start = src.indexOf("\n    logout() {");
+    const end = src.indexOf("\n    async forgetDevice() {");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const logout = src.slice(start, end);
+    expect(logout).not.toContain("clearSignupPhraseOwed");
+    expect(logout).not.toContain("deletePhrase");
+    expect(logout).not.toContain("phraseOwedInMemory.delete");
+    // Forget-device wipes both (`wipe-account.ts`).
+    const wipe = readFileSync(fileURLToPath(new URL("./wipe-account.ts", import.meta.url)), "utf8");
+    expect(wipe).toContain("deletePhrase(accountIdB64)");
+    expect(wipe).toContain("clearSignupPhraseOwed(storage, accountIdB64)");
   });
 });
