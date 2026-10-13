@@ -153,6 +153,19 @@ if ! grep -q '^LAKKO_AUTH_HANDLE_PEPPER=' $ENV_FILE; then
   echo "login-handle pepper added to the env file"
 fi
 
+# The recovery email (ADR-0067) arrived later: an older env file gains the
+# pepper that keys the stored (login handle, address) values, generated once
+# and then kept (regenerating it turns every recovery email off). The SMTP
+# relay is NOT written here: its password is typed into the env file by the
+# operator, and without LAKKO_AUTH_SMTP_HOST the service sends no letters.
+if ! grep -q '^LAKKO_AUTH_EMAIL_PEPPER=' $ENV_FILE; then
+  echo "LAKKO_AUTH_EMAIL_PEPPER=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "recovery-email pepper added to the env file"
+fi
+if ! grep -q '^LAKKO_AUTH_SMTP_HOST=' $ENV_FILE; then
+  echo "note: no LAKKO_AUTH_SMTP_* in the env file; recovery letters are not sent (ADR-0067)"
+fi
+
 # The DS -> push-gw wake forward (ADR-0054) arrived later: an older env file
 # gains one shared secret here, written to both services' variables at once
 # (a half-configured pair would stop the DS from starting).

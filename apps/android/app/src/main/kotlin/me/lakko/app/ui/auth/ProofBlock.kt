@@ -194,7 +194,7 @@ public class ProofController(
         state = ProofBlockState(mode = state.mode)
     }
 
-    private companion object {
+    internal companion object {
         /** Credential Manager passkeys need Android 9. */
         val PASSKEYS_SUPPORTED: Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
     }
