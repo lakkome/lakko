@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The one session-token provider (ADR-0065 section 3.3).
+ * The one session-token provider (ADR-0073 section 3.3).
  *
  * Every authenticated client of this app (auth, discovery, storage,
  * gif-proxy, the call JWT and TURN mints, the backup head, the anonymous
@@ -21,7 +21,7 @@
  *      bearer route, raises `superseded` once: the device signs out and
  *      wipes (the listener in `AuthContext` runs it); `refresh-invalid`
  *      raises `refresh-invalid`: the sign-in screen, nothing wiped;
- *   4. `401 device-revoked` (ADR-0066), from the refresh route or from any
+ *   4. `401 device-revoked` (ADR-0074), from the refresh route or from any
  *      bearer route, raises `device-revoked` once: this device was removed
  *      from the account, signs out and wipes everything.
  *
@@ -63,7 +63,7 @@ export type RefreshOutcome =
   /** The account's keys were reset elsewhere: the pair is dropped and
    *  `superseded` was raised. */
   | "superseded"
-  /** This device was removed from the account (ADR-0066): the pair is
+  /** This device was removed from the account (ADR-0074): the pair is
    *  dropped and `device-revoked` was raised. */
   | "device-revoked"
   /** The credential is bad or expired: the pair is dropped and
@@ -92,7 +92,7 @@ export class SessionTokenProvider {
    *  page lifetime (one per 15 minutes by design). */
   private readonly replaced = new Set<string>();
   private inflight: Promise<RefreshOutcome> | null = null;
-  /** ADR-0066 section 3.3: the pair that was held when the server answered
+  /** ADR-0074 section 3.3: the pair that was held when the server answered
    *  `key-generation-superseded`. A kept device exchanges its refresh
    *  credential for a pair at the new generation with a statement by the new
    *  account key; a device that cannot is signed out as before. */
@@ -145,7 +145,7 @@ export class SessionTokenProvider {
     return this.held?.keyGeneration ?? null;
   }
 
-  /** The pair that was superseded, for `accountIdB64` (ADR-0066 section
+  /** The pair that was superseded, for `accountIdB64` (ADR-0074 section
    *  3.3); `null` when none is kept. Dropped by the next `install`. */
   supersededPair(accountIdB64: string): SessionPair | null {
     return this.supersededHeld !== null && this.supersededHeld.accountIdB64 === accountIdB64
@@ -256,7 +256,7 @@ export class SessionTokenProvider {
 
   /**
    * A bearer route of auth answered `401 device-revoked` to the held token
-   * (ADR-0066 section 0.4): this device was removed from the account. Drop
+   * (ADR-0074 section 0.4): this device was removed from the account. Drop
    * the pair and raise `device-revoked` once.
    */
   reportDeviceRevoked(): void {

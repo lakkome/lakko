@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0067 — the recovery-email and account-notice routes of
+// ADR-0075 — the recovery-email and account-notice routes of
 // `lakko-svc-auth` (`services/auth/src/recovery_email.rs`,
 // `account_notices.rs`), their wire shapes, and the mapping of their
 // refusals.

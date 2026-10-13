@@ -10,7 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0066 section 3.5 - who is the same person across a PROVEN rotation,
+ * ADR-0074 section 3.5 - who is the same person across a PROVEN rotation,
  * and that an unproven key change never gets predecessor treatment.
  */
 class ProvenPredecessorsTest {
@@ -132,7 +132,7 @@ class ProvenPredecessorsTest {
         }
     }
 
-    // --- ADR-0066 section 3.5a rule 1, for what is sealed to a key ----------
+    // --- ADR-0074 section 3.5a rule 1, for what is sealed to a key ----------
 
     @Test
     fun `a contact request is never sent for a key that resolves to another`() {
@@ -145,7 +145,7 @@ class ProvenPredecessorsTest {
         assertTrue(staleRecipientKey(old, current))
     }
 
-    // --- ADR-0066 section 3.5a rule 5 / people search: which key came first --
+    // --- ADR-0074 section 3.5a rule 5 / people search: which key came first --
 
     @Test
     fun `a key precedes only the keys its own proven steps lead to`() {

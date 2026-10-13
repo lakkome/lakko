@@ -6,7 +6,7 @@ package me.lakko.app.auth
 import kotlinx.coroutines.CancellationException
 
 /*
- * ADR-0066 "T5 as built" items 17, 24 and 25 - two retries an account
+ * ADR-0074 "T5 as built" items 17, 24 and 25 - two retries an account
  * statement's sender owes, as pure decisions a host JVM test runs.
  *
  *   * `401 {"error":"statement-stale","server_time_ms":T}` is answered ONLY

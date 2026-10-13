@@ -4,7 +4,7 @@
 import Combine
 import Foundation
 
-/// ADR-0067 — what the signed-in account's protection is and what its
+/// ADR-0075 — what the signed-in account's protection is and what its
 /// devices are to be told, as this device knows it: the status of
 /// `GET /recovery-email`, the notices of `GET /account/notices`, the
 /// no-protection banner.
@@ -101,7 +101,7 @@ final class AccountProtectionCenter: ObservableObject {
     private var refreshing = false
     /// The composition root's watch on the address register.
     var addressWatch: AnyCancellable?
-    /// The composition root's watch on the own-username register (ADR-0068).
+    /// The composition root's watch on the own-username register (ADR-0076).
     var usernameWatch: AnyCancellable?
     /// An address to write to the register once the synced state is loaded
     /// (`.some(nil)` = a removal).

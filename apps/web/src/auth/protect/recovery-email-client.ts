@@ -3,7 +3,7 @@
 
 /**
  * The recovery-email and account-notice routes of `services/auth`
- * (ADR-0067 sections 6, 7 and 9), one method per route.
+ * (ADR-0075 sections 6, 7 and 9), one method per route.
  *
  * Encodings: `handle`, `challenge_id` and `ticket` are URL-safe base64
  * without padding; `vault_salt` (16 bytes), `sealed_entropy` (44 bytes) and

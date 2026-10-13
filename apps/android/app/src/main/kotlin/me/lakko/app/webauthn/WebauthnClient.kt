@@ -195,7 +195,7 @@ public class WebauthnClient(
         context: android.content.Context,
         accountIdB64: String? = null,
         registration: WebauthnRegistration = WebauthnRegistration(),
-        /** ADR-0066 - base64url of this device's id, when the account is
+        /** ADR-0074 - base64url of this device's id, when the account is
          *  known beforehand ([accountIdB64] given); else the session lands
          *  naming no device and is bound afterwards. */
         deviceIdB64Url: String? = null,
@@ -543,7 +543,7 @@ public data class AuthStartResponse(
 public data class AuthFinishRequest(
     @SerialName("state_id") public val stateId: String,
     public val credential: JsonElement,
-    /** ADR-0066 - absent = the session names no device yet. */
+    /** ADR-0074 - absent = the session names no device yet. */
     @SerialName("device_id_b64") public val deviceIdB64: String? = null,
 )
 
@@ -552,7 +552,7 @@ public data class AuthFinishResponse(
     @SerialName("account_id_b64") public val accountIdB64: String,
     @SerialName("session_token") public val sessionToken: String,
     @SerialName("session_expires_at_ms") public val sessionExpiresAtMs: Long,
-    /** ADR-0065: the rest of the session pair. */
+    /** ADR-0073: the rest of the session pair. */
     @SerialName("refresh_token") public val refreshToken: String,
     @SerialName("refresh_expires_at_ms") public val refreshExpiresAtMs: Long,
     @SerialName("key_generation") public val keyGeneration: Long,
@@ -613,7 +613,7 @@ public data class ActionFinishResponse(
 public class PasskeyLoginResult(
     /** base64url, no padding (the server's wire form). */
     public val accountIdB64: String,
-    /** ADR-0065: the session pair the assertion landed. */
+    /** ADR-0073: the session pair the assertion landed. */
     public val session: me.lakko.app.auth.SessionPair,
     public val credentialId: ByteArray?,
     /** 32 bytes, or `null`: the passkey then signs in only. Never sent to
@@ -623,7 +623,7 @@ public class PasskeyLoginResult(
     public val freshGrant: String? = null,
     public val freshGrantExpiresAtMs: Long? = null,
 ) {
-    /** The same result with [pair] as its session (ADR-0066: the pair
+    /** The same result with [pair] as its session (ADR-0074: the pair
      *  `bind-device` returned for a sign-in that named no device). */
     public fun withSession(pair: me.lakko.app.auth.SessionPair): PasskeyLoginResult = PasskeyLoginResult(
         accountIdB64 = accountIdB64,

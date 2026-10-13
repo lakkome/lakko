@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * "Change username" (ADR-0068): the screen, the wiring of the one resumable
+ * "Change username" (ADR-0076): the screen, the wiring of the one resumable
  * operation (`username-change.ts`), and what a landing does with a rename
  * that was not finished.
  *

@@ -132,7 +132,7 @@ export function PasswordChangeGate(props: {
       >
         <form onSubmit={(e) => void onProve(e)} class="lk-stack">
           <ProofBlock gate={gate}>
-            {/* ADR-0067 section 11: three words exist only for a
+            {/* ADR-0075 section 11: three words exist only for a
                 phrase-protected account. */}
             <Show when={wordsOffered()}>
             <div>

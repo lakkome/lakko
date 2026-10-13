@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * What a 401 means (`session-401.ts`, ADR-0065 sections 3.2-3.5): the one
+ * What a 401 means (`session-401.ts`, ADR-0073 sections 3.2-3.5): the one
  * code that signs a device out and wipes it, the one that sends it to the
  * sign-in screen, and the plain 401 that costs one refresh and one retry.
  */
@@ -75,9 +75,9 @@ describe("refreshRefusal", () => {
   });
 });
 
-// ADR-0066 section 0.4: the removed device, against a logout and a reset.
+// ADR-0074 section 0.4: the removed device, against a logout and a reset.
 describe("the two wiping codes do not depend on an order", () => {
-  // ADR-0066 "T3 as built", item 1: the server reads the generation before
+  // ADR-0074 "T3 as built", item 1: the server reads the generation before
   // the device floor. Each code alone decides; the staged wipe and the
   // recall record follow `superseded`, the full wipe `device-revoked`.
   it("maps each code to its own refusal on both routes", () => {

@@ -11,7 +11,7 @@ import Foundation
 ///     (1.17d6)
 ///   * `apps/android/.../ui/auth/SignupViewModel.kt` (1.15d4)
 ///
-/// ADR-0067 D2: the recovery phrase is NOT shown at sign-up. The device
+/// ADR-0075 D2: the recovery phrase is NOT shown at sign-up. The device
 /// generates and keeps it (``DevicePhrase``); this view model never sees
 /// it. What follows the form is "Protect your account" (UX 19.1a), which
 /// the app root shows over the landed session.

@@ -9,7 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0065 R.7 - the repair plans, row by row (mirror of the web
+/** ADR-0073 R.7 - the repair plans, row by row (mirror of the web
  *  `reset-repair` tables). */
 class ResetRepairTest {
     private val roster = listOf(PersonLeaf(0u, "me"), PersonLeaf(1u, "old"), PersonLeaf(2u, "old"), PersonLeaf(3u, "c"))

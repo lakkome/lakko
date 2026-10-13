@@ -480,7 +480,7 @@ export async function composeForwardEnvelope(
 }
 
 /**
- * ADR-0065 R.7 case 1 — compose a **re-send**: the same chat envelope as
+ * ADR-0073 R.7 case 1 — compose a **re-send**: the same chat envelope as
  * [`composeEnvelope`] (text + refs), also carrying the ORIGINAL group id and
  * message id of the message it repeats. The marker is never rendered; a
  * device that already holds the original shows the message once
@@ -680,7 +680,7 @@ export type ParsedBodyResult =
        *  original author's name and / or the origin reference, as the
        *  forwarder wrote them. */
       forward?: ForwardRef;
-      /** ADR-0065 R.7 case 1 — set on a message RE-SENT into a successor
+      /** ADR-0073 R.7 case 1 — set on a message RE-SENT into a successor
        *  one-to-one: where it was originally sent. Never drawn
        *  (`resend-marker.ts`). */
       resendOrigin?: ForwardOrigin;
@@ -807,7 +807,7 @@ export async function parseBodyEnvelope(
           : { origin: { groupIdB64: originGroup, messageId: Number(originMessage) } }),
       };
     }
-    // ADR-0065 R.7 case 1 — the re-send marker: both halves or neither.
+    // ADR-0073 R.7 case 1 — the re-send marker: both halves or neither.
     const resendGroup = parsed.resendOriginGroupB64;
     const resendMessage = parsed.resendOriginMessageId;
     const resendOrigin: ForwardOrigin | undefined =

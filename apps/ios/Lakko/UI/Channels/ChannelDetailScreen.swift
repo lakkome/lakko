@@ -52,7 +52,7 @@ struct ChannelDetailScreen: View {
 
     var body: some View {
         Group {
-            // ADR-0065 phase 2 (UX 16.6) — a channel this device owned under
+            // ADR-0073 phase 2 (UX 16.6) — a channel this device owned under
             // keys a reset replaced: the notice and `Remove from this device`;
             // the composer, the rotation and the subscriber management are
             // gone (the server refuses the old owner key).
@@ -204,7 +204,7 @@ struct ChannelHeaderCard: View {
     }
 }
 
-// MARK: - Orphaned by a key reset (ADR-0065 phase 2, UX 16.6)
+// MARK: - Orphaned by a key reset (ADR-0073 phase 2, UX 16.6)
 
 /// The channel as the device that reset its account keys sees it: the header,
 /// one notice stating what the reset did, and one control. The person creates

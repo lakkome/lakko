@@ -765,7 +765,7 @@ function buildDecryptDeps(wasm, core) {
         return null;
       }
     },
-    // ADR-0065 R.5 — which conversation a group belongs to, from the same
+    // ADR-0073 R.5 — which conversation a group belongs to, from the same
     // row. READ-ONLY; `null` on every miss (the notification is then grouped
     // under the group id).
     lookupConversation: async (accountId, deviceKey, groupHex) => {
@@ -779,7 +779,7 @@ function buildDecryptDeps(wasm, core) {
         return null;
       }
     },
-    // ADR-0065 R.5 / R.8 — the account keys an accepted reset retired, from
+    // ADR-0073 R.5 / R.8 — the account keys an accepted reset retired, from
     // the plaintext mirror the app writes (`src/push/superseded-mirror.ts`;
     // the pin store itself is `localStorage`, which a worker cannot read).
     // READ-ONLY (C-59). Every miss is "none retired": the wake is shown.
@@ -791,7 +791,7 @@ function buildDecryptDeps(wasm, core) {
         return null;
       }
     },
-    // ADR-0065 R.7 case 1 — is this a re-sent message whose original this
+    // ADR-0073 R.7 case 1 — is this a re-sent message whose original this
     // device already holds? READ-ONLY, from the two encrypted rows this
     // worker already reads: the message log (the held row and its author)
     // and the sync row (the lineage: which group is an older segment of

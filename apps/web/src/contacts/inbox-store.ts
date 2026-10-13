@@ -64,7 +64,7 @@ export interface StoredMailboxRow {
 export interface PersistedInbox {
   readonly cursor: number;
   readonly pending: readonly StoredMailboxRow[];
-  /** ADR-0065 R.7 case 1 / UX 16.6 — requests from accounts that are
+  /** ADR-0073 R.7 case 1 / UX 16.6 — requests from accounts that are
    *  ALREADY contacts whose identity check had no verdict yet. Never listed;
    *  kept as raw rows like `pending`, because the mailbox cursor has moved
    *  past them and nothing else would bring them back after a reload. */
@@ -217,7 +217,7 @@ export function fromStoredRow(row: StoredMailboxRow): MailboxRow {
 export interface FetchedRequest {
   readonly request: IncomingContactRequest;
   readonly row: MailboxRow;
-  /** ADR-0066 section 3.5a rule 5 - the pending requests this one REPLACES:
+  /** ADR-0074 section 3.5a rule 5 - the pending requests this one REPLACES:
    *  the same person's, sent from a key this request's key provably
    *  superseded. Removed in the same write, so the list shows one request
    *  per person and never a second row. */
@@ -231,7 +231,7 @@ export interface PendingKey {
 }
 
 /**
- * ADR-0066 section 3.5a rule 5 - what a request arriving from `incomingKeyB64`
+ * ADR-0074 section 3.5a rule 5 - what a request arriving from `incomingKeyB64`
  * does to the pending list: it REPLACES every pending request whose key it
  * provably superseded, and is itself DROPPED when a pending request already
  * comes from a key that superseded its own (a stale request never puts the

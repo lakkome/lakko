@@ -516,7 +516,7 @@ pub fn decrypt_attachment(ciphertext: &[u8], key: &[u8], nonce: &[u8]) -> Result
 ///
 /// The optional parts of a chat message are set on the builder before
 /// building and may be combined freely: `setReply`, `setForward` (both
-/// ADR-0052) and `setResendOrigin` (ADR-0065). `build()` emits whatever was
+/// ADR-0052) and `setResendOrigin` (ADR-0073). `build()` emits whatever was
 /// set; `buildReply` / `buildForward` set their own part and keep the rest.
 ///
 /// ```ts
@@ -580,7 +580,7 @@ impl EnvelopeBuilder {
         self.forward = forward_from_parts(forwarded_from, origin_group_id_b64, origin_message_id);
     }
 
-    /// ADR-0065 — mark the message as a RE-SEND into a successor
+    /// ADR-0073 — mark the message as a RE-SEND into a successor
     /// one-to-one: `originGroupIdB64` is the base64 group id of the
     /// conversation it was originally sent in and `originMessageId` (a
     /// `bigint`) its DS `messageId` there. The marker is never rendered; it
@@ -775,7 +775,7 @@ impl ParsedBody {
         self.forward_origin_message_id
     }
 
-    /// ADR-0065 — on a message re-sent into a successor one-to-one, base64
+    /// ADR-0073 — on a message re-sent into a successor one-to-one, base64
     /// of the ORIGINAL conversation's group id; set only together with
     /// `resendOriginMessageId`. Never shown: it lets a device that already
     /// holds the original show the message once.
@@ -784,7 +784,7 @@ impl ParsedBody {
         self.resend_origin_group_b64.clone()
     }
 
-    /// ADR-0065 — the DS `messageId` of the original in that conversation
+    /// ADR-0073 — the DS `messageId` of the original in that conversation
     /// (a `bigint`).
     #[wasm_bindgen(getter, js_name = resendOriginMessageId)]
     pub fn resend_origin_message_id(&self) -> Option<i64> {

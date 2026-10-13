@@ -25,7 +25,7 @@ import { loadWasm } from "../wasm";
 import { dsAccess } from "./access";
 import { DsClient } from "./client";
 
-/** `predecessor` (ADR-0066 section 3.5): the mailbox of the account key the
+/** `predecessor` (ADR-0074 section 3.5): the mailbox of the account key the
  *  conversation leaves are still bound to after a proven key rotation. It is
  *  read for as long as leaves name it. */
 type Slot = "account" | "device" | "predecessor";
@@ -34,7 +34,7 @@ const SLOTS: readonly Slot[] = ["account", "device", "predecessor"];
 const installed: Record<Slot, string | null> = { account: null, device: null, predecessor: null };
 const generation: Record<Slot, number> = { account: 0, device: 0, predecessor: 0 };
 
-/** ADR-0066 section 3.5a - the mailboxes of the INTERMEDIATE own
+/** ADR-0074 section 3.5a - the mailboxes of the INTERMEDIATE own
  *  predecessors (the keys held between two rotations), read inside their own
  *  30-day windows. A list, not a slot: there is one per earlier rotation. */
 let chainInstalled: string[] = [];
@@ -88,7 +88,7 @@ export function installMailboxAccess(slot: Slot, identity: WasmIdentity | null):
 }
 
 /**
- * Install the mailbox signers of the intermediate own predecessors (ADR-0066
+ * Install the mailbox signers of the intermediate own predecessors (ADR-0074
  * section 3.5a rule 4), replacing the previous list. The mailboxes are READ
  * only; the claim is the idempotent one this key already made when it was
  * the account's. Never throws.

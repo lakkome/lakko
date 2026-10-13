@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-/** Log out at the server too (`logout-owed.ts`, ADR-0066 section 2.1). */
+/** Log out at the server too (`logout-owed.ts`, ADR-0074 section 2.1). */
 import { describe, expect, it } from "vitest";
 
 import {

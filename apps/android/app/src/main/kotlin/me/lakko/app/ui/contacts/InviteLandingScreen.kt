@@ -70,7 +70,7 @@ public fun InviteLandingScreen(
     viewModel: InviteLandingViewModel,
     onDone: () -> Unit,
     onOpenChat: (groupIdHex: String) -> Unit,
-    /** ADR-0065 UX 16.6 — the link's owner is already a contact. */
+    /** ADR-0073 UX 16.6 — the link's owner is already a contact. */
     onOpenContact: (routeKey: String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {

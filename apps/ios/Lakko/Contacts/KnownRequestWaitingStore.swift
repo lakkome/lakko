@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 R.3 - the contact requests kept WAITING, unshown, for an identity
+// ADR-0073 R.3 - the contact requests kept WAITING, unshown, for an identity
 // verdict (`KnownContactRequest.Verdict.wait`).
 //
 // A request from an account that is already an established contact is never

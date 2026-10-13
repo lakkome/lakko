@@ -3,7 +3,7 @@
 
 /**
  * The typed confirmation in front of "Reset account keys"
- * (docs/ux/identity-recovery.md section 15.1, ADR-0065).
+ * (docs/ux/identity-recovery.md section 15.1, ADR-0073).
  *
  * The word is the same Latin letters in every language (like the slot
  * numbers of the phrase grid), and the line above the field names it:

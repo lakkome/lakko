@@ -110,7 +110,7 @@ export interface IdentityUploadRequest {
    *  verbatim to the transparency append (invariant #2); a peer verifies
    *  it on a first observation against the pinned auth attest key. */
   genesis_attest?: string;
-  /** ADR-0065: standard base64 of the 177-byte key-reset attestation
+  /** ADR-0073: standard base64 of the 177-byte key-reset attestation
    *  `POST /account/keys/reset/finish` minted. Required for a key CHANGE
    *  that carries no supersession proof: discovery verifies it under its
    *  pinned attest key, requires a generation strictly above the stored one,
@@ -134,11 +134,11 @@ export interface IdentityFetchResponse {
    *  account rotated recently; absent otherwise. The peer verifies it
    *  locally — the server passes the bytes through opaquely. */
   supersession_proof?: string;
-  /** ADR-0065: the key generation the published key belongs to (1 =
+  /** ADR-0073: the key generation the published key belongs to (1 =
    *  never reset). A device compares it with the generation of its own
    *  session pair before it uploads anything (`auth/landing-rule.ts`). */
   key_generation: number;
-  /** ADR-0065 R.3: standard base64 of the auth-signed key-reset attestation
+  /** ADR-0073 R.3: standard base64 of the auth-signed key-reset attestation
    *  of the account's LATEST reset (177 bytes); absent for an account that
    *  never reset. Discovery passes the stored bytes through unparsed; a
    *  peer verifies it locally (`contacts/reset-verdict.ts`). After a later

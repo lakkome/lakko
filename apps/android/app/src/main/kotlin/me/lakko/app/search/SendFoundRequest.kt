@@ -38,7 +38,7 @@ public interface SendDeps {
     /** The identity bundle of an account, or `null`. */
     public suspend fun identityFetch(accountId: ByteArray): IdentityKeys?
 
-    /** ADR-0066 section 3.5a - whether [foundKey] is a PROVEN predecessor
+    /** ADR-0074 section 3.5a - whether [foundKey] is a PROVEN predecessor
      *  of [publishedKey] ([PeopleSearchDeps.isProvenPredecessor]). */
     public fun isProvenPredecessor(foundKey: ByteArray, publishedKey: ByteArray): Boolean = false
 
@@ -89,7 +89,7 @@ public suspend fun sendFoundRequest(person: PersonResult, intro: ByteArray, deps
         // No bundle, or a bundle for another key: the person as found cannot
         // be reached under this account id. Nothing is sent. A bundle whose
         // key the found key PROVABLY rotated to is the same person
-        // (ADR-0066 3.5a): the request is sealed to the bundle's keys.
+        // (ADR-0074 3.5a): the request is sealed to the bundle's keys.
         if (bundle == null || !foundKeyIsPublished(key, bundle.signaturePub, deps::isProvenPredecessor)) {
             return SendOutcome.Refused
         }

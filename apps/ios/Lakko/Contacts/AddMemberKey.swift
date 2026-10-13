@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0065 R.2 / ADR-0050 - adding a person to a group checks WHOSE devices
+// ADR-0073 R.2 / ADR-0050 - adding a person to a group checks WHOSE devices
 // the directory served.
 //
 // iOS mirror of `apps/web/src/contacts/add-member-key.ts`.
@@ -27,7 +27,7 @@ public enum AddMemberKey {
     /// | no                                                          | the expected key alone                |
     /// | yes (the current key or a proven predecessor)               | the current key and every predecessor |
     ///
-    /// The second row is ADR-0066 section 3.5: after a PROVEN rotation a
+    /// The second row is ADR-0074 section 3.5: after a PROVEN rotation a
     /// device that was kept stays bound to the key it was enrolled under
     /// while a device paired later binds to the new one, and both are the
     /// same person. A key an accepted RESET retired is in no proven chain

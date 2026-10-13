@@ -3,7 +3,7 @@
 
 /**
  * What the account's own devices are told (docs/ux/identity-recovery.md
- * sections 19.2, 19.5 and 19.6, ADR-0067 section 9), and the per-landing
+ * sections 19.2, 19.5 and 19.6, ADR-0075 section 9), and the per-landing
  * read of how the account is protected.
  *
  * At every session landing this reads `GET /recovery-email` (which keeps
@@ -154,7 +154,7 @@ export function AccountNotices(): JSX.Element {
     void read(l.accountIdB64, l.token);
   });
 
-  // ADR-0067 (amended 2026-10-13): the automatic re-seal. Whenever the
+  // ADR-0075 (amended 2026-10-13): the automatic re-seal. Whenever the
   // status or the held address changes, a device that holds the address of
   // an account whose vault is gone puts the vault back, silently. One
   // attempt in flight, and one per (account, key generation, address) in a

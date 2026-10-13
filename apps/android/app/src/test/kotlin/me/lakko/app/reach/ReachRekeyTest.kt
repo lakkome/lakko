@@ -7,7 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * ADR-0066 section 3.5, "Reach" - what a bind does with the registrations a
+ * ADR-0074 section 3.5, "Reach" - what a bind does with the registrations a
  * device recorded when the account key it binds is, or is not, the one they
  * were made under.
  */

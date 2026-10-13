@@ -112,10 +112,10 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
   });
   return [
     byId("lakko-auth", "device_keys"),
-    // ADR-0066 section 1.1: the recall record of a device whose account keys
+    // ADR-0074 section 1.1: the recall record of a device whose account keys
     // were reset elsewhere.
     byId("lakko-recall-record", "records"),
-    // ADR-0066 part 3: the predecessor seeds, the pending key-rotation
+    // ADR-0074 part 3: the predecessor seeds, the pending key-rotation
     // envelopes and a prepared rotation, sealed under the device key.
     { db: "lakko-key-rotation", store: "state", row: { accountId: acct, ciphertext: ct } },
     byId("lakko-mls", "snapshots"),
@@ -141,7 +141,7 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|contact|slug1`, ciphertext: ct } },
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|call|slug2`, ciphertext: ct } },
     byId("lakko-sent-request-intros", "rows"),
-    // ADR-0065 R.8: the service worker's plaintext copy of the retired keys.
+    // ADR-0073 R.8: the service worker's plaintext copy of the retired keys.
     { db: "lakko-superseded-keys", store: "rows", row: { accountId: acct, keys: ["a2V5"] } },
     {
       db: "lakko-push-routing",
@@ -184,7 +184,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   rememberInviteLinkSecret(acctUrl, "slug1", "fragmentfragment");
   put(`lakko.readmission.removed.v1:${acct}`, JSON.stringify({ [G]: ["k"] }));
   markSignupPhraseOwed(local, acct);
-  // ADR-0067: how the account is protected as this device knows it, and
+  // ADR-0075: how the account is protected as this device knows it, and
   // what it saw and did of the account's notices.
   setPhraseProtected(local, acct, true);
   dismissBanner(local, acct, 1);
@@ -201,13 +201,13 @@ function seedAccount(acct: string, acctUrl: string): void {
     signedAtMs: 1,
     done: { directory: false, deviceGroup: false },
   });
-  // ADR-0066: the device id the sessions name, the "account key recorded at
+  // ADR-0074: the device id the sessions name, the "account key recorded at
   // auth" mark, a logout still owed, and a device removal still finishing.
   writeKnownDeviceId(local, acct, "B".repeat(43));
   writeGenesisRecorded(local, acct, "a2V5");
   markLogoutOwed(local, acct);
   writeRemoval(local, acct, "C".repeat(43), newRemoval("C".repeat(43), 1));
-  // ADR-0066 part 3: a key rotation this device was finishing, the "keys
+  // ADR-0074 part 3: a key rotation this device was finishing, the "keys
   // were changed" line, the predecessor mailbox's cursor and the channels
   // whose owner key moved.
   writeRotation(local, acct, newRotation("C".repeat(43), 1));
@@ -435,7 +435,7 @@ describe("wipeAccountLocalData", () => {
     expect(notLoadBearing).toEqual([]);
   });
 
-  // ADR-0066 section 1.1 (UX 18.4): the staged wipe of a device whose
+  // ADR-0074 section 1.1 (UX 18.4): the staged wipe of a device whose
   // account keys were reset on another device.
   it("staged: deletes what the full wipe deletes, minus the recall record and its device key", async () => {
     await createSchemas();

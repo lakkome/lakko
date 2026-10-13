@@ -53,7 +53,7 @@ import {
 /** Options of [`ensureDeviceGroup`]. */
 export interface EnsureDeviceGroupOptions {
   /**
-   * ADR-0065 section 5 - the founding follows a key reset: the journal's root
+   * ADR-0073 section 5 - the founding follows a key reset: the journal's root
    * belongs to the OLD seed, so instead of `claimOrReset` (which a stranger
    * cannot win) the founding sends the attested `PUT .../reset` carrying this
    * attestation (STANDARD base64 of the 177 bytes) under which the DS hears
@@ -77,7 +77,7 @@ export interface EnsuredDeviceGroup {
    *  (this device is now the founder). `false` when the
    *  handle was restored from a cached snapshot. */
   readonly bootstrapped: boolean;
-  /** ADR-0065: how the attested reset of the journal was answered, on a
+  /** ADR-0073: how the attested reset of the journal was answered, on a
    *  founding that carried one. */
   readonly journalReset?: "reset" | "already-reset";
 }
@@ -175,7 +175,7 @@ export async function ensureDeviceGroup(
   // throws: nothing is persisted, the in-memory founder is dropped, and the
   // next call founds and claims again.
   //
-  // ADR-0065: after a key reset the claim cannot be won (the journal is held
+  // ADR-0073: after a key reset the claim cannot be won (the journal is held
   // by the OLD root), so the founding sends the attested reset instead.
   let journalReset: "reset" | "already-reset" | undefined;
   try {
@@ -204,7 +204,7 @@ export async function ensureDeviceGroup(
         throw new Error("ds: the DeviceGroup root is not available yet");
       }
       if (keyResetAttestB64 !== undefined) {
-        // ADR-0066 section 4.6: the new account key endorses the root that
+        // ADR-0074 section 4.6: the new account key endorses the root that
         // becomes the journal's (the Reset statement's signer), bound to the
         // journal and the attested generation.
         const rootEndorsementB64 = rootEndorsementFor(
@@ -253,7 +253,7 @@ export async function ensureDeviceGroup(
 }
 
 /**
- * ADR-0066 section 4.6 - `root_endorsement_b64` for an attested DS statement:
+ * ADR-0074 section 4.6 - `root_endorsement_b64` for an attested DS statement:
  * `signDsRootEndorsement(newAccountEd25519Seed, journalId, keyGeneration,
  * rootKey)` in STANDARD base64, where the generation is read off the
  * attestation the statement carries and `rootKey` is the key that BECOMES the

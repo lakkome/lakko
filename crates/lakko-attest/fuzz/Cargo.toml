@@ -80,7 +80,7 @@ test = false
 doc = false
 bench = false
 
-# `KeyResetAttestation::open` is the key-reset attestation parser (ADR-0065): a
+# `KeyResetAttestation::open` is the key-reset attestation parser (ADR-0073): a
 # fixed-layout 177-byte Ed25519-signed blob posted to discovery's identity
 # upload and to the Delivery Service's journal reset by whoever holds a session
 # or a journal id, and read back by a client from its own persisted state, so
@@ -94,7 +94,7 @@ test = false
 doc = false
 bench = false
 
-# `AccountStatement` is the client-signed account-key statement (ADR-0066): a
+# `AccountStatement` is the client-signed account-key statement (ADR-0074): a
 # fixed-layout 138-byte Ed25519-signed blob sent as a request body field to
 # auth and as a request header to discovery by anyone, so a malformed envelope
 # is fully attacker-controlled and reaches the bounded parser and the verifier

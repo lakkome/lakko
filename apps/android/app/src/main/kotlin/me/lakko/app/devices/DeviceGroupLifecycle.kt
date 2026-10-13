@@ -139,7 +139,7 @@ public object DeviceGroupLifecycle {
     }
 
     /**
-     * ADR-0065 section 5 — the DeviceGroup this device holds was founded under
+     * ADR-0073 section 5 — the DeviceGroup this device holds was founded under
      * the account's OLD seed, whose root the attested reset is replacing.
      * Drop its MLS snapshot (its own store, apart from the conversation
      * groups) and the stale founding marker, so the next [ensureDeviceGroup]

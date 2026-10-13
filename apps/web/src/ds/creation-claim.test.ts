@@ -60,7 +60,7 @@ describe("a conversation group: no Welcome before the claim lands", () => {
       }),
     } as unknown as DsClient;
     const discovery = {
-      // ADR-0065 phase 2 — the identity check that runs first; an account
+      // ADR-0073 phase 2 — the identity check that runs first; an account
       // that publishes nothing passes (the KeyPackage fetch answers for it).
       identityFetch: async () => null,
       fetchKeyPackages: async () => [{ deviceId: peer.signaturePublicKey, keyPackage: peer.createKeyPackage() }],
@@ -71,7 +71,7 @@ describe("a conversation group: no Welcome before the claim lands", () => {
     });
     // The key the caller expects the peer to have: the one its KeyPackage's
     // binding names. `startGroupWith` adds only a device bound to it
-    // (ADR-0065 R.2, `contacts/add-member-key.ts`).
+    // (ADR-0073 R.2, `contacts/add-member-key.ts`).
     const peerKey = peer.signaturePublicKey;
     return { client, ds, order, peerKey, free: () => [device, account, peer].forEach((i) => i.free()) };
   }

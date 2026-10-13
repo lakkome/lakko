@@ -15,7 +15,7 @@ import {
 
 const alice: AccountKeys = { currentKeyB64: "A1", provenPredecessorsB64: [] };
 
-describe("the proven-predecessor rule (ADR-0066 section 3.5)", () => {
+describe("the proven-predecessor rule (ADR-0074 section 3.5)", () => {
   it("a proven rotation makes the old key the same person", () => {
     const rotated = afterProvenRotation(alice, "A2");
     expect(rotated).toEqual({ currentKeyB64: "A2", provenPredecessorsB64: ["A1"] });

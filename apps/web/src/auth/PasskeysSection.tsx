@@ -3,7 +3,7 @@
 
 /**
  * `PasskeysSection` — passkey management, under Settings > Security
- * (docs/ux/identity-recovery.md 10.2, ADR-0064 decision 6).
+ * (docs/ux/identity-recovery.md 10.2, ADR-0072 decision 6).
  *
  *   1. **Capability gate.** A browser without WebAuthn gets one line
  *      saying why the section is inert.
@@ -179,7 +179,7 @@ export default function PasskeysSection(): JSX.Element {
             ? { accountIdBytes: secrets.accountId, accountIdB64: st.account.accountId }
             : null,
       });
-      // ADR-0064 decision 6: nothing is stored for the new passkey here.
+      // ADR-0072 decision 6: nothing is stored for the new passkey here.
       // When the platform can protect keys with it, the person is asked;
       // otherwise the line says it signs in only.
       if (added.outcome === "offer-keys-choice") {

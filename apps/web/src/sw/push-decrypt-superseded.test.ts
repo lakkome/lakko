@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.5 / R.8 — nothing from a superseded sender acts, on the push
+ * ADR-0073 R.5 / R.8 — nothing from a superseded sender acts, on the push
  * path too: a frame whose MLS-authenticated sender is bound to a key an
  * accepted reset retired (a removed device that still holds the old keys)
  * neither rings nor becomes a notification preview.

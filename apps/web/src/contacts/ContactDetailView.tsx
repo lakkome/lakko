@@ -112,7 +112,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal("");
   /** The key the safety number is computed over: the contact's CURRENT key.
-   *  After an accepted reset (ADR-0065 R.2) the row is re-keyed, so this is
+   *  After an accepted reset (ADR-0073 R.2) the row is re-keyed, so this is
    *  the new key and the section shows the current number with its ordinary
    *  copy; it never says the number changed. */
   const safetyKeyB64 = (): string => props.personKeyB64;

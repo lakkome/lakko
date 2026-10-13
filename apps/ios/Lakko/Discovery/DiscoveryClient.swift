@@ -288,7 +288,7 @@ public final class DiscoveryClient {
     /// `discovery-lookup` token) → finalize → `POST /discovery/lookup`.
     /// Both requests anonymous; with no session there is no token, and the
     /// lookup fails with ``AnonTokenUnavailable/noSession``.
-    /// `POST /discovery/username/replace` (ADR-0068 section 1): the account's
+    /// `POST /discovery/username/replace` (ADR-0076 section 1): the account's
     /// current name is retired (held for 30 days) and `username` becomes its
     /// name. Answers the canonical name and the NEW name's certificate.
     ///
@@ -613,7 +613,7 @@ public final class DiscoveryClient {
     /// of the authenticated account's device KeyPackages (ADR-0050 device
     /// removal). Bearer-auth; idempotent (204).
     ///
-    /// ADR-0066 section 2.2: a device deletes its OWN row with the session
+    /// ADR-0074 section 2.2: a device deletes its OWN row with the session
     /// alone. ANOTHER device's row needs `accountStatement`, the 138-byte
     /// `device-revoke` account statement over that id, sent base64url in the
     /// `x-lakko-account-statement` header; without it the server answers
@@ -687,7 +687,7 @@ public final class DiscoveryClient {
     /// encoded into `IdentityUploadRequest.genesisAttest`; `nil` on a
     /// non-genesis re-publish (absence is `COALESCE`-preserved server-side).
     ///
-    /// ADR-0065 section 4.1: `keyResetAttest`, when non-`nil`, is the RAW
+    /// ADR-0073 section 4.1: `keyResetAttest`, when non-`nil`, is the RAW
     /// 177-byte key-reset attestation of the reset that installs THIS key;
     /// standard-base64 encoded into `IdentityUploadRequest.keyResetAttest`.
     /// The refusals discovery answers are typed by

@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 --
--- ADR-0066 sprint T5 — a recall whose answer was lost can be asked again.
+-- ADR-0074 sprint T5 — a recall whose answer was lost can be asked again.
 --
 -- `POST /account/recall/finish` changes everything in one transaction and
 -- answers with the only credentials the recalling device will ever get: the

@@ -268,7 +268,7 @@ pub fn reach_seed(
 }
 
 /// The 32-byte **continuity reach seed** of an account at a key generation
-/// (ADR-0065 R.4): `BLAKE3-derive-key("lakko/reach/continuity/v1",
+/// (ADR-0073 R.4): `BLAKE3-derive-key("lakko/reach/continuity/v1",
 /// account_id(16) || key_generation(8, BE))`.
 ///
 /// After an account key reset the new identity knows none of its former
@@ -1527,7 +1527,7 @@ mod tests {
         );
     }
 
-    /// The core's continuity golden (ADR-0065 R.4), reproduced through this
+    /// The core's continuity golden (ADR-0073 R.4), reproduced through this
     /// surface; the wasm surface pins the same literals. The seed signs a
     /// mailbox write through the existing reach signer, with no second one.
     #[test]

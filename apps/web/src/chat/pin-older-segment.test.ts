@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-/** ADR-0065 R.5 - a pin of an older segment can be unpinned. */
+/** ADR-0073 R.5 - a pin of an older segment can be unpinned. */
 import { describe, expect, it } from "vitest";
 
 import { historyRowId, historyRowOrigin, HISTORY_ID_SPAN } from "./lineage";

@@ -71,23 +71,23 @@ public class ReachManager internal constructor(
     private val store: ReachDocStore,
     private val dsFactory: () -> DsClient = { DsClient() },
     private val ownProfiles: OwnProfileAccess? = null,
-    /** ADR-0066 section 3.5a - the proven key steps this account recorded
+    /** ADR-0074 section 3.5a - the proven key steps this account recorded
      *  (its contacts' and its own), by the signed-in account id (standard
      *  base64). Only a PROVEN step is ever in it. */
     private val provenLinks: (ownerAccountIdB64: String) -> List<me.lakko.app.contacts.ProvenLink> = { emptyList() },
-    /** ADR-0066 section 3.5a - this account's own previous account keys
+    /** ADR-0074 section 3.5a - this account's own previous account keys
      *  this device still holds the seed of, newest first, each as
      *  `(signature public key, 32-byte Ed25519 seed)`. A committer
      *  delegation may name any of them. SECRET; the caller of the provider
      *  wipes the seeds. */
     private val ownPredecessorKeys: (ownerAccountIdB64: String) -> List<Pair<ByteArray, ByteArray>> = { emptyList() },
-    /** ADR-0065 R.4 - the marker of this device's own last account-key reset
+    /** ADR-0073 R.4 - the marker of this device's own last account-key reset
      *  ([ContinuityMarkerStore]), by the signed-in account id; `null` when
      *  this device never reset the account. */
     private val continuityMarker: (ownerAccountIdB64: String) -> ContinuityMarker? = { null },
 ) {
     /**
-     * ADR-0065 R.4 - the account and generation behind [ownerKey] when this
+     * ADR-0073 R.4 - the account and generation behind [ownerKey] when this
      * device ACCEPTED a reset that re-pinned the person to it, with the
      * attestation's `signed_at`: what the continuity reach key of that
      * person's new mailbox derives from. Installed by the contacts
@@ -170,7 +170,7 @@ public class ReachManager internal constructor(
     /**
      * Bind to the signed-in account and reconcile its mailbox. Idempotent.
      *
-     * ADR-0066 section 3.5, "Reach": [account] is the identity the directory
+     * ADR-0074 section 3.5, "Reach": [account] is the identity the directory
      * serves. When it is not the key the stored registrations were made
      * under (the account's keys were rotated, in this session or before a
      * restart), the reach keys MOVE: see [rekeyDecision].
@@ -258,7 +258,7 @@ public class ReachManager internal constructor(
     public fun ownAccountKey(): ByteArray? = binding.get()?.accountKey?.copyOf()
 
     // -----------------------------------------------------------------
-    // ADR-0066 section 3.5a - the mailbox after a key rotation
+    // ADR-0074 section 3.5a - the mailbox after a key rotation
     // -----------------------------------------------------------------
 
     private fun links(): List<me.lakko.app.contacts.ProvenLink> {
@@ -394,7 +394,7 @@ public class ReachManager internal constructor(
      *  them): retire every reply key waiting on them. */
     public fun retireRepliesTo(fromKey: ByteArray) {
         val b = binding.get() ?: return
-        // ADR-0066 3.5a rule 2: the person, under whichever of their keys
+        // ADR-0074 3.5a rule 2: the person, under whichever of their keys
         // the request was addressed to.
         val keysHex = personKeys(fromKey)
         scope.launch {
@@ -734,7 +734,7 @@ public class ReachManager internal constructor(
             r.pkHex to RegisteredReachKey(ReachSlot(kind, r.scopeHex), r.version, r.expiresAtMs)
         }.toMap()
         val diff = diffReachKeys(desired, registered)
-        // ADR-0065 R.4 - the continuity key rides beside the class keys.
+        // ADR-0073 R.4 - the continuity key rides beside the class keys.
         syncContinuityLocked(b, nowMs)
         if (binding.get() !== b) return false
         val wantOpen = setting.mode == FfiVisibilityMode.EVERYONE
@@ -1017,7 +1017,7 @@ public class ReachManager internal constructor(
      *  §5), or `null` until one was fetched. */
     public fun usernameCertificate(): ByteArray? = doc.usernameCertHex?.let(::reachUnhex)
 
-    /** ADR-0068 - the account was renamed: the certificate held here is the
+    /** ADR-0076 - the account was renamed: the certificate held here is the
      *  old name's. Dropped, so the current one is fetched again. */
     public fun dropUsernameCertificate() {
         val b = binding.get() ?: return
@@ -1085,7 +1085,7 @@ public class ReachManager internal constructor(
 
     private suspend fun storeHeld(b: Binding, ownerKey: ByteArray, grant: FfiReachGrant, scopeHex: String) {
         val kind = grant.`class`.toKind()
-        // ADR-0066 3.5a rule 2: filed for the PERSON, i.e. under the current
+        // ADR-0074 3.5a rule 2: filed for the PERSON, i.e. under the current
         // key of the account, whichever key the leaf it arrived from names.
         val currentOwner = mailboxAccountKey(ownerKey)
         val ownerHex = reachHex(currentOwner)
@@ -1174,7 +1174,7 @@ public class ReachManager internal constructor(
     /**
      * The grants held for the person known by [ownerKey]. SECRET.
      *
-     * ADR-0066 3.5a rule 2: found under the account's current key AND under
+     * ADR-0074 3.5a rule 2: found under the account's current key AND under
      * every proven predecessor of it, the current key's first, so a grant
      * filed before the key change was proven is still found and one issued
      * for the new mailbox is tried before an older one of the same class.
@@ -1225,7 +1225,7 @@ public class ReachManager internal constructor(
         groupHex: String? = null,
     ): List<() -> DsReachAuth?> {
         val b = binding.get() ?: return emptyList()
-        // ADR-0066 3.5a rule 1: this account's own conversation key (a
+        // ADR-0074 3.5a rule 1: this account's own conversation key (a
         // proven predecessor after a rotation) IS this account.
         if (mailboxAccountKey(ownerKey).contentEquals(b.accountKey)) {
             return listOf({ grant(ReachKind.CONTACT)?.let { DsReachAuth(reachSigner(it.seed)) } })
@@ -1242,7 +1242,7 @@ public class ReachManager internal constructor(
                 out += { DsReachAuth(reachSigner(seed)) }
             }
         }
-        // ADR-0065 R.4 - a Welcome to a person whose reset this device
+        // ADR-0073 R.4 - a Welcome to a person whose reset this device
         // accepted may be signed with the continuity key of their new
         // mailbox: nobody holds a grant for it. After the grants the person
         // issued (once they are in a conversation their profile hands those
@@ -1286,7 +1286,7 @@ public class ReachManager internal constructor(
     }
 
     /**
-     * ADR-0065 R.4 - keep the continuity key of THIS account registered on
+     * ADR-0073 R.4 - keep the continuity key of THIS account registered on
      * its mailbox until its expiry, after a reset this device ran. Derived
      * from public values (the account id and the generation); removed once it
      * is no longer wanted. Best-effort: a failure leaves the record as it was
@@ -1508,7 +1508,7 @@ public class ReachManager internal constructor(
      * The delegation naming this account for a Welcome to [addedAccountKey]
      * in [groupHex], or `null`.
      *
-     * ADR-0066 3.5a: a proposer names the committer by the account key IT
+     * ADR-0074 3.5a: a proposer names the committer by the account key IT
      * knows. One that observed this account's proven rotation names the
      * current key; one that has not names the key the role table carries,
      * a predecessor. So every own key this device holds the seed of is
@@ -1560,7 +1560,7 @@ public class ReachManager internal constructor(
     ): ByteArray? {
         val contact = heldFor(addedAccountKey).firstOrNull { it.first.kind == ReachKind.CONTACT }?.second
             ?: return null
-        // ADR-0066 3.5a rule 1: the delegation opens the added person's
+        // ADR-0074 3.5a rule 1: the delegation opens the added person's
         // CURRENT mailbox, and is signed to each candidate's current key
         // (the key that candidate's device signs the write with).
         val addedCurrent = mailboxAccountKey(addedAccountKey)
@@ -1675,7 +1675,7 @@ public fun FfiReachClass.toKind(): ReachKind = when (this) {
 }
 
 /** This account's own previous account keys on this device, NEWEST first,
- *  each with its 32-byte Ed25519 seed (ADR-0066 3.5a). The caller wipes the
+ *  each with its 32-byte Ed25519 seed (ADR-0074 3.5a). The caller wipes the
  *  seeds. */
 private fun ownPredecessorKeysOnDevice(context: Context, accountIdB64: String): List<Pair<ByteArray, ByteArray>> {
     val rows = me.lakko.app.auth.OwnPredecessorStore.onDevice(context).load(accountIdB64)

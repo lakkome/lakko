@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The throttle of the address re-check (ADR-0066 section 3.5a rule 6).
+ * The throttle of the address re-check (ADR-0074 section 3.5a rule 6).
  *
  * A refused write to a person's mailbox re-checks that person's identity
  * bundle once. Several writes to one person can be refused in a row (a

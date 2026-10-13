@@ -223,12 +223,12 @@ interface ServerPublicKeyCredentialRequestOptions {
 export interface AuthFinishRequest {
   readonly state_id: string;
   readonly credential: AuthPublicKeyCredentialJSON;
-  /** ADR-0066 section 0.4: this device's id; absent = an unbound session. */
+  /** ADR-0074 section 0.4: this device's id; absent = an unbound session. */
   readonly device_id_b64?: string;
 }
 
 /** `POST /webauthn/auth/finish`: the account id plus the session pair
- *  (ADR-0065) every login route returns. */
+ *  (ADR-0073) every login route returns. */
 export interface AuthFinishResponse extends SessionPairWire {
   readonly account_id_b64: string;
   /** The fresh-auth grant a passkey sign-in mints (`fresh-auth.ts`). */
@@ -271,8 +271,8 @@ interface AuthPublicKeyCredentialJSON {
 export const ACTION_DOMAIN_DELETE_CREDENTIAL = "lakko/action/delete-credential/v1";
 export const ACTION_DOMAIN_REMOVE_DEVICE = "lakko/action/remove-device/v1";
 export const ACTION_DOMAIN_DELETE_ACCOUNT = "lakko/action/delete-account/v1";
-/** ADR-0064 decision 6: letting one passkey restore the account's keys. The
- *  server does not consume a grant for this action today (ADR-0064 open
+/** ADR-0072 decision 6: letting one passkey restore the account's keys. The
+ *  server does not consume a grant for this action today (ADR-0072 open
  *  question 4); the ceremony is what yields the passkey's PRF output inside
  *  a signed-in session, and it is bound to the action it serves. */
 export const ACTION_DOMAIN_PASSKEY_RESTORES_KEYS = "lakko/action/passkey-restores-keys/v1";
@@ -456,10 +456,10 @@ export class WebauthnClient {
     options: {
       accountIdB64?: string;
       mediation?: CredentialMediationRequirement;
-      /** ADR-0064 decision 6: evaluate the PRF extension with this salt so the
+      /** ADR-0072 decision 6: evaluate the PRF extension with this salt so the
        *  assertion also yields the credential's 32-byte secret. */
       prfSalt?: Uint8Array;
-      /** ADR-0066 section 0.4: this device's id (URL-safe base64, no
+      /** ADR-0074 section 0.4: this device's id (URL-safe base64, no
        *  padding), when it is known for the account being signed in to;
        *  the session then names the device from the start. */
       deviceIdB64?: string;
@@ -849,7 +849,7 @@ function encodeAuthCredential(cred: PublicKeyCredential): AuthPublicKeyCredentia
   };
 }
 
-/** What a ceremony yields beyond the server's answer (ADR-0064 decision 6): the raw
+/** What a ceremony yields beyond the server's answer (ADR-0072 decision 6): the raw
  *  credential id, and the PRF `first` output when the authenticator
  *  evaluated it (`null` otherwise: unsupported, or not requested). */
 export interface PasskeyCeremonyExtras {

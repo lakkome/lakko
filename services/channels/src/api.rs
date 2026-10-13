@@ -8,7 +8,7 @@
 //! | Method | Path | Gate | Purpose |
 //! |---|---|---|---|
 //! | `POST` | `/v1/channels` | none | Register a channel: `{channel_id, owner_pubkey_hex}`. Re-creating a channel never changes its owner key. |
-//! | `PUT`  | `/v1/channels/:id/owner` | owner proof (by the CURRENT owner key) | Hand the channel to a new owner key (ADR-0066 section 3.5). Body: the new key, 32 raw bytes, `application/octet-stream`. |
+//! | `PUT`  | `/v1/channels/:id/owner` | owner proof (by the CURRENT owner key) | Hand the channel to a new owner key (ADR-0074 section 3.5). Body: the new key, 32 raw bytes, `application/octet-stream`. |
 //! | `POST` | `/v1/channels/:id/posts` | publisher proof | Publish an opaque ChannelPost. |
 //! | `GET`  | `/v1/channels/:id/posts?after=&limit=` | none | Cursor-paginated fetch. |
 //! | `POST` | `/v1/channels/:id/subscribers` | one `channel-subscribe` token | Register a subscriber key. |
@@ -1740,7 +1740,7 @@ fn parse_pubkey_hex(hex_str: &str) -> Option<[u8; 32]> {
 }
 
 /// `PUT /v1/channels/:channel_id/owner` — hand the channel to a new owner
-/// key ([ADR-0066] section 3.5). Signed by the CURRENT owner key; the body is
+/// key ([ADR-0074] section 3.5). Signed by the CURRENT owner key; the body is
 /// the new key, 32 raw bytes (`lakko_channels::owner_handover_body`).
 ///
 /// When it is used: the account that owns the channel changed its account
@@ -1765,7 +1765,7 @@ fn parse_pubkey_hex(hex_str: &str) -> Option<[u8; 32]> {
 /// carries a signature by the owner key (an appointment is a row the owner
 /// asked for, a listing is checked at upload).
 ///
-/// [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+/// [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 async fn replace_owner(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,

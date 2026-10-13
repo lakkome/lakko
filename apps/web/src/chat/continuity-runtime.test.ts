@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.6 / R.7 - claim, then build, driven through a fake port
+ * ADR-0073 R.6 / R.7 - claim, then build, driven through a fake port
  * (`continuity-runtime.ts`). What these pin is the ORDER: nothing reaches
  * anyone before the claim is confirmed, a lost claim discards, and every
  * step can be re-entered.

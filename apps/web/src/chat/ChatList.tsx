@@ -278,7 +278,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       if (row.kind === "channel" || !rowHasUnread(row)) continue;
       const g = groupById().get(row.id);
       if (g === undefined) continue;
-      // ADR-0065 R.5 — the read position and the flags are the
+      // ADR-0073 R.5 — the read position and the flags are the
       // CONVERSATION's; the newest message is the head group's.
       const conversationId = conversationIdOf(g);
       const newest = newestIdFor(g.group.groupId);
@@ -402,7 +402,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   /** Routed by the ROW's own kind, not the pane's: one list holds both, so
    *  there is no pane kind left to ask. */
   const hrefOf = (g: ActiveGroup): string => {
-    // ADR-0065 R.5 — the route is the CONVERSATION's: it stays the same when
+    // ADR-0073 R.5 — the route is the CONVERSATION's: it stays the same when
     // the conversation continues in a successor group.
     const slug = base64UrlEncodeNoPad(conversationIdOf(g));
     return kindOf(g) === "chat" ? paths.chat(slug) : paths.groupChat(slug);

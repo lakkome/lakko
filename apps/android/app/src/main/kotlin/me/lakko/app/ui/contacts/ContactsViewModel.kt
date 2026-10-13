@@ -606,7 +606,7 @@ internal fun atLabel(raw: String): String? {
  * The copy for a fail-closed identity refusal: a `SupersessionRefused` is
  * thrown when a contact's `signature_pubkey` changed and the change is
  * neither a proven rotation (ADR-0016) nor an attested reset this device
- * accepted (ADR-0065 R.2). An accepted reset never reaches this function: it
+ * accepted (ADR-0073 R.2). An accepted reset never reaches this function: it
  * is silent. So the refusal has two readings, by the best-effort key-log
  * marker the client attached ([SupersessionRefused.loggedReset]):
  *

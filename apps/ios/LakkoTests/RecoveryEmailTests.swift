@@ -5,7 +5,7 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-// ADR-0067 / docs/ux/identity-recovery.md section 19 — the recovery email,
+// ADR-0075 / docs/ux/identity-recovery.md section 19 — the recovery email,
 // the account without a saved phrase, the notices, and the phrase arm of
 // "take the account back". Every flow runs over scripted ports: nothing
 // here reaches a server.

@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 ADR-0061 S5, batch 1. Every user-visible string of the screens a person sees before and while getting into an account moved from web JSX literals into `l10n/catalog/en.json`. The iOS and Android clients map their own literals of the same screens onto these keys; names follow meaning, not the web component.
 
-> 2026-10-02: the recovery keys were reworked (ADR-0064: 12-word phrase, three words checked on the device, passkeys that restore keys; guardian shares and email / phone codes removed). Rows for deleted keys were dropped and the English column was refreshed; keys added since are not listed here. `l10n/catalog/en.json` is the source of truth.
+> 2026-10-02: the recovery keys were reworked (ADR-0072: 12-word phrase, three words checked on the device, passkeys that restore keys; guardian shares and email / phone codes removed). Rows for deleted keys were dropped and the English column was refreshed; keys added since are not listed here. `l10n/catalog/en.json` is the source of truth.
 
 224 keys added, 66 of them `security_critical` (they render in English until a translation is `reviewed`, and a signed update can never change them).
 

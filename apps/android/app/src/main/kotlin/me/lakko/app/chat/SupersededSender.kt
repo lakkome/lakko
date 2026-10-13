@@ -4,7 +4,7 @@
 package me.lakko.app.chat
 
 /*
- * ADR-0065 R.5 / R.8 - NOTHING FROM A SUPERSEDED SENDER ACTS.
+ * ADR-0073 R.5 / R.8 - NOTHING FROM A SUPERSEDED SENDER ACTS.
  *
  * A key an accepted reset retired belongs to nobody this device trusts: a
  * device still holding it was removed from the account (or stolen). Its MLS

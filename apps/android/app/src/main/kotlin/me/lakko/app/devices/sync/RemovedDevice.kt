@@ -15,7 +15,7 @@ import kotlinx.coroutines.CancellationException
  * `false`), frozen for good, and nothing new decrypts. The sync runtime then
  * stops polling, persists nothing more, and the app root shows one
  * full-screen state instead of the app and wipes the account's data by
- * itself (ADR-0066 section 2.3; the screen and its copy are
+ * itself (ADR-0074 section 2.3; the screen and its copy are
  * `KeysResetSignedOutScreen` and `RemovalCopy`).
  *
  * The decisions live here, apart from [DeviceGroupSyncRepository], so a host

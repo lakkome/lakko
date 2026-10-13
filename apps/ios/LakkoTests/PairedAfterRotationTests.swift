@@ -5,7 +5,7 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-/// ADR-0066 part 3, third pass — a device paired AFTER a rotation of the
+/// ADR-0074 part 3, third pass — a device paired AFTER a rotation of the
 /// account keys, and the durable sent-requests list of section 3.5a rule 5.
 ///
 ///   * the pairing state bundle, format 2: round trip, format 1 refused, each

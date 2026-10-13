@@ -4,7 +4,7 @@
 package me.lakko.app.chat
 
 /*
- * ADR-0065 R.5 - a conversation's pins span its segments. The pin store stays
+ * ADR-0073 R.5 - a conversation's pins span its segments. The pin store stays
  * keyed on `(group, message id)` and is never rewritten when a conversation
  * continues in a successor group, so a pin of an older segment is still held
  * under the older group. Mirror of the segment functions of

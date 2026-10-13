@@ -10,7 +10,7 @@
  *   - one dismissible banner for an unprotected account without a passkey,
  *     "This account has no way back in.", which returns after 30 days;
  *   - the `Recovery email` row: the address on a device that holds it (the
- *     synced register, ADR-0067 as amended 2026-10-13), else On / Off, with
+ *     synced register, ADR-0075 as amended 2026-10-13), else On / Off, with
  *     Replace and Remove;
  *   - the `Recovery phrase` row: `Show recovery phrase` for a
  *     phrase-protected account, `Save a recovery phrase` for every other.

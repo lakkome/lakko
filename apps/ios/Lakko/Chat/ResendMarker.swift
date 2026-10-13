@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 R.7 case 1 - the RE-SEND MARKER.
+// ADR-0073 R.7 case 1 - the RE-SEND MARKER.
 //
 // iOS mirror of `apps/web/src/chat/resend-marker.ts` and
 // `apps/web/src/chat/resend-receive.ts`; the tables are the same and so are

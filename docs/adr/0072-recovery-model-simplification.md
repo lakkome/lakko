@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
 
-# ADR-0064: Recovery model simplification: a 12-word phrase, three words checked on the device, and a passkey that can carry keys
+# ADR-0072: Recovery model simplification: a 12-word phrase, three words checked on the device, and a passkey that can carry keys
 
 - **Status:** Accepted 2026-10-02 (maintainer decisions). Amended the same
   day: decision 5 was rewritten (the three words are checked on the device;
@@ -20,8 +20,8 @@
   whole.
 - **UX spec:** [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md).
 
-Number check: `ls docs/adr` showed 0063 as the highest file in this worktree
-on 2026-10-02, so 0064 was free here. Other branches were not checked.
+Renumbered from 0064 on 2026-10-13: the main branch had taken 0064 to 0071 for
+other decisions. Commit messages before that date name this ADR as 0064.
 
 ## Context
 

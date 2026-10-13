@@ -10,7 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0065 R.5 - one conversation over several groups (mirror of the web
+/** ADR-0073 R.5 - one conversation over several groups (mirror of the web
  *  `lineage` and `pin-bar` segment tables). */
 class LineageTest {
     private val lineage = buildLineage(

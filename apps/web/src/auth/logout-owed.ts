@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Log out at the server too (ADR-0066 section 2.1 / 2.3; UX 18.2, "Log
+ * Log out at the server too (ADR-0074 section 2.1 / 2.3; UX 18.2, "Log
  * out").
  *
  * `POST /auth/session/logout` raises a floor for this device at auth, so a

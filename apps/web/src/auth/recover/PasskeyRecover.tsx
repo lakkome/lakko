@@ -3,7 +3,7 @@
 
 /**
  * Getting back in with a passkey (docs/ux/identity-recovery.md section 4,
- * ADR-0064 decision 6). No username field: the browser's own sheet lists
+ * ADR-0072 decision 6). No username field: the browser's own sheet lists
  * the passkeys saved for Lakko, and the sign-in works on a device that has
  * never held the account.
  *

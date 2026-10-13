@@ -426,7 +426,7 @@ public class ChatViewModel(
         // most once a day per group; the core's rule decides). Fire-and-forget
         // inside the repository, like the provisioning above.
         repo.requestProfilesIfNeeded(groupIdHex)
-        // ADR-0065 R.2 "Triggers" — opening a conversation runs the identity
+        // ADR-0073 R.2 "Triggers" — opening a conversation runs the identity
         // check of its people and whatever an accepted reset still owes this
         // group. Fire-and-forget inside the repository; nothing is shown.
         repo.checkResetsOnOpen(groupIdHex)
@@ -495,7 +495,7 @@ public class ChatViewModel(
                 )
             }
         }
-        // ADR-0065 R.5 — what was typed and not sent belongs to the
+        // ADR-0073 R.5 — what was typed and not sent belongs to the
         // conversation, not to the group this screen happens to be on: a
         // screen rebuilt on the conversation's successor starts with it
         // ([me.lakko.app.chat.ComposerCarry]). Seeded here, before the
@@ -2701,7 +2701,7 @@ public class ChatViewModel(
         composer: ComposerState,
         typingText: UiText?,
     ): ChatScreenUiState {
-        // ADR-0065 R.5 — the conversation's folded thread: the older
+        // ADR-0073 R.5 — the conversation's folded thread: the older
         // segments as read-only history above this group's rows.
         val thread: ChatThread? =
             repoState.conversations.firstOrNull { it.groupIdHex == groupIdHex }

@@ -440,7 +440,7 @@ impl ConversationOrderRegister {
     }
 }
 
-/// One conversation-lineage register (ADR-0065 R.5): the group
+/// One conversation-lineage register (ADR-0073 R.5): the group
 /// `successorGroupId` continues the conversation `rootConversationId` (the
 /// group id of the first group of the lineage).
 #[wasm_bindgen]
@@ -468,7 +468,7 @@ impl LineageRegister {
     }
 }
 
-/// The account's recovery email register as held (ADR-0067, amended
+/// The account's recovery email register as held (ADR-0075, amended
 /// 2026-10-13), a removal included.
 #[wasm_bindgen]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -491,7 +491,7 @@ impl RecoveryEmailRegister {
     }
 }
 
-/// The account's own-username register as held (ADR-0068 section 3), a
+/// The account's own-username register as held (ADR-0076 section 3), a
 /// stamped "none" included.
 #[wasm_bindgen]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -773,7 +773,7 @@ impl SyncedState {
     }
 
     /// Record that `successorGroupId` continues the conversation
-    /// `rootConversationId` (ADR-0065 R.5), stamped `hlc`. **Write-once**:
+    /// `rootConversationId` (ADR-0073 R.5), stamped `hlc`. **Write-once**:
     /// when a register is already held for this successor nothing is written
     /// and `false` is returned, whatever root it names (read it with
     /// `lineageRoot`). On `true`, send `lineageEnvelopeFor(successorGroupId)`
@@ -872,7 +872,7 @@ impl SyncedState {
             .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
     }
 
-    /// Write the account's recovery email register (ADR-0067, amended
+    /// Write the account's recovery email register (ADR-0075, amended
     /// 2026-10-13), stamped `hlc`: an address sets it, `undefined` / `null`
     /// (or a blank string) records that the account has none. The address
     /// is normalised here with the one rule (`normalizeRecoveryEmail`).
@@ -935,7 +935,7 @@ impl SyncedState {
             .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
     }
 
-    /// Write the account's own-username register (ADR-0068 section 3),
+    /// Write the account's own-username register (ADR-0076 section 3),
     /// stamped `hlc`: a username sets it, `undefined` / `null` (or a blank
     /// string) records that the account has none. The username is
     /// normalised and checked here with the one rule (`validateUsername`),

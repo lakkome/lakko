@@ -10,7 +10,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /*
- * ADR-0066 — two small debts a session carries, each a pure rule over a
+ * ADR-0074 — two small debts a session carries, each a pure rule over a
  * per-account row so a host JVM test runs it without a server:
  *
  *   * the RECORDED IDENTITY KEY (section 0.1): auth records the account's
@@ -140,7 +140,7 @@ public fun logoutRetryStep(owed: LogoutOwed, nowMs: Long): LogoutRetryStep = whe
 
 /**
  * Whether an owed logout is kept for another launch after an attempt
- * failed with [error]. ONE retry only (ADR-0066 section 2.3): the marker is
+ * failed with [error]. ONE retry only (ADR-0074 section 2.3): the marker is
  * kept after the logout itself failed for want of a connection, and dropped
  * after its retry whatever the answer. An HTTP answer always drops (a `401`
  * means the session is already gone).

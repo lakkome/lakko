@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The recall record (ADR-0066 section 1.1; `docs/ux/identity-recovery.md`
+ * The recall record (ADR-0074 section 1.1; `docs/ux/identity-recovery.md`
  * section 18.4).
  *
  * A device that learns the account's keys were reset on another device

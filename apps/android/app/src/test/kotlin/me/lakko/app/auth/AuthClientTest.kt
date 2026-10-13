@@ -655,7 +655,7 @@ class AuthClientTest {
         assertNull("not a limit", authLimitCopy(err))
     }
 
-    // ---- ADR-0066: the device id on a landing, logout, bind, removal -------
+    // ---- ADR-0074: the device id on a landing, logout, bind, removal -------
 
     private val pairJson066 = """"session_token":"t","session_expires_at_ms":1,"refresh_token":"r","refresh_expires_at_ms":2,"key_generation":3"""
 

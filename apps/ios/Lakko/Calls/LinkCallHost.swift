@@ -509,7 +509,7 @@ extension LinkCallHost {
                             linkId: linkId, expiresAtMs: expiresAtMs)
                     }
                 )
-                // ADR-0066 section 3.5a rule 5 — the ledger id is kept with
+                // ADR-0074 section 3.5a rule 5 — the ledger id is kept with
                 // the link's reach scope, so a key rotation can revoke the
                 // link at the call-invite ledger (an inline link has no row).
                 if let mintedLinkId, let blobId = composed.blobId {

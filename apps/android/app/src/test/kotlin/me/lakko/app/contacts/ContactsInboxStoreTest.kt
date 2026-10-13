@@ -267,7 +267,7 @@ class ContactsInboxStoreTest {
     }
 
     // -----------------------------------------------------------------
-    // ADR-0066 section 3.5a rule 5 - one request per person across a
+    // ADR-0074 section 3.5a rule 5 - one request per person across a
     // proven rotation
     // -----------------------------------------------------------------
 

@@ -11,7 +11,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /**
- * ADR-0065 phase 2 / `docs/ux/identity-recovery.md` 16.6 — the channels a
+ * ADR-0073 phase 2 / `docs/ux/identity-recovery.md` 16.6 — the channels a
  * reset orphaned, on the device that reset the keys.
  *
  * A channel's owner key derives from the account seed (ADR-0059,

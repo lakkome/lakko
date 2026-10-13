@@ -19,7 +19,7 @@ libfuzzer-sys = "0.4"
 lakko-auth-token = { path = ".." }
 
 # `TokenSecret::verify` + `verify_refresh` are the credential parsers +
-# verifiers (ADR-0065 v2 access token and r1 refresh credential): a client or
+# verifiers (ADR-0073 v2 access token and r1 refresh credential): a client or
 # peer presents one on every bearer request and on auth's refresh route, so the
 # string is fully attacker-controlled and reaches the dot-split / base64url /
 # u64 + i64 parse / HMAC path before admission. Any panic / overflow /

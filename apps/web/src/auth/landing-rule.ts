@@ -2,11 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * No publish-back (ADR-0065 section 4.2): what a session landing does once
+ * No publish-back (ADR-0073 section 4.2): what a session landing does once
  * it has read the identity the directory publishes for the account, BEFORE
  * it uploads anything.
  *
- * Until ADR-0065 a landing that found a different key published raised a
+ * Until ADR-0073 a landing that found a different key published raised a
  * dismissible banner and then re-published its own bundle over it: the
  * "heal", which is exactly how a device signed out by a reset would put the
  * old identity back. Discovery now refuses an unattested key change

@@ -166,7 +166,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
     derived = { account, identity: wasmNow.Identity.fromSeed(secrets.accountIdentitySeed) };
     return derived.identity;
   }
-  /** ADR-0066 section 3.5: the account key this account holds INSIDE a
+  /** ADR-0074 section 3.5: the account key this account holds INSIDE a
    *  conversation (the role table's owner slot, the member an envelope is
    *  sealed to): after a proven rotation the predecessor, else the account
    *  key. The journal ROOT is always derived from the account identity. */
@@ -496,7 +496,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
     })();
   }
 
-  // ADR-0066 section 3.5: after a key rotation every conversation journal
+  // ADR-0074 section 3.5: after a key rotation every conversation journal
   // this account owns is taken over by the root of the new seed, exactly as a
   // handover to oneself.
   const uninstallRotationTakeOver = installRotationTakeOver(async (oldAccountEd25519Seed) => {

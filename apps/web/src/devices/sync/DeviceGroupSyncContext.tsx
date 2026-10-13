@@ -179,7 +179,7 @@ export interface DeviceGroupSyncApi {
   /** Reactive: a folder edit made here has not reached the other devices
    *  yet (UX spec section 6). */
   readonly pendingFolderSync: Accessor<boolean>;
-  /** Reactive: the conversation lineage registers (ADR-0065 R.5): which
+  /** Reactive: the conversation lineage registers (ADR-0073 R.5): which
    *  group continues which conversation. Read through `chat/lineage.ts`. */
   readonly lineage: Accessor<readonly LineageEntry[]>;
   /** Reactive: another device removed this one from the account, and this
@@ -244,7 +244,7 @@ export interface DeviceGroupSyncApi {
   applyFolderEdits(edits: readonly RegisterEdit[]): Promise<void>;
 
   /**
-   * ADR-0065 R.5 — record that `successorGroupId` continues the conversation
+   * ADR-0073 R.5 — record that `successorGroupId` continues the conversation
    * `rootConversationId`. Write-once: `false` when this device already holds
    * a register for the successor (nothing is written or sent). On `true` the
    * register is folded here at once and its envelope is sent to the account's
@@ -315,7 +315,7 @@ export function DeviceGroupSyncProvider(props: {
     if (own === undefined) return;
     const before = untrack(deviceRoster);
     const keys = members.map((m) => m.key);
-    // ADR-0066 section 2.3 — the roster every own-device admission is
+    // ADR-0074 section 2.3 — the roster every own-device admission is
     // checked against (`own-device-roster.ts`).
     if (activeAccountIdB64 !== null) {
       publishOwnDeviceRoster({ accountIdB64: activeAccountIdB64, keysHex: keys });
@@ -460,11 +460,11 @@ export function DeviceGroupSyncProvider(props: {
     setOrder(p.order);
     setFolders(p.folders);
     setLineageEntries(p.lineage);
-    // ADR-0067 (amended 2026-10-13): the recovery address the account's
+    // ADR-0075 (amended 2026-10-13): the recovery address the account's
     // devices keep, for the screens above this provider.
     if (activeAccountIdB64 !== null) {
       publishHeldAddress(activeAccountIdB64, synced.recoveryEmail() ?? null);
-      // ADR-0068: the account's username as its devices agree on it.
+      // ADR-0076: the account's username as its devices agree on it.
       publishRegisterUsername(activeAccountIdB64, synced.ownUsername() ?? null);
     }
     setStateVersion((v) => v + 1);
@@ -631,7 +631,7 @@ export function DeviceGroupSyncProvider(props: {
     void drainFolderOutbox();
     void flushUnsentLineage();
     void flushUnsentRecoveryEmail();
-    // ADR-0067: the synced state is loaded, so the recovery address can be
+    // ADR-0075: the synced state is loaded, so the recovery address can be
     // written (a write that waited for this is applied now).
     uninstallAddressRegister?.();
     uninstallAddressRegister = installAddressRegister({ accountIdB64, set: setRecoveryEmailImpl });
@@ -659,7 +659,7 @@ export function DeviceGroupSyncProvider(props: {
     }
     setDeviceRemoved(true);
     publishOwnDeviceRoster(null);
-    // ADR-0066 section 2.3: an inactive DeviceGroup is proof of removal by a
+    // ADR-0074 section 2.3: an inactive DeviceGroup is proof of removal by a
     // device of the account. The device signs out and wipes everything by
     // itself; the removed screen (UX 18.2) is the auth layer's from here.
     if (activeAccountIdB64 !== null) auth.reportDeviceRemoved(activeAccountIdB64);
@@ -847,15 +847,15 @@ export function DeviceGroupSyncProvider(props: {
         const bytes = group.createDeviceGroupSnapshotMessage(identity, part, mintHlc());
         await publishGroupMessage(bytes);
       }
-      // ADR-0065 R.13a - the lineage is not in `snapshotParts()`: a catch-up
+      // ADR-0073 R.13a - the lineage is not in `snapshotParts()`: a catch-up
       // is the snapshot parts PLUS every lineage envelope, each with its
       // original stamp.
       await sendLineageEnvelopes(synced.lineageEnvelopes());
-      // ADR-0067 - the recovery-email register is not in `snapshotParts()`
+      // ADR-0075 - the recovery-email register is not in `snapshotParts()`
       // either: its envelope rides beside them, with its original stamp.
       const recoveryEmail = synced.recoveryEmailEnvelope();
       if (recoveryEmail !== undefined) await sendLineageEnvelopes([recoveryEmail]);
-      // ADR-0068 - and the own-username register, the same way.
+      // ADR-0076 - and the own-username register, the same way.
       const ownUsername = synced.ownUsernameEnvelope();
       if (ownUsername !== undefined) await sendLineageEnvelopes([ownUsername]);
     } catch (err) {
@@ -868,7 +868,7 @@ export function DeviceGroupSyncProvider(props: {
     }
   }
 
-  // ----- ADR-0065 R.5: the lineage register ------------------------
+  // ----- ADR-0073 R.5: the lineage register ------------------------
 
   /** `localStorage` marker: a lineage register written here has not been
    *  confirmed sent. Set before the publish, cleared after it, so a device
@@ -885,7 +885,7 @@ export function DeviceGroupSyncProvider(props: {
     }
   }
 
-  // ----- ADR-0067: the recovery-email register --------------------
+  // ----- ADR-0075: the recovery-email register --------------------
 
   /** `localStorage` marker: the register written here has not been confirmed
    *  sent (it holds no address, only the fact). The same rule as the lineage
@@ -943,7 +943,7 @@ export function DeviceGroupSyncProvider(props: {
     await sendRecoveryEmailRegister(account);
   }
 
-  // ----- ADR-0068: the own-username register ----------------------
+  // ----- ADR-0076: the own-username register ----------------------
 
   const ownUsernameUnsentKey = (account: string): string => `lakko.own-username.unsent.v1.${account}`;
 
@@ -1045,7 +1045,7 @@ export function DeviceGroupSyncProvider(props: {
 
   // ----- Inbound poll loop ---------------------------------------
 
-  // ----- ADR-0066 section 3.3: the key-rotation port -----------------
+  // ----- ADR-0074 section 3.3: the key-rotation port -----------------
 
   /** Poll passes started so far; a catch-up is settled only by a pass that
    *  started after it was asked for. */
@@ -1244,7 +1244,7 @@ export function DeviceGroupSyncProvider(props: {
               const wasm = await loadWasm();
               const parsed = wasm.parseDeviceGroupPayload(data);
               try {
-                // ADR-0066 section 3.3: a `key-rotation` envelope means
+                // ADR-0074 section 3.3: a `key-rotation` envelope means
                 // something here and nowhere else. Awaited, so a journal
                 // read "to the head" has stored it before it reports.
                 if (
@@ -1317,7 +1317,7 @@ export function DeviceGroupSyncProvider(props: {
         }
       }
 
-      // ADR-0066 section 3.3: a pass that started after a catch-up was asked
+      // ADR-0074 section 3.3: a pass that started after a catch-up was asked
       // for and found nothing more behind it has read the journal to its head.
       if (batch.persisted && !raw.hasMore) settleCatchUps("read", passStartedAt);
       if (batch.persisted) {
@@ -1512,9 +1512,9 @@ export function DeviceGroupSyncProvider(props: {
       // own Profile envelope from another device of this account, ordered by
       // its own stamp (not the HLC) and not a synced register; anything else
       // inside is dropped by the intake.
-      // ADR-0065 R.5 / R.13a - a lineage envelope is routed BEFORE that
+      // ADR-0073 R.5 / R.13a - a lineage envelope is routed BEFORE that
       // dispatcher: it is a `lakko-sync` register, folded by the one fold.
-      // ADR-0067 - the recovery-email register, the same way.
+      // ADR-0075 - the recovery-email register, the same way.
       if (wasmSync !== null && wasmSync.isRecoveryEmailEnvelope(parsed.serviceEnvelope)) {
         try {
           if (synced?.applyRecoveryEmailEnvelope(parsed.serviceEnvelope) === true) {
@@ -1526,7 +1526,7 @@ export function DeviceGroupSyncProvider(props: {
         }
         return;
       }
-      // ADR-0068 - the own-username register, the same way.
+      // ADR-0076 - the own-username register, the same way.
       if (wasmSync !== null && wasmSync.isOwnUsernameEnvelope(parsed.serviceEnvelope)) {
         try {
           if (synced?.applyOwnUsernameEnvelope(parsed.serviceEnvelope) === true) {

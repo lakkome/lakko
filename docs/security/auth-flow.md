@@ -62,15 +62,15 @@ LOGIN
 ```text
 RECOVER  — same as signup but keyed off the 12-word BIP39
 phrase the user wrote down at signup (24 words until
-ADR-0064, 2026-10-02). The phrase derives a
+ADR-0072, 2026-10-02). The phrase derives a
 "recovery exportKey" used to authenticate the password
 rotation. Old exportKey is invalidated by the rotation; a
 fresh device-root key is derived from the new exportKey.
 ```
 
-### Recovery after ADR-0064 (2026-10-02)
+### Recovery after ADR-0072 (2026-10-02)
 
-[ADR-0064](../adr/0064-recovery-model-simplification.md) is the record;
+[ADR-0072](../adr/0072-recovery-model-simplification.md) is the record;
 this is the part that bears on the auth service. Built in `services/auth`
 and on web, unit-tested, not walked live; iOS and Android in progress.
 
@@ -87,8 +87,8 @@ and on web, unit-tested, not walked live; iOS and Android in progress.
 - **After a fresh identity** (ADR-0017 `mintFreshIdentity`, which the
   interface calls "Reset account keys") the recovery credential is replaced
   **inside the key reset** (next section): the standalone
-  `POST /recovery/credential/{start,finish}` routes of ADR-0064 decision 9
-  were deleted by ADR-0065 on 2026-10-03.
+  `POST /recovery/credential/{start,finish}` routes of ADR-0072 decision 9
+  were deleted by ADR-0073 on 2026-10-03.
 - **Removed:** the phone / email one-time code (ADR-0018 factor (d)) and the
   server-side word vault (ADR-0049 section 1). The server-issued access
   factors are another device, a passkey and TOTP.
@@ -97,9 +97,9 @@ and on web, unit-tested, not walked live; iOS and Android in progress.
   never reaches the server), `PUT /vault/passkey`, `POST /vault/passkey/get`,
   `DELETE /vault/passkey`, `GET /vault/passkeys`, all bearer.
 
-### Reset account keys (ADR-0065, phase 1 built 2026-10-03)
+### Reset account keys (ADR-0073, phase 1 built 2026-10-03)
 
-[ADR-0065](../adr/0065-account-key-reset.md) is the record; its "What the
+[ADR-0073](../adr/0073-account-key-reset.md) is the record; its "What the
 build changed / found" section lists the deviations. Built in `services/auth`,
 `services/discovery`, `services/ds` and on web, iOS and Android; DB-gated
 and unit tests green (auth 120 + 2, discovery 107, DS 85; the three client
@@ -126,7 +126,7 @@ suites); **not walked live**, no passkey ceremony executed; the
   BLAKE3-derive-key of the account id, the DeviceGroup journal id, `g`, the
   new pubkey, `signed_at`; the shared attest key, its own domain); issue the
   caller a fresh pair at `g`. **Kept:** the password envelope and the TOTP
-  secret (ADR-0065 open question 1). **No ADR-0014 action grant**, even with a
+  secret (ADR-0073 open question 1). **No ADR-0014 action grant**, even with a
   passkey on the account. Limits: `Scope::RecoveryReplace` (10 per hour) on
   both calls, `Scope::KeyReset` (3 per day) on `finish`.
 - **What the attestation buys**, stated plainly: a binding of the
@@ -166,7 +166,7 @@ the password to recover it. On every platform the in-memory
 holder:
 
 - Holds `accountId: bytes` (16) + `exportKey: bytes` (64) + the
-  ADR-0017 `accountIdentitySeed` (64) + the ADR-0065 session pair
+  ADR-0017 `accountIdentitySeed` (64) + the ADR-0073 session pair
   (`session`: the access token and its expiry, the refresh credential
   and its expiry, the key generation; `sessionToken` /
   `sessionExpiresAtMs` are views onto it on iOS and Android).
@@ -201,7 +201,7 @@ in the same turn. See
 and the platform-specific
 `WebauthnClient` wrappers.
 
-## Session credentials (ADR-0065 section 3, 2026-10-03)
+## Session credentials (ADR-0073 section 3, 2026-10-03)
 
 Every session-landing route of `auth` (`/signup/finish`, `/login/finish`,
 `/recovery/login/finish`, `/password/reset/finish`, `/webauthn/auth/finish`,
@@ -216,7 +216,7 @@ key generation (`crates/lakko-auth-token`, `services/auth/src/session.rs`):
   `/auth/genesis/attest`, `/auth/backup/head`, `/auth/tokens`,
   `/auth/login-handle`, the key reset), `discovery`, `storage` (`/backup`) and
   `gif-proxy`. Default TTL **900 s** (`LAKKO_SESSION_TOKEN_TTL_SECS`; chosen,
-  not measured). The pre-ADR-0065 four-part `v1` token is refused (flag day,
+  not measured). The pre-ADR-0073 four-part `v1` token is refused (flag day,
   no users).
 - **Refresh credential** `r1.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag>`,
   tagged under `BLAKE3-derive-key("lakko/session-refresh/v1", secret)` so an

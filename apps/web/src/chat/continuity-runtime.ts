@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 "Phase 2 revised", R.6 and R.7 cases 1 and 3 - the ORDER in
+ * ADR-0073 "Phase 2 revised", R.6 and R.7 cases 1 and 3 - the ORDER in
  * which a device continues a conversation that cannot be repaired in place,
  * as one function over an injected port.
  *

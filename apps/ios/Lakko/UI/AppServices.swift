@@ -31,13 +31,13 @@ final class AppServices {
     /// The Feed's "Couldn't check for new messages." state, fed by every
     /// check. In memory, per account.
     let feedRefresh: FeedRefreshCenter
-    /// ADR-0066 section 2.3 — removing another device of the account, with
+    /// ADR-0074 section 2.3 — removing another device of the account, with
     /// its owed record.
     let deviceRemoval: DeviceRemovalRunner
-    /// ADR-0066 section 3.2 — "It was lost or stolen": remove a device AND
+    /// ADR-0074 section 3.2 — "It was lost or stolen": remove a device AND
     /// change the account keys, with its owed record.
     let keyRotation: KeyRotationRunner
-    /// ADR-0067 — the signed-in account's protection (recovery email, saved
+    /// ADR-0075 — the signed-in account's protection (recovery email, saved
     /// phrase) and the notices its devices are shown.
     let accountProtection: AccountProtectionCenter
 
@@ -95,7 +95,7 @@ extension AppServices {
         }
     }
 
-    /// ADR-0065 section 3.5 — the automatic wipe of the signed-out screen:
+    /// ADR-0073 section 3.5 — the automatic wipe of the signed-out screen:
     /// the full forget-device wipe WITHOUT the directory call
     /// ``forgetThisDevice()`` makes first (the reset already deleted this
     /// device's KeyPackage row, and the token is superseded) and without any
@@ -107,7 +107,7 @@ extension AppServices {
         wipeAccountLocalData(accountIdB64: accountIdB64)
     }
 
-    /// ADR-0066 section 1.1 — the STAGED wipe of a device whose account keys
+    /// ADR-0074 section 1.1 — the STAGED wipe of a device whose account keys
     /// were reset elsewhere: the same runtimes let go and the same stores
     /// are removed, except the recall record, which is what "Was it you?"
     /// needs to take the account back.

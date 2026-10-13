@@ -10,7 +10,7 @@ import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 
 /*
- * ADR-0065 "Phase 2 revised", R.6 - the per-`(account, group)` CLAIM state a
+ * ADR-0073 "Phase 2 revised", R.6 - the per-`(account, group)` CLAIM state a
  * received `group_closed` envelope leaves on this device.
  *
  * Since the visible flow was removed, a `group_closed` envelope has one

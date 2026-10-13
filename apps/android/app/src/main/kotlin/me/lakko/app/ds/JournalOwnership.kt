@@ -35,10 +35,10 @@ import uniffi.lakko_ffi_uniffi.DsStatementSignerInterface
 public data class DsStatement(val path: String, val bodyJson: String)
 
 /**
- * ADR-0065 section 5 — the same `Reset` statement with the key-reset
+ * ADR-0073 section 5 — the same `Reset` statement with the key-reset
  * attestation beside it (`{"statement_b64": ..., "key_reset_attest_b64": ...}`,
  * standard base64 of the 177 bytes) and the root endorsement
- * (`"root_endorsement_b64"`, ADR-0066): the DS then hears the
+ * (`"root_endorsement_b64"`, ADR-0074): the DS then hears the
  * reset from a signer that is NOT the journal's root, verifies the
  * attestation under its pinned attest key, requires a strictly greater
  * generation than it stored, and re-roots the journal under the signer.
@@ -56,7 +56,7 @@ public fun DsStatement.withKeyResetEvidence(evidence: KeyResetRootEvidence): DsS
 }
 
 /**
- * ADR-0066 "T5 as built" item 21 - what an attested `reset` (after a key
+ * ADR-0074 "T5 as built" item 21 - what an attested `reset` (after a key
  * reset or a recall) or an attested `root` transfer (after a rotation)
  * carries beside its statement. The DS refuses the attestation alone: the
  * key the attestation names must also say which key becomes the journal's
@@ -75,7 +75,7 @@ public class KeyResetRootEvidence(
 public const val KEY_RESET_ATTEST_FIELD: String = "key_reset_attest_b64"
 
 /** The body field carrying the root endorsement (required with the
- *  attestation since ADR-0066 T5). */
+ *  attestation since ADR-0074 T5). */
 public const val ROOT_ENDORSEMENT_FIELD: String = "root_endorsement_b64"
 
 /** A registrar's rank. The root outranks both. */
@@ -702,7 +702,7 @@ public suspend fun claimOrReset(
     epochKey: ByteArray,
     statements: DsStatementSigning,
     refounded: Boolean,
-    /** ADR-0065 / ADR-0066: the key-reset attestation with the root
+    /** ADR-0073 / ADR-0074: the key-reset attestation with the root
      *  endorsement for the resetting root, when this founding follows a
      *  reset of the account keys, so the reset is heard although the
      *  journal's chain belongs to the OLD root. `null` (or a `null` answer)
@@ -779,7 +779,7 @@ public suspend fun probeRoot(
     }
 
 /**
- * ADR-0066 section 3.5 "DS" - move [journalId]'s root from [oldRoot] to
+ * ADR-0074 section 3.5 "DS" - move [journalId]'s root from [oldRoot] to
  * [newRoot] after a rotation of the account keys: a `root` transfer signed
  * by the OLD root, with the key-reset attestation and the new account key's
  * endorsement of [newRoot] beside it when [evidence] is in hand (the DS then

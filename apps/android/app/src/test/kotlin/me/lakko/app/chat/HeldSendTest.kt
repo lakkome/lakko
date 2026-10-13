@@ -19,7 +19,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0065 R.7 case 1 - the held send, the dead-session guard, the re-send
+/** ADR-0073 R.7 case 1 - the held send, the dead-session guard, the re-send
  *  marker, the call and the continuity key (mirror of the web tables). */
 class HeldSendTest {
     @Test

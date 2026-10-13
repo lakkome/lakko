@@ -62,7 +62,7 @@
 //!   Unset: `PUT .../push-binding` answers 503 `push-binding-disabled` and
 //!   every wake is dropped (startup warning). Malformed: startup fails.
 //! - `LAKKO_DS_ATTEST_KEY` — base64 of auth's 32-byte Ed25519 attest
-//!   verifying key (ADR-0065): a key-reset attestation carried by
+//!   verifying key (ADR-0073): a key-reset attestation carried by
 //!   `PUT .../reset` is verified under it, letting the device that holds an
 //!   account's NEW seed re-root the DeviceGroup journal the old seed owned.
 //!   Unset: that arm answers 503 `key-reset-disabled` (startup warning); the
@@ -89,7 +89,7 @@
 //! - `PUT    /ds/group/{group_id_hex}/claim`       — first claim, by the journal's root (ADR-0057)
 //! - `PUT    /ds/group/{group_id_hex}/reset`       — the root replaces the epoch chain; with
 //!   `key_reset_attest_b64`, any signer re-roots the journal under a verified key-reset
-//!   attestation of a newer generation (ADR-0065)
+//!   attestation of a newer generation (ADR-0073)
 //! - `PUT    /ds/group/{group_id_hex}/access`      — a registrar registers an epoch's access key
 //! - `PUT    /ds/group/{group_id_hex}/registrars`  — the root manages registrars
 //! - `PUT    /ds/group/{group_id_hex}/root`        — the root names a new root
@@ -159,7 +159,7 @@ pub(crate) struct AppState {
     /// (`LAKKO_DS_BINDING_PEPPER`). `None`: the binding route answers 503
     /// and every wake is dropped.
     pub(crate) binding_pepper: Option<[u8; 32]>,
-    /// ADR-0065 - the auth attest VERIFYING key pinned from
+    /// ADR-0073 - the auth attest VERIFYING key pinned from
     /// `LAKKO_DS_ATTEST_KEY`, which a key-reset attestation on
     /// `PUT .../reset` is verified under. `None`: that arm answers 503
     /// `key-reset-disabled`; the plain root reset is unaffected.
@@ -224,7 +224,7 @@ async fn main() -> Result<()> {
         .context("key-reset attest key")?;
     if attest_key.is_none() {
         tracing::warn!(
-            "LAKKO_DS_ATTEST_KEY unset - an attested journal reset (ADR-0065) answers 503 \
+            "LAKKO_DS_ATTEST_KEY unset - an attested journal reset (ADR-0073) answers 503 \
              key-reset-disabled; an account that reset its keys cannot re-root its DeviceGroup"
         );
     }

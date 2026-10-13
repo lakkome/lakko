@@ -3,7 +3,7 @@
 
 /**
  * The recovery-email register of the synced state, through the real wasm
- * core, the way this client drives it (ADR-0067, amended 2026-10-13): a
+ * core, the way this client drives it (ADR-0075, amended 2026-10-13): a
  * write on one device reaches a sibling as a service envelope, survives the
  * encrypted row (`toBytes`) and the backup merge, and a removal wins by its
  * later stamp.

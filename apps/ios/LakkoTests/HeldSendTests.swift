@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.7 case 1 - the held send. The cases are those of
+/// ADR-0073 R.7 case 1 - the held send. The cases are those of
 /// `apps/web/src/chat/held-send.test.ts`, the pure half of
 /// `held-reply-and-flush.test.ts`, and the publish guard's table of
 /// `dead-session-guard.test.ts`.

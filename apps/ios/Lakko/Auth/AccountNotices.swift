@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0067 section 9 / UX 19.2, 19.5, 19.6 — what the account's own devices
+// ADR-0075 section 9 / UX 19.2, 19.5, 19.6 — what the account's own devices
 // are told: the password was changed by email, the account was opened by
 // email, a recovery email was added / replaced / removed, a recovery phrase
 // was saved. The server keeps the list (`GET /account/notices`), since the

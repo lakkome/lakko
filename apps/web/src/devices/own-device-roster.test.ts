@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-/** The DeviceGroup filter (ADR-0066 section 2.3). */
+/** The DeviceGroup filter (ADR-0074 section 2.3). */
 import { afterEach, describe, expect, it } from "vitest";
 
 import {

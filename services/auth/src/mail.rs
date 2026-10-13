@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Sending the one letter this service sends: a recovery-email code
-//! ([ADR-0067] section 10, UX `docs/ux/identity-recovery.md` section 19.4).
+//! ([ADR-0075] section 10, UX `docs/ux/identity-recovery.md` section 19.4).
 //!
 //! [`MailSender`] is the seam. Two implementations:
 //!
@@ -35,7 +35,7 @@
 //! - `LAKKO_AUTH_SMTP_HELO` — the name sent in `EHLO`. Default: the domain
 //!   of the `From` address.
 //!
-//! [ADR-0067]: ../../../docs/adr/0067-recovery-email.md
+//! [ADR-0075]: ../../../docs/adr/0075-recovery-email.md
 
 use std::future::Future;
 use std::pin::Pin;

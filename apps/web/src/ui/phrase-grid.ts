@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Layout rule for the recovery-phrase grid (ADR-0064; the maintainer's
+ * Layout rule for the recovery-phrase grid (ADR-0072; the maintainer's
  * requirement that the 12 words fit one screen): the words read ACROSS the
  * rows, row-major (1 2 3 / 4 5 6 / ...), in a grid that is 3 columns x 4
  * rows at phone width and 4 columns x 3 rows on a wide screen. The same

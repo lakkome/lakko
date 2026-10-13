@@ -3,7 +3,7 @@
 
 /**
  * The recovery phrase on a device that holds the account's keys
- * (maintainer decision 2026-10-02, superseding ADR-0064 decision 5).
+ * (maintainer decision 2026-10-02, superseding ADR-0072 decision 5).
  *
  * A device that holds the keys also holds the 12-word phrase, wrapped under
  * its non-extractable device key (`phrase-store.ts`). Three things rest on
@@ -49,7 +49,7 @@ export const PHRASE_LANDING_PATHS = [
   "device-restore",
   /** `mintFreshIdentity`: a new identity and a new phrase. */
   "fresh-identity",
-  /** ADR-0066 part 3: the account keys were changed with the devices kept
+  /** ADR-0074 part 3: the account keys were changed with the devices kept
    *  (on this device, or adopted from another one). */
   "key-rotation",
 ] as const;

@@ -47,7 +47,7 @@ vi.mock("../wasm", () => ({
   loadWasm: async () => ({
     // ADR-0050: the Welcome is addressed to the added leaf's own key.
     keyPackageSignatureKey: (_kp: Uint8Array) => new Uint8Array(32).fill(9),
-    // ADR-0065 R.2: `addMemberToGroup` adds only a device whose binding names
+    // ADR-0073 R.2: `addMemberToGroup` adds only a device whose binding names
     // the expected account key. The first byte of the fake KeyPackage is the
     // account key's fill, so a test can serve another account's device.
     keyPackageAccountKey: (kp: Uint8Array) => new Uint8Array(32).fill(kp[0] ?? 0),
@@ -566,7 +566,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     const abortHookGids: string[] = [];
     let persistCalled = false;
     const client = new ContactsClient(
-      // addMemberToGroup checks the new member's published identity (ADR-0065
+      // addMemberToGroup checks the new member's published identity (ADR-0073
       // phase 2; nothing published passes) and fetches their KeyPackage first.
       {
         identityFetch: async () => null,
@@ -607,7 +607,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     expect(publishGroup).not.toHaveBeenCalled();
     expect(publishMailbox).not.toHaveBeenCalled();
   });
-  it("addMemberToGroup refuses a device whose binding names another account key: nothing is merged or published (ADR-0065 R.2)", async () => {
+  it("addMemberToGroup refuses a device whose binding names another account key: nothing is merged or published (ADR-0073 R.2)", async () => {
     let epoch = 5n;
     const addMember = vi.fn(() => {
       epoch += 1n;

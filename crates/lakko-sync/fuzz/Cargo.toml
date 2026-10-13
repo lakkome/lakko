@@ -34,8 +34,8 @@ doc = false
 bench = false
 
 # The four byte decoders of the ADR-0058 synced state: the lineage envelope
-# (ADR-0065 R.5), the recovery-email envelope (ADR-0067) and the own-username
-# envelope (ADR-0068), which arrive
+# (ADR-0073 R.5), the recovery-email envelope (ADR-0075) and the own-username
+# envelope (ADR-0076), which arrive
 # from another device of the account inside a DeviceGroup service envelope,
 # and `SyncedState::from_bytes`, which reads
 # local persistence and the backup payload a storage tier serves.

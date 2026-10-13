@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! wasm-bindgen surface for the email vault and the recovery-address rule
-//! (ADR-0067 sections 2 and 4). Mirror of
+//! (ADR-0075 sections 2 and 4). Mirror of
 //! `crates/lakko-ffi-uniffi/src/email_vault.rs`.
 //!
 //! - `emailVaultSeal(mnemonic, loginHandle, address, vaultSalt) ->

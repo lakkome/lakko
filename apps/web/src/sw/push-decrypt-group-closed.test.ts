@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 phase 2 — the BACKGROUND notification path
+ * ADR-0073 phase 2 — the BACKGROUND notification path
  * (`public/sw-push-decrypt.js`) suppresses a group-closed envelope,
  * READ-ONLY (C-59), exactly as it does the group name (see
  * `push-decrypt-group-name.test.ts`, whose fixture this copies).

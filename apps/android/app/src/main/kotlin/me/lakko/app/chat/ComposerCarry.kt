@@ -4,7 +4,7 @@
 package me.lakko.app.chat
 
 /*
- * ADR-0065 R.5 - the composer's unsent text belongs to the CONVERSATION.
+ * ADR-0073 R.5 - the composer's unsent text belongs to the CONVERSATION.
  *
  * The chat screen's view model is bound to one group, the conversation's
  * current one. When the conversation moves to its successor (the other

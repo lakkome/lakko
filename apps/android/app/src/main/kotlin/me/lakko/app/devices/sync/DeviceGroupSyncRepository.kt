@@ -456,7 +456,7 @@ public class DeviceGroupSyncRepository(
     }
 
     /**
-     * ADR-0066 section 2.3 — the leaf signature keys of the devices in the
+     * ADR-0074 section 2.3 — the leaf signature keys of the devices in the
      * account's DeviceGroup, lowercase hex, as this device's live handle
      * holds them. `null` when there is no handle, the group is inactive
      * (this device was removed: its frozen roster proves nothing) or the
@@ -528,7 +528,7 @@ public class DeviceGroupSyncRepository(
                 republishRecoveryEmail(state)
                 republishOwnUsername(state)
                 republishLineage(state)
-                // ADR-0065 R.5 - every person-facing store is keyed by
+                // ADR-0073 R.5 - every person-facing store is keyed by
                 // conversation id; a screen holding ANY segment's id reads the
                 // conversation's row ([me.lakko.app.chat.aliasAcrossSegments]).
                 val lineageEntries = mutableLineage.value
@@ -597,7 +597,7 @@ public class DeviceGroupSyncRepository(
     }
 
     // ------------------------------------------------------------
-    // ADR-0065 R.5 / R.13a - the conversation lineage
+    // ADR-0073 R.5 / R.13a - the conversation lineage
     // ------------------------------------------------------------
 
     private val mutableLineage: MutableStateFlow<List<me.lakko.app.chat.LineageEntry>> =
@@ -678,7 +678,7 @@ public class DeviceGroupSyncRepository(
     }
 
     // ------------------------------------------------------------
-    // ADR-0067 (amended 2026-10-13) - the recovery email address
+    // ADR-0075 (amended 2026-10-13) - the recovery email address
     // ------------------------------------------------------------
 
     private val mutableRecoveryEmail: MutableStateFlow<RecoveryAddressState> =
@@ -745,7 +745,7 @@ public class DeviceGroupSyncRepository(
     }
 
     // ------------------------------------------------------------
-    // ADR-0068 - the account's own username
+    // ADR-0076 - the account's own username
     // ------------------------------------------------------------
 
     private val mutableOwnUsername: MutableStateFlow<OwnUsernameState> = MutableStateFlow(OwnUsernameState.NOT_READY)
@@ -834,12 +834,12 @@ public class DeviceGroupSyncRepository(
                 ),
             )
         }
-        // ADR-0065 R.13a - the backup payload carries the lineage registers
+        // ADR-0073 R.13a - the backup payload carries the lineage registers
         // (`to_bytes`), and `snapshotParts()` does not.
         for (envelope in runCatching { restored.lineageEnvelopes() }.getOrNull().orEmpty()) applyLineage(envelope)
-        // ADR-0067 - and the recovery email register, with its own stamp.
+        // ADR-0075 - and the recovery email register, with its own stamp.
         runCatching { restored.recoveryEmailEnvelope() }.getOrNull()?.let { applyRecoveryEmail(it) }
-        // ADR-0068 - and the own-username register.
+        // ADR-0076 - and the own-username register.
         runCatching { restored.ownUsernameEnvelope() }.getOrNull()?.let { applyOwnUsername(it) }
     }
 
@@ -855,7 +855,7 @@ public class DeviceGroupSyncRepository(
      *  carrying its segment. Under [stateLock]. */
     private var conversationReadCursors: Map<String, ReadCursorState> = emptyMap()
 
-    /** ADR-0065 R.5 - the conversation id a person-facing write for
+    /** ADR-0073 R.5 - the conversation id a person-facing write for
      *  [groupId] is filed under, and the index of that group among the
      *  conversation's segments. */
     private fun conversationOf(groupId: ByteArray): Pair<ByteArray, Int> {
@@ -931,7 +931,7 @@ public class DeviceGroupSyncRepository(
         upToMessageId: ByteArray,
         readAtMs: ULong,
     ) {
-        // ADR-0065 R.5 - one position per conversation: `message_id(8 BE)`
+        // ADR-0073 R.5 - one position per conversation: `message_id(8 BE)`
         // in the first segment, `message_id(8 BE) || segment(4 BE)` later.
         val (conversationId, segment) = conversationOf(groupId)
         val held = synchronized(stateLock) { conversationReadCursors[groupIdHexOf(conversationId)]?.upToMessageId }
@@ -1033,18 +1033,18 @@ public class DeviceGroupSyncRepository(
         for (part in parts) {
             sendBody(DeviceGroupBody.StateSnapshot(part), Hlc.mint())
         }
-        // ADR-0065 R.13a - the lineage registers are not in `snapshot()`: a
+        // ADR-0073 R.13a - the lineage registers are not in `snapshot()`: a
         // catch-up is the snapshot parts plus `lineageEnvelopes()`.
         val lineageEnvelopes = synchronized(stateLock) {
             runCatching { syncedState?.lineageEnvelopes() }.getOrNull().orEmpty()
         }
         for (envelope in lineageEnvelopes) sendServiceEnvelope(envelope)
-        // ADR-0067 - the recovery email register is not in `snapshot()` either.
+        // ADR-0075 - the recovery email register is not in `snapshot()` either.
         val recoveryEmailEnvelope = synchronized(stateLock) {
             runCatching { syncedState?.recoveryEmailEnvelope() }.getOrNull()
         }
         recoveryEmailEnvelope?.let { sendServiceEnvelope(it) }
-        // ADR-0068 - nor is the own-username register.
+        // ADR-0076 - nor is the own-username register.
         val ownUsernameEnvelope = synchronized(stateLock) {
             runCatching { syncedState?.ownUsernameEnvelope() }.getOrNull()
         }
@@ -1235,13 +1235,13 @@ public class DeviceGroupSyncRepository(
                             if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isOwnUsernameEnvelope(body.envelope)
                             ) {
-                                // ADR-0068 - the account's username from
+                                // ADR-0076 - the account's username from
                                 // another of its devices (a rename there).
                                 applyOwnUsername(body.envelope)
                             } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isRecoveryEmailEnvelope(body.envelope)
                             ) {
-                                // ADR-0067 - the account's recovery email
+                                // ADR-0075 - the account's recovery email
                                 // address from another of its devices; a
                                 // `lakko-sync` envelope, routed before the
                                 // lakko-contacts dispatcher.
@@ -1249,13 +1249,13 @@ public class DeviceGroupSyncRepository(
                             } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isLineageEnvelope(body.envelope)
                             ) {
-                                // ADR-0065 R.13a - a lineage register from
+                                // ADR-0073 R.13a - a lineage register from
                                 // another of this account's devices. Routed
                                 // BEFORE the lakko-contacts dispatcher: it is
                                 // a `lakko-sync` envelope, not one of those.
                                 applyLineage(body.envelope)
                             } else if (body is DeviceGroupBody.ServiceEnvelope && isKeyRotation(body.envelope)) {
-                                // ADR-0066 section 3.3 - the account's new
+                                // ADR-0074 section 3.3 - the account's new
                                 // keys from the device that changed them.
                                 // Meaningful ONLY here, in the account's own
                                 // DeviceGroup; verified and stored as
@@ -1306,7 +1306,7 @@ public class DeviceGroupSyncRepository(
                     }
                 }
 
-                // ADR-0066 section 3.3 - every row up to the journal's head has
+                // ADR-0074 section 3.3 - every row up to the journal's head has
                 // been applied: a superseded device waiting for a key-rotation
                 // envelope may decide now.
                 if (drainedBatch) headReads.value = headReads.value + 1
@@ -1403,7 +1403,7 @@ public class DeviceGroupSyncRepository(
     }
 
     // ------------------------------------------------------------
-    // ADR-0066 part 3 - the key-rotation envelope
+    // ADR-0074 part 3 - the key-rotation envelope
     // ------------------------------------------------------------
 
     /** Bumped each time a poll read the journal to its head. */
@@ -1502,7 +1502,7 @@ public class DeviceGroupSyncRepository(
         }
     }
 
-    /** ADR-0066 section 3.5 - the account seed changed (a rotation this
+    /** ADR-0074 section 3.5 - the account seed changed (a rotation this
      *  device ran or adopted): the journal's root signer follows it. */
     public fun rebindRoot(accountIdentitySeed: ByteArray) {
         val g = group.get() ?: return
@@ -1586,7 +1586,7 @@ public class DeviceGroupSyncRepository(
                     statements = root,
                     refounded = unconfirmed,
                     put = { make -> ds.putStatement(make) },
-                    // ADR-0065 section 5 — after a reset of the account keys
+                    // ADR-0073 section 5 — after a reset of the account keys
                     // the chain on the DS belongs to the old root; the
                     // attestation is what lets this root reset it.
                     keyResetEvidence = if (unconfirmed && accountIdB64 != null) {
@@ -1682,7 +1682,7 @@ public class DeviceGroupSyncRepository(
         public var active: DeviceGroupSyncRepository? = null
             private set
 
-        /** ADR-0066 section 3.3 - where a `key-rotation` envelope read from
+        /** ADR-0074 section 3.3 - where a `key-rotation` envelope read from
          *  the account's own DeviceGroup goes (the auth side verifies it and
          *  stores it as pending). Set by the app root. */
         @Volatile
@@ -1739,16 +1739,16 @@ public class DeviceGroupSyncRepository(
                             ),
                         )
                     }
-                    // ADR-0065 R.13a - and the lineage registers, which are
+                    // ADR-0073 R.13a - and the lineage registers, which are
                     // not part of `snapshotParts()`.
                     for (envelope in SyncedState.fromBytes(bytes).lineageEnvelopes()) {
                         existing.applyLineageEnvelope(envelope)
                     }
-                    // ADR-0067 - and the recovery email register.
+                    // ADR-0075 - and the recovery email register.
                     SyncedState.fromBytes(bytes).recoveryEmailEnvelope()?.let {
                         existing.applyRecoveryEmailEnvelope(it)
                     }
-                    // ADR-0068 - and the own-username register.
+                    // ADR-0076 - and the own-username register.
                     SyncedState.fromBytes(bytes).ownUsernameEnvelope()?.let {
                         existing.applyOwnUsernameEnvelope(it)
                     }

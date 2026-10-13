@@ -19,7 +19,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * ADR-0066 part 3, Stage A - "remove and change keys" as one owed
+ * ADR-0074 part 3, Stage A - "remove and change keys" as one owed
  * operation: the order of the steps, the record and its resumes, what each
  * refusal means ("removed but not rotated" included), the one seam that
  * seals the new seed AFTER the removal, and what the sheet shows. Fake
@@ -990,7 +990,7 @@ class KeyRotationFlowTest {
         )
     }
 
-    // ---- ADR-0067 section 3: "Save a recovery phrase" ----------------------
+    // ---- ADR-0075 section 3: "Save a recovery phrase" ----------------------
 
     @Test
     fun `saving a phrase rotates the keys, removes no device and marks the commit`() = runTest {

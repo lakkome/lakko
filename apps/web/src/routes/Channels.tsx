@@ -870,7 +870,7 @@ const ChannelView: Component = () => {
   const [infoOpen, setInfoOpen] = createSignal(false);
 
   const isOwner = (): boolean => channelsState.keysByChannel().get(params.id) !== undefined;
-  /** ADR-0065 phase 2 (UX 16.6) — owned under account keys since reset: no
+  /** ADR-0073 phase 2 (UX 16.6) — owned under account keys since reset: no
    *  composer, no rotation, no subscriber management; one notice and
    *  `Remove from this device`. */
   const isOrphaned = (): boolean => channelsState.orphanedByKeyReset().has(params.id);

@@ -3,7 +3,7 @@
 
 import SwiftUI
 
-/// What the change-username screen shows, pure (ADR-0068).
+/// What the change-username screen shows, pure (ADR-0076).
 enum ChangeUsernameLayout: Equatable {
     /// The last change is under 30 days ago: `username.change.too_soon`
     /// with the date, no form.
@@ -33,7 +33,7 @@ enum ChangeUsernameLayout: Equatable {
     }
 }
 
-/// "Change username" (ADR-0068): the warnings, the 17.1 proof block when no
+/// "Change username" (ADR-0076): the warnings, the 17.1 proof block when no
 /// fresh grant is live, the username field with the live rule, `Change`.
 struct ChangeUsernameScreen: View {
     @ObservedObject var authRepository: AuthRepository

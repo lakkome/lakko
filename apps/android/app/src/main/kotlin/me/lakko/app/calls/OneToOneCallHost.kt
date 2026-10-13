@@ -461,7 +461,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         hasCamera: Boolean = true,
     ): Boolean {
         if (hasCall || otherCalls.isNotEmpty()) return false
-        // ADR-0065 R.12 — a call asked for in a dead one-to-one is placed in
+        // ADR-0073 R.12 — a call asked for in a dead one-to-one is placed in
         // the conversation's successor when this device holds one; otherwise
         // it does not start, before any signalling ([oneToOneCallTarget]).
         val target = when (val resolved = callTargetOf(groupIdHex)) {
@@ -552,7 +552,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     private val closedGroups: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /**
-     * ADR-0065 R.12 — where a one-to-one call asked for in a group is placed
+     * ADR-0073 R.12 — where a one-to-one call asked for in a group is placed
      * ([oneToOneCallTarget] over the repository's facts). Installed with the
      * repository; the default dials the group that was asked for.
      */
@@ -567,7 +567,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         }
 
     /**
-     * ADR-0065 R.12 / `docs/ux/identity-recovery.md` 16.4 — the one-to-one
+     * ADR-0073 R.12 / `docs/ux/identity-recovery.md` 16.4 — the one-to-one
      * [groupIdHex] has just become a dead session (the other person's reset
      * was accepted) or its conversation MOVED to a successor.
      *

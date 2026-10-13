@@ -4,7 +4,7 @@
 //! Fuzz target — `TokenSecret::verify` + `TokenSecret::verify_refresh` +
 //! `TokenSecret::verify_fresh_grant` (the v3 access-token, r2
 //! refresh-credential and k1 fresh-auth-grant parsers + verifiers,
-//! `fuzz_api::verify_token`, ADR-0065 and ADR-0066). The fuzz input is an
+//! `fuzz_api::verify_token`, ADR-0073 and ADR-0074). The fuzz input is an
 //! attacker-controlled credential string: a client or peer presents an
 //! access token on every bearer request and a refresh credential on auth's
 //! refresh route, and a fresh-auth grant in a body field or the

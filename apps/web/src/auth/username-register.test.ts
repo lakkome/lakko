@@ -136,7 +136,7 @@ describe("the register through the real core", () => {
   });
 });
 
-describe("the discovery 409 bodies are JSON (ADR-0068)", () => {
+describe("the discovery 409 bodies are JSON (ADR-0076)", () => {
   it("username-taken is the name; username-already-set and no-username are not", () => {
     expect(isUsernameTaken(409, "username-taken")).toBe(true);
     expect(isUsernameTaken(409, "username-already-set")).toBe(false);

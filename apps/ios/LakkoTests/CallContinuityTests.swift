@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.12 - a one-to-one call and a conversation that moved. The cases
+/// ADR-0073 R.12 - a one-to-one call and a conversation that moved. The cases
 /// are those of `apps/web/src/calls/call-continuity.test.ts`.
 final class CallContinuityTests: XCTestCase {
 

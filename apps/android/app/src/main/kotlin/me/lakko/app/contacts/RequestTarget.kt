@@ -11,7 +11,7 @@ package me.lakko.app.contacts
  * For a STRANGER (no pin) that is right. For an account this device has
  * pinned, a key that is not the pin sends the published identity through
  * the fail-closed gate first, where a proven rotation re-pins and an attested
- * reset is accepted silently (ADR-0065 R.2); a key that is then still neither
+ * reset is accepted silently (ADR-0073 R.2); a key that is then still neither
  * the pin nor a proven predecessor of it is refused. Old keys do not come
  * back. Mirror of `apps/web/src/contacts/request-target.ts`.
  */
@@ -37,7 +37,7 @@ public fun contactRequestGate(pinnedKeyB64: String?, recipientKeyB64: String): C
     }
 
 /** Which keys a contact request goes out to once the recipient's published
- *  identity has passed the fail-closed gate (ADR-0066 section 3.5a rule 1). */
+ *  identity has passed the fail-closed gate (ADR-0074 section 3.5a rule 1). */
 public enum class RequestTarget {
     /** The keys in hand are the published ones. */
     AS_SUPPLIED,

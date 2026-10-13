@@ -86,7 +86,7 @@ public enum ConversationMuteMirror {
     ) -> Bool {
         guard let defaults, let accountIdB64 else { return false }
         if defaults.bool(forKey: key(accountIdB64, groupIdHex)) { return true }
-        // ADR-0065 R.5 — mute belongs to the CONVERSATION: a group that
+        // ADR-0073 R.5 — mute belongs to the CONVERSATION: a group that
         // continues a muted conversation is muted, for the app and for the
         // notification extension alike (`ConversationLineageMirror`).
         let conversation = ConversationLineageMirror.conversationHex(

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * One email-vault job (ADR-0067 section 2), over the subset of the wasm core
+ * One email-vault job (ADR-0075 section 2), over the subset of the wasm core
  * it needs, so the worker and the main-thread fallback run the same code and
  * a test can run it with a fake core.
  *

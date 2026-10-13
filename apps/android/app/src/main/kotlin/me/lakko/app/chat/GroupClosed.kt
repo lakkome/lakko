@@ -4,7 +4,7 @@
 package me.lakko.app.chat
 
 /*
- * ADR-0065 "Phase 2 revised", R.6 — the wire peek of the group-closed
+ * ADR-0073 "Phase 2 revised", R.6 — the wire peek of the group-closed
  * envelope (`lakko-contacts::group_closed`, `lakko/group-closed/v1`).
  *
  * Since the visible flow was removed the envelope has one producer: a device

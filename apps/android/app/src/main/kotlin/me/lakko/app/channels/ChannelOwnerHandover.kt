@@ -9,7 +9,7 @@ import kotlinx.coroutines.CancellationException
 import uniffi.lakko_ffi_uniffi.Identity
 
 /*
- * ADR-0066 section 3.5, "Channels" - after a rotation of the account keys
+ * ADR-0074 section 3.5, "Channels" - after a rotation of the account keys
  * the owner key of every channel this account owns moves to the key the NEW
  * seed derives: `PUT /v1/channels/{id}/owner`, body = the new owner key, the
  * owner proof by the OLD seed's key.

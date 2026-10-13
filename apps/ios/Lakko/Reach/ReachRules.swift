@@ -390,7 +390,7 @@ public enum ReachRules {
         /// Hex group or channel id, `nil` for `contact` / `reply`.
         public let scopeHex: String?
         public let storedAtMs: UInt64
-        /// ADR-0066 section 3.5a rule 6 — `true` for the grant a newer one of
+        /// ADR-0074 section 3.5a rule 6 — `true` for the grant a newer one of
         /// the same class, scope and VERSION displaced: the person's account
         /// seed changed (a key rotation), so this one opens the mailbox of
         /// their old key and the newer one the mailbox of their new key. Kept
@@ -443,7 +443,7 @@ public enum ReachRules {
             out += all(.reply)
             return out
         }
-        // ADR-0066 section 3.5a rule 6 — a grant a rotation displaced comes
+        // ADR-0074 section 3.5a rule 6 — a grant a rotation displaced comes
         // after every current one: it opens only the old mailbox.
         let ordered = ordered(held.filter { !$0.isSuperseded }) + ordered(held.filter(\.isSuperseded))
         var seen = Set<Data>()
@@ -453,7 +453,7 @@ public enum ReachRules {
     /// Replace the grants held for one person with `incoming` of the same
     /// class and scope — the newest wins — keeping every other.
     ///
-    /// ADR-0066 section 3.5a rule 6 — one exception: a grant displaced by one
+    /// ADR-0074 section 3.5a rule 6 — one exception: a grant displaced by one
     /// of the SAME version and another seed is kept beside it, marked
     /// ``HeldGrant/superseded``. A reach key the owner rotated bumps the
     /// version; the same version under another seed means the owner's account
@@ -492,7 +492,7 @@ public enum ReachRules {
         return out
     }
 
-    /// ADR-0066 section 3.5a rule 5 — what a key rotation spends: every live
+    /// ADR-0074 section 3.5a rule 5 — what a key rotation spends: every live
     /// link scope and every outstanding reply scope joins the spent lists
     /// (once each), and none stays live.
     public static func spending(
@@ -516,7 +516,7 @@ public enum ReachRules {
         held.filter { !$0.isSuperseded }
     }
 
-    /// ADR-0066 section 3.5a, proposer / committer — which of this account's
+    /// ADR-0074 section 3.5a, proposer / committer — which of this account's
     /// own keys signs a delegated write: the first (current key first, then
     /// its own proven predecessors) a delegation in the envelope names. A
     /// proposer that has not observed this account's rotation names the old

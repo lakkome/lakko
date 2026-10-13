@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0065 section 5 - the attested arm of `PUT /ds/group/{hex}/reset`.
+//! ADR-0073 section 5 - the attested arm of `PUT /ds/group/{hex}/reset`.
 //!
 //! A journal's root key hangs on the owner's account seed (ADR-0057), so
 //! after an account resets its keys the device that holds the NEW seed is a
@@ -15,7 +15,7 @@
 //!    `503 key-reset-disabled`, on this arm only),
 //! 2. names the journal in the path (else the uniform `401`: an attestation
 //!    for one journal is useless on any other, a group journal the account
-//!    owns included - those are not re-rooted here, ADR-0065 phase 2),
+//!    owns included - those are not re-rooted here, ADR-0073 phase 2),
 //! 3. carries a generation strictly greater than the journal's stored
 //!    `ds_group_owner.key_generation` (else `409`),
 //!
@@ -27,10 +27,10 @@
 //! to the server. Without the field the route behaves exactly as ADR-0057
 //! wrote it.
 //!
-//! # The root endorsement (ADR-0066 section 4.6, decision D11)
+//! # The root endorsement (ADR-0074 section 4.6, decision D11)
 //!
 //! "From ANY signer" was a race. The attestation is not a secret: the
-//! resetting device hands it to discovery before it comes here, and ADR-0065
+//! resetting device hands it to discovery before it comes here, and ADR-0073
 //! R.3 has discovery serve it to anyone who fetches the bundle. Between
 //! those two steps, and for as long as an owed retry lasts, anyone holding a
 //! copy could present it and become the root of that account's DeviceGroup
@@ -48,7 +48,7 @@
 //! # The attested root transfer (a key rotation)
 //!
 //! `PUT /ds/group/{hex}/root` takes the same two fields. A key ROTATION
-//! (ADR-0066 section 3.5) does not reset the journal: the old root, which the
+//! (ADR-0074 section 3.5) does not reset the journal: the old root, which the
 //! rotating device still holds, signs a `RootTransfer` naming the root the
 //! new seed derives, so the epoch chain stays and a kept device that lags an
 //! epoch is not cut off. Carried with the attestation and an endorsement of
@@ -145,7 +145,7 @@ pub(crate) fn verify_for_journal(
 }
 
 /// Check the root endorsement that must accompany an attestation
-/// (ADR-0066 D11): the attested identity key signing `becomes_root`, the key
+/// (ADR-0074 D11): the attested identity key signing `becomes_root`, the key
 /// this statement makes the journal's root. Shape first (`400`), then the
 /// signature (the uniform `401`); an absent field is the uniform `401`.
 ///
@@ -861,7 +861,7 @@ mod route_tests {
         );
     }
 
-    /// ADR-0066 D11: a copy of the attestation is not enough. Without the
+    /// ADR-0074 D11: a copy of the attestation is not enough. Without the
     /// attested identity key's endorsement of the very key that signs the
     /// reset, the attested arm is the uniform refusal, costs the journal
     /// nothing, and leaves the honest reset possible afterwards.

@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0018: Recovery factor cascade — ACCESS-only factors
 
-> **Amended by ADR-0064 (2026-10-02).** The body below is left as written.
+> **Amended by ADR-0072 (2026-10-02).** The body below is left as written.
 > What no longer holds:
 >
 > - **Factor (d), the phone / email one-time code, is removed**: its routes,
@@ -21,7 +21,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 >   the exporter label `lakko/device-recovery/v2`; the v1 payload with the
 >   64-byte seed is refused, no dual accept.
 >
-> See [ADR-0064](0064-recovery-model-simplification.md).
+> See [ADR-0072](0072-recovery-model-simplification.md).
 
 - **Status:** Accepted — **built + reviewed** (Part 2 of the account-recovery
   overhaul). All four factors landed end-to-end (server + web + iOS + Android);

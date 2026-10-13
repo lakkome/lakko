@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.5 / R.7 - this device's own facts about a moved conversation
+/// ADR-0073 R.5 / R.7 - this device's own facts about a moved conversation
 /// (`ContinuityStore`, the twin of `apps/web/src/chat/continuity-store.ts`,
 /// which has no test file of its own).
 final class ContinuityStoreTests: XCTestCase {

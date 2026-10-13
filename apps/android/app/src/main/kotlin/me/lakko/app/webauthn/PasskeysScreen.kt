@@ -143,7 +143,7 @@ public fun PasskeysScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    // UX 15.3 (ADR-0065) - after a reset on this device the
+                    // UX 15.3 (ADR-0073) - after a reset on this device the
                     // empty state says why the passkeys are gone.
                     val resetThisSession by viewModel.repository.resetThisSession.collectAsStateWithLifecycle()
                     if (resetThisSession) {

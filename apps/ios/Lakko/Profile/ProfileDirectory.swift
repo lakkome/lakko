@@ -83,7 +83,7 @@ public final class ProfileDirectory: ObservableObject {
         ownProfile = ownStore.load(accountIdB64: accountIdB64)
         // This account's own names for its contacts, never the previous one's.
         setRenames(from: AcceptedContactsStore.load(accountIdB64: accountIdB64))
-        // ADR-0066 section 3.5 — the proven-predecessor map of this account's
+        // ADR-0074 section 3.5 — the proven-predecessor map of this account's
         // contacts, re-read whenever the pin gate records a proven rotation.
         provenPredecessors = ProvenPredecessorStore(ownerAccountIdB64: accountIdB64).load()
         if predecessorObserver == nil {
@@ -96,7 +96,7 @@ public final class ProfileDirectory: ObservableObject {
         bump()
     }
 
-    /// ADR-0066 section 3.5 — `predecessor key -> current key` for every
+    /// ADR-0074 section 3.5 — `predecessor key -> current key` for every
     /// contact whose key change the ADR-0016 gate accepted BY PROOF. The same
     /// person under two keys: a name known under either resolves for both.
     /// Never fed by an unproven change.
@@ -355,7 +355,7 @@ public final class ProfileDirectory: ObservableObject {
         var next: [String: String] = [:]
         var nextAliases: [String: String] = [:]
         for contact in accepted {
-            // ADR-0065 R.2 "the re-pin" — the keys an accepted reset retired
+            // ADR-0073 R.2 "the re-pin" — the keys an accepted reset retired
             // are DISPLAY aliases for stored history only (C-68: an author is
             // a key resolved at receipt, so an old bubble is attributed
             // through the alias). Never accepted for new traffic.
@@ -372,7 +372,7 @@ public final class ProfileDirectory: ObservableObject {
         bump()
     }
 
-    /// ADR-0065 R.2 — `retired key -> current key` for every contact whose
+    /// ADR-0073 R.2 — `retired key -> current key` for every contact whose
     /// reset this device accepted; see ``setRenames(from:)``.
     private var aliases: [String: String] = [:]
 
@@ -388,7 +388,7 @@ public final class ProfileDirectory: ObservableObject {
         if let current = aliases[keyB64], current != keyB64, let currentKey = Data(base64Encoded: current) {
             return resolve(signatureKey: currentKey)
         }
-        // ADR-0066 section 3.5 — a key nothing is known under that is the
+        // ADR-0074 section 3.5 — a key nothing is known under that is the
         // same person as a known key across a PROVEN rotation resolves as
         // that person. Nothing is shown about the rotation itself.
         if let alias = provenAlias(of: keyB64), let aliasKey = Data(base64Encoded: alias) {

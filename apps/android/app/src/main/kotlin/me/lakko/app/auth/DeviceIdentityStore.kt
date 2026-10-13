@@ -144,7 +144,7 @@ public object DeviceIdentityStore {
     }
 
     /**
-     * ADR-0065 — drop the binding alone, keeping the seed: after a reset of
+     * ADR-0073 — drop the binding alone, keeping the seed: after a reset of
      * the account keys the stored binding was signed by the OLD account key,
      * and the next chat bootstrap mints one under the new key
      * ([SessionIdentities.deviceIdentity] also re-mints when it finds the

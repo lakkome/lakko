@@ -15,7 +15,7 @@
 //! | Route (`PUT /ds/group/{hex}/...`) | Signer | Effect |
 //! |---|---|---|
 //! | `claim` | anyone, first time | the signer becomes the root, one epoch |
-//! | `reset` | the root; or ANY signer carrying a key-reset attestation (`key_reset_attest_b64`, ADR-0065) AND the attested identity key's endorsement of that signer (`root_endorsement_b64`, ADR-0066 D11; `src/key_reset.rs`) | replaces the chain (and the registrar set when sent); attested: replaces the root too, drops the push binding, records the generation |
+//! | `reset` | the root; or ANY signer carrying a key-reset attestation (`key_reset_attest_b64`, ADR-0073) AND the attested identity key's endorsement of that signer (`root_endorsement_b64`, ADR-0074 D11; `src/key_reset.rs`) | replaces the chain (and the registrar set when sent); attested: replaces the root too, drops the push binding, records the generation |
 //! | `access` | root or registrar | appends or replaces an epoch, revokes lower ranks |
 //! | `registrars` | the root | adds, re-ranks, removes registrars |
 //! | `registrars-set` | the root | replaces the whole registrar set |
@@ -131,13 +131,13 @@ pub(crate) fn pepper_from_lookup(
 pub(crate) struct StatementJson {
     /// Standard base64 of the signed statement blob.
     statement_b64: String,
-    /// ADR-0065 section 5, `reset` only: standard base64 of the 177-byte
+    /// ADR-0073 section 5, `reset` only: standard base64 of the 177-byte
     /// key-reset attestation (auth hands it out URL-safe; the client
     /// re-encodes, as it does for every other base64 field here). On any
     /// other route the field is refused (`400`).
     #[serde(default)]
     key_reset_attest_b64: Option<String>,
-    /// ADR-0066 section 4.6 (decision D11), required with
+    /// ADR-0074 section 4.6 (decision D11), required with
     /// `key_reset_attest_b64` and refused without it: standard base64 of the
     /// 64-byte root endorsement, the attested identity key signing the key
     /// that becomes this journal's root (`src/key_reset.rs`).
@@ -244,9 +244,9 @@ async fn handle(
 ) -> Result<Response, HandlerError> {
     let group_id = journal::decode_pseudonym(group_hex)?;
     let (statement, attest_fields) = parse_statement(body, kind, &group_id)?;
-    // ADR-0065: the attested arm. Shape and the pinned key first (`400` /
+    // ADR-0073: the attested arm. Shape and the pinned key first (`400` /
     // `503`), then the signature and the journal binding, then the root
-    // endorsement (ADR-0066 D11: the attested identity key must name the key
+    // endorsement (ADR-0074 D11: the attested identity key must name the key
     // that becomes the root), the last two the uniform `401`; all before the
     // statement's own signature is checked.
     let attested = match attest_fields {
@@ -314,7 +314,7 @@ async fn handle(
 }
 
 /// Whether a signer of `standing` is heard on a statement of `kind` at
-/// all. A verified key-reset attestation (`attested`, ADR-0065) lets any
+/// all. A verified key-reset attestation (`attested`, ADR-0073) lets any
 /// signer be heard on a reset; the generation rule then decides. A
 /// registrar sending a registrars set is heard and refused (403): it is
 /// someone to this journal, only not the root.
@@ -381,7 +381,7 @@ async fn decide(
     if !is_heard(statement.body.kind(), standing, attested.is_some()) {
         return Ok(Err(refused()));
     }
-    // ADR-0065 section 5 step 5: the generation is checked BEFORE the nonce
+    // ADR-0073 section 5 step 5: the generation is checked BEFORE the nonce
     // is spent, so a replayed or overtaken attestation costs the server no
     // row (the uniform refusal order of ADR-0057 for everything else).
     if let Some(attestation) = attested {
@@ -954,7 +954,7 @@ async fn manage_registrars(
     Ok(Ok(()))
 }
 
-/// Hand the root over. With `generation` (an attested transfer, ADR-0066
+/// Hand the root over. With `generation` (an attested transfer, ADR-0074
 /// section 4.6: a key ROTATION moving the account's DeviceGroup journal to
 /// the root its new seed derives) the journal's key generation is recorded
 /// too, so the attestation that rode along cannot be presented again, on

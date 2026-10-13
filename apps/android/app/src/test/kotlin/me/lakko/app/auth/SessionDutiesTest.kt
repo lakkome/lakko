@@ -10,7 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0066 — the recorded-identity-key rule (section 0.1) and the owed
+ * ADR-0074 — the recorded-identity-key rule (section 0.1) and the owed
  * logout (section 2.3), over a map in place of the device's storage.
  */
 class SessionDutiesTest {

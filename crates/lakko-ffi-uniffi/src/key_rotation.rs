@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! UniFFI surface for the key rotation that keeps the other devices
-//! (ADR-0066 part 3, Stage A; sprint T5).
+//! (ADR-0074 part 3, Stage A; sprint T5).
 //!
 //! Mirror of `crates/lakko-ffi-wasm/src/key_rotation.rs` for iOS + Android.
 //! Three things a client needs and must not re-derive:
@@ -21,7 +21,7 @@
 //! expiresAt)`, and the kept device's session upgrade with
 //! `signSessionUpgradeStatement` (`crate::account_statement`).
 //!
-//! # The order the rotating device owes (ADR-0066 section 3.2)
+//! # The order the rotating device owes (ADR-0074 section 3.2)
 //!
 //! [`compose_key_rotation_envelope`] produces bytes that hand the new account
 //! to whoever can read them. They are sent ONLY in the account's DeviceGroup,
@@ -56,7 +56,7 @@ fn wire_error(e: KeyRotationError) -> FfiError {
 /// A decoded key-rotation envelope. **`new_entropy` is the new account**:
 /// never log it, store it only under the device key, and adopt it only after
 /// [`verify_key_rotation_envelope`] accepted the envelope AND the server-side
-/// change is visible (ADR-0066 section 3.3).
+/// change is visible (ADR-0074 section 3.3).
 #[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiKeyRotation {
     /// Rotating-device clock, UNIX milliseconds, when it was prepared. Ages
@@ -169,7 +169,7 @@ pub fn decode_key_rotation_envelope(plaintext: Vec<u8>) -> Result<FfiKeyRotation
 }
 
 /// The three checks a kept device makes before it stores an envelope as
-/// pending (ADR-0066 section 3.3), in one call so no client re-derives them:
+/// pending (ADR-0074 section 3.3), in one call so no client re-derives them:
 ///
 /// 1. the supersession proof is signed by `held_account_pubkey` (the account
 ///    identity key THIS device holds), has a validity window the format
@@ -253,7 +253,7 @@ pub const fn key_rotation_pending_expired(prepared_at_ms: u64, now_ms: u64) -> b
 }
 
 /// Sign the **root endorsement** the Delivery Service requires beside a
-/// key-reset attestation (ADR-0066 section 4.6): the account's NEW identity
+/// key-reset attestation (ADR-0074 section 4.6): the account's NEW identity
 /// key says which key becomes the root of the account's DeviceGroup journal.
 /// Sent as `root_endorsement_b64` (standard base64) with
 /// `key_reset_attest_b64` on `PUT /ds/group/{hex}/reset` (after a reset or a

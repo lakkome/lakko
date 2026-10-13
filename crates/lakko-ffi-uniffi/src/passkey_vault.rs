@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! UniFFI surface for `lakko_mnemonic::vault` (ADR-0064 decision 6): the
+//! UniFFI surface for `lakko_mnemonic::vault` (ADR-0072 decision 6): the
 //! passkey vault. Mirror of `crates/lakko-ffi-wasm/src/passkey_vault.rs`.
 //!
 //! [`passkey_vault_seal`] seals the phrase entropy under a passkey's 32-byte

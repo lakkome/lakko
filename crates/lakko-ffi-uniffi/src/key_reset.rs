@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! UniFFI surface for `lakko-attest`'s key-reset attestation (ADR-0065 S5).
+//! UniFFI surface for `lakko-attest`'s key-reset attestation (ADR-0073 S5).
 //!
 //! Mirror of `crates/lakko-ffi-wasm/src/key_reset.rs` for iOS + Android.
 //! **Verify only**: `services/auth` signs the attestation inside
@@ -18,7 +18,7 @@
 //! what a server answered.
 //!
 //! **Error posture (the backup-head split).** A stale attestation is a
-//! distinct [`FfiError::KeyResetAttestationStale`]: ADR-0065 section 4.2 has a
+//! distinct [`FfiError::KeyResetAttestationStale`]: ADR-0073 section 4.2 has a
 //! client apply a weeks-old reset only after a fresh sign-in, which is a
 //! prompt rather than a refusal, so the client must tell staleness from a
 //! forgery. Every other failure is the hard fail-closed
@@ -85,7 +85,7 @@ fn parse_inputs(
 /// Verify a key-reset attestation's signature and its binding to
 /// `expected_account_id` (through the derived `account_ref` and DeviceGroup
 /// journal id) and to `expected_pubkey`, with **no** freshness check
-/// (ADR-0065 section 2.2). Returns the authenticated generation and mint
+/// (ADR-0073 section 2.2). Returns the authenticated generation and mint
 /// time.
 ///
 /// `attestation` is the raw 177-byte blob (`key_reset_attest_b64` decoded).
@@ -122,7 +122,7 @@ pub fn verify_key_reset_attestation(
 /// [`verify_key_reset_attestation`] plus a freshness bound: `signed_at` must
 /// lie within `max_age_millis` of `now_millis` (and no further in the future
 /// than a five-minute skew). The entry point for a client applying its own
-/// reset from persisted `publish-owed` state (ADR-0065 section 4.2, 30 days
+/// reset from persisted `publish-owed` state (ADR-0073 section 4.2, 30 days
 /// chosen there).
 ///
 /// # Errors

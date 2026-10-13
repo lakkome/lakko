@@ -60,7 +60,7 @@ http-body-util = "0.1"
 # Ed25519 key types, so no direct lakko-crypto dependency is needed here.
 lakko-ds-proof.workspace = true
 
-# ADR-0065 section 5 - the one auth-signed artefact the DS verifies: a
+# ADR-0073 section 5 - the one auth-signed artefact the DS verifies: a
 # key-reset attestation lets a stranger root re-root an account's DeviceGroup
 # journal. Verified under a pinned key (`LAKKO_DS_ATTEST_KEY`), never fetched.
 # lakko-attest's whole dependency set is lakko-crypto + thiserror, both

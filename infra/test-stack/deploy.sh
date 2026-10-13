@@ -83,7 +83,7 @@ if [[ $SKIP_BACKEND != 1 ]]; then
   systemctl enable lakko-test.target lakko-test-*.service >/dev/null 2>&1
   # The SFU fetches the JWKS from auth at startup, so auth goes first.
   systemctl restart lakko-test-auth
-  # ADR-0065: discovery and the DS pin auth's attestation verifying key to
+  # ADR-0073: discovery and the DS pin auth's attestation verifying key to
   # verify key-reset attestations. Auth mints the key at first boot, so it
   # is read from the JWKS after auth is up and written into the env once
   # (the key is stable per auth database). Standard base64 of the raw key.

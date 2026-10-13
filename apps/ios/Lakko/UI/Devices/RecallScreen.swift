@@ -3,7 +3,7 @@
 
 import SwiftUI
 
-/// "Was it you?" (docs/ux/identity-recovery.md section 18.4, ADR-0066
+/// "Was it you?" (docs/ux/identity-recovery.md section 18.4, ADR-0074
 /// section 1): what an old device shows after the account's keys were reset
 /// on another device. It replaces the whole app, at launch too; the chats and
 /// contacts are already deleted when it appears.
@@ -282,7 +282,7 @@ struct RecalledNoticeBanner: View {
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
-                // ADR-0067 — only a phrase-protected account has words to show.
+                // ADR-0075 — only a phrase-protected account has words to show.
                 if authRepository.sessionPhraseProtected {
                     Button(l10n.t(KeysRotatedCopy.showPhrase)) { onShowNewPhrase() }
                         .font(.footnote.weight(.medium))

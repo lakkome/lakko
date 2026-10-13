@@ -6,7 +6,7 @@
  * newPassword, username)`, which rotates the password on the server and
  * lands a session on this device.
  *
- * ADR-0067 section 8 (UX 19.7): when the words are refused as not the
+ * ADR-0075 section 8 (UX 19.7): when the words are refused as not the
  * account's, the form asks whether they are the account's phrase from
  * before a key reset in the last month (`auth.recall.checkByPhrase`, signed
  * by the key the phrase derives). If so it continues with "This account's

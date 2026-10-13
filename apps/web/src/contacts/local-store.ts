@@ -114,7 +114,7 @@ export interface AcceptedContact {
    *  joined from a Welcome has no contact link and falls back to the
    *  group label. */
   groupIdB64?: string;
-  /** ADR-0065 R.2: the account keys this contact held BEFORE a reset this
+  /** ADR-0073 R.2: the account keys this contact held BEFORE a reset this
    *  device accepted, base64, oldest first. The row is re-keyed to the new
    *  key at the re-pin (so the person keeps their rename, folders, pins,
    *  mute and chat link); the old keys stay here as DISPLAY ALIASES for
@@ -163,26 +163,26 @@ export interface AccountPubkeyPin {
    *  downgrade-protection floor. Absent on a pin that has never been
    *  chain-confirmed (a TOFU pin, or one written before G-30 #2). */
   pinnedLogVersion?: number;
-  /** ADR-0065 R.2: the `key_generation` this device last ACCEPTED for the
+  /** ADR-0073 R.2: the `key_generation` this device last ACCEPTED for the
    *  account. The baseline is the bundle's generation at the first pin; an
    *  accepted reset raises it. A reset attestation is accepted only at a
    *  generation strictly above this, so an old one can never be replayed. */
   acceptedKeyGeneration?: number;
-  /** ADR-0065 R.2: every account key this device pinned for the account
+  /** ADR-0073 R.2: every account key this device pinned for the account
    *  before a key change, base64, oldest first. Display aliases for stored
    *  history and the lookup of old leaves in a group; never trusted for
    *  anything new. */
   previousKeysB64?: string[];
-  /** ADR-0065 R.5 / R.6: the keys an ACCEPTED RESET retired (the pin it
+  /** ADR-0073 R.5 / R.6: the keys an ACCEPTED RESET retired (the pin it
    *  replaced and that pin's proven predecessors), base64. Rows and claims
    *  from leaves bound to these are dropped; a proven predecessor of the
    *  CURRENT key is never in this list. */
   supersededKeysB64?: string[];
-  /** ADR-0065 R.7 case 1: the `signed_at` (ms) of the last accepted reset's
+  /** ADR-0073 R.7 case 1: the `signed_at` (ms) of the last accepted reset's
    *  attestation: the moment after which this account's messages in the old
    *  one-to-one reached only removed devices. */
   resetSignedAtMs?: number;
-  /** ADR-0066 section 3.5: every key this account had before a PROVEN
+  /** ADR-0074 section 3.5: every key this account had before a PROVEN
    *  rotation (a re-pin authorised by a supersession proof), base64, oldest
    *  first. The conversation leaves that exist stay bound to these, so they
    *  name the same person (`predecessor.ts`); nothing is evicted and nothing
@@ -300,7 +300,7 @@ function isAccountPubkeyPin(p: unknown): p is AccountPubkeyPin {
   if (rs !== undefined && (typeof rs !== "number" || !Number.isFinite(rs))) {
     delete (p as { resetSignedAtMs?: unknown }).resetSignedAtMs;
   }
-  // ADR-0066: a junk predecessor list is dropped, which reads as "no proven
+  // ADR-0074: a junk predecessor list is dropped, which reads as "no proven
   // predecessor" (the fail-closed direction).
   const pp = (p as AccountPubkeyPin).provenPredecessorsB64;
   if (pp !== undefined && !isStringArray(pp)) {
@@ -408,7 +408,7 @@ export function peerContactByMemberPubkeys(
   memberSigPubkeysB64: readonly string[],
   ownSigPubkeyB64: string | null,
   accepted: readonly AcceptedContact[],
-  /** ADR-0065 R.2: a retired key still names the person
+  /** ADR-0073 R.2: a retired key still names the person
    *  ({@link loadKeyAliases}) in a conversation's older groups. */
   aliases: ReadonlyMap<string, string> = new Map(),
 ): AcceptedContact | undefined {
@@ -564,13 +564,13 @@ export function setPin(
   pinnedSignaturePubkeyB64: string,
   rotationMarker: number,
   owner?: string,
-  /** ADR-0066 section 3.5: `proven` is passed ONLY by the fail-closed gate,
+  /** ADR-0074 section 3.5: `proven` is passed ONLY by the fail-closed gate,
    *  after a supersession proof by the pinned key verified for exactly this
    *  new key. The replaced key then becomes a proven predecessor. Any other
    *  re-pin records none. */
   options: {
     readonly proven?: boolean;
-    /** ADR-0065 R.2: the fetched bundle's `key_generation`. Recorded as the
+    /** ADR-0073 R.2: the fetched bundle's `key_generation`. Recorded as the
      *  accepted-generation baseline when the pin holds none; never lowers
      *  or replaces a held one (only {@link acceptReset} raises it). */
     readonly keyGeneration?: number;
@@ -598,7 +598,7 @@ export function setPin(
   // silently drop the downgrade floor; the fetch path re-records it right
   // after a confirmed rotation, so a stale carried value is replaced.
   const carriedLogVersion = existing?.pinnedLogVersion;
-  // ADR-0065 R.2: the accepted generation travels with the account; the
+  // ADR-0073 R.2: the accepted generation travels with the account; the
   // first observation of a bundle's generation is its baseline. A re-pin to
   // a DIFFERENT key retires the old one into `previousKeysB64` (the old
   // leaves in shared groups still resolve to it).
@@ -615,7 +615,7 @@ export function setPin(
   }
   const carriedSuperseded = existing?.supersededKeysB64;
   const carriedResetSignedAt = existing?.resetSignedAtMs;
-  // ADR-0066: the proven chain. A proven re-pin appends the replaced key; an
+  // ADR-0074: the proven chain. A proven re-pin appends the replaced key; an
   // unchanged key carries the chain; a change that is NOT proven ends it.
   let provenPredecessors: string[] = [];
   if (existing !== undefined) {
@@ -657,7 +657,7 @@ export function setPin(
 }
 
 // ----------------------------------------------------------------------------
-// ADR-0065 R.2: the silent re-pin of an accepted reset
+// ADR-0073 R.2: the silent re-pin of an accepted reset
 // ----------------------------------------------------------------------------
 
 /** The standard-base64 form of a contact row's `accountIdHex`, or `null`
@@ -697,7 +697,7 @@ export interface AcceptedReset {
 }
 
 /**
- * ADR-0065 R.2 "The re-pin". The verdict was `accepted`; this is the write.
+ * ADR-0073 R.2 "The re-pin". The verdict was `accepted`; this is the write.
  *
  * `pin[account] = new key`, marker `max(held marker, now in seconds)`,
  * accepted generation `g`. The held key (and its proven predecessors: a
@@ -780,14 +780,14 @@ export function acceptReset(reset: AcceptedReset, owner?: string): AcceptResetRe
   return "accepted";
 }
 
-/** ADR-0065 R.2: the generation this device last accepted for an account
+/** ADR-0073 R.2: the generation this device last accepted for an account
  *  (0 when it never recorded one). */
 export function acceptedGenerationOf(accountIdB64: string, owner?: string): number {
   return readPin(accountIdB64, owner)?.acceptedKeyGeneration ?? 0;
 }
 
 /**
- * ADR-0065 R.4: the account and generation behind `currentKeyB64` when it is
+ * ADR-0073 R.4: the account and generation behind `currentKeyB64` when it is
  * the key an ACCEPTED RESET re-pinned this device to, with the attestation's
  * `signed_at`: what a Welcome to the new identity derives the continuity
  * reach key from. `null` for a key no accepted reset produced (a first pin,
@@ -816,7 +816,7 @@ export function acceptedResetOfKey(
   return null;
 }
 
-/** ADR-0065 R.5 / R.6: every key an accepted reset retired, across all
+/** ADR-0073 R.5 / R.6: every key an accepted reset retired, across all
  *  accounts, mapped to the account id it belonged to. A row or a claim from
  *  a leaf bound to one of these is dropped. */
 export function loadSupersededKeys(owner?: string): Map<string, string> {
@@ -847,7 +847,7 @@ export function loadKeyAliases(owner?: string): Map<string, string> {
     for (const old of pin.previousKeysB64 ?? []) {
       if (old !== c.signaturePubkeyB64 && !out.has(old)) out.set(old, c.signaturePubkeyB64);
     }
-    // ADR-0066 section 3.5: after a PROVEN rotation the row keeps the key the
+    // ADR-0074 section 3.5: after a PROVEN rotation the row keeps the key the
     // person's leaves are bound to, and the newly pinned key names the same
     // row. Only for a proven chain: a pin that differs from the row for any
     // other reason is not an alias.
@@ -864,7 +864,7 @@ export function loadKeyAliases(owner?: string): Map<string, string> {
 
 /**
  * The proven predecessors a pin holds after another device of the SAME
- * account handed over its own (ADR-0066, the pairing state bundle): the
+ * account handed over its own (ADR-0074, the pairing state bundle): the
  * carried chain when this device holds none or only keys the carried chain
  * names too; this device's own chain otherwise. The current key is never a
  * predecessor. Pure.
@@ -912,7 +912,7 @@ export function recordCarriedProvenPredecessors(
   return true;
 }
 
-/** ADR-0066 section 3.5: the keys of a pinned account as `predecessor.ts`
+/** ADR-0074 section 3.5: the keys of a pinned account as `predecessor.ts`
  *  reads them, or `undefined` when the account is not pinned. */
 export function accountKeysOf(accountIdB64: string, owner?: string): AccountKeys | undefined {
   const pin = readPin(accountIdB64, owner);
@@ -927,7 +927,7 @@ export function accountKeysOf(accountIdB64: string, owner?: string): AccountKeys
  * The account id (standard base64) this device knows the key `keyB64` under:
  * a pin whose current key or proven predecessor it is, else an accepted
  * contact's row. `null` for a key no trusted local record names. Used to
- * re-check a person's address (ADR-0066 section 3.5a rule 6); a claimed
+ * re-check a person's address (ADR-0074 section 3.5a rule 6); a claimed
  * account id (a profile's) is deliberately not consulted.
  */
 export function accountIdB64OfKey(keyB64: string, owner?: string): string | null {

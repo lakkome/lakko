@@ -66,14 +66,14 @@ public object StateBundle {
         val accountIdB64: String,
         val pinnedSignaturePubkeyB64: String,
         val rotationMarker: Long,
-        /** ADR-0066: the contact's proven predecessors as the sending device
+        /** ADR-0074: the contact's proven predecessors as the sending device
          *  holds them, oldest first (standard base64 of 32-byte signature
          *  keys); empty when it knows of none. At most [MAX_PREDECESSORS]. */
         val provenPredecessorsB64: List<String> = emptyList(),
     )
 
     /**
-     * ADR-0066: one earlier account key of THIS account. [seedB64] is the
+     * ADR-0074: one earlier account key of THIS account. [seedB64] is the
      * 64-byte account phrase seed of that key (key material: it travels only
      * inside the sealed bundle and is never logged); [adoptedAtMs] is when the
      * sending device adopted the key that replaced it.
@@ -95,7 +95,7 @@ public object StateBundle {
         val ownPredecessors: List<CarriedOwnPredecessor> = emptyList(),
     )
 
-    /** The one bundle version this build writes and reads (ADR-0066: flag
+    /** The one bundle version this build writes and reads (ADR-0074: flag
      *  day, a bundle of any other version is refused). */
     public const val VERSION: Long = 2L
 
@@ -325,7 +325,7 @@ public object StateBundle {
         return Bundle(contacts, pins, groups, ownPredecessors)
     }
 
-    // ---- ADR-0066: predecessors (pure) ---------------------------------------
+    // ---- ADR-0074: predecessors (pure) ---------------------------------------
 
     /** The sending half: this device's own previous identities as the bundle
      *  carries them, oldest first. The caller zeroes [rows]. */
@@ -489,15 +489,15 @@ public object StateBundle {
     public data class Applied(
         val contacts: Int,
         val pins: Int,
-        /** ADR-0066: this account's earlier keys held after the bundle. */
+        /** ADR-0074: this account's earlier keys held after the bundle. */
         val ownPredecessors: Int = 0,
-        /** ADR-0066: the key the conversation leaves are bound to changed;
+        /** ADR-0074: the key the conversation leaves are bound to changed;
          *  a chat layer already loaded must be rebuilt under it. */
         val conversationKeyChanged: Boolean = false,
     )
 
     /**
-     * ADR-0066: run after a bundle moved the account's conversation key on a
+     * ADR-0074: run after a bundle moved the account's conversation key on a
      * device whose chat layer may already be loaded under the current key,
      * with the account the bundle was for. Set by the process-lived contacts
      * repository, which rebuilds the chat layer's identity under the
@@ -522,7 +522,7 @@ public object StateBundle {
 
     /** Merge [bundle] into [accountIdB64]'s state on this device: contacts
      *  not here yet, pins through the monotone setter, the known group ids
-     *  for the chat list, and (ADR-0066) this account's earlier keys and each
+     *  for the chat list, and (ADR-0074) this account's earlier keys and each
      *  contact's proven predecessors. */
     public fun apply(context: Context, accountIdB64: String, bundle: Bundle): Applied {
         val owner = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)

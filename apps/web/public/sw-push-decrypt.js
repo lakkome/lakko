@@ -218,7 +218,7 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   ONLY to classify the row out of the preview path — the SW never stores
  *   a received name (C-59). Optional so an older deps object still loads.
  * @property {(bytes: Uint8Array) => any} [decodeGroupClosedEnvelope]
- *   ADR-0065 phase 2 — the fail-closed group-closed-envelope codec. THROWS
+ *   ADR-0073 phase 2 — the fail-closed group-closed-envelope codec. THROWS
  *   an `Error` carrying a `groupClosedError` code when the bytes are not a
  *   well-formed notice; `wrongDomain` is the only "not a notice" answer.
  *   Used ONLY to classify the row out of the preview path — the SW never
@@ -321,12 +321,12 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   because a database did not open. Silently swallowing calls is a far worse
  *   defect than an unwanted ring.
  * @property {(accountId: string, deviceKey: any, groupHex: string) => Promise<string | null>} [lookupConversation]
- *   ADR-0065 R.5 — READ-ONLY: the conversation `groupHex` belongs to (hex of
+ *   ADR-0073 R.5 — READ-ONLY: the conversation `groupHex` belongs to (hex of
  *   the lineage's first group), from the same sync row as the mute flag.
  *   `null` when unknown: the notification is then grouped under the group
  *   id, as before. Optional; a throw is treated as unknown.
  * @property {(accountId: string, deviceKey: any, question: ResendQuestion) => Promise<boolean>} [lookupResendHeld]
- *   ADR-0065 R.7 case 1 — READ-ONLY: is this message a RE-SEND whose
+ *   ADR-0073 R.7 case 1 — READ-ONLY: is this message a RE-SEND whose
  *   original this device already holds? Answered from two rows the app wrote
  *   and the worker already reads (the encrypted message log and the
  *   encrypted sync row), through {@link resendHeldFromRows}. `true` posts
@@ -334,7 +334,7 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   "not held", so the message is previewed as any other (the marker's
  *   fail-safe direction: a notification too many, never one too few).
  * @property {(accountId: string) => Promise<readonly string[] | null>} [lookupSupersededKeys]
- *   ADR-0065 R.5 / R.8 — READ-ONLY: the account keys (standard base64) an
+ *   ADR-0073 R.5 / R.8 — READ-ONLY: the account keys (standard base64) an
  *   accepted reset retired, from the plaintext mirror the app writes
  *   (`src/push/superseded-mirror.ts`). A frame whose MLS-authenticated
  *   sender is bound to one of them (a removed device that still holds the
@@ -638,7 +638,7 @@ export async function decryptPushPreview(wake, deps) {
     // be judged stale differently.
     const now = typeof deps.nowMs === "function" ? deps.nowMs() : Date.now();
     const words = readWords(deps.notificationWords ?? null);
-    // ADR-0065 R.8 — the retired keys, read once for the batch.
+    // ADR-0073 R.8 — the retired keys, read once for the batch.
     const retired = await supersededKeySet(deps, accountId);
     for (const message of messages) {
       let processed;
@@ -662,7 +662,7 @@ export async function decryptPushPreview(wake, deps) {
         latestCall = { notice: call, senderKeyB64: senderKeyOf(group, processed) };
         continue;
       }
-      // ADR-0065 R.7 case 1 — a re-sent message whose original this device
+      // ADR-0073 R.7 case 1 — a re-sent message whose original this device
       // already holds is not a new message here: it posts nothing, and an
       // older real row of the batch stays the preview. A READ (C-59).
       if (await resendAlreadyHeld(deps, accountId, deviceKey, group, processed, groupHex)) {
@@ -732,7 +732,7 @@ export async function decryptPushPreview(wake, deps) {
       };
     }
 
-    // ADR-0065 R.5 — group the notification under the CONVERSATION, so a
+    // ADR-0073 R.5 — group the notification under the CONVERSATION, so a
     // successor group's message replaces the conversation's earlier
     // notification rather than stacking beside it. Unknown reads as the
     // group id (the grouping every build had).
@@ -959,9 +959,9 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
  * kinds before its chat parse; this is the background mirror of that
  * same two-step peek, in the same order.
  *
- * Twelve arms below (the last is the ADR-0066 key-rotation envelope): call signaling, the ADR-0042 / ADR-0044 push-routing
+ * Twelve arms below (the last is the ADR-0074 key-rotation envelope): call signaling, the ADR-0042 / ADR-0044 push-routing
  * secret, the ADR-0045 committer beacon, the ADR-0048 profile, the ADR-0048
- * profile request, the ADR-0051 group name, the ADR-0065 group-closed
+ * profile request, the ADR-0051 group name, the ADR-0073 group-closed
  * notice, the ADR-0052 shared pin, the ADR-0059 shared channels, the
  * ADR-0057 registrar seed, and the ADR-0060 scoped-discovery envelopes.
  * Each arm is a cheap byte peek gating an authoritative codec.
@@ -988,7 +988,7 @@ function isServiceEnvelope(wasm, bytes) {
   if (isProfileEnvelope(wasm, bytes)) return true;
   // 5. Group name (ADR-0051).
   if (isGroupNameEnvelope(wasm, bytes)) return true;
-  // 5b. Group closed (ADR-0065 phase 2) — the name's twin.
+  // 5b. Group closed (ADR-0073 phase 2) — the name's twin.
   if (isGroupClosedEnvelope(wasm, bytes)) return true;
   // 6. Profile request (ADR-0048 §2 trigger 4).
   if (isProfileRequestEnvelope(wasm, bytes)) return true;
@@ -1001,7 +1001,7 @@ function isServiceEnvelope(wasm, bytes) {
 
   // 10. Scoped discovery (ADR-0060).
   if (isScopedDiscoveryEnvelope(wasm, bytes)) return true;
-  // 11. Key rotation (ADR-0066 section 3.3). It means something only in the
+  // 11. Key rotation (ADR-0074 section 3.3). It means something only in the
   //     account's own DeviceGroup, which this worker never reads; in a
   //     conversation it is somebody's stray bytes and is never rendered.
   if (isKeyRotationEnvelope(wasm, bytes)) return true;
@@ -1009,7 +1009,7 @@ function isServiceEnvelope(wasm, bytes) {
 }
 
 /**
- * Arm 11 of {@link isServiceEnvelope} — the ADR-0066 `key-rotation`
+ * Arm 11 of {@link isServiceEnvelope} — the ADR-0074 `key-rotation`
  * envelope, classified by the core's `dispatchIncomingEnvelope`. Same cheap
  * first-byte peek as the other `lakko/...` arms. Classification ONLY: the
  * envelope's fields (the account's new entropy) are never read here (C-59).
@@ -1275,13 +1275,13 @@ function isGroupNameEnvelope(wasm, bytes) {
 }
 
 /**
- * First byte of the ADR-0065 group-closed domain separator (`'l'` of
+ * First byte of the ADR-0073 group-closed domain separator (`'l'` of
  * `"lakko/group-closed/v1\0"`). Its own constant, like the ones above.
  */
 const GROUP_CLOSED_ENVELOPE_FIRST_BYTE = 0x6c;
 
 /**
- * Arm 5b of {@link isServiceEnvelope} — the ADR-0065 phase-2 group-closed
+ * Arm 5b of {@link isServiceEnvelope} — the ADR-0073 phase-2 group-closed
  * notice, the group name's twin: an admin closed the group after recreating
  * it. Unfiltered it would be previewed as a notification body reading
  * `lakko/group-closed/v1` plus the stamp and the successor id. Same verdict
@@ -1485,7 +1485,7 @@ async function resendAlreadyHeld(deps, accountId, deviceKey, group, processed, g
 }
 
 /**
- * ADR-0065 R.7 case 1 — the service worker's copy of the re-send rule
+ * ADR-0073 R.7 case 1 — the service worker's copy of the re-send rule
  * (`src/chat/resend-marker.ts` `resendVerdict`, which this file cannot
  * import): `true` exactly when
  *
@@ -1668,7 +1668,7 @@ export function mutedFromSyncStateRow(payload, groupHex, wasm) {
       groupId[i] = parseInt(groupHex.slice(i * 2, i * 2 + 2), 16);
     }
     state = wasm.SyncedState.fromBytes(bytes);
-    // ADR-0065 R.5 — the mute flag is the CONVERSATION's: keyed on the id of
+    // ADR-0073 R.5 — the mute flag is the CONVERSATION's: keyed on the id of
     // the lineage's first group, never rewritten when the conversation
     // continues in a successor group. A wake for a successor is therefore
     // asked under the conversation it belongs to. For a group that is its
@@ -1695,7 +1695,7 @@ export function mutedFromSyncStateRow(payload, groupHex, wasm) {
 }
 
 /**
- * ADR-0065 R.5 — the CONVERSATION a group belongs to, as lowercase hex, read
+ * ADR-0073 R.5 — the CONVERSATION a group belongs to, as lowercase hex, read
  * from the same decrypted sync row as the mute flag: the lineage's first
  * group for a successor, the group itself otherwise. What a notification is
  * grouped under, so a conversation that continued in a successor group

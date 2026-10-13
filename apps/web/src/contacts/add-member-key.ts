@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.2 / ADR-0050 - adding a person to a group checks WHOSE devices
+ * ADR-0073 R.2 / ADR-0050 - adding a person to a group checks WHOSE devices
  * the directory served.
  *
  * `ContactsClient.addMemberToGroup` is told an account id (what the
@@ -40,7 +40,7 @@ const NO_KEYS: ReadonlySet<string> = new Set();
  * | not in the account's pinned proven chain (or no pin)       | the expected key alone                |
  * | in the chain (the current key or a proven predecessor)     | the current key and every predecessor |
  *
- * The third row is ADR-0066 section 3.5: after a PROVEN rotation a device
+ * The third row is ADR-0074 section 3.5: after a PROVEN rotation a device
  * that was kept stays bound to the key it was enrolled under while a device
  * paired later may bind to the new one, and both are the same person. A key
  * an accepted RESET retired (`supersededKeysB64`) is never accepted, whoever

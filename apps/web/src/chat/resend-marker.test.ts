@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-/** ADR-0065 R.7 case 1 - `resend-marker.ts`. */
+/** ADR-0073 R.7 case 1 - `resend-marker.ts`. */
 import { describe, expect, it } from "vitest";
 
 import { heldRowAuthor, resendVerdict } from "./resend-marker";

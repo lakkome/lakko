@@ -501,11 +501,11 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.EmailVaultNotOpened,
                 is FfiException.EmailVault,
                 is FfiException.RecoveryEmail,
-                // ADR-0065 - a key-reset attestation that does not verify, or
+                // ADR-0073 - a key-reset attestation that does not verify, or
                 // is older than the client's window; not membership refusals.
                 is FfiException.KeyResetAttestation,
                 is FfiException.KeyResetAttestationStale,
-                // ADR-0066 - an account statement that could not be signed
+                // ADR-0074 - an account statement that could not be signed
                 // (a wrong-length seed, account id or device id); not a
                 // membership refusal.
                 is FfiException.AccountStatement,
@@ -549,7 +549,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.DisplayNameControlOrFormatCharacter,
                 is FfiException.DisplayNameTooLong,
                 is FfiException.DisplayNameTooManyBytes,
-                // ADR-0066 part 3 - a key-rotation envelope or a root
+                // ADR-0074 part 3 - a key-rotation envelope or a root
                 // endorsement that could not be made; never a refusal.
                 is FfiException.KeyRotation,
                 -> null

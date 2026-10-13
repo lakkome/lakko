@@ -339,7 +339,7 @@ export function channelInfoSections(
 export interface PersonRecordLike {
   readonly signaturePubkeyB64: string;
   readonly groupIdB64?: string;
-  /** ADR-0065 R.2: the keys the person held before an accepted reset. */
+  /** ADR-0073 R.2: the keys the person held before an accepted reset. */
   readonly previousSignaturePubkeysB64?: readonly string[];
 }
 
@@ -373,7 +373,7 @@ export function findPersonRecord<T extends PersonRecordLike>(
   const peerKeyB64 = where.peerKeyB64;
   return (
     accepted.find((c) => c.signaturePubkeyB64 === peerKeyB64) ??
-    // ADR-0065 R.5: an older group of the conversation holds the contact's
+    // ADR-0073 R.5: an older group of the conversation holds the contact's
     // OLD key; the row was re-keyed at the re-pin and remembers it.
     accepted.find((c) => (c.previousSignaturePubkeysB64 ?? []).includes(peerKeyB64)) ??
     null

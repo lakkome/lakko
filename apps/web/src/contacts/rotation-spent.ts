@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.5a rule 5 - what was granted before a rotation of the
+ * ADR-0074 section 3.5a rule 5 - what was granted before a rotation of the
  * account keys is spent.
  *
  * The account's `/i/` links and the `reply` grants of its unanswered contact

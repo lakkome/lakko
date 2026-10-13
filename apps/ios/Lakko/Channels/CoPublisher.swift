@@ -317,7 +317,7 @@ public enum CoPublisher {
                 // as its account), so its mailbox is the pseudonym of that key.
                 // ADR-0060 — written with the `reply` grant its attribution
                 // carried; the mailbox is closed to anything else.
-                // ADR-0066 section 3.5a rule 1 — resolved before addressing.
+                // ADR-0074 section 3.5a rule 1 — resolved before addressing.
                 // Rule 6 — a refused Welcome re-checks the joiner's address
                 // once.
                 let resolve: () async throws -> MailboxWriteAttempt = {

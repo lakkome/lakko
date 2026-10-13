@@ -18,7 +18,7 @@
  *
  * - at most once per `(session token, handle)` in this page's memory (a new
  *   page load may repeat it; the PUT is idempotent);
- * - ADR-0068: the handle is CHECKED first and bound only when the account
+ * - ADR-0076: the handle is CHECKED first and bound only when the account
  *   holds none ({@link handleSyncAction}); a device holding an old name
  *   binds nothing;
  * - no username (a guest) binds nothing;
@@ -36,7 +36,7 @@ import { LoginHandleUsernameError, type LoginHandle } from "./login-handle";
 export type HandleState = "same" | "other" | "none";
 
 /**
- * ADR-0068: what a session does about its handle. The device never binds
+ * ADR-0076: what a session does about its handle. The device never binds
  * blindly: a device that still holds an OLD name would take the account's
  * handle back and undo a rename made elsewhere.
  *
@@ -94,7 +94,7 @@ export interface LoginHandleSync {
 
 export function createLoginHandleSync(deps: LoginHandleSyncDeps): LoginHandleSync {
   const done = new Set<string>();
-  // Keyed on the token's ACCOUNT segment, not the whole token (ADR-0065):
+  // Keyed on the token's ACCOUNT segment, not the whole token (ADR-0073):
   // an access token is replaced by a refresh every fifteen minutes, and a
   // key on the token would re-bind on every refresh, ticking the server's
   // bind limit for nothing. One bind per account per page.

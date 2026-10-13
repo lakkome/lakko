@@ -13,7 +13,7 @@ import me.lakko.app.chat.KeyPackageRepublishOutcome
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 
 /**
- * [KeyRotationPorts] over the device (ADR-0066 part 3, Stage A): auth,
+ * [KeyRotationPorts] over the device (ADR-0074 part 3, Stage A): auth,
  * discovery, the DS, the account's DeviceGroup, the chat layer and the
  * backup. The machine and every decision are in [KeyRotationRunner]; this
  * only connects them.
@@ -37,7 +37,7 @@ internal object KeyRotationDevice {
         deviceId: ByteArray? = null,
         attestation: ByteArray? = null,
         onStep: (RotationUiStep) -> Unit = {},
-        /** ADR-0067 section 3: the runner of "Save a recovery phrase", a
+        /** ADR-0075 section 3: the runner of "Save a recovery phrase", a
          *  rotation that removes no device. */
         savingPhrase: Boolean = false,
     ): KeyRotationRunner? {

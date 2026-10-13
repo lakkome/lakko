@@ -198,7 +198,7 @@ class ProofBlockRulesTest {
             ProofSurface.AddPasskey to "proof.add_passkey.cancelled",
             ProofSurface.ChangePassword to "proof.change_password.cancelled",
             ProofSurface.RemoveDevice to "proof.remove_device.cancelled",
-            // ADR-0067: the catalog has no cancelled line of their own.
+            // ADR-0075: the catalog has no cancelled line of their own.
             ProofSurface.RecoveryEmail to "chat.record.cancelled",
             ProofSurface.SavePhrase to "chat.record.cancelled",
             ProofSurface.ChangeUsername to "chat.record.cancelled",

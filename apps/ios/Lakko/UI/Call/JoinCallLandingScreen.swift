@@ -28,7 +28,7 @@ import SwiftUI
 ///
 /// An anonymous visitor (no session) joins WITHOUT logging in: on tapping Join
 /// we auto-create a FULL, username-less account via ``AuthRepository/signupGuest()``
-/// (the audited PoW-gated signup). ADR-0067 D2: the recovery phrase is not
+/// (the audited PoW-gated signup). ADR-0075 D2: the recovery phrase is not
 /// shown at sign-up, a guest's included, so the session lands directly and —
 /// because the call slug stays parked in ``InviteIntake`` with the auto-resume
 /// flag armed — the re-mounted landing continues the join automatically.
@@ -147,7 +147,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
             await decode()
         }
         // Guest-join resume (web `pendingJoin` effect): once `signupGuest` +
-        // the session it lands (no phrase screen since ADR-0067), continue the parked
+        // the session it lands (no phrase screen since ADR-0075), continue the parked
         // join automatically. The short-circuit means the one-shot flag is only
         // consumed when we actually have a valid, live-session decode.
         if let decoded, decoded.valid,
@@ -183,7 +183,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
             await beginJoin(decoded)
             return
         }
-        // No session — mint a guest account. ADR-0067 D2: its phrase is not
+        // No session — mint a guest account. ADR-0075 D2: its phrase is not
         // shown; the session lands directly and the resume effect above
         // continues the join. The synchronous latch makes
         // a rapid double-tap idempotent — never two guest accounts.

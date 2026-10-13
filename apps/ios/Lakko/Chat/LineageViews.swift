@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 "Phase 2 revised", R.5 - what the views of a conversation do once
+// ADR-0073 "Phase 2 revised", R.5 - what the views of a conversation do once
 // it spans several groups (`Lineage.swift`): the pinned bar, the jump of a
 // forward, the delete of a whole conversation and the feed's source list.
 //

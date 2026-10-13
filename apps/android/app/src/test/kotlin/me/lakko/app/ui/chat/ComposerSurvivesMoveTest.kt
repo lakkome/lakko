@@ -16,7 +16,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * ADR-0065 R.5 - what the person typed and did not send survives the chat
+ * ADR-0073 R.5 - what the person typed and did not send survives the chat
  * screen being rebuilt.
  *
  * The screen's view model is bound to ONE group. When the conversation moves

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Route tests for ADR-0066 sprint T3: the recall anchors and their capture
+//! Route tests for ADR-0074 sprint T3: the recall anchors and their capture
 //! rule, `POST /account/recall/{status,start,finish}`, and the deletion
 //! refusal while a recall window is open.
 //!
@@ -1219,7 +1219,7 @@ async fn the_owner_recalls_after_a_password_only_takeover() {
 
 /// The party a recall displaced cannot answer it, an attacker who resets
 /// twice cannot make their own key the winning one, and an older standing
-/// outranks a newer one (ADR-0066 D1).
+/// outranks a newer one (ADR-0074 D1).
 #[tokio::test]
 async fn a_double_resetting_attacker_cannot_lock_the_owner_out() {
     let pool = db_or_skip!("a_double_resetting_attacker_cannot_lock_the_owner_out");

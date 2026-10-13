@@ -74,11 +74,11 @@ public enum DeviceReadmission {
     ///   NOT proposed for an Add by this arm: an account whose published key
     ///   could not be confirmed as the roster's person key. After a reset the
     ///   directory lists the NEW identity's devices under the same account id;
-    ///   those are added by the reset repair (ADR-0065 R.7), which checks each
+    ///   those are added by the reset repair (ADR-0073 R.7), which checks each
     ///   KeyPackage's account key, never by this arm. The retire half is
     ///   untouched: it is about this account's own leaves.
     ///
-    /// - Parameter ownDeviceGroupRoster: ADR-0066 section 2.3 — the leaf keys
+    /// - Parameter ownDeviceGroupRoster: ADR-0074 section 2.3 — the leaf keys
     ///   (base64) of the account's own DeviceGroup, or `nil` when it could
     ///   not be read. A device of the OWN account is proposed for an Add only
     ///   when it is in that roster: the DeviceGroup is the account's own,
@@ -125,7 +125,7 @@ public enum DeviceReadmission {
         return Plan(admit: admit, retire: retire)
     }
 
-    /// ADR-0066 section 2.3 — whether a device of the OWN account may be
+    /// ADR-0074 section 2.3 — whether a device of the OWN account may be
     /// added to a conversation: only when its key is a leaf of the account's
     /// DeviceGroup. `nil` (the roster could not be read) admits nothing.
     /// Every "add my own device" path asks this: the re-admission arm, the

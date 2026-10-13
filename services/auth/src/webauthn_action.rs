@@ -70,7 +70,7 @@ pub(crate) const ACTION_DOMAIN_DELETE_CREDENTIAL: &str = "lakko/action/delete-cr
 /// token, and by nothing else: the grant can only be written by
 /// [`action_finish`] after a verified passkey assertion over this action's
 /// challenge, so it is itself the fresh proof of identity and no fresh-auth
-/// grant is asked for beside it (ADR-0065, amended 2026-10-06).
+/// grant is asked for beside it (ADR-0073, amended 2026-10-06).
 pub(crate) const ACTION_DOMAIN_DELETE_ACCOUNT: &str = "lakko/action/delete-account/v1";
 
 /// Lifetime of the action attestation signed on `/auth/action/finish`

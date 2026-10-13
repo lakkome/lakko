@@ -383,7 +383,7 @@ pub struct ConversationOrderRegister {
     pub group_ids: Vec<Vec<u8>>,
 }
 
-/// One conversation-lineage register (ADR-0065 R.5): the group
+/// One conversation-lineage register (ADR-0073 R.5): the group
 /// `successor_group_id` continues the conversation `root_conversation_id`
 /// (the group id of the first group of the lineage).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -408,7 +408,7 @@ fn lineage_refusal(e: core::LineageEnvelopeError) -> FfiError {
     FfiError::SyncedState(format!("{}: {e}", e.code()))
 }
 
-/// The account's recovery email register as held (ADR-0067, amended
+/// The account's recovery email register as held (ADR-0075, amended
 /// 2026-10-13), a removal included.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct RecoveryEmailRegister {
@@ -426,7 +426,7 @@ fn recovery_email_register(s: Stamped<core::RecoveryEmailEntry>) -> RecoveryEmai
     }
 }
 
-/// The account's own-username register as held (ADR-0068 section 3), a
+/// The account's own-username register as held (ADR-0076 section 3), a
 /// stamped "none" included.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct OwnUsernameRegister {
@@ -667,7 +667,7 @@ impl SyncedState {
     }
 
     /// Record that `successor_group_id` continues the conversation
-    /// `root_conversation_id` (ADR-0065 R.5), stamped `hlc`. **Write-once**:
+    /// `root_conversation_id` (ADR-0073 R.5), stamped `hlc`. **Write-once**:
     /// when a register is already held for this successor nothing is
     /// written and `false` is returned, whatever root it names (read it with
     /// [`Self::lineage_root`]). On `true`, send
@@ -780,7 +780,7 @@ impl SyncedState {
             .map_err(lineage_refusal)
     }
 
-    /// Write the account's recovery email register (ADR-0067, amended
+    /// Write the account's recovery email register (ADR-0075, amended
     /// 2026-10-13), stamped `hlc`: an address sets it, `None` (or a blank
     /// string) records that the account has none. The address is normalised
     /// here with the one rule (`normalizeRecoveryEmail`), so any spelling
@@ -862,7 +862,7 @@ impl SyncedState {
             .map_err(recovery_email_refusal)
     }
 
-    /// Write the account's own-username register (ADR-0068 section 3),
+    /// Write the account's own-username register (ADR-0076 section 3),
     /// stamped `hlc`: a username sets it, `None` (or a blank string) records
     /// that the account has none. The username is normalised and checked
     /// here with the one rule (`validateUsername`), so `"@Bob"` may be

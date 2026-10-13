@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Key-reset attestation ([ADR-0065] section 2.2).
+//! Key-reset attestation ([ADR-0073] section 2.2).
 //!
 //! A *key-reset attestation* is a compact, domain-separated, Ed25519-signed
 //! statement by `services/auth` that the account behind `account_ref` moved to
@@ -58,10 +58,10 @@
 //!   the mint when the resetting device crashed between the server reset and
 //!   the publish.
 //! - [`verify_key_reset_fresh`] — the same plus a caller-supplied age bound on
-//!   `signed_at`, for a client applying its own reset (ADR-0065 section 4.2
+//!   `signed_at`, for a client applying its own reset (ADR-0073 section 4.2
 //!   bounds it at 30 days; older, the person signs in again first).
 //!
-//! [ADR-0065]: ../../../docs/adr/0065-account-key-reset.md
+//! [ADR-0073]: ../../../docs/adr/0073-account-key-reset.md
 
 use lakko_crypto::hash;
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
@@ -431,14 +431,14 @@ fn root_endorsement_input(
     buf
 }
 
-/// Sign a **root endorsement** ([ADR-0066] section 4.6, decision D11): the
+/// Sign a **root endorsement** ([ADR-0074] section 4.6, decision D11): the
 /// identity key a key-reset attestation names says which key may become the
 /// root of the account's DeviceGroup journal under that attestation.
 ///
 /// A key-reset attestation alone says "this account moved to this key at
 /// this generation"; it does not say who may act on it. The Delivery Service
 /// hears an attested journal `reset` from any signer, so without this an
-/// attestation that anyone can read (ADR-0065 R.3 has discovery serve it)
+/// attestation that anyone can read (ADR-0073 R.3 has discovery serve it)
 /// would let anyone become the root. With it, the attestation is useless to
 /// everyone but the holder of the attested identity key.
 ///
@@ -447,7 +447,7 @@ fn root_endorsement_input(
 /// the key that becomes the journal's root: the signer of a `reset`
 /// statement, the `new_root` of a `root` transfer.
 ///
-/// [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+/// [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 #[must_use]
 pub fn sign_root_endorsement(
     identity: &SigningKey,

@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 R.12 / UX 16.4 - a live ONE-TO-ONE call ends when its conversation
+// ADR-0073 R.12 / UX 16.4 - a live ONE-TO-ONE call ends when its conversation
 // moves, and is never started in a dead session.
 //
 // iOS mirror of `apps/web/src/calls/call-continuity.ts`; the tables are the
@@ -51,7 +51,7 @@ public enum CallContinuity {
         case unavailable
     }
 
-    /// ADR-0065 R.12 - a one-to-one call is never STARTED in a dead session.
+    /// ADR-0073 R.12 - a one-to-one call is never STARTED in a dead session.
     ///
     /// A call takes its keys and its signalling from the group it is dialled
     /// in. In a one-to-one whose other person's reset was accepted, that

@@ -140,7 +140,7 @@ public struct SignupFinishRequest: Codable, Equatable {
     public let accountId: String
     public let passwordUpload: String
     public let recoveryUpload: String?
-    /// ADR-0066 section 0.4 — URL-safe base64 (no pad) of this device's
+    /// ADR-0074 section 0.4 — URL-safe base64 (no pad) of this device's
     /// 32-byte id (its conversation leaf key); omitted for an unbound
     /// session.
     public let deviceIdB64: String?
@@ -166,7 +166,7 @@ public struct SignupFinishRequest: Codable, Equatable {
 }
 
 /// `POST /signup/finish` response body: `ok` plus the session pair
-/// (ADR-0065 section 3) flattened into the object.
+/// (ADR-0073 section 3) flattened into the object.
 public struct SignupFinishResponse: Codable, Equatable, SessionPairCarrying {
     public let ok: Bool
     /// The access token: the bearer for every service.
@@ -176,7 +176,7 @@ public struct SignupFinishResponse: Codable, Equatable, SessionPairCarrying {
     public let refreshToken: String
     public let refreshExpiresAtMs: Int64
     public let keyGeneration: UInt64
-    /// The opaque fresh-auth grant of this signup (ADR-0065, amended
+    /// The opaque fresh-auth grant of this signup (ADR-0073, amended
     /// 2026-10-06): the person just chose the password, so the onboarding's
     /// own actions (adding a passkey) ask for nothing more.
     public let freshGrant: String?
@@ -250,7 +250,7 @@ public struct LoginFinishRequest: Codable, Equatable {
     public let sessionId: String
     /// base64(CredentialFinalization).
     public let finalize: String
-    /// ADR-0066 section 0.4 — URL-safe base64 (no pad) of this device's
+    /// ADR-0074 section 0.4 — URL-safe base64 (no pad) of this device's
     /// 32-byte id; omitted when the account (and so the device identity) is
     /// not known before the finish. The session is then bound afterwards
     /// (`POST /auth/session/bind-device`).
@@ -270,8 +270,8 @@ public struct LoginFinishRequest: Codable, Equatable {
 }
 
 /// Shared by `/login/finish` and `/recovery/login/finish`: `ok`, the
-/// account id, and the session pair (ADR-0065 section 3). The PASSWORD
-/// login's finish also carries a fresh-auth grant (ADR-0065, amended
+/// account id, and the session pair (ADR-0073 section 3). The PASSWORD
+/// login's finish also carries a fresh-auth grant (ADR-0073, amended
 /// 2026-10-06); the recovery login's never does.
 public struct LoginFinishResponse: Codable, Equatable, SessionPairCarrying {
     public let ok: Bool
@@ -403,7 +403,7 @@ public struct PasswordResetFinishRequest: Codable, Equatable {
 // ----------------------------------------------------------------------------
 
 /// `POST /device/authorize/start` request body (bearer): the fresh-auth
-/// grant (ADR-0065, amended 2026-10-06). Without a valid one the server
+/// grant (ADR-0073, amended 2026-10-06). Without a valid one the server
 /// answers `403 fresh-auth-required` and mints nothing.
 public struct DeviceAuthorizeStartRequest: Codable, Equatable {
     public let freshGrant: String
@@ -615,7 +615,7 @@ public struct TotpRecoverResponse: Codable, Equatable, SessionPairCarrying {
 public struct LoginHandleBindRequest: Codable, Equatable {
     /// base64url, no padding, of the 32-byte handle.
     public let handle: String
-    /// ADR-0068 — the fresh-auth grant: needed only when the bind CHANGES
+    /// ADR-0076 — the fresh-auth grant: needed only when the bind CHANGES
     /// the account's handle.
     public var freshGrant: String?
     /// The handle the account holds now (base64url, no padding), for a change.
@@ -642,7 +642,7 @@ public struct LoginHandleBindRequest: Codable, Equatable {
     }
 }
 
-/// The `recovery_email` part of a handle change (ADR-0068 section 2): the
+/// The `recovery_email` part of a handle change (ADR-0076 section 2): the
 /// confirmed address, and, only while no phrase is saved, the email vault
 /// sealed under the NEW handle with a fresh salt (both standard base64).
 public struct LoginHandleRecoveryEmail: Codable, Equatable {
@@ -719,7 +719,7 @@ public struct PasswordResetFinishResponse: Codable, Equatable, SessionPairCarryi
 
 // ----------------------------------------------------------------------------
 // Session refresh + the key reset (services/auth/src/{session,key_reset}.rs,
-// ADR-0065)
+// ADR-0073)
 // ----------------------------------------------------------------------------
 
 /// `POST /auth/session/refresh` request body. Anonymous: the refresh
@@ -736,7 +736,7 @@ public struct SessionRefreshRequest: Codable, Equatable {
     }
 }
 
-/// `POST /auth/session/bind-device` request body (bearer; ADR-0066 "T1 as
+/// `POST /auth/session/bind-device` request body (bearer; ADR-0074 "T1 as
 /// built" points 8 and 9): name the device a session that landed without one
 /// belongs to. The answer is a session pair naming it.
 public struct BindDeviceRequest: Codable, Equatable {
@@ -756,7 +756,7 @@ public struct BindDeviceRequest: Codable, Equatable {
     }
 }
 
-/// `POST /account/devices/revoke` request body (bearer; ADR-0066 section
+/// `POST /account/devices/revoke` request body (bearer; ADR-0074 section
 /// 2.1): sign ANOTHER device of the account out at the server.
 public struct DeviceRevokeRequest: Codable, Equatable {
     /// The fresh-auth grant.
@@ -866,7 +866,7 @@ public struct KeyResetFinishResponse: Codable, Equatable, SessionPairCarrying {
     }
 }
 
-// MARK: - ADR-0066 part 3: rotating the account keys
+// MARK: - ADR-0074 part 3: rotating the account keys
 
 /// `POST /account/keys/rotate/finish` request body (bearer). The start body
 /// is the reset's (``KeyResetStartRequest``) under the rotate path.
@@ -883,7 +883,7 @@ public struct KeyRotateFinishRequest: Codable, Equatable {
     /// URL-safe base64 (no pad) device ids (at most 8) that get a session
     /// floor in the same transaction: a removal that raced the commit.
     public let revokeDeviceIdsB64: [String]
-    /// ADR-0067 section 3 — `true` when this rotation is "Save a recovery
+    /// ADR-0075 section 3 — `true` when this rotation is "Save a recovery
     /// phrase"; absent otherwise.
     public let phraseSaved: Bool?
 
@@ -909,7 +909,7 @@ public struct KeyRotateFinishRequest: Codable, Equatable {
     }
 }
 
-/// `POST /auth/session/refresh` with the session upgrade of ADR-0066 section
+/// `POST /auth/session/refresh` with the session upgrade of ADR-0074 section
 /// 3.3: a refresh credential of a LOWER key generation is exchanged for a
 /// pair at the current one when `key_statement_b64` (kind `SessionUpgrade`,
 /// body `BLAKE3(refresh_token)`, URL-safe base64) verifies under the

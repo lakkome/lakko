@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! wasm-bindgen surface for `lakko-attest`'s account statement (ADR-0066
+//! wasm-bindgen surface for `lakko-attest`'s account statement (ADR-0074
 //! section 0.3).
 //!
 //! Mirror of `crates/lakko-ffi-uniffi/src/account_statement.rs` for the web
@@ -207,7 +207,7 @@ pub fn sign_device_revoke_statement(
     sign_revoke_inner(account_seed, account_id, device_id).map_err(|msg| JsError::new(&msg))
 }
 
-/// Sign the statement `POST /account/recall/start` requires (ADR-0066 "T3 as
+/// Sign the statement `POST /account/recall/start` requires (ADR-0074 "T3 as
 /// built"): kind 5 over the anchor's `anchorSeq` (from
 /// `POST /account/recall/status`) and the OPAQUE login request, given as the
 /// same standard-base64 string the request body carries
@@ -261,7 +261,7 @@ pub fn sign_recall_statement(
 }
 
 /// Sign the statement that upgrades a kept device's session after a key
-/// rotation (ADR-0066 section 3.3): kind 4 over `BLAKE3(refreshToken)`. Sent
+/// rotation (ADR-0074 section 3.3): kind 4 over `BLAKE3(refreshToken)`. Sent
 /// as `key_statement_b64` (base64url, no padding) beside `refresh_token` on
 /// `POST /auth/session/refresh`, once the device has ADOPTED the new account
 /// seed. `accountSeed` is the NEW account identity's 32-byte Ed25519 seed;

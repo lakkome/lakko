@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 R.7 case 1 / UX 16.6 - a contact request (or an `/i/` link) from an
+// ADR-0073 R.7 case 1 / UX 16.6 - a contact request (or an `/i/` link) from an
 // account that is ALREADY a contact.
 //
 // iOS mirror of `apps/web/src/contacts/known-contact-request.ts`; the tables
@@ -114,7 +114,7 @@ public enum KnownContactRequest {
     /// | yes                     | no                           | no                                      | none     |
     ///
     /// "The pin names the key" means the pinned key or one of its PROVEN
-    /// predecessors (ADR-0066 section 3.5: after a proven rotation the row
+    /// predecessors (ADR-0074 section 3.5: after a proven rotation the row
     /// keeps the key the person's leaves are bound to). A key a reset retired
     /// is not among them. Every row naming the account is considered, so a
     /// claimed row cannot hide the real one, and a pin written for the
@@ -167,7 +167,7 @@ public enum KnownContactRequest {
 }
 
 // Which keys a contact request goes out to once the recipient's published
-// identity has passed the fail-closed gate (ADR-0066 section 3.5a rule 1).
+// identity has passed the fail-closed gate (ADR-0074 section 3.5a rule 1).
 //
 // iOS mirror of `requestTargetAfterFetch` in
 // `apps/web/src/contacts/request-target.ts`. The other half of that web

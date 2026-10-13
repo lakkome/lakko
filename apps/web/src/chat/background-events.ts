@@ -86,7 +86,7 @@ export interface BackgroundEventPlan {
   readonly messageOps: readonly MessageOpEvent[];
   /** ADR-0051 — shared group names, for the role-gated receive. */
   readonly groupNames: readonly Of<"group-name">[];
-  /** ADR-0065 R.6 — successor claims, for the claim rule. */
+  /** ADR-0073 R.6 — successor claims, for the claim rule. */
   readonly groupClosed: readonly Of<"group-closed">[];
   /** ADR-0052 decision 3 — shared pins, for the role-gated receive. */
   readonly pins: readonly Of<"pin">[];
@@ -141,7 +141,7 @@ export interface InertSender {
 }
 
 /**
- * ADR-0065 R.5 / R.8 — whether an event is dropped because of WHO sent it.
+ * ADR-0073 R.5 / R.8 — whether an event is dropped because of WHO sent it.
  * The one rule both consumers apply (the background settle through
  * {@link planBackgroundEvents}, the open chat's own poll):
  *
@@ -173,18 +173,18 @@ export function dropsFromSupersededSender(
  *  journal order. */
 export function planBackgroundEvents(
   events: readonly IncomingChatEvent[],
-  /** ADR-0065 R.5 / R.8 — whether a sender's ACCOUNT key was retired by an
+  /** ADR-0073 R.5 / R.8 — whether a sender's ACCOUNT key was retired by an
    *  accepted reset. A message, an op or a call signal from such a sender (a
    *  removed device still holding the old keys) is dropped here, before it
    *  is stored, shown, notified or rung. Commits and every other row are
    *  not judged by this. */
   senderSuperseded: (senderKeyB64: string) => boolean = () => false,
-  /** ADR-0065 R.7 case 1 — whether a message is a RE-SEND whose original
+  /** ADR-0073 R.7 case 1 — whether a message is a RE-SEND whose original
    *  this device already holds (`resend-marker.ts` `resendVerdict` said
    *  `skip`). Such a message is dropped here, before it is stored, shown,
    *  counted or notified: the history row is the one copy. */
   resendAlreadyHeld: (e: Of<"application">) => boolean = () => false,
-  /** ADR-0065 R.8 — whether NOTHING from a sender acts in this conversation
+  /** ADR-0073 R.8 — whether NOTHING from a sender acts in this conversation
    *  (see {@link dropsFromSupersededSender}). */
   inert: InertSender = { sender: () => false },
 ): BackgroundEventPlan {

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.2: "the stolen device is out first" (the C-61 pattern).
+ * ADR-0074 section 3.2: "the stolen device is out first" (the C-61 pattern).
  *
  * The `key-rotation` envelope carries the account's NEW entropy, so it must
  * be sealed at a DeviceGroup epoch the removed device never held. No crate
@@ -204,7 +204,7 @@ describe("the envelope on a kept device (through the real core)", () => {
   });
 });
 
-describe("the DS root endorsement (ADR-0066 section 4.6) is what a reset and a recall send", () => {
+describe("the DS root endorsement (ADR-0074 section 4.6) is what a reset and a recall send", () => {
   /** A 177-byte attestation-shaped blob carrying `generation` where the
    *  layout has it; only the generation is read by the endorsement. */
   function attestationWithGeneration(generation: bigint): string {

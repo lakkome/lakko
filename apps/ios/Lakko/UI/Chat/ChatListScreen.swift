@@ -67,7 +67,7 @@ public struct ChatListScreen: View {
     /// back on this device (``RecalledNoticeBanner``). A view of its own, so
     /// this screen is not re-evaluated by it; `nil` draws nothing.
     var recalledNotice: RecalledNoticeBanner?
-    /// UX 19.6 — what the account's devices are told (ADR-0067).
+    /// UX 19.6 — what the account's devices are told (ADR-0075).
     var accountNotice: AccountNoticeBanner?
     /// UX 18.3 — `Updating keys...` in the header while a kept device adopts
     /// the account's new keys (``KeysUpdatingLabel``); `nil` draws nothing.
@@ -288,7 +288,7 @@ public struct ChatListScreen: View {
     ) -> [ConversationListRow] {
         viewModel.threads.map { thread -> ConversationListRow in
             let kind = viewModel.kind(of: thread.groupIdHex)
-            // ADR-0065 R.5 — the row IS the conversation: its identity and
+            // ADR-0073 R.5 — the row IS the conversation: its identity and
             // every person-facing key (pin / mute / archive, folders, the
             // read position, the route) is the conversation id, which stays
             // what it was when the conversation continues in a successor
@@ -348,7 +348,7 @@ public struct ChatListScreen: View {
                 id: channel.id,
                 kind: .channel,
                 title: model.title,
-                // ADR-0065 phase 2 (UX 16.6) — on the device that reset the
+                // ADR-0073 phase 2 (UX 16.6) — on the device that reset the
                 // keys, a channel it owned says it can no longer post.
                 preview: channels.orphanedByReset(channelId: channel.id)
                     ? Localization.text("channels.keys_reset.row_sub")
@@ -420,7 +420,7 @@ public struct ChatListScreen: View {
                         // the chat has to keep working while the offer stands.
                         if let quietCall, QuietIncomingCallPresentation.showsOnListRow(
                             // The offer names a GROUP; the row is a
-                            // conversation (ADR-0065 R.5).
+                            // conversation (ADR-0073 R.5).
                             quietCall, rowId: viewModel.headGroupIdHex(ofRow: row.id)) {
                             QuietIncomingCallRowActions(
                                 call: quietCall,
@@ -714,7 +714,7 @@ public struct ChatListScreen: View {
         cursor: ReadCursorState?
     ) -> Int? {
         guard let cursor else { return nil }
-        // ADR-0065 R.5 — the position is `(segment, message id)`; what it
+        // ADR-0073 R.5 — the position is `(segment, message id)`; what it
         // means for the rows of the conversation's CURRENT group is decided
         // by `readUpToInSegment`. Rows of older segments are behind the
         // position or were read where they were.
@@ -1091,7 +1091,7 @@ public final class ChatListViewModel: ObservableObject {
     /// newest server message id, for the read cursor the caller broadcasts.
     /// `nil` when the chat holds no acknowledged message.
     func markReadLocally(groupIdHex: String) -> Data? {
-        // The id is the row's: the CONVERSATION (ADR-0065 R.5).
+        // The id is the row's: the CONVERSATION (ADR-0073 R.5).
         guard let thread = threads.first(where: { $0.conversationIdHex == groupIdHex }) else {
             repository.clearUnread(groupIdHex: groupIdHex)
             return nil
@@ -1106,7 +1106,7 @@ public final class ChatListViewModel: ObservableObject {
             LineageRules.TimelinePosition(segment: thread.segmentIndex, messageId: highest))
     }
 
-    /// The group a list row's conversation currently is (ADR-0065 R.5), for
+    /// The group a list row's conversation currently is (ADR-0073 R.5), for
     /// the few things on a row that name a group rather than a conversation.
     func headGroupIdHex(ofRow id: String) -> String {
         threads.first(where: { $0.conversationIdHex == id })?.groupIdHex ?? id

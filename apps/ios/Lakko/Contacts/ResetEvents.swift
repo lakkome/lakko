@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 R.2 - "a reset was accepted", as an in-process signal.
+// ADR-0073 R.2 - "a reset was accepted", as an in-process signal.
 //
 // iOS mirror of `apps/web/src/contacts/reset-events.ts`.
 //

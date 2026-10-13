@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The account statement as the web client uses it (ADR-0066 section 0.3),
+ * The account statement as the web client uses it (ADR-0074 section 0.3),
  * through the real wasm core: the `device-revoke` statement a removal sends
  * to auth and, in the header, to discovery.
  */
@@ -64,7 +64,7 @@ describe("the device-revoke statement", () => {
   });
 });
 
-// ADR-0066 part 1: the three statements the old device signs with the seed
+// ADR-0074 part 1: the three statements the old device signs with the seed
 // kept in its recall record.
 describe("the recall statements", () => {
   const LOGIN_REQUEST = btoa("an opaque login request");

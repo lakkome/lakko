@@ -6,7 +6,7 @@ package me.lakko.app.auth
 import android.content.Context
 
 /**
- * ADR-0067 / `docs/ux/identity-recovery.md` section 19 - how an account is
+ * ADR-0075 / `docs/ux/identity-recovery.md` section 19 - how an account is
  * protected, and everything the screens decide from it. Pure: the answer of
  * `GET /recovery-email` goes in, what a screen draws comes out, so a host
  * JVM test runs every rule.
@@ -125,7 +125,7 @@ public fun recoveryEmailRow(status: RecoveryEmailStatus, addressHeld: Boolean = 
 }
 
 /**
- * ADR-0067 (amended 2026-10-13) - the automatic re-seal: the server keeps
+ * ADR-0075 (amended 2026-10-13) - the automatic re-seal: the server keeps
  * the address value, holds no vault, no phrase is saved, and THIS device
  * holds the address. It then seals the current phrase and installs the vault
  * silently (`PUT /recovery-email/vault`).
@@ -250,7 +250,7 @@ public fun recoveryPhraseRow(phraseSaved: Boolean, phraseOnDevice: Boolean): Rec
 public fun threeWordsSurfaceOffered(phraseSaved: Boolean): Boolean = phraseSaved
 
 /**
- * The enrol sealing rule (ADR-0067 section 6): the vault is sealed and sent
+ * The enrol sealing rule (ADR-0075 section 6): the vault is sealed and sent
  * with `enrol/finish` only while no phrase is saved. A phrase-protected
  * account never gets a vault (the server answers `409 phrase-saved`).
  */

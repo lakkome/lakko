@@ -115,12 +115,12 @@ export interface ChatApi {
    *  than a leaf: contact requests and acks, invite capabilities, the
    *  discovery bundle, the safety number. `identity()` is the device. */
   readonly accountIdentity: Accessor<WasmIdentity | null>;
-  /** ADR-0066 section 3.5 — after a proven key rotation, the identity of the
+  /** ADR-0074 section 3.5 — after a proven key rotation, the identity of the
    *  account key the conversation leaves are still bound to (the proven
    *  predecessor this device holds); `null` when the account never rotated.
    *  Its mailbox is where peers address this account's leaves. */
   readonly predecessorAccountIdentity: Accessor<WasmIdentity | null>;
-  /** ADR-0066 section 3.5a - own predecessors are a CHAIN. After a second
+  /** ADR-0074 section 3.5a - own predecessors are a CHAIN. After a second
    *  rotation the account has held keys between the conversation key above
    *  and the current one; these are their identities, older first. Each
    *  one's mailbox is read inside its own 30-day window, and a committer
@@ -152,12 +152,12 @@ export interface ChatApi {
   setIdentity(identity: WasmIdentity | null): void;
   /** Replace the account identity (ADR-0050). Frees the previous one. */
   setAccountIdentity(identity: WasmIdentity | null): void;
-  /** Replace the predecessor identity (ADR-0066). Frees the previous one. */
+  /** Replace the predecessor identity (ADR-0074). Frees the previous one. */
   setPredecessorAccountIdentity(identity: WasmIdentity | null): void;
-  /** Replace the intermediate predecessor identities (ADR-0066 section
+  /** Replace the intermediate predecessor identities (ADR-0074 section
    *  3.5a). Frees the ones no longer listed. */
   setIntermediatePredecessorIdentities(identities: readonly WasmIdentity[]): void;
-  /** ADR-0066 section 3.5 — a proven key rotation in a LIVE session: `next`
+  /** ADR-0074 section 3.5 — a proven key rotation in a LIVE session: `next`
    *  becomes the account identity. When no predecessor is held yet, the
    *  identity that was the account's becomes the predecessor AS THE SAME
    *  OBJECT (never freed, never rebuilt): its MLS provider holds the
@@ -266,7 +266,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       }
     }
     setPredecessorIdentitySig(next);
-    // ADR-0066 section 3.5 — the mailbox the conversation leaves name.
+    // ADR-0074 section 3.5 — the mailbox the conversation leaves name.
     installMailboxAccess("predecessor", next);
   }
 
@@ -285,7 +285,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       }
     }
     setIntermediateIdentitiesSig([...next]);
-    // ADR-0066 section 3.5a rule 4 — each one's mailbox is still read.
+    // ADR-0074 section 3.5a rule 4 — each one's mailbox is still read.
     installPredecessorChainAccess(next);
   }
 
@@ -340,7 +340,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     ownPredecessorIdentities: () => {
       const oldest = predecessorIdentity();
       // Without a conversation predecessor (a device whose leaves are bound
-      // to the current key, ADR-0066) the earlier keys are still held.
+      // to the current key, ADR-0074) the earlier keys are still held.
       return oldest === null ? intermediateIdentities() : [oldest, ...intermediateIdentities()];
     },
     setPredecessorAccountIdentity(next) {

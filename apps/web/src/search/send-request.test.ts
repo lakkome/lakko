@@ -59,7 +59,7 @@ describe("sendFoundRequest", () => {
     expect(d.sendToBundle).not.toHaveBeenCalled();
   });
 
-  it("a person found under a PROVEN predecessor key gets the request at their current keys (ADR-0066 3.5a)", async () => {
+  it("a person found under a PROVEN predecessor key gets the request at their current keys (ADR-0074 3.5a)", async () => {
     const CURRENT = new Uint8Array(32).fill(0xb7);
     const provenPredecessor = vi.fn(async () => true);
     const d = deps({

@@ -34,7 +34,7 @@ fuzz_target!(|data: &[u8]| {
     // and the bound is idempotent under compose_reply -> parse_body.
     assert!(reply_within_bounds(data));
     assert!(forward_within_bounds(data), "ADR-0052: a forward that survives parse is within its bounds and idempotent");
-    // ADR-0065: a re-send marker survives parse only whole and within its
+    // ADR-0073: a re-send marker survives parse only whole and within its
     // bound, and the bound is idempotent under compose_chat -> parse_body.
     assert!(resend_within_bounds(data));
 });

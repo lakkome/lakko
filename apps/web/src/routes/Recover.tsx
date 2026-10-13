@@ -3,10 +3,10 @@
 
 /**
  * The recovery screen, "Get back in" (docs/ux/identity-recovery.md section
- * 2, ADR-0064 decision 7): a list of ways back in, each a tappable row, that
+ * 2, ADR-0072 decision 7): a list of ways back in, each a tappable row, that
  * reveals the matching form under a heading that leads back to the list.
  *
- * First, above both groups (ADR-0067, UX 19.3): Email code, a code sent to
+ * First, above both groups (ADR-0075, UX 19.3): Email code, a code sent to
  * the recovery email. What it brings depends on the account, and nothing
  * says which before the code was accepted.
  *

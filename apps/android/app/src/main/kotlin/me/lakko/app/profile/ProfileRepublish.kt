@@ -136,7 +136,7 @@ public class ProfileRepublishScheduler(
     }
 
     /**
-     * ADR-0066 section 3.5a rule 3 - re-send the profile into every group of
+     * ADR-0074 section 3.5a rule 3 - re-send the profile into every group of
      * [groupIdHexes] and WAIT for each: `true` only when none failed, so the
      * caller can keep the re-send owed. A group that took it counts as
      * published for the growth throttle and is reported to [onSent].

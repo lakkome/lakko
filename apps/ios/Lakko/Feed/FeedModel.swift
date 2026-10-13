@@ -37,7 +37,7 @@ struct FeedSource: Equatable {
     /// People in a group, for weighing reactions against its size; 0 for a
     /// channel, whose posts carry no reactions.
     let audience: Int
-    /// ADR-0065 R.5 — the conversation a GROUP source belongs to (the
+    /// ADR-0073 R.5 — the conversation a GROUP source belongs to (the
     /// lineage root), when it differs from nothing: `nil` for a channel.
     var conversationHex: String? = nil
 

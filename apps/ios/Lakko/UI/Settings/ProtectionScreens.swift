@@ -4,7 +4,7 @@
 import LakkoCore
 import SwiftUI
 
-// ADR-0067 / docs/ux/identity-recovery.md section 19 — the screens of an
+// ADR-0075 / docs/ux/identity-recovery.md section 19 — the screens of an
 // account's protection:
 //
 //   * `LakkoConfirmDialog`     the app's own confirmation (never a system one);
@@ -540,7 +540,7 @@ enum SavePhraseState: Equatable {
     }
 }
 
-/// "Save a recovery phrase" (UX 19.5): the ADR-0066 key rotation with no
+/// "Save a recovery phrase" (UX 19.5): the ADR-0074 key rotation with no
 /// device removed, then the existing words grid and three-word check.
 struct SavePhraseScreen: View {
     @ObservedObject var authRepository: AuthRepository

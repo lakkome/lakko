@@ -3,7 +3,7 @@
 
 /**
  * "Was it you?" and taking the account back: every decision, as pure
- * functions (ADR-0066 part 1 and "T3 as built";
+ * functions (ADR-0074 part 1 and "T3 as built";
  * `docs/ux/identity-recovery.md` section 18.4).
  *
  * The network, the wasm core and the stores are the caller's
@@ -87,7 +87,7 @@ export interface RecallStatus {
   readonly changedAtMs: number;
   /** Wrong old passwords still allowed on this anchor. */
   readonly attemptsRemaining: number;
-  /** ADR-0067 section 8: `start` accepts `proof: "phrase"` for this anchor
+  /** ADR-0075 section 8: `start` accepts `proof: "phrase"` for this anchor
    *  (the account had a saved phrase and no email vault when the anchor was
    *  captured). `false` when the server did not say. */
   readonly phraseArm: boolean;
@@ -198,7 +198,7 @@ export function recallAttemptFailure(input: {
 }
 
 /**
- * ADR-0067 section 8 (UX 19.7): whether the phrase may stand in for the old
+ * ADR-0075 section 8 (UX 19.7): whether the phrase may stand in for the old
  * password on this anchor. Only when the server said so: for an account
  * that was mail-protected, whoever came in by email holds the same words, so
  * they prove nothing.

@@ -116,7 +116,7 @@ class DevicePhraseTest {
                 "device-pairing",
                 "device-restore",
                 "fresh-identity",
-                // ADR-0066 part 3: the keys were changed, the devices kept.
+                // ADR-0074 part 3: the keys were changed, the devices kept.
                 "key-rotation",
             ),
             DevicePhrase.LandingPath.entries.map { it.tag },

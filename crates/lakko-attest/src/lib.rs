@@ -91,7 +91,7 @@
 //! # Key-reset attestation
 //!
 //! The sixth format, [`KeyResetAttestation`] (see the [`key_reset`] module,
-//! [ADR-0065] section 2.2): auth's signed statement that an account moved to
+//! [ADR-0073] section 2.2): auth's signed statement that an account moved to
 //! key generation `g` and presented a given identity key as that generation's.
 //! Discovery requires it before it accepts an unproven change of the
 //! published key, and the Delivery Service before it lets a stranger re-root
@@ -100,18 +100,18 @@
 //! its own domain separator, so all six kinds stay non-interchangeable under
 //! the shared auth attest key; its 177-byte length is shared with none.
 //!
-//! [ADR-0065]: ../../../docs/adr/0065-account-key-reset.md
+//! [ADR-0073]: ../../../docs/adr/0073-account-key-reset.md
 //!
 //! # Account statement
 //!
 //! The seventh format, [`AccountStatement`] (see the [`account_statement`]
-//! module, [ADR-0066] section 0.3), is the first a **client** signs and a
+//! module, [ADR-0074] section 0.3), is the first a **client** signs and a
 //! service verifies: a 138-byte request signed by the account's identity key
 //! (remove a device, and the recall and session-upgrade kinds of the same
 //! ADR). Its own domain separator and a length shared with no other kind keep
 //! it apart from the six above.
 //!
-//! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+//! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 
 #![forbid(unsafe_code)]
 
@@ -356,7 +356,7 @@ pub mod fuzz_api {
     /// a request body field (auth) or a request header (discovery) anyone can
     /// send, so the bytes reach [`AccountStatement::decode_unverified`] and
     /// [`verify_account_statement`] before any state is consulted
-    /// (ADR-0066). The fuzzer cannot forge a signature under the fixed key,
+    /// (ADR-0074). The fuzzer cannot forge a signature under the fixed key,
     /// so it exercises the length, version and kind gates, the field slicing,
     /// the account and window comparisons at their extremes (the clock is the
     /// statement's own `unix_ms`, so the window never hides the signature
@@ -465,7 +465,7 @@ pub mod fuzz_api {
     /// key. The bytes are attacker-controlled — a key-reset attestation is a
     /// request body field on discovery's identity upload and the DS's journal
     /// reset, and a client reads one back from its own persisted
-    /// `publish-owed` state (ADR-0065), reaching this bounded parser before
+    /// `publish-owed` state (ADR-0073), reaching this bounded parser before
     /// any state is consulted — and the parser must stay panic-free on any
     /// input. The fuzzer cannot forge a valid signature against the fixed key,
     /// so it exercises the length / version / field-slicing / signature-parse

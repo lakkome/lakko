@@ -3,7 +3,7 @@
 
 /**
  * Pins the two TypeScript constants of `phrase-shape.ts` against the wasm
- * core, which is the authority (ADR-0064 decision 3: 12 words, 16 bytes).
+ * core, which is the authority (ADR-0072 decision 3: 12 words, 16 bytes).
  */
 import { beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";

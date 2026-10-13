@@ -28,7 +28,7 @@ enum PhraseReveal: Equatable {
 /// `key-reset.ts` publish record and the phrase-owed marker of
 /// `phrase-gate.ts`.
 ///
-///   * **Publish owed** (ADR-0065 section 2.3). "Reset account keys" resets
+///   * **Publish owed** (ADR-0073 section 2.3). "Reset account keys" resets
 ///     the keys in one server step; what can still be owed afterwards is
 ///     telling the directory, this device's KeyPackage row and the account's
 ///     DeviceGroup journal about the new keys. The record holds the

@@ -92,7 +92,7 @@ class DeviceReadmissionTest {
         assertEquals(1, plan.admit.size)
     }
 
-    // ---- ADR-0066 section 2.3: the DeviceGroup filter ------------------------
+    // ---- ADR-0074 section 2.3: the DeviceGroup filter ------------------------
 
     @Test
     fun `an own device is admitted only when the account's DeviceGroup roster lists it`() {
@@ -178,7 +178,7 @@ class DeviceReadmissionTest {
 
     @Test
     fun `an own device whose KeyPackage names another account key is not admitted and not retired`() {
-        // ADR-0066: a device paired after a key rotation published under the
+        // ADR-0074: a device paired after a key rotation published under the
         // current key before the state bundle reached it.
         val stale = DirectoryDevice("me-2", "kp:me-2".toByteArray(), admissible = false)
         val plan = DeviceReadmission.plan(

@@ -94,14 +94,14 @@ export default function Login(): JSX.Element {
 
   // The passkey button shows wherever the browser supports passkeys: the
   // sign-in is discoverable, so it works on a device that has never held
-  // the account (ADR-0064 decision 6). What it restores is decided after.
+  // the account (ADR-0072 decision 6). What it restores is decided after.
   const passkeyAvailable = (): boolean => WebauthnClient.isWebauthnAvailable();
 
   return (
     <AuthLayout>
       <h1>{t("auth.login.title")}</h1>
       <p class="lk-auth-lede">{t("auth.login.lede")}</p>
-      {/* ADR-0065 section 3.3: the refresh credential expired or was
+      {/* ADR-0073 section 3.3: the refresh credential expired or was
           refused as invalid; the session ended on its own, nothing wiped. */}
       <Show when={sessionExpired()}>
         <div class="lk-alert info" role="status">

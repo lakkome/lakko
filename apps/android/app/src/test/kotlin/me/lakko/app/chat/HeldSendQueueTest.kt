@@ -8,7 +8,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0065 R.7 case 1 - the stored held messages (mirror of the web
+/** ADR-0073 R.7 case 1 - the stored held messages (mirror of the web
  *  `held-send-queue` codec cases). */
 class HeldSendQueueTest {
     private fun row(text: String = "hello", at: Long = 10, conversation: String = "ab12", group: String = "ab12") =

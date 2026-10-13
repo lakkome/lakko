@@ -133,7 +133,7 @@ describe("deleteChat", () => {
   });
 });
 
-describe("deleting a whole conversation (ADR-0065 R.5)", () => {
+describe("deleting a whole conversation (ADR-0073 R.5)", () => {
   const seg = (id: string) => ({ groupIdB64: id, groupIdHex: `hex-${id}` });
 
   it("orders every held segment before the head, each once", async () => {

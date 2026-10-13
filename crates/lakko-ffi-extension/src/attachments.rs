@@ -126,13 +126,13 @@ pub struct ParsedBody {
     pub emoji: Option<String>,
     /// ADR-0024 — the typing state (`Some` only for `Typing`).
     pub is_typing: Option<bool>,
-    /// ADR-0065 R.7: the group a re-sent message was first sent into
+    /// ADR-0073 R.7: the group a re-sent message was first sent into
     /// (standard base64), carried only together with
     /// `resend_origin_message_id`. Never shown: the extension uses it to stay
     /// quiet about a message this device already holds.
     #[uniffi(default = None)]
     pub resend_origin_group_b64: Option<String>,
-    /// ADR-0065 R.7: the DS `messageId` of that first send.
+    /// ADR-0073 R.7: the DS `messageId` of that first send.
     #[uniffi(default = None)]
     pub resend_origin_message_id: Option<i64>,
 }
@@ -147,7 +147,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
         // ADR-0052: a reply's quote is not previewed by a notification, and
         // this surface stays the smallest that decrypts (C-59), so the reply
         // and the forward attribution are matched away rather than carried.
-        // The ADR-0065 re-send marker IS carried: without it the extension
+        // The ADR-0073 re-send marker IS carried: without it the extension
         // would notify a second time about a message the device holds.
         inner::MessageBody::Chat {
             text,

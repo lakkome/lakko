@@ -268,7 +268,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     verifyIdentityInLogMock.mockClear();
 
     // A changed key with NO supersession proof and NO key-reset attestation
-    // must fail-closed (ADR-0065 R.2 row 1). The verified log read only
+    // must fail-closed (ADR-0073 R.2 row 1). The verified log read only
     // chooses the refusal copy.
     let thrown: unknown;
     try {
@@ -491,7 +491,7 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
   });
 });
 
-describe("ADR-0065 R.2 — the refusal copy of a proof-less change with no attestation", () => {
+describe("ADR-0073 R.2 — the refusal copy of a proof-less change with no attestation", () => {
   /** TOFU-pin an original key, then attempt an UNPROVEN changed key with no
    *  attestation and capture the thrown `SupersessionRefused`. The copy
    *  marker comes from the VERIFIED log read (`verifyIdentityInLog`). */

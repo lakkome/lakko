@@ -97,7 +97,7 @@ data class SignupFinishRequest(
     val account_id: String,
     val password_upload: String,
     val recovery_upload: String? = null,
-    /** ADR-0066 - base64url (no padding) of this device's 32-byte id (its
+    /** ADR-0074 - base64url (no padding) of this device's 32-byte id (its
      *  conversation leaf signature key, the id of its directory row). Absent
      *  = the session names no device yet (bound later). */
     val device_id_b64: String? = null,
@@ -113,7 +113,7 @@ data class SignupFinishResponse(
     val session_token: String,
     /** Token expiry as a unix-millisecond timestamp. */
     val session_expires_at_ms: Long,
-    /** ADR-0065: the refresh credential only `POST /auth/session/refresh` accepts. */
+    /** ADR-0073: the refresh credential only `POST /auth/session/refresh` accepts. */
     val refresh_token: String,
     /** Refresh-credential expiry as a unix-millisecond timestamp. */
     val refresh_expires_at_ms: Long,
@@ -156,7 +156,7 @@ data class LoginFinishRequest(
     val session_id: String,
     /** base64(CredentialFinalization). */
     val finalize: String,
-    /** ADR-0066 - base64url (no padding) of this device's 32-byte id (its
+    /** ADR-0074 - base64url (no padding) of this device's 32-byte id (its
      *  conversation leaf signature key, the id of its directory row). Absent
      *  = the session names no device yet (bound later). */
     val device_id_b64: String? = null,
@@ -172,7 +172,7 @@ data class LoginFinishResponse(
     val session_token: String,
     /** Token expiry as a unix-millisecond timestamp. */
     val session_expires_at_ms: Long,
-    /** ADR-0065: the refresh credential only `POST /auth/session/refresh` accepts. */
+    /** ADR-0073: the refresh credential only `POST /auth/session/refresh` accepts. */
     val refresh_token: String,
     /** Refresh-credential expiry as a unix-millisecond timestamp. */
     val refresh_expires_at_ms: Long,
@@ -225,7 +225,7 @@ data class PasswordResetFinishRequest(
     val recovery_finalize: String,
     /** base64(RegistrationUpload) — the new password envelope. */
     val new_password_upload: String,
-    /** ADR-0066 - base64url (no padding) of this device's 32-byte id (its
+    /** ADR-0074 - base64url (no padding) of this device's 32-byte id (its
      *  conversation leaf signature key, the id of its directory row). Absent
      *  = the session names no device yet (bound later). */
     val device_id_b64: String? = null,
@@ -241,7 +241,7 @@ data class PasswordResetFinishResponse(
     val session_token: String,
     /** Token expiry as a unix-millisecond timestamp. */
     val session_expires_at_ms: Long,
-    /** ADR-0065: the refresh credential only `POST /auth/session/refresh` accepts. */
+    /** ADR-0073: the refresh credential only `POST /auth/session/refresh` accepts. */
     val refresh_token: String,
     /** Refresh-credential expiry as a unix-millisecond timestamp. */
     val refresh_expires_at_ms: Long,
@@ -280,7 +280,7 @@ data class DeviceAuthorizeRedeemRequest(
      *  received over the rendezvous channel. The grant alone names
      *  the account (ADR-0056); the response carries its id. */
     val grant_token_b64: String,
-    /** ADR-0066 - base64url (no padding) of this device's 32-byte id (its
+    /** ADR-0074 - base64url (no padding) of this device's 32-byte id (its
      *  conversation leaf signature key, the id of its directory row). Absent
      *  = the session names no device yet (bound later). */
     val device_id_b64: String? = null,
@@ -295,7 +295,7 @@ data class DeviceAuthorizeRedeemResponse(
     val account_id_b64: String,
     val session_token: String,
     val session_expires_at_ms: Long,
-    /** ADR-0065: the refresh credential only `POST /auth/session/refresh` accepts. */
+    /** ADR-0073: the refresh credential only `POST /auth/session/refresh` accepts. */
     val refresh_token: String,
     /** Refresh-credential expiry as a unix-millisecond timestamp. */
     val refresh_expires_at_ms: Long,
@@ -367,7 +367,7 @@ data class TotpRecoverRequest(
     val handle: String,
     /** Current 6-digit authenticator code. */
     val code: String,
-    /** ADR-0066 - base64url (no padding) of this device's 32-byte id (its
+    /** ADR-0074 - base64url (no padding) of this device's 32-byte id (its
      *  conversation leaf signature key, the id of its directory row). Absent
      *  = the session names no device yet (bound later). */
     val device_id_b64: String? = null,
@@ -381,7 +381,7 @@ data class TotpRecoverResponse(
     val account_id_b64: String,
     val session_token: String,
     val session_expires_at_ms: Long,
-    /** ADR-0065: the refresh credential only `POST /auth/session/refresh` accepts. */
+    /** ADR-0073: the refresh credential only `POST /auth/session/refresh` accepts. */
     val refresh_token: String,
     /** Refresh-credential expiry as a unix-millisecond timestamp. */
     val refresh_expires_at_ms: Long,
@@ -398,7 +398,7 @@ data class TotpRecoverResponse(
 data class LoginHandleRequest(
     /** base64url (no padding) of the 32-byte login handle. */
     val handle: String,
-    /** ADR-0068: the fresh-auth grant; needed only when the bind CHANGES
+    /** ADR-0076: the fresh-auth grant; needed only when the bind CHANGES
      *  the account's handle. */
     val fresh_grant: String? = null,
     /** The handle the account holds now (base64url, no padding); with
@@ -408,7 +408,7 @@ data class LoginHandleRequest(
     val recovery_email: LoginHandleRecoveryEmail? = null,
 )
 
-/** The recovery email carried across a handle change (ADR-0068 section 2). */
+/** The recovery email carried across a handle change (ADR-0076 section 2). */
 @Serializable
 data class LoginHandleRecoveryEmail(
     val address: String,
@@ -441,7 +441,7 @@ data class LoginHandleRemovedResponse(
 )
 
 // -----------------------------------------------------------------
-// Session refresh (ADR-0065 section 3.2)
+// Session refresh (ADR-0073 section 3.2)
 // -----------------------------------------------------------------
 
 /** `POST /auth/session/refresh` (anonymous: the refresh credential is the
@@ -449,7 +449,7 @@ data class LoginHandleRemovedResponse(
 @Serializable
 data class SessionRefreshRequest(
     val refresh_token: String,
-    /** ADR-0066 section 3.3: an account statement of kind 4 by the CURRENT
+    /** ADR-0074 section 3.3: an account statement of kind 4 by the CURRENT
      *  account key over this credential (URL-safe base64, no padding). Read
      *  only when the credential is of a lower generation; absent otherwise. */
     val key_statement_b64: String? = null,
@@ -466,7 +466,7 @@ data class SessionRefreshResponse(
 )
 
 // -----------------------------------------------------------------
-// Reset account keys (ADR-0065 section 2; replaces the deleted
+// Reset account keys (ADR-0073 section 2; replaces the deleted
 // /recovery/credential/{start,finish} pair)
 // -----------------------------------------------------------------
 
@@ -497,7 +497,7 @@ data class KeyResetFinishRequest(
     val new_signature_pubkey_b64: String,
 )
 
-/** `POST /account/keys/rotate/finish` (bearer, ADR-0066 section 3.4): the
+/** `POST /account/keys/rotate/finish` (bearer, ADR-0074 section 3.4): the
  *  reset's finish with the old key's proof and the devices to revoke. */
 @Serializable
 data class KeyRotateFinishRequest(
@@ -511,7 +511,7 @@ data class KeyRotateFinishRequest(
     val supersession_proof_b64: String,
     /** base64url (no padding) device ids, at most 8. */
     val revoke_device_ids_b64: List<String> = emptyList(),
-    /** ADR-0067 section 3: this rotation is "Save a recovery phrase". Sent
+    /** ADR-0075 section 3: this rotation is "Save a recovery phrase". Sent
      *  only when `true`. */
     val phrase_saved: Boolean? = null,
 )
@@ -530,7 +530,7 @@ data class KeyResetFinishResponse(
 )
 
 // -----------------------------------------------------------------
-// ADR-0066 part 1: taking the account back (anonymous routes)
+// ADR-0074 part 1: taking the account back (anonymous routes)
 // -----------------------------------------------------------------
 
 /** `POST /account/recall/status`. */
@@ -539,7 +539,7 @@ data class RecallStatusRequest(
     /** base64url (no padding) of a 138-byte account statement of kind
      *  `recall-status`, signed by the OLD account identity key. */
     val statement_b64: String,
-    /** ADR-0067 section 8: base64url (no padding) of the 32-byte login
+    /** ADR-0075 section 8: base64url (no padding) of the 32-byte login
      *  handle, from a device that holds no account id. The statement then
      *  carries the first 16 bytes of the handle in its account field. */
     val handle: String? = null,
@@ -551,9 +551,9 @@ data class RecallStatusResponse(
     val expires_at_ms: Long,
     val changed_at_ms: Long,
     val attempts_remaining: Int,
-    /** ADR-0067: base64url (no padding) of the 16-byte account id. */
+    /** ADR-0075: base64url (no padding) of the 16-byte account id. */
     val account_id_b64: String? = null,
-    /** ADR-0067: the account can be taken back with its recovery phrase. */
+    /** ADR-0075: the account can be taken back with its recovery phrase. */
     val phrase_arm: Boolean = false,
 )
 
@@ -570,7 +570,7 @@ data class RecallStartRequest(
     val password_request: String,
     /** base64(RegistrationRequest) for the NEW recovery credential. */
     val recovery_request: String,
-    /** ADR-0067 section 8: `"phrase"` when `login_request` is a login with
+    /** ADR-0075 section 8: `"phrase"` when `login_request` is a login with
      *  the OLD recovery credential; absent for the password. */
     val proof: String? = null,
 )
@@ -653,7 +653,7 @@ data class PasskeyVaultListResponse(
 )
 
 // ---------------------------------------------------------------------
-// ADR-0066 - logout, device binding, device removal
+// ADR-0074 - logout, device binding, device removal
 // ---------------------------------------------------------------------
 
 /** `POST /auth/session/bind-device` (bearer): name the device of a session
@@ -678,7 +678,7 @@ data class DeviceRevokeRequest(
 )
 
 // -----------------------------------------------------------------
-// ADR-0067: the recovery email, and the account's notices
+// ADR-0075: the recovery email, and the account's notices
 // -----------------------------------------------------------------
 
 /** `GET /recovery-email/available` (anonymous). */

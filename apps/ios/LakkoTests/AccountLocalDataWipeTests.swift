@@ -114,7 +114,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
         NSLog("[account-wipe-test] other account kept: %d item(s)", beforeB.count)
     }
 
-    /// ADR-0066 section 1.1 — the STAGED wipe is the full list minus ONE
+    /// ADR-0074 section 1.1 — the STAGED wipe is the full list minus ONE
     /// item: after it, the only thing on the device that still names the
     /// account is the recall record, and the full wipe then removes that too.
     func testTheStagedWipeDeletesEverythingExceptTheRecallRecord() throws {
@@ -308,7 +308,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
             accountIdB64: x, exportKey: Data(repeating: 3, count: ExportKeyStore.exportKeyLength))
         try AccountIdentitySeedStore.putAccountIdentitySeed(
             accountIdB64: x, seed: Data(repeating: 4, count: AccountIdentitySeedStore.seedLength))
-        // ADR-0066 section 1.1 — the recall record of a reset elsewhere.
+        // ADR-0074 section 1.1 — the recall record of a reset elsewhere.
         try KeychainRecallRecordStore().put(RecallRecord(
             accountIdB64: x, oldSeed: Data(repeating: 9, count: RecallRecord.seedLength),
             username: "alice", learnedAtMs: 1))
@@ -320,7 +320,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
             accountKey: x, context: .pushRegister,
             tokens: [AnonToken(context: AnonTokenContext.pushRegister.rawValue, epoch: 1, headerValue: "h")])
         KeychainReachPersistence().save(ReachRecord(), accountIdB64: x)
-        // ADR-0066 part 3 — the account's own predecessor seed (key material
+        // ADR-0074 part 3 — the account's own predecessor seed (key material
         // a pairing state bundle may have brought) with its adoption time,
         // and the unanswered outgoing contact requests with their intro.
         try KeychainOwnPredecessorStore().add(
@@ -360,7 +360,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
         calls.save(accountIdB64: CallHistoryStore.backfillMarkerKey(x), data: Data([1]))
 
         // UserDefaults, through the stores.
-        // ADR-0065: the owed-publish record of a key reset, with its
+        // ADR-0073: the owed-publish record of a key reset, with its
         // attestation, and the phrase-owed marker.
         RecoveryMarkers().markPublishOwed(
             KeyResetPublishRecord(

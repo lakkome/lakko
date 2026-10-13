@@ -230,7 +230,7 @@ export class DiscoveryClientArgError extends Error {
 /** Server returned a non-2xx status. Carries the original status
  *  + endpoint so the UI can branch on (e.g.) 409 = taken,
  *  404 = unknown. */
-/** The header carrying an account statement to discovery (ADR-0066 section
+/** The header carrying an account statement to discovery (ADR-0074 section
  *  2.2). The core names it too (`accountStatementHeaderName()`); a test pins
  *  the two together. */
 export const ACCOUNT_STATEMENT_HEADER = "x-lakko-account-statement";
@@ -247,7 +247,7 @@ function certificateOf(resp: unknown): Uint8Array | null {
 }
 
 /** The `409` codes of `POST /discovery/register` and `username/replace`
- *  (ADR-0068: the bodies are JSON). */
+ *  (ADR-0076: the bodies are JSON). */
 export const CODE_USERNAME_TAKEN = "username-taken";
 export const CODE_USERNAME_ALREADY_SET = "username-already-set";
 
@@ -270,7 +270,7 @@ export class DiscoveryHttpError extends Error {
     super(`discovery ${endpoint} → ${status}: ${body}`);
   }
 
-  /** The machine-readable code of a `{"error": "<code>"}` body (ADR-0065:
+  /** The machine-readable code of a `{"error": "<code>"}` body (ADR-0073:
    *  `key-generation-superseded`, `key-generation-not-newer`,
    *  `identity-change-needs-attestation`, `key-reset-attestation-invalid`,
    *  `key-reset-disabled`), or `null` when the body has none. */
@@ -482,14 +482,14 @@ export class DiscoveryClient {
     return this.post("/discovery/register", req);
   }
 
-  /** `POST /discovery/username/replace` (ADR-0068, session): the account's
+  /** `POST /discovery/username/replace` (ADR-0076, session): the account's
    *  name becomes the one `oprf_hash` is the lookup key of. */
   async usernameReplace(req: RegisterRequest): Promise<RegisterResponse> {
     return this.post("/discovery/username/replace", req);
   }
 
   /**
-   * Change this account's `@username` at discovery (ADR-0068): OPRF blind,
+   * Change this account's `@username` at discovery (ADR-0076): OPRF blind,
    * evaluate, finalize, then `username/replace`. Returns the canonical name
    * and the new certificate. Throws `DiscoveryHttpError`: `409
    * username-taken`, `409 no-username`, `429 rename-too-soon` (with
@@ -917,7 +917,7 @@ export class DiscoveryClient {
    *        binding. Supplied by the signup + fresh-start-mint callers
    *        (where a new key is published). Omit on a routine same-key
    *        re-upload — the log append is idempotent there.
-   * @param keyResetAttest  ADR-0065: the raw 177-byte key-reset attestation
+   * @param keyResetAttest  ADR-0073: the raw 177-byte key-reset attestation
    *        (from `AuthClient.resetAccountKeys`) or a pre-base64'd string
    *        (standard alphabet). Supplied ONLY by the key-reset publish; it is
    *        what lets discovery accept a changed key without a supersession
@@ -990,7 +990,7 @@ export class DiscoveryClient {
     }
 
 
-    // ADR-0065: the key-reset attestation, standard base64 like every
+    // ADR-0073: the key-reset attestation, standard base64 like every
     // sibling field (auth hands it out URL-safe; the caller passes the raw
     // bytes and this re-encodes).
     let keyResetAttestB64: string | undefined;
@@ -1096,7 +1096,7 @@ export class DiscoveryClient {
    *  authenticated account's device KeyPackages (ADR-0050 device removal).
    *  Idempotent (204).
    *
-   *  ADR-0066 section 2.2: the session's OWN device row needs nothing more;
+   *  ADR-0074 section 2.2: the session's OWN device row needs nothing more;
    *  ANOTHER device's row needs `statement`, the 138-byte `device-revoke`
    *  account statement for that id (`signDeviceRevokeStatement`), sent as
    *  the `x-lakko-account-statement` header. Without a valid one the server
@@ -1914,7 +1914,7 @@ export class DiscoveryClient {
       // never come through here (ADR-0054 S3, see `tokenPost`).
       const baseHeaders =
         body === undefined ? {} : { "content-type": "application/json" };
-      // ADR-0065: through the session-aware fetch, which refreshes a
+      // ADR-0073: through the session-aware fetch, which refreshes a
       // managed bearer ahead of expiry and retries once on a 401.
       response = await sessionFetch(url, {
         method: "POST",

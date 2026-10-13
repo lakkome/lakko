@@ -9,7 +9,7 @@ import java.nio.ByteBuffer
 import me.lakko.app.l10n.UiText
 
 /*
- * ADR-0066 part 1 - "Was it you?" and taking the account back
+ * ADR-0074 part 1 - "Was it you?" and taking the account back
  * (`docs/ux/identity-recovery.md` section 18.4).
  *
  * A device that learns the account's keys were reset elsewhere deletes
@@ -287,7 +287,7 @@ public enum class SupersededWipe {
 }
 
 /**
- * The verdict (ADR-0066 section 1.1 and 2.3; UX 18.7 "three answers, three
+ * The verdict (ADR-0074 section 1.1 and 2.3; UX 18.7 "three answers, three
  * screens, three deletions"):
  *
  *   * the keys were reset elsewhere AND this device holds the account's
@@ -340,10 +340,10 @@ public data class RecallStatus(
     val changedAtMs: Long,
     /** Password attempts left before the server destroys the anchor. */
     val attemptsRemaining: Int,
-    /** ADR-0067: the account the anchor belongs to (the answer names it for
+    /** ADR-0075: the account the anchor belongs to (the answer names it for
      *  a device that asked by login handle). */
     val accountId: ByteArray? = null,
-    /** ADR-0067 section 8: the account can be taken back with the recovery
+    /** ADR-0075 section 8: the account can be taken back with the recovery
      *  phrase it had before the reset (it had a saved phrase then). */
     val phraseArm: Boolean = false,
 )
@@ -644,7 +644,7 @@ private const val HTTP_CONFLICT: Int = 409
 private const val HTTP_TOO_MANY: Int = 429
 
 /**
- * ADR-0067 section 8 / UX 19.7 - whether the 18.4 form offers `Use my
+ * ADR-0075 section 8 / UX 19.7 - whether the 18.4 form offers `Use my
  * recovery phrase instead`: only once the server said the phrase arm is
  * open (the account had a saved phrase before the reset).
  */

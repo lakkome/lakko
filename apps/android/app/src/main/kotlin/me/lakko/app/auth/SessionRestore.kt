@@ -22,7 +22,7 @@ package me.lakko.app.auth
  *
  * Restore silently ONLY when every one of these is present and readable:
  * the marker, the device key, a well-formed account id, a session pair whose
- * REFRESH credential is unexpired (ADR-0065 section 3.3: the restore refreshes
+ * REFRESH credential is unexpired (ADR-0073 section 3.3: the restore refreshes
  * the access token instead of reusing it, so the access token's own expiry
  * does not matter here), and the 64-byte AccountIdentity (phrase) seed.
  * Anything missing, expired, malformed or undecryptable lands signed out —

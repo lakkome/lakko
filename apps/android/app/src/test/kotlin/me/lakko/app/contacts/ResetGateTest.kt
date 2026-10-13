@@ -19,7 +19,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * ADR-0065 R.2 - the identity gate end to end ([ContactsClient.gateIdentity]),
+ * ADR-0073 R.2 - the identity gate end to end ([ContactsClient.gateIdentity]),
  * with the two native checks (the attestation verify and the verified log
  * read) injected: the host JVM loads no native library. What is asserted is
  * what the gate WRITES and what it throws.

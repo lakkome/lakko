@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 import { supersessionRefusedMessage } from "./supersession-message";
 
 describe("supersessionRefusedMessage (KT-log S4)", () => {
-  it("loggedReset=true is never a copy of its own: it renders as unconfirmed (ADR-0065 R.2)", () => {
+  it("loggedReset=true is never a copy of its own: it renders as unconfirmed (ADR-0073 R.2)", () => {
     // A change that IS an attested reset is accepted silently and reaches no
     // refusal; if the marker ever arrives here, nothing says "reset".
     expect(supersessionRefusedMessage(true, "@alice")).toBe(

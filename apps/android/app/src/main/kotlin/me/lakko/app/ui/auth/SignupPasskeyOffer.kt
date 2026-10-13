@@ -35,7 +35,7 @@ import me.lakko.app.webauthn.keysChoiceEndText
 import me.lakko.app.webauthn.passkeyAddOutcome
 
 /**
- * The passkey row of "Protect your account" (ADR-0067, UX 19.1a): "Add a
+ * The passkey row of "Protect your account" (ADR-0075, UX 19.1a): "Add a
  * passkey so you can sign in with your face, fingerprint or screen lock."
  * Skippable, and nothing here can fail the sign-up: the account exists. Every outcome, a
  * failure included, leaves "Not now" available.

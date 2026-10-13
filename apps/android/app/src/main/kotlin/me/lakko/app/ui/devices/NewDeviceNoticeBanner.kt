@@ -209,7 +209,7 @@ public fun KeysRotatedNotice(
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                // ADR-0067 - `Show new phrase` only for a phrase-protected
+                // ADR-0075 - `Show new phrase` only for a phrase-protected
                 // account: the others are never shown words.
                 if (repository.showsNewWordsHere()) {
                     Button(

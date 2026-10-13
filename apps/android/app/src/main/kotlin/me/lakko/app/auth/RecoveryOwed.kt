@@ -13,7 +13,7 @@ import android.content.Context
  *     sign-up or a fresh identity) and the person has not yet confirmed
  *     they saved it. The next session for that account shows the phrase
  *     first, read back from the phrase store.
- *   - **publish owed** (ADR-0065 section 2.3, the successor of the
+ *   - **publish owed** (ADR-0073 section 2.3, the successor of the
  *     recovery-credential debt): the account keys were reset on this device
  *     (the server step is done: the new seed and phrase are stored here, the
  *     other devices are signed out) but the new identity is not yet

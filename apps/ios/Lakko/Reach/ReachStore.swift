@@ -57,7 +57,7 @@ public struct ReachRecord: Codable, Equatable {
     /// reach state and not listed here is recovered before anything is
     /// registered. Optional so a record stored before it still decodes.
     public var versionCheckedSlots: [String]?
-    /// ADR-0066 section 3.5a rule 5 — the link and reply scopes that were live
+    /// ADR-0074 section 3.5a rule 5 — the link and reply scopes that were live
     /// when this account's keys were rotated. Their grants were derived from
     /// the OLD account seed and name the old mailbox: they are spent. Nothing
     /// is registered for them; the rotation's owed step revokes the links at

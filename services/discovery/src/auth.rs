@@ -48,7 +48,7 @@ use crate::AppState;
 #[derive(Clone, Debug)]
 pub(crate) struct AuthenticatedAccount(pub(crate) [u8; 16]);
 
-/// The key generation the session token was issued under (ADR-0065),
+/// The key generation the session token was issued under (ADR-0073),
 /// stashed beside [`AuthenticatedAccount`] so the two identity writes can
 /// apply the generation floor of `identity_bundles.key_generation`. A
 /// property of the credential, not of the principal, hence its own
@@ -56,7 +56,7 @@ pub(crate) struct AuthenticatedAccount(pub(crate) [u8; 16]);
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SessionKeyGeneration(pub(crate) u64);
 
-/// The device the session token names (ADR-0066 section 0.4): the device's
+/// The device the session token names (ADR-0074 section 0.4): the device's
 /// conversation leaf signature key, which is the `device_id` of the KeyPackage
 /// directory. All zero for a session that names no device yet. Asserted by
 /// the client when the session landed at auth, not proven; what it buys here
@@ -101,7 +101,7 @@ pub(crate) async fn require_session(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
 
-    // The key generation the v3 token carries (ADR-0065) is not compared
+    // The key generation the v3 token carries (ADR-0073) is not compared
     // here: discovery's stateless verify accepts any generation within the
     // expiry. It is handed on, and the two identity writes apply the floor
     // of their own row (`key_reset::floor_refuses`).

@@ -338,19 +338,19 @@ pub struct ChatEnvelopeParts {
     /// ADR-0052 — the DS `messageId` of the forwarded original.
     #[uniffi(default = None)]
     pub forward_origin_message_id: Option<i64>,
-    /// ADR-0065 — base64 of the group id of the conversation this message
+    /// ADR-0073 — base64 of the group id of the conversation this message
     /// was ORIGINALLY sent in, when it is a re-send into a successor
     /// one-to-one; carried only together with `resend_origin_message_id`.
     #[uniffi(default = None)]
     pub resend_origin_group_b64: Option<String>,
-    /// ADR-0065 — the DS `messageId` of the original in that conversation.
+    /// ADR-0073 — the DS `messageId` of the original in that conversation.
     #[uniffi(default = None)]
     pub resend_origin_message_id: Option<i64>,
 }
 
 /// Build a chat message with any combination of its optional parts: a reply
 /// (ADR-0052), a forward attribution (ADR-0052) and a re-send marker
-/// (ADR-0065). [`compose_envelope`], [`compose_reply_envelope`] and
+/// (ADR-0073). [`compose_envelope`], [`compose_reply_envelope`] and
 /// [`compose_forward_envelope`] are this call with one part set.
 ///
 /// A message re-sent into a successor one-to-one passes the original's
@@ -565,13 +565,13 @@ pub struct ParsedBody {
     /// ADR-0052 — the DS `messageId` of the original in the origin
     /// conversation.
     pub forward_origin_message_id: Option<i64>,
-    /// ADR-0065 — on a message re-sent into a successor one-to-one, base64
+    /// ADR-0073 — on a message re-sent into a successor one-to-one, base64
     /// of the ORIGINAL conversation's group id; present only together with
     /// `resend_origin_message_id`. Never shown: it lets a device that already
     /// holds the original show the message once.
     #[uniffi(default = None)]
     pub resend_origin_group_b64: Option<String>,
-    /// ADR-0065 — the DS `messageId` of the original in that conversation.
+    /// ADR-0073 — the DS `messageId` of the original in that conversation.
     #[uniffi(default = None)]
     pub resend_origin_message_id: Option<i64>,
 }

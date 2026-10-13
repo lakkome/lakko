@@ -144,7 +144,7 @@ export default function Profile(): JSX.Element {
                     <Show
                       when={usernameClaimEntry(u(), auth.firstPasswordOwed()) === "finish"}
                       fallback={
-                        // ADR-0068: the name can be changed from where it is shown.
+                        // ADR-0076: the name can be changed from where it is shown.
                         <>
                           {" "}
                           <button type="button" onClick={openUsernameChange}>

@@ -85,7 +85,7 @@ pub(crate) const CODE_SIGNUP_RATE_LIMITED: &str = "signup-rate-limited";
 /// bucket).
 pub(crate) const CODE_HANDLE_BIND_LIMITED: &str = "handle-bind-limited";
 
-/// Body code for a refused letter of the recovery email (ADR-0067): the
+/// Body code for a refused letter of the recovery email (ADR-0075): the
 /// per-handle or per-account letter counter, or the address bucket of the
 /// two routes that send one.
 pub(crate) const CODE_EMAIL_RATE_LIMITED: &str = "email-rate-limited";
@@ -110,7 +110,7 @@ const DEFAULT_HANDLE_CHANGE_MIN_INTERVAL_SECS: u32 = 60;
 /// Env knob for the minimum interval between handle changes.
 const HANDLE_CHANGE_INTERVAL_VAR: &str = "LAKKO_AUTH_HANDLE_CHANGE_MIN_INTERVAL_SECS";
 
-/// Default recall window in days (ADR-0066 section 0.2, D4). Chosen, not
+/// Default recall window in days (ADR-0074 section 0.2, D4). Chosen, not
 /// measured.
 const DEFAULT_RECALL_WINDOW_DAYS: u32 = 30;
 
@@ -179,29 +179,29 @@ pub(crate) enum Scope {
     /// `POST /account/keys/reset/{start,finish}`, keyed on the signed-in
     /// account (one hit per call, so a whole reset costs two). The name is
     /// the recovery-credential replace's, which the reset folded in
-    /// (ADR-0065 section 2).
+    /// (ADR-0073 section 2).
     RecoveryReplace = 12,
     /// `POST /account/keys/reset/finish` only, keyed on the signed-in
     /// account: the reset itself, rarer and more destructive than the
-    /// credential replace it carries (ADR-0065 open question 3).
+    /// credential replace it carries (ADR-0073 open question 3).
     KeyReset = 13,
     /// `POST /account/devices/revoke`, keyed on the signed-in account
-    /// (ADR-0066 section 2.1). Charged only after the fresh-auth grant and
+    /// (ADR-0074 section 2.1). Charged only after the fresh-auth grant and
     /// the account-key statement were accepted, so a caller holding neither
     /// spends none of the owner's budget.
     DeviceRevoke = 15,
     /// `POST /account/recall/start`, keyed on the account and the anchor
-    /// (ADR-0066 section 1.2): the password attempts of a recall. Charged
+    /// (ADR-0074 section 1.2): the password attempts of a recall. Charged
     /// only after the account statement verified under the anchor's key, so
     /// a caller without that key spends none of it.
     Recall = 14,
     /// `POST /account/keys/rotate/finish`, keyed on the signed-in account
-    /// (ADR-0066 section 3.4): the key rotation itself. Charged only after
+    /// (ADR-0074 section 3.4): the key rotation itself. Charged only after
     /// the fresh-auth grant and the supersession proof were accepted, so a
     /// caller holding a session and the password but not the account key
     /// spends none of it.
     KeyRotate = 16,
-    /// A letter of the recovery email asked for by login handle (ADR-0067
+    /// A letter of the recovery email asked for by login handle (ADR-0075
     /// section 10): `POST /recovery-email/recover/start` and
     /// `POST /recovery-email/enrol/start`, keyed on the login handle and
     /// charged before anything is looked up, so an unknown name is counted
@@ -218,13 +218,13 @@ pub(crate) enum Scope {
     /// `POST /recovery-email/recover/open`, keyed on the account: how often
     /// its email vault may leave the server.
     EmailVaultOpen = 20,
-    /// `PUT /recovery-email/vault`, keyed on the signed-in account (ADR-0067,
+    /// `PUT /recovery-email/vault`, keyed on the signed-in account (ADR-0075,
     /// amended 2026-10-13). Charged before the typed address is compared
     /// with the stored key: without it a session could test addresses
     /// against the account as fast as it can send them.
     EmailVaultStore = 21,
     /// `POST /auth/login-handle/check`, keyed on the signed-in account
-    /// (ADR-0068 section 2). Its own counter, not [`Self::HandleBind`]'s:
+    /// (ADR-0076 section 2). Its own counter, not [`Self::HandleBind`]'s:
     /// every device asks at every session landing, and the bind's five a day
     /// would be spent by the question.
     HandleCheck = 22,
@@ -310,13 +310,13 @@ impl Scope {
             | Self::DeviceGrantMint => Window::new(10, 900),
             Self::TotpRecover | Self::Recall => Window::new(5, 900),
             Self::DeviceRequestTarget => Window::new(5, 600),
-            // The email vault's five releases a day per account (ADR-0067
+            // The email vault's five releases a day per account (ADR-0075
             // section 10) share the handle bind's figure.
             Self::HandleBind | Self::EmailVaultOpen => Window::new(5, 86_400),
             Self::RecoveryReplace => Window::new(10, 3600),
             Self::KeyReset | Self::KeyRotate => Window::new(3, 86_400),
             Self::DeviceRevoke => Window::new(20, 3600),
-            // ADR-0067 section 10. Five letters an hour per name and ten a
+            // ADR-0075 section 10. Five letters an hour per name and ten a
             // day per account; fifteen code guesses an hour per name (three
             // challenges' worth).
             Self::EmailLetterHandle => Window::new(5, 3600),
@@ -365,7 +365,7 @@ pub(crate) enum Category {
     Challenge,
     /// `PUT /auth/login-handle`.
     HandleBind,
-    /// The two routes that send a letter of the recovery email (ADR-0067):
+    /// The two routes that send a letter of the recovery email (ADR-0075):
     /// `/recovery-email/enrol/start` and `/recovery-email/recover/start`.
     Email,
 }
@@ -463,7 +463,7 @@ pub(crate) struct Limits {
     handle_change_min_interval_secs: u32,
     /// The device-link guess budget, one entry per tier.
     device_link: [DeviceLinkTier; DEVICE_LINK_TIERS.len()],
-    /// How long a recall anchor lives (ADR-0066 section 0.2), milliseconds.
+    /// How long a recall anchor lives (ADR-0074 section 0.2), milliseconds.
     recall_window_ms: i64,
     /// Cap on the address-bucket map ([`MAX_ADDRESS_BUCKETS`]).
     max_buckets: usize,
@@ -1043,7 +1043,7 @@ mod tests {
         let pinned: Vec<u8> = Scope::ALL.iter().map(|s| *s as u8).collect();
         // 5 was the removed server-side three-word verifier's; 6, 7 and 8
         // were the removed one-time-code factor's. None is reused. 14 is the
-        // ADR-0066 recall (listed after 15: it was added later); 16 is the
+        // ADR-0074 recall (listed after 15: it was added later); 16 is the
         // key rotation.
         assert_eq!(
             pinned,

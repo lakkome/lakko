@@ -4,7 +4,7 @@
 package me.lakko.app.auth
 
 /**
- * ADR-0065 section 3 — the session pair every session-landing response
+ * ADR-0073 section 3 — the session pair every session-landing response
  * carries: a short-lived access token (the bearer of every service), the
  * refresh credential only `POST /auth/session/refresh` accepts, and the key
  * generation both were issued under. Treated as opaque strings; the
@@ -14,7 +14,7 @@ package me.lakko.app.auth
  */
 public class SessionPair(
     /** `v3.<account>.<generation>.<device>.<issued>.<expiry>.<tag>` - the
-     *  bearer (ADR-0066: it names the device it was issued to). */
+     *  bearer (ADR-0074: it names the device it was issued to). */
     public val accessToken: String,
     /** Unix milliseconds; the access token is unusable at or after this. */
     public val accessExpiresAtMs: Long,
@@ -57,14 +57,14 @@ public const val KEY_GENERATION_SUPERSEDED: String = "key-generation-superseded"
 /** The refresh route's `401` for a bad, expired or unknown credential. */
 public const val REFRESH_INVALID: String = "refresh-invalid"
 
-/** ADR-0066 section 2 - the `error` code auth answers (`401`, on any bearer
+/** ADR-0074 section 2 - the `error` code auth answers (`401`, on any bearer
  *  route and on the refresh route) to a device another device of the account
  *  removed. Discovery answers the same code with a `403` on a KeyPackage
  *  publish; that one is NOT proof of removal (see [deviceRevokedHintOf]). */
 public const val DEVICE_REVOKED: String = "device-revoked"
 
 /**
- * What a `401` means for this device (ADR-0065 section 3.3 and 3.5; the
+ * What a `401` means for this device (ADR-0073 section 3.3 and 3.5; the
  * contract's section 7). Pure over the status and the body's `error` code.
  */
 public enum class SessionRefusal {
@@ -72,7 +72,7 @@ public enum class SessionRefusal {
      *  device. This device signs out and wipes; nothing is retried. */
     KeysReset,
 
-    /** `device-revoked` (ADR-0066): another device of the account removed
+    /** `device-revoked` (ADR-0074): another device of the account removed
      *  this one. This device shows the removed screen and wipes everything
      *  by itself; nothing is retried, and no recall record is kept. */
     DeviceRevoked,
@@ -118,14 +118,14 @@ public fun tokenActionAt(accessExpiresAtMs: Long, nowMs: Long): TokenAction =
 /**
  * Whether a response is discovery's `403 device-revoked` (a KeyPackage
  * publish under a tombstoned device id). It is a HINT, never proof of
- * removal (ADR-0066 "T1 as built" point 24): the client refreshes at auth
+ * removal (ADR-0074 "T1 as built" point 24): the client refreshes at auth
  * and acts on auth's answer, which is `401 device-revoked` when the device
  * really was removed and a new pair when it was not.
  */
 public fun deviceRevokedHintOf(status: Int, errorCode: String?): Boolean =
     status == HTTP_FORBIDDEN_STATUS && errorCode == DEVICE_REVOKED
 
-/** The version prefix of an access token (ADR-0066 flag day: `v2` is gone). */
+/** The version prefix of an access token (ADR-0074 flag day: `v2` is gone). */
 public const val ACCESS_TOKEN_PREFIX: String = "v3."
 
 /** The version prefix of a refresh credential. */

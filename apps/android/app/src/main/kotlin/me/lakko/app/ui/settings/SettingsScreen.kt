@@ -102,7 +102,7 @@ public fun SettingsScreen(
     onOpenChatFolders: () -> Unit = {},
     /** `docs/ux/who-can-find-me.md` section 2 — Settings > Privacy. */
     onOpenWhoCanFindMe: () -> Unit = {},
-    /** ADR-0067 / UX 19.1 — Settings > Account: how the account is
+    /** ADR-0075 / UX 19.1 — Settings > Account: how the account is
      *  protected (status line, banner, recovery email, recovery phrase). */
     accountProtection: @Composable () -> Unit = {},
 ) {

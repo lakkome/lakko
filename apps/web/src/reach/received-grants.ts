@@ -26,7 +26,7 @@ export type ScopedGrantClass = "group" | "member" | "channel";
 
 /**
  * A grant that a newer one of the same class replaced after a ROTATION of
- * the sender's account keys (ADR-0066 section 3.5a rule 6), kept beside it.
+ * the sender's account keys (ADR-0074 section 3.5a rule 6), kept beside it.
  *
  * The re-sent profile can reach this device before it has observed the
  * proven key change. It then holds the NEW grant and still addresses the
@@ -327,7 +327,7 @@ export function grantsInOrder(
 }
 
 /**
- * ADR-0066 section 3.5a rule 2 - the grants held for one PERSON, over every
+ * ADR-0074 section 3.5a rule 2 - the grants held for one PERSON, over every
  * key they have had (`keysHex`: the current key first, then the proven
  * predecessors, as `personKeysHex` gives them). A grant filed under a key
  * that later became a proven predecessor is still found; the grants filed

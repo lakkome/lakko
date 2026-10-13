@@ -4,7 +4,7 @@
 package me.lakko.app.auth
 
 /*
- * The fresh-auth proof (`docs/ux/identity-recovery.md` section 17; ADR-0065
+ * The fresh-auth proof (`docs/ux/identity-recovery.md` section 17; ADR-0073
  * as amended 2026-10-06). Reset account keys, delete the account, add a
  * device, add a passkey and change the password each need the person to
  * prove who they are NOW: a signed-in session alone is refused

@@ -9,7 +9,7 @@ import XCTest
 // The recovery model on the repository: every landing path that gives the
 // device keys also gives it the phrase, a passkey signs in on a device with
 // no cached account and restores keys only when it carries them, the
-// three-word check is local, and "Reset account keys" (ADR-0065) resets the
+// three-word check is local, and "Reset account keys" (ADR-0073) resets the
 // keys in one server step and then owes the publish of the new keys.
 //
 // The auth service is a scripted `URLProtocol` (`NameRouteStub`), discovery
@@ -33,7 +33,7 @@ private final class ScriptedDirectory: AccountDirectory, DeviceRestoreDirectory 
 
     func note(_ event: String) { events.append(event) }
 
-    /// The generation the published identity reads (ADR-0065 section 4.1).
+    /// The generation the published identity reads (ADR-0073 section 4.1).
     var publishedGeneration: UInt64 = 1
 
     func fetchIdentityBundle(accountId: Data, sessionToken: String?) async throws -> IdentityFetchResponse? {
@@ -100,7 +100,7 @@ private final class ScriptedKeyReset: KeyResetAttestationVerifying {
     var onReset: (() -> Void)?
 
     /// The password sign-in the reset runs when it holds no live grant
-    /// (ADR-0065, amended 2026-10-04): the account it names, what it
+    /// (ADR-0073, amended 2026-10-04): the account it names, what it
     /// throws, the pair and the grant it answers.
     var loginAccount = Data()
     var loginError: Error?
@@ -348,7 +348,7 @@ final class RecoveryFlowTests: XCTestCase {
         try await h.repository.recoverWithTotp(username: "alice", code: "123456")
         XCTAssertTrue(isNeedsKeys(h.repository))
         // A phrase-protected account: a key reset shows its new words
-        // (ADR-0067; the other kind is `testAKeyResetWithoutASavedPhrase...`).
+        // (ADR-0075; the other kind is `testAKeyResetWithoutASavedPhrase...`).
         if let accountIdB64 = h.store.load()?.accountIdB64 {
             AccountProtectionStore().setPhraseSaved(true, accountIdB64: accountIdB64)
         }
@@ -370,7 +370,7 @@ final class RecoveryFlowTests: XCTestCase {
         // a phrase typed later is checked against)...
         XCTAssertEqual(DevicePhrase.read(accountIdB64: account.b64), mnemonic.phrase())
         XCTAssertEqual(h.repository.heldPhraseForEmailVault(), mnemonic.phrase())
-        // ...but ADR-0067 D2: it is not shown at sign-up, and `Show recovery
+        // ...but ADR-0075 D2: it is not shown at sign-up, and `Show recovery
         // phrase` has nothing to show until the person saved one.
         XCTAssertNil(h.repository.devicePhrase(), "no saved phrase, nothing to show")
         XCTAssertFalse(h.repository.threeWordsCheckAvailable)
@@ -441,7 +441,7 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: account.b64), mine.toSeed())
     }
 
-    // MARK: - Reset account keys (ADR-0065)
+    // MARK: - Reset account keys (ADR-0073)
 
     private func record(_ h: Harness, _ account: (bytes: Data, b64: String)) -> KeyResetPublishRecord? {
         h.markers.publishOwed(accountIdB64: account.b64)
@@ -473,7 +473,7 @@ final class RecoveryFlowTests: XCTestCase {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
-        // Not phrase-protected (ADR-0067): no words on any screen.
+        // Not phrase-protected (ADR-0075): no words on any screen.
         AccountProtectionStore().setPhraseSaved(false, accountIdB64: account.b64)
 
         _ = try await mint(h)
@@ -761,7 +761,7 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(h.reset.deviceGroupCalls.map(\.accountIdB64), [account.b64])
     }
 
-    // MARK: - The password-fresh reset grant (ADR-0065, amended 2026-10-04)
+    // MARK: - The password-fresh reset grant (ADR-0073, amended 2026-10-04)
 
     func testAResetWithoutAGrantOrAPasswordAsksForThePasswordBeforeAnyCall() async throws {
         let account = newAccount()
@@ -1196,7 +1196,7 @@ final class RecoveryFlowTests: XCTestCase {
         let mnemonic = RecoveryMnemonic.generate()
         try AccountIdentitySeedStore.putAccountIdentitySeed(accountIdB64: account.b64, seed: mnemonic.toSeed())
         try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mnemonic.phrase().utf8))
-        // ADR-0067: the account's phrase was saved (the three-word surfaces
+        // ADR-0075: the account's phrase was saved (the three-word surfaces
         // exist only then).
         AccountProtectionStore().setPhraseSaved(true, accountIdB64: account.b64)
         let h = harness(marker: PersistedSession(accountIdB64: account.b64, username: username), routes: routes)
@@ -1219,7 +1219,7 @@ final class RecoveryFlowTests: XCTestCase {
 
         XCTAssertNil(harness().repository.threeWordsAccount(), "no cached account")
 
-        // ADR-0067: the device holds the words of an account whose phrase was
+        // ADR-0075: the device holds the words of an account whose phrase was
         // never saved, but the person never saw them: no row.
         let (unsaved, _, unsavedId) = try deviceWithKeysAndPhrase()
         AccountProtectionStore().setPhraseSaved(false, accountIdB64: unsavedId)
@@ -1346,7 +1346,7 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertFalse(model.wordsRetired)
     }
 
-    // MARK: - A guest chooses a username (ADR-0067 pass A, part 2)
+    // MARK: - A guest chooses a username (ADR-0075 pass A, part 2)
 
     /// A signed-in guest account that holds its keys.
     private func guest(
@@ -1433,7 +1433,7 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertFalse(d.repository.firstPasswordOwed)
     }
 
-    // MARK: - ADR-0068: the handle sync, the own-username register, the rename
+    // MARK: - ADR-0076: the handle sync, the own-username register, the rename
 
     /// A signed-in named account that holds its keys, with scripted handle routes.
     private func named(
@@ -1704,7 +1704,7 @@ final class RecoveryFlowTests: XCTestCase {
         let mnemonic = RecoveryMnemonic.generate()
         let newKey = try Identity.fromSeed(seed: mnemonic.toSeed()).signaturePublicKey()
         try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mnemonic.phrase().utf8))
-        // A phrase-protected account (ADR-0067): only it has words to show.
+        // A phrase-protected account (ADR-0075): only it has words to show.
         AccountProtectionStore().setPhraseSaved(true, accountIdB64: account.b64)
         let persistence = ScriptedPersistence()
         persistence.deviceKey = true
@@ -1948,7 +1948,7 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertFalse(h.repository.passwordChangeAllowed)
     }
 
-    // MARK: - The fresh-auth proof (ADR-0065, amended 2026-10-06; UX 17)
+    // MARK: - The fresh-auth proof (ADR-0073, amended 2026-10-06; UX 17)
 
     /// A device that holds the keys, signed in with the authenticator code.
     private func sessionWithKeys() async throws -> (Harness, (bytes: Data, b64: String)) {

@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.7 case 1 - the durable queue of held messages. The stored-form
+/// ADR-0073 R.7 case 1 - the durable queue of held messages. The stored-form
 /// cases are those of `apps/web/src/chat/held-send-queue.test.ts` and the
 /// queue half of `held-reply-and-flush.test.ts`; the rest pins what the file
 /// layout adds on iOS (order, removal, the two clears, the sealer).

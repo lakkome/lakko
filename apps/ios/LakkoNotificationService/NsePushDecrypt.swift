@@ -174,12 +174,12 @@ public struct NseProcessedRow: Equatable {
     /// what the app reads back to clear that alert when the call is answered
     /// here (``LakkoCallNotification/callIdUserInfoKey``).
     public let callIdHex: String?
-    /// ADR-0065 R.8 — the ACCOUNT key (standard base64) of the row's
+    /// ADR-0073 R.8 — the ACCOUNT key (standard base64) of the row's
     /// MLS-authenticated sender, resolved by the core at receipt (C-68).
     /// `nil` when the sender does not resolve. Read to drop a row from a key
     /// an accepted reset retired.
     public let senderKeyB64: String?
-    /// ADR-0065 R.7 case 1 — the re-send marker of a chat row, when its
+    /// ADR-0073 R.7 case 1 — the re-send marker of a chat row, when its
     /// sealed envelope carried one: where the message was ORIGINALLY sent.
     public let resendOrigin: NseResendOrigin?
 
@@ -211,7 +211,7 @@ public struct NseProcessedRow: Equatable {
     }
 }
 
-/// ADR-0065 R.7 case 1 — where a re-sent message was originally sent: the
+/// ADR-0073 R.7 case 1 — where a re-sent message was originally sent: the
 /// original group's id (standard base64) and the DS message id there.
 public struct NseResendOrigin: Equatable {
     public let groupIdB64: String
@@ -296,7 +296,7 @@ public enum NsePushOutcome: Equatable {
     case callSilent(NseCallAlert)
     /// A call this device may be showing an alert for is over.
     case callEnded(callIdHex: String)
-    /// ADR-0065 R.8 / R.7 — every row this wake brought is one the APP shows
+    /// ADR-0073 R.8 / R.7 — every row this wake brought is one the APP shows
     /// nothing for: a row from a key an accepted reset retired, or a re-send
     /// of a message this device already holds. The extension must still
     /// deliver something (it cannot post nothing), so it delivers the
@@ -313,9 +313,9 @@ public struct NsePushPreview: Equatable {
     public let body: String
     /// The conversation hex — collapses a burst into one grouped
     /// notification. The group's own hex unless the group continues another
-    /// conversation (ADR-0065 R.5).
+    /// conversation (ADR-0073 R.5).
     public let tag: String
-    /// ADR-0065 R.5 — whether the group this preview came from continues
+    /// ADR-0073 R.5 — whether the group this preview came from continues
     /// another conversation, so ``tag`` (the conversation) is what the
     /// notification is grouped under rather than the wake's own routing id.
     public let movedConversation: Bool
@@ -438,20 +438,20 @@ public protocol NsePushDecryptDeps {
     /// swallow calls because a file was not there.
     func isMuted(accountIdB64: String, groupIdHex: String) -> Bool
 
-    /// ADR-0065 R.5 — the conversation `groupIdHex` belongs to, hex: the
+    /// ADR-0073 R.5 — the conversation `groupIdHex` belongs to, hex: the
     /// group itself unless it continues another conversation. What a
     /// notification is grouped under, so a conversation that moved to a new
     /// group keeps one stack. READ-ONLY, from the App Group lineage mirror
     /// (C-59).
     func conversationHex(accountIdB64: String, groupIdHex: String) -> String
 
-    /// ADR-0065 R.8 — is `senderKeyB64` a key an accepted reset retired?
+    /// ADR-0073 R.8 — is `senderKeyB64` a key an accepted reset retired?
     /// READ-ONLY, from the App Group mirror the APP writes (the pins live in
     /// the app's own store, which this process does not open). Defaulted
     /// `false`: a missing mirror drops nothing.
     func isSupersededSender(accountIdB64: String, senderKeyB64: String?) -> Bool
 
-    /// ADR-0065 R.7 case 1 — is this chat row a re-send whose original the
+    /// ADR-0073 R.7 case 1 — is this chat row a re-send whose original the
     /// app already holds: the named row exists in an OLDER segment of the
     /// SAME conversation and is by the SAME account as the sender? READ-ONLY:
     /// the message log the app wrote and the lineage mirror (C-59). Defaulted
@@ -633,7 +633,7 @@ public func decryptPushOutcome(
     //    A call-signaling row is classified separately and OUTRANKS a message
     //    (see this function's docs): the newest call event decides, and an
     //    `end` for a call cancels its own `offer` from the same batch.
-    // ADR-0065 R.5 — notifications are grouped by CONVERSATION: a group
+    // ADR-0073 R.5 — notifications are grouped by CONVERSATION: a group
     // that continues one stacks with it.
     let conversationTag = deps.conversationHex(
         accountIdB64: account.accountIdB64, groupIdHex: realGroupHex)
@@ -643,7 +643,7 @@ public func decryptPushOutcome(
     var silenced = false
     for row in rows {
         guard let processed = group.process(row.payload) else { continue }
-        // ADR-0065 R.8 — nothing from a superseded sender acts: its call does
+        // ADR-0073 R.8 — nothing from a superseded sender acts: its call does
         // not ring and its message is not previewed (the app drops the same
         // row before storage). Asked before the kind, so a kind added later
         // is covered.
@@ -712,7 +712,7 @@ public func decryptPushOutcome(
     return .none
 }
 
-/// ADR-0065 R.8 / R.7 case 1 — the rows the background reader shows nothing
+/// ADR-0073 R.8 / R.7 case 1 — the rows the background reader shows nothing
 /// for, the same two silent drops the app's receive paths apply
 /// (`ChatRepository.silentlyFiltered`):
 ///
@@ -739,7 +739,7 @@ public func nseDropsSilently(
     return false
 }
 
-/// ADR-0065 R.5 — the notification stack a wake belongs to, known BEFORE any
+/// ADR-0073 R.5 — the notification stack a wake belongs to, known BEFORE any
 /// decrypt: the conversation of the group the wake's routing id names.
 ///
 /// A wake carries `g`, an opaque per-group routing id that also changes when
@@ -1169,7 +1169,7 @@ public func nseLooksLikeGroupName(_ bytes: Data, envelopeLens: ClosedRange<Int>)
     envelopeLens.contains(bytes.count) && bytes.first == groupNameEnvelopeFirstByte
 }
 
-/// Cheap PRE-FILTER for an ADR-0065 group-closed envelope (UX 16.5): a length
+/// Cheap PRE-FILTER for an ADR-0073 group-closed envelope (UX 16.5): a length
 /// inside the two well-formed lengths (32 without a successor, 64 with one)
 /// plus the first domain byte. The bounds arrive from the slim FFI
 /// (`groupClosedEnvelopeMinLen()` / `groupClosedEnvelopeMaxLen()`), never
@@ -1199,12 +1199,12 @@ public func nseLooksLikePin(_ bytes: Data, envelopeLen: Int) -> Bool {
     bytes.count == envelopeLen && bytes.first == pinEnvelopeFirstByte
 }
 
-/// First byte of the ADR-0066 key-rotation domain separator
+/// First byte of the ADR-0074 key-rotation domain separator
 /// (`"lakko/key-rotation/v1\0"`): the same ASCII `l` as every other envelope
 /// domain, its own constant for the same reason as the others.
 private let keyRotationEnvelopeFirstByte: UInt8 = 0x6C
 
-/// Cheap, allocation-free pre-filter for the ADR-0066 key-rotation envelope:
+/// Cheap, allocation-free pre-filter for the ADR-0074 key-rotation envelope:
 /// the exact length (192 bytes, injected from the slim FFI's
 /// `keyRotationEnvelopeLen()` rather than written here, because a stale
 /// literal silently stops suppressing it) and the first domain byte. The peek
@@ -1300,13 +1300,13 @@ public func nseIsServiceEnvelope(
     scopedDiscoveryEnvelopeLens: ClosedRange<Int>,
     decodesAsSharedChannels: (Data) -> Bool,
     sharedChannelsEnvelopeLens: ClosedRange<Int>,
-    // ADR-0065 phase 2 — the ninth service envelope, the group-closed notice.
+    // ADR-0073 phase 2 — the ninth service envelope, the group-closed notice.
     // Defaulted so the older call sites (and the tests that stub every
     // decoder) keep compiling; a stub that says "never" only ever lets a
     // notice through, which is what those sites did before the arm existed.
     decodesAsGroupClosed: (Data) -> Bool = { _ in false },
     groupClosedEnvelopeLens: ClosedRange<Int> = 0...0,
-    // ADR-0066 section 3.3 — the tenth, the account's `key-rotation`
+    // ADR-0074 section 3.3 — the tenth, the account's `key-rotation`
     // envelope. It is meaningful only in the account's own DeviceGroup, which
     // this process never reads; here it is recognised and suppressed like
     // every service envelope, and NOT decoded: it carries the account's next

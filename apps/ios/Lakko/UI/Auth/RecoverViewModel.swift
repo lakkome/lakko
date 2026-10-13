@@ -31,7 +31,7 @@ public final class RecoverViewModel: ObservableObject {
 
     /// One way back in.
     public enum Mode: Hashable {
-        /// ADR-0067 / UX 19.3 — a code sent to the recovery email. What it
+        /// ADR-0075 / UX 19.3 — a code sent to the recovery email. What it
         /// brings depends on the account, so the row stands above both
         /// groups; it is always listed (no row depends on server state).
         case email

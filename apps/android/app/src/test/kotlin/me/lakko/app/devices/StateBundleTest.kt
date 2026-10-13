@@ -33,7 +33,7 @@ class StateBundleTest {
 
     @Test
     fun `decodes the v2 shape the three clients agreed on`() {
-        // ADR-0066: `v` 2, `provenPredecessorsB64` on each pin and the
+        // ADR-0074: `v` 2, `provenPredecessorsB64` on each pin and the
         // top-level `ownPredecessors`; field names as `JSON.stringify` on web
         // writes them.
         val seed = b64(ByteArray(64) { 9 })

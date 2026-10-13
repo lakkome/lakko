@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0066 section 3.5a rule 3 — the profile re-send after the account's keys
+// ADR-0074 section 3.5a rule 3 — the profile re-send after the account's keys
 // moved, made durable.
 //
 // The grants every peer holds open the OLD mailbox only; the re-sent profile

@@ -192,7 +192,7 @@ class ThreeWordsTest {
 
     @Test
     fun `a refused credential suspends three words`() {
-        // ADR-0065: a reset replaces the recovery credential in the same
+        // ADR-0073: a reset replaces the recovery credential in the same
         // server transaction that stores the new seed here, so a refusal is
         // never "the new phrase is not registered yet".
         assertEquals(

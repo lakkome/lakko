@@ -377,7 +377,7 @@ pub trait ChannelStore: Send + Sync {
         channel: ChannelId,
     ) -> Result<Option<[u8; OWNER_PUBKEY_LEN]>, StorageError>;
 
-    /// Replace the owner key of `channel` (ADR-0066 section 3.5: the owning
+    /// Replace the owner key of `channel` (ADR-0074 section 3.5: the owning
     /// account changed its keys), as a compare-and-swap: the key becomes
     /// `new_owner` only while it is still `current_owner`, the key the
     /// caller verified the handover under. `Ok(true)` when it was replaced,

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The session pair (ADR-0065 section 3): a short-lived access token every
+ * The session pair (ADR-0073 section 3): a short-lived access token every
  * service verifies statelessly, and a refresh credential only
  * `POST /auth/session/refresh` accepts, plus the key generation both were
  * issued under. Every session-landing response of `lakko-svc-auth` carries
@@ -39,7 +39,7 @@ export interface SessionPairWire {
 }
 
 /** Refresh ahead of expiry when this much (or less) access life remains.
- *  Chosen (ADR-0065 section 3.3), not measured. */
+ *  Chosen (ADR-0073 section 3.3), not measured. */
 export const REFRESH_AHEAD_MS = 120_000;
 
 /** `true` when `value` is a finite, non-negative millisecond timestamp. */
@@ -108,7 +108,7 @@ export type TokenDecision =
   | "refresh-expired";
 
 /**
- * The timing rule of the token provider (ADR-0065 section 3.3). Pure: the
+ * The timing rule of the token provider (ADR-0073 section 3.3). Pure: the
  * caller passes the clock, so a test can place `nowMs` on either side of
  * each boundary.
  */

@@ -167,7 +167,7 @@ public fun forwardJumpTarget(
     val groupIdHex = forward.originGroupIdHex ?: return null
     val messageId = forward.originMessageId ?: return null
     if (messageId == 0L) return null
-    // ADR-0065 R.5 — the origin may be an OLDER segment of a conversation:
+    // ADR-0073 R.5 — the origin may be an OLDER segment of a conversation:
     // the jump opens the conversation's current group and lands on the
     // history row ([forwardJumpRow]).
     val thread = conversationThreadOf(threads, groupIdHex) ?: return null

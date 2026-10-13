@@ -103,7 +103,7 @@ export async function intakeScopedEnvelope(args: {
   if (session === null) return;
   let senderHex: string | null = null;
   try {
-    // ADR-0066 section 3.5a rule 2 - the sender as a PERSON: a leaf bound to
+    // ADR-0074 section 3.5a rule 2 - the sender as a PERSON: a leaf bound to
     // a proven predecessor (this account's own other devices included) is
     // filed, and recognised as self, under the current key.
     if (args.senderKeyB64 !== undefined) {

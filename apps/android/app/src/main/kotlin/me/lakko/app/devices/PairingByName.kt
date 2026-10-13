@@ -132,7 +132,7 @@ public sealed interface JoinByNameResult {
     /** The grant redeemed and the joined group is that account's DeviceGroup. */
     public class Joined(
         public val accountId: ByteArray,
-        /** ADR-0065: the pair the redeem issued. */
+        /** ADR-0073: the pair the redeem issued. */
         public val session: me.lakko.app.auth.SessionPair,
     ) : JoinByNameResult {
         public val sessionToken: String get() = session.accessToken

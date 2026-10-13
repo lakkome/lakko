@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The account's username as its own devices agree on it (ADR-0068): the
+ * The account's username as its own devices agree on it (ADR-0076): the
  * own-username register of the synced state (`lakko-sync`), stored with that
  * state, sent to the account's other devices over the DeviceGroup, and in
  * the backup. `DeviceGroupSyncProvider` owns the state and installs its port

@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 "Phase 2 revised: silent continuity", R.7 and R.8 - what each
+// ADR-0073 "Phase 2 revised: silent continuity", R.7 and R.8 - what each
 // shared conversation does once a member's account-key reset was ACCEPTED
 // (`Contacts/ResetVerdict.swift`), as pure decisions.
 //
@@ -427,7 +427,7 @@ public enum ResetRepair {
     }
 }
 
-// MARK: - ADR-0065 R.2: the wider re-admission lookup
+// MARK: - ADR-0073 R.2: the wider re-admission lookup
 
 extension DeviceReadmission {
 

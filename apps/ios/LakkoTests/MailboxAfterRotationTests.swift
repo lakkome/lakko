@@ -5,7 +5,7 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-/// ADR-0066 section 3.5a — the mailbox after a key rotation: senders resolve
+/// ADR-0074 section 3.5a — the mailbox after a key rotation: senders resolve
 /// before they address, grants are kept for the person, the profile is
 /// re-sent, and a predecessor mailbox is read for 30 days and then left.
 @MainActor

@@ -26,7 +26,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0065 section 3.3 — the one place every bearer request passes through:
+ * ADR-0073 section 3.3 — the one place every bearer request passes through:
  * a Ktor client over [SessionBearerEngine] over a [MockEngine] standing in
  * for the network, with a provider over a fake refresh route.
  */
@@ -212,7 +212,7 @@ class SessionBearerEngineTest {
         assertEquals(listOf("Bearer v3.$acct.1.$dev.1.5.old"), seenBearers)
     }
 
-    // ---- ADR-0066: this device was removed ---------------------------------
+    // ---- ADR-0074: this device was removed ---------------------------------
 
     @Test
     fun `auth's 401 device-revoked is reported as a removal and never retried`() = runTest {

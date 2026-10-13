@@ -79,7 +79,7 @@ public class FolderActions(
         val threads = chats.state.value.threads.associateBy { it.groupIdHex }
         for (row in rows) {
             if (row.kind == ConversationRowKind.CHANNEL || !row.hasUnread) continue
-            // ADR-0065 R.5 — read is marked in the conversation's CURRENT
+            // ADR-0073 R.5 — read is marked in the conversation's CURRENT
             // group (the store files it under the conversation id, with its
             // segment); the older segments' local counts are cleared too.
             val groupId = bytesOfHex(row.headId) ?: continue

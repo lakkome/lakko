@@ -19,7 +19,7 @@ extension Notification.Name {
 /// the per-contact identity pins and rotation markers, and the ids of the
 /// groups the old device knows.
 ///
-/// ADR-0066 part 3 (format `v` 2, flag day: any other `v` is refused) — the
+/// ADR-0074 part 3 (format `v` 2, flag day: any other `v` is refused) — the
 /// bundle also carries what a device paired AFTER a rotation of the account
 /// keys cannot learn from the current key alone: the account's OWN
 /// predecessor seeds with the time each was retired (``OwnPredecessor``), and
@@ -105,7 +105,7 @@ public enum StateBundle {
         }
     }
 
-    /// One earlier key of the account being paired (ADR-0066 part 3).
+    /// One earlier key of the account being paired (ADR-0074 part 3).
     public struct OwnPredecessor: Codable, Equatable {
         /// Standard base64 of the 64-byte account phrase seed of that key.
         /// Key material: the bundle is sealed under the DeviceGroup exporter,
@@ -320,7 +320,7 @@ public enum StateBundle {
         return zip(chain, chain.dropFirst()).map { (oldKeyB64: $0, newKeyB64: $1) }
     }
 
-    /// ADR-0066 part 3 — store the account's own predecessors exactly as a
+    /// ADR-0074 part 3 — store the account's own predecessors exactly as a
     /// kept device that adopted each rotation holds them: the seeds in the
     /// predecessor slot (oldest first), and each key's adoption time as the
     /// SENDING device recorded it, so the mailbox of each is read for its
@@ -358,7 +358,7 @@ public enum StateBundle {
     /// account the bundle belongs to (the one being paired): its contacts and
     /// pins are filed under it, never under whoever else is signed in.
     ///
-    /// ADR-0066 part 3 — the account's own predecessors are stored FIRST
+    /// ADR-0074 part 3 — the account's own predecessors are stored FIRST
     /// (the device binding minted at the first chat bootstrap reads them),
     /// and each pinned contact's proven predecessors are recorded in the
     /// proven-predecessor store, on the sending device's word: it is a device

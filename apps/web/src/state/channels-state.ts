@@ -79,7 +79,7 @@ interface ChannelsStateInternal {
    *  seed is re-derived at hydration from the restored
    *  PublisherGroup. */
   readonly keysByChannel: Accessor<ReadonlyMap<string, ChannelPublisherKeys>>;
-  /** ADR-0065 phase 2 (UX 16.6): the channels this device owned under
+  /** ADR-0073 phase 2 (UX 16.6): the channels this device owned under
    *  account keys that were since reset — their publisher state is in the
    *  log, but the provider it lives in was signed by the previous identity,
    *  so no key can be re-opened and no post, rotation or subscriber change
@@ -367,7 +367,7 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
     if (stored.publisherLeafKeyB64 !== leafKeyB64) {
       // eslint-disable-next-line no-console
       console.warn("channel log: provider snapshot belongs to another identity; dropped");
-      // ADR-0065 phase 2 (UX 16.6) — the one way this device learns which
+      // ADR-0073 phase 2 (UX 16.6) — the one way this device learns which
       // channels it owned under the OLD keys: the publisher state is here,
       // under an identity this account no longer has. Recorded durably
       // (`channels/orphaned-by-reset.ts`): the next flush replaces this
@@ -569,7 +569,7 @@ export const channelsActions = {
    *  side registry is unaffected — this is purely the
    *  user un-following on their own device. */
   removeChannel(channelId: string): void {
-    // ADR-0065 phase 2 (UX 16.6) — `Remove from this device` on an orphaned
+    // ADR-0073 phase 2 (UX 16.6) — `Remove from this device` on an orphaned
     // channel: the record goes with it.
     if (orphanedByKeyReset().has(channelId)) {
       const owner = counterOwner ?? sink?.accountIdB64 ?? null;

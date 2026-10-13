@@ -89,12 +89,12 @@ describe("every path that lands a device with keys stores the phrase", () => {
     expect(gates).toBeGreaterThan(store);
   });
 
-  it("stores a reset identity's phrase only after the server reset answered, and before the publish (ADR-0065 2.3)", () => {
+  it("stores a reset identity's phrase only after the server reset answered, and before the publish (ADR-0073 2.3)", () => {
     // The point of no return is `reset/finish`: nothing is stored before it
     // (a failure there discards the generated phrase), and everything local
     // is persisted before the publishing steps, which can fail and be
     // retried with what was stored.
-    // Since ADR-0066 the part after the server's answer is one function,
+    // Since ADR-0074 the part after the server's answer is one function,
     // `adoptKeyResetOutcome`, which the reset and the recall both call.
     const start = authContext.indexOf("async mintFreshIdentity(");
     const reset = authContext.indexOf("await client.resetAccountKeys(", start);
@@ -116,8 +116,8 @@ describe("every path that lands a device with keys stores the phrase", () => {
     expect(authContext.split('"fresh-identity"').length - 1).toBe(1);
   });
 
-  it("a recall continues through the reset's one path, and drops its record only after the new keys are stored (ADR-0066 part 1)", () => {
-    // ADR-0067 section 8: the old device's recall and the recall by phrase
+  it("a recall continues through the reset's one path, and drops its record only after the new keys are stored (ADR-0074 part 1)", () => {
+    // ADR-0075 section 8: the old device's recall and the recall by phrase
     // share one runner; each supplies what happens once the keys are stored.
     const wrapperStart = authContext.indexOf("function recallTakeBack(");
     const wrapper = authContext.slice(wrapperStart, authContext.indexOf("\n  }\n", wrapperStart));
@@ -126,7 +126,7 @@ describe("every path that lands a device with keys stores the phrase", () => {
     const body = authContext.slice(start, end);
     expect(wrapper.includes("return runRecall(")).toBe(true);
     expect(body.includes("afterPersist: target.afterPersist,")).toBe(true);
-    // The server exchange is two calls since ADR-0066 T5 item 25 (the finish
+    // The server exchange is two calls since ADR-0074 T5 item 25 (the finish
     // request is kept until it is answered); the adoption follows the finish.
     const server = body.lastIndexOf("await client.recallFinish(");
     expect(body.indexOf("await client.recallPrepare(")).toBeGreaterThan(0);

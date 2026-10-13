@@ -7,7 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/** ADR-0065 R.5 - a feed source is keyed for the person's stores on the
+/** ADR-0073 R.5 - a feed source is keyed for the person's stores on the
  *  conversation id (mirror of the web `feedSourceKey` / `groupFeedSources`). */
 class FeedSourceKeyTest {
     private val moved = GroupConversationForFeed(conversationHex = "root", headHex = "head", title = "T", audience = 3)

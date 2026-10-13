@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-/** ADR-0065 R.6 - the claim state's codec and store (`group-closed-store.ts`). */
+/** ADR-0073 R.6 - the claim state's codec and store (`group-closed-store.ts`). */
 import { describe, expect, it } from "vitest";
 
 import {

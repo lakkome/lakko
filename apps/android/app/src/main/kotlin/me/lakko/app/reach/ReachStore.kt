@@ -61,7 +61,7 @@ internal data class StoredHeld(
     val scopeHex: String,
     /** The 37-byte grant wire (`encodeReachGrant`), hex. */
     val grantHex: String,
-    /** ADR-0066 section 3.5a rule 6 - the grant [grantHex] replaced, kept
+    /** ADR-0074 section 3.5a rule 6 - the grant [grantHex] replaced, kept
      *  beside it until the person's address is known current. */
     val previousGrantHex: String? = null,
 )
@@ -98,7 +98,7 @@ internal data class ReachDoc(
     val registered: List<StoredRegistered> = emptyList(),
     val links: List<StoredLink> = emptyList(),
     val replies: List<StoredReply> = emptyList(),
-    /** ADR-0066 section 3.5a rule 5 - the links this device minted before
+    /** ADR-0074 section 3.5a rule 5 - the links this device minted before
      *  the account's keys moved: their keys name the old mailbox and are not
      *  registered on the new one; the rotating device revokes those with a
      *  ledger row and then forgets them. */
@@ -109,23 +109,23 @@ internal data class ReachDoc(
     val visibilityHex: String? = null,
     /** The `open` flag the server was last told, or `null` when never told. */
     val registeredOpen: Boolean? = null,
-    /** ADR-0066 section 3.5 - the account key (hex) whose mailbox
+    /** ADR-0074 section 3.5 - the account key (hex) whose mailbox
      *  [registered] and [registeredOpen] describe, once a rotation moved the
      *  reach keys; `null` before any rotation (the key the session first
      *  bound). */
     val registeredForKeyHex: String? = null,
-    /** ADR-0065 R.4 - the continuity key this device registered after its
+    /** ADR-0073 R.4 - the continuity key this device registered after its
      *  own account-key reset, and the mailbox (hex) it registered it on. Kept
      *  beside [registered], not in it: the key derives from the account id
      *  and the key generation, not from a reach class of the account seed. */
     val continuityRegistered: RegisteredContinuityKey? = null,
     val continuityMailboxHex: String? = null,
-    /** ADR-0066 section 3.5a rule 3 - the account key (hex) the profile
+    /** ADR-0074 section 3.5a rule 3 - the account key (hex) the profile
      *  still has to be re-sent under to every conversation, set when the
      *  reach keys moved to it and cleared once every conversation took the
      *  envelope; `null` when nothing is owed. */
     val profileResendOwedForKeyHex: String? = null,
-    /** ADR-0066 section 3.5a rule 5 - the account key (hex) under which
+    /** ADR-0074 section 3.5a rule 5 - the account key (hex) under which
      *  this device still has to spend what it granted before the keys moved
      *  (revoke its `/i/` and `/c/` links, re-send its unanswered contact
      *  requests): set when the reach keys moved to that key, on the rotating

@@ -3,7 +3,7 @@
 
 /**
  * The "publish owed" record and the step rules of a key reset
- * (`key-reset-owed.ts`, ADR-0065 section 2.3, UX 15.4): the two server
+ * (`key-reset-owed.ts`, ADR-0073 section 2.3, UX 15.4): the two server
  * steps run in order with the same attestation, a step that already landed
  * reads as done, the record clears only when both have, a stale attestation
  * waits for an explicit sign-in, and the phrase is withheld while anything

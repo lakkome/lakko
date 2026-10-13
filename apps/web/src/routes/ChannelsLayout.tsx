@@ -71,7 +71,7 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
           isOwner: isOwner(c.id),
           subscriberCount: knownSubscriberCount(c.id),
           lastPostMs: lastPostMsOf(c.id),
-          // ADR-0065 phase 2 (UX 16.6) — owned under keys since reset.
+          // ADR-0073 phase 2 (UX 16.6) — owned under keys since reset.
           orphanedByKeyReset: channelsState.orphanedByKeyReset().has(c.id),
         },
         clock(),

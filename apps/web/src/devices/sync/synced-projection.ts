@@ -43,7 +43,7 @@ export interface SyncedProjection {
   readonly readCursors: Readonly<Record<string, ReadCursorState>>;
   readonly order: OrderState | null;
   readonly folders: readonly FolderModel[];
-  /** ADR-0065 R.5 — the lineage registers (`successor -> root`). */
+  /** ADR-0073 R.5 — the lineage registers (`successor -> root`). */
   readonly lineage: readonly LineageEntry[];
 }
 

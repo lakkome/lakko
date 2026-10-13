@@ -83,7 +83,7 @@ public enum AntiCensorshipError: Error {
 }
 
 public enum AntiCensorshipTransport {
-    /// ADR-0065 section 3.3 — the session token provider every request
+    /// ADR-0073 section 3.3 — the session token provider every request
     /// passes through, on the direct path and inside the tunnel alike: a
     /// request carrying an access token of the signed-in session gets the
     /// current one (refreshed ahead of expiry), and a `401` is read by the

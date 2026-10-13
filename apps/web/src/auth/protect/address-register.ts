@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The recovery address as the account's own devices keep it (ADR-0067,
+ * The recovery address as the account's own devices keep it (ADR-0075,
  * "Amended 2026-10-13: the account's devices keep the address").
  *
  * The address lives in ONE place: the recovery-email register of the synced

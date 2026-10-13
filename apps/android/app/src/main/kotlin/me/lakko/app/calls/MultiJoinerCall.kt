@@ -654,11 +654,11 @@ class MultiJoinerCall private constructor(
             // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
             // speaks for its MLS sender, never the SFU signal-relay; dropped.
             FfiIncomingEnvelopeKind.SHARED_CHANNELS -> Unit
-            // ADR-0065 phase 2 — a group-closed notice rides the GROUP JOURNAL,
+            // ADR-0073 phase 2 — a group-closed notice rides the GROUP JOURNAL,
             // where the chat receive loop checks the sender's role. A relay
             // payload closes nothing; dropped.
             FfiIncomingEnvelopeKind.GROUP_CLOSED -> Unit
-            // ADR-0066 part 3 - a key-rotation envelope means something ONLY
+            // ADR-0074 part 3 - a key-rotation envelope means something ONLY
             // in the account's own DeviceGroup. A relay payload changes no
             // keys; dropped, and never rendered.
             FfiIncomingEnvelopeKind.KEY_ROTATION -> Unit

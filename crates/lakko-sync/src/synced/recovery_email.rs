@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The recovery-email envelope ([ADR-0067](../../../../docs/adr/0067-recovery-email.md),
+//! The recovery-email envelope ([ADR-0075](../../../../docs/adr/0075-recovery-email.md),
 //! amended 2026-10-13): how the account's recovery email register travels
 //! between the account's own devices.
 //!

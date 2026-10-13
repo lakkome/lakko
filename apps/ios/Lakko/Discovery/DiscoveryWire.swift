@@ -158,7 +158,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
     /// server-side, never stripping a still-valid stored value). Opaque to the
     /// server — verified operator-side + by the peer on a first observation.
     public let genesisAttest: String?
-    /// ADR-0065 section 4.1: standard base64 of the 177-byte key-reset
+    /// ADR-0073 section 4.1: standard base64 of the 177-byte key-reset
     /// attestation `POST /account/keys/reset/finish` minted, carried on the
     /// upload that installs the reset identity. Discovery verifies it under
     /// its pinned attest key, requires a generation strictly above the
@@ -214,12 +214,12 @@ public struct IdentityFetchResponse: Codable, Equatable {
     /// account rotated recently; `nil` otherwise. Verified locally by the
     /// peer — the server passes the bytes through opaquely.
     public let supersessionProof: String?
-    /// ADR-0065 section 4.1: the key generation the published identity
+    /// ADR-0073 section 4.1: the key generation the published identity
     /// belongs to (1 = never reset). A device compares it with the one its
     /// session pair carries (``KeyResetLanding``). Absent in a response of a
     /// scripted test directory, it reads as 1.
     public let keyGeneration: UInt64
-    /// ADR-0065 R.3: standard base64 of the auth-signed key-reset
+    /// ADR-0073 R.3: standard base64 of the auth-signed key-reset
     /// attestation of the account's LATEST reset, absent when it never
     /// reset. Opaque to the server at fetch; verified locally
     /// (`verifyKeyResetAttestation`). After a later proven rotation it no

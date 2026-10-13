@@ -69,7 +69,7 @@ public object PairingOrchestrator {
      */
     public class JoinRecoveryOutcome(
         public val phraseEntropy: ByteArray,
-        /** ADR-0065: the pair the grant redeem issued, or `null` when the
+        /** ADR-0073: the pair the grant redeem issued, or `null` when the
          *  redeem failed (a keys-only outcome). */
         public val session: me.lakko.app.auth.SessionPair?,
         public val accountId: ByteArray?,
@@ -260,7 +260,7 @@ public object PairingOrchestrator {
                         override fun joinedGroupId(): ByteArray = plain.groupId()
 
                         override suspend fun redeem(grantTokenB64: String) =
-                            // ADR-0066 - the session names this device from
+                            // ADR-0074 - the session names this device from
                             // its first credential: the id is the leaf key of
                             // the identity that just joined the DeviceGroup.
                             AuthClient().use { client ->
@@ -385,7 +385,7 @@ public object PairingOrchestrator {
                         "state bundle: ${applied.contacts} contacts, ${applied.pins} pins, " +
                             "${applied.ownPredecessors} earlier account keys",
                     )
-                    // ADR-0066: a chat layer already loaded under the current
+                    // ADR-0074: a chat layer already loaded under the current
                     // key is rebuilt under the conversation key.
                     StateBundle.afterApply(accountIdB64, applied)
                 } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -449,7 +449,7 @@ public object PairingOrchestrator {
                             "state bundle: ${applied.contacts} contacts, ${applied.pins} pins, " +
                                 "${applied.ownPredecessors} earlier account keys",
                         )
-                        // ADR-0066: a chat layer already loaded under the
+                        // ADR-0074: a chat layer already loaded under the
                         // current key is rebuilt under the conversation key.
                         StateBundle.afterApply(accountIdB64, applied)
                     }
@@ -515,7 +515,7 @@ public object PairingOrchestrator {
                     joinedGroupId = joined.groupId(),
                     grantToken = parsed.grantToken,
                     redeem = { grantB64 ->
-                        // ADR-0066 - name this device at the landing.
+                        // ADR-0074 - name this device at the landing.
                         AuthClient().use { client ->
                             client.deviceAuthorizeRedeem(grantB64, deviceId = identity.signaturePublicKey())
                         }

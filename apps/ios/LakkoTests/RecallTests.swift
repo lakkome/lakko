@@ -46,7 +46,7 @@ extension RecallOperations {
 
 // MARK: - The pure rules
 
-/// ADR-0066 part 1 (sprint T4): which wipe a sign-out runs, what the recall
+/// ADR-0074 part 1 (sprint T4): which wipe a sign-out runs, what the recall
 /// record holds, every server answer mapped, and the "Was it you?" state
 /// machine with its closed / exhausted / offline / expiry states.
 @MainActor
@@ -428,7 +428,7 @@ final class RecallFlowTests: XCTestCase {
         private(set) var statusCalls: [RecallRecord] = []
         var takeBack: Result<SessionPair, Error> = .failure(RecallWrongPassword())
         private(set) var attempts: [RecallAttempt] = []
-        /// ADR-0067 section 8 — the status read by login handle.
+        /// ADR-0075 section 8 — the status read by login handle.
         var byHandle: Result<RecallByHandle, Error> = .failure(
             AuthClientError.http(status: 401, endpoint: "/account/recall/status", body: #"{"error":"recall-refused"}"#))
         private(set) var byHandleCalls: [(handle: Data, seed: Data)] = []
@@ -536,7 +536,7 @@ final class RecallFlowTests: XCTestCase {
     ) -> Harness {
         let store = SessionStore(defaults: defaults("recall-session"))
         let persistence = Persistence()
-        // ADR-0067: a phrase-protected account by default (after it is taken
+        // ADR-0075: a phrase-protected account by default (after it is taken
         // back, its new words are shown).
         AccountProtectionStore().setPhraseSaved(phraseProtected && signedIn, accountIdB64: accountIdB64)
         if signedIn {
@@ -602,7 +602,7 @@ final class RecallFlowTests: XCTestCase {
         return h
     }
 
-    // MARK: ADR-0067 section 8 — the phrase as the proof
+    // MARK: ADR-0075 section 8 — the phrase as the proof
 
     func testAnOldDeviceTakesTheAccountBackWithThePhraseInsteadOfThePassword() async throws {
         let h = await asking()

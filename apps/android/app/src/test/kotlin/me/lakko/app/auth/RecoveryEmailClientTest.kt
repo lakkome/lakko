@@ -25,7 +25,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * ADR-0067 - the wire shapes of the recovery-email routes that need no
+ * ADR-0075 - the wire shapes of the recovery-email routes that need no
  * native core (the OPAQUE and statement routes do and are not run on the
  * host JVM). A [MockEngine] answers; nothing reaches a network.
  */
@@ -288,7 +288,7 @@ class RecoveryEmailClientTest {
         }
     }
 
-    // ---- ADR-0068: the login handle on a rename -----------------------------
+    // ---- ADR-0076: the login handle on a rename -----------------------------
 
     @Test
     fun `a first bind sends the handle alone`() = runTest {

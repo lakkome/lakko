@@ -22,7 +22,7 @@
  * happened before this client joined is invisible to it, and the device would
  * be re-admitted — recorded in the ADR as the arm's known limit.
  *
- * ADR-0066 section 2.3: for the OWN account that limit is closed by a second
+ * ADR-0074 section 2.3: for the OWN account that limit is closed by a second
  * test. A device of this account is admitted only when it is in the
  * account's DeviceGroup roster (`devices/own-device-roster.ts`), so a device
  * that was removed and publishes itself again is not put back; the per-chat
@@ -34,7 +34,7 @@ export interface DirectoryDevice {
   readonly deviceKeyB64: string;
   readonly keyPackage: Uint8Array;
   /**
-   * ADR-0066 (a device paired after a key rotation): `false` when the listed
+   * ADR-0074 (a device paired after a key rotation): `false` when the listed
    * KeyPackage of an OWN device is bound to another account key than the one
    * this device's leaves are bound to (`devices/own-conversation-key.ts`).
    * The row still counts as listed (its leaf is not retired); it is not
@@ -73,7 +73,7 @@ export function planReadmission(input: {
   readonly accounts: readonly AccountDevices[];
   readonly removed: ReadonlySet<string>;
   /**
-   * ADR-0066 section 2.3 — the leaf keys (standard base64) of the account's
+   * ADR-0074 section 2.3 — the leaf keys (standard base64) of the account's
    * current DeviceGroup roster, or `null` when it is not known. A device of
    * THIS account is admitted only when it is in it: a removed device is not,
    * whatever the directory lists for it. `null` admits no own device (the
@@ -180,7 +180,7 @@ export function clearRemovedDevicesForAccount(accountIdB64: string): void {
   }
 }
 
-// ---- ADR-0065 R.2: the wider lookup ----------------------------------------
+// ---- ADR-0073 R.2: the wider lookup ----------------------------------------
 
 /** A roster person this device can look up in the directory. */
 export interface LookupCandidate {
@@ -198,7 +198,7 @@ export interface LookupContact {
 }
 
 /**
- * ADR-0065 R.2 "Triggers" — every roster account whose account id this
+ * ADR-0073 R.2 "Triggers" — every roster account whose account id this
  * device knows, not only its accepted contacts: a contact row (found by its
  * current key or any key it had), else the profile store (the profile
  * envelope carries the account id, ADR-0048 v2). This is also what removes

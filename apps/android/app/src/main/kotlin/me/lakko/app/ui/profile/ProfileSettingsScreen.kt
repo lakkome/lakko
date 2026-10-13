@@ -64,7 +64,7 @@ public fun ProfileSettingsScreen(
     /** Opens "Choose a username"; offered only while the account has none
      *  (`usernameClaimOffered`). */
     onChooseUsername: (() -> Unit)? = null,
-    /** ADR-0068 - opens "Change username"; shown beside the username. */
+    /** ADR-0076 - opens "Change username"; shown beside the username. */
     onChangeUsername: (() -> Unit)? = null,
 ) {
     // Keyed on [current]: the base a save is computed from is always the

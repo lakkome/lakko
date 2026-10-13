@@ -3,7 +3,7 @@
 
 /**
  * `AuthClient.recallFinish` and `recallStatus` against a scripted `fetch`
- * (ADR-0066 "T5 as built", items 24 and 25): a lost answer is asked again
+ * (ADR-0074 "T5 as built", items 24 and 25): a lost answer is asked again
  * with the BYTE-IDENTICAL request, a `statement-stale` answer is re-signed at
  * the server's time once, and no other answer is retried.
  */

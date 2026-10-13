@@ -100,7 +100,7 @@ public fun CallsHost(
                     scope.launch {
                         try {
                             val outcome = AppCallHost.startNewCall(
-                                // ADR-0066 Stage A: the conversation identity.
+                                // ADR-0074 Stage A: the conversation identity.
                                 accountIdentitySeed = me.lakko.app.auth.conversationAccountSeedOf(
                                     repository.context,
                                     me.lakko.app.auth.base64Encode(secrets.accountId),

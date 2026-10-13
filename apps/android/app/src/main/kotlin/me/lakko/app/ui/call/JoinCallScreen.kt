@@ -171,7 +171,7 @@ class JoinCallViewModel(
     private val endCurrentCallAction: () -> Unit,
 ) : ViewModel() {
 
-    /** ADR-0066 Stage A - the seed of the account identity MLS groups know
+    /** ADR-0074 Stage A - the seed of the account identity MLS groups know
      *  this account by (the predecessor after a key rotation). */
     private fun conversationSeed(secrets: me.lakko.app.auth.IdentitySecrets): ByteArray =
         me.lakko.app.auth.conversationAccountSeedOf(

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * A guest chooses a username and a password (ADR-0067 pass A, part 2).
+ * A guest chooses a username and a password (ADR-0075 pass A, part 2).
  *
  * A guest account (the call-link join) has no username and a random
  * password nobody knows. One screen gives it both. The name is claimed in

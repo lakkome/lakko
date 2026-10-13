@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0066 section 3.5a rule 6 — a refused write re-checks the address once.
+// ADR-0074 section 3.5a rule 6 — a refused write re-checks the address once.
 //
 // A write to a person's mailbox that the Delivery Service refuses (`401`) may
 // be a write to the mailbox of a key the person has since rotated away, or a
@@ -165,7 +165,7 @@ public enum PersonAddressRecheck {
         } catch {
             // A failed fetch or a refusal of the gate changes nothing: the
             // first refusal stands (an unproven change is never resolved).
-            NSLog("ADR-0066 3.5a: the address re-check after a refused write did not complete: \(type(of: error))")
+            NSLog("ADR-0074 3.5a: the address re-check after a refused write did not complete: \(type(of: error))")
         }
         reach.reloadKeyResolver()
     }

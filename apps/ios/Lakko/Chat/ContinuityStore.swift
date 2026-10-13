@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 R.5 / R.7 - the facts about a moved conversation that are this
+// ADR-0073 R.5 / R.7 - the facts about a moved conversation that are this
 // device's alone and that nothing else records:
 //
 //   * WHEN this device learned an old group was continued elsewhere: the

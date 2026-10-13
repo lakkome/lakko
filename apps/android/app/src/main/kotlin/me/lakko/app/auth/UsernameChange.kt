@@ -10,14 +10,14 @@ import kotlinx.serialization.json.Json
 import me.lakko.app.l10n.UiText
 
 /*
- * ADR-0068 - choosing a username later, and changing it. Everything here is
+ * ADR-0076 - choosing a username later, and changing it. Everything here is
  * a pure decision, a small store, or a machine over ports, so a host JVM
  * test runs the whole rename (rollback and the owed record included) without
  * a server or the native core.
  */
 
 // ---------------------------------------------------------------------------
-// The session's handle sync (ADR-0068 section 2)
+// The session's handle sync (ADR-0076 section 2)
 // ---------------------------------------------------------------------------
 
 /** `POST /auth/login-handle/check`: what the account's bound handle is,
@@ -130,7 +130,7 @@ public fun ownUsernameSync(
 // The too-soon rule and what the screen shows
 // ---------------------------------------------------------------------------
 
-/** One rename per 30 days (ADR-0068 D2). */
+/** One rename per 30 days (ADR-0076 D2). */
 public const val RENAME_INTERVAL_MS: Long = 30L * 24L * 60L * 60L * 1000L
 
 /**

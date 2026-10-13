@@ -6,7 +6,7 @@ import XCTest
 
 @testable import Lakko
 
-// ADR-0066 part 3, Stage A — a KEPT device (pending / adopt / drop /
+// ADR-0074 part 3, Stage A — a KEPT device (pending / adopt / drop /
 // superseded without a pending envelope), the proven-predecessor rule, the
 // stale-statement retry, the recall-finish retry and the root endorsement of
 // the reset / recall.

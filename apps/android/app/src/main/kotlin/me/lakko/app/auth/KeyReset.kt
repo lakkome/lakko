@@ -10,7 +10,7 @@ import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.ds.DsHttpError
 
 /**
- * ADR-0065 "Reset account keys": what a reset still owes after its server
+ * ADR-0073 "Reset account keys": what a reset still owes after its server
  * step, and the rules that drive the retries. The decisions are pure (a host
  * JVM test runs them without a server or the native core); the store is a
  * plain per-account row, since the attestation is a public signed artifact

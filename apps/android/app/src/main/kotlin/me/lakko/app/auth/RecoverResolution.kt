@@ -101,7 +101,7 @@ public interface LoginHandleBinder {
     public suspend fun unbind(sessionToken: String): Boolean
 
     /**
-     * `POST /auth/login-handle/check` (ADR-0068 section 2): what the account
+     * `POST /auth/login-handle/check` (ADR-0076 section 2): what the account
      * holds relative to [handle]. The default answers "none" (bind), which is
      * what a first bind at sign-up is.
      */

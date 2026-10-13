@@ -668,7 +668,7 @@ private fun decodeGroupNameOrNull(bytes: ByteArray): FfiGroupName? =
         null
     }
 
-/** ADR-0065 phase 2 / UX 16.5 — the authoritative, fail-closed group-closed
+/** ADR-0073 phase 2 / UX 16.5 — the authoritative, fail-closed group-closed
  *  decode: the notice, or `null` for a malformed / out-of-bounds envelope
  *  (dropped, never rendered). */
 private fun decodeGroupClosedOrNull(bytes: ByteArray): uniffi.lakko_ffi_uniffi.FfiGroupClosed? =
@@ -894,7 +894,7 @@ internal fun toEvent(
                     createdAt = createdAt,
                 )
             } else if (looksLikeGroupClosedEnvelope(processed.data)) {
-                // ADR-0065 phase 2 / UX 16.5 — an admin closed the group after
+                // ADR-0073 phase 2 / UX 16.5 — an admin closed the group after
                 // the owner's keys were reset, naming the recreated one. Never
                 // a timeline bubble. Same shape as the group-name arm: the
                 // sender is resolved to its account KEY here (C-68), because
@@ -1019,7 +1019,7 @@ internal fun toEvent(
                             originGroupB64 = body.forwardOriginGroupB64,
                             originMessageId = body.forwardOriginMessageId,
                         ),
-                        // ADR-0065 — the re-send marker, only as a whole pair.
+                        // ADR-0073 — the re-send marker, only as a whole pair.
                         resendOrigin = resendOriginFrom(body.resendOriginGroupB64, body.resendOriginMessageId),
                     )
                     MessageBodyKind.EDIT -> IncomingChatEvent.Op(
@@ -1178,7 +1178,7 @@ public sealed interface IncomingChatEvent {
         /** ADR-0052 decision 2 — the forward attribution, when the envelope
          *  carried `forwarded_from` or an origin; `null` otherwise. */
         val forward: ForwardRef? = null,
-        /** ADR-0065 R.7 case 1 — where a RE-SENT message was originally sent
+        /** ADR-0073 R.7 case 1 — where a RE-SENT message was originally sent
          *  ([ResendOrigin]), as the sealed envelope names it; `null` for an
          *  ordinary message. A sender's claim: believed only against a row
          *  this device already holds ([resendVerdict]). Never drawn. */
@@ -1548,7 +1548,7 @@ public sealed interface IncomingChatEvent {
         val createdAt: String,
     ) : IncomingChatEvent
 
-    /** ADR-0065 phase 2 / UX 16.5 — a group-closed envelope. Never a timeline
+    /** ADR-0073 phase 2 / UX 16.5 — a group-closed envelope. Never a timeline
      *  bubble.
      *
      *  [closed] is `null` when the envelope matched the domain but was

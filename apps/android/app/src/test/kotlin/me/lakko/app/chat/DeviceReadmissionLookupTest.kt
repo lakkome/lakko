@@ -9,7 +9,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/** ADR-0065 R.2 - the wider re-admission lookup and what a roster key is
+/** ADR-0073 R.2 - the wider re-admission lookup and what a roster key is
  *  worth for an account; and the conversation a push wake belongs to. */
 class DeviceReadmissionLookupTest {
     private val idA = java.util.Base64.getEncoder().encodeToString(ByteArray(16) { 1 })

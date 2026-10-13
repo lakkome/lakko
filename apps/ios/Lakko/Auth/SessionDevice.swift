@@ -4,7 +4,7 @@
 import Foundation
 import Security
 
-// ADR-0066 section 0 and 2 — the client-side rules of "a session names a
+// ADR-0074 section 0 and 2 — the client-side rules of "a session names a
 // device", free of state:
 //
 //   * `LandingDevice`          what a session landing sends as `device_id_b64`;
@@ -19,7 +19,7 @@ import Security
 
 // MARK: - What a landing sends
 
-/// The device id a session landing asserts (ADR-0066 section 0.4).
+/// The device id a session landing asserts (ADR-0074 section 0.4).
 ///
 /// The id is this device's conversation leaf signature key, the same 32
 /// bytes that key its discovery directory row. On iOS the device identity is
@@ -126,7 +126,7 @@ public enum SessionDeviceBinding {
 /// `POST /auth/genesis/attest` records the account key on its FIRST call and
 /// afterwards attests only that key. Without a recorded key a device removal
 /// answers `account-key-required`, and whoever holds a session first could
-/// record their own key (ADR-0066 "T1 as built" point 14). So the client
+/// record their own key (ADR-0074 "T1 as built" point 14). So the client
 /// mints at signup and on every landing until the mint succeeded once for
 /// the key it holds, and again after a key reset (the key changed).
 public enum IdentityKeyRecord {
@@ -335,8 +335,8 @@ public final class InMemoryLogoutOwedStore: LogoutOwedStoring, @unchecked Sendab
 
 /// Why this device shows the signed-out screen and wipes itself.
 public enum DeviceSignOutCause: Equatable, Sendable {
-    /// The account keys were reset on another device (ADR-0065 section 3.5).
+    /// The account keys were reset on another device (ADR-0073 section 3.5).
     case keysReset
-    /// This device was removed from the account (ADR-0066 section 2.3).
+    /// This device was removed from the account (ADR-0074 section 2.3).
     case deviceRemoved
 }

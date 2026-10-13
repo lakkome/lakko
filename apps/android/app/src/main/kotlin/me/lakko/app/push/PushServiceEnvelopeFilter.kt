@@ -250,7 +250,7 @@ private fun isServiceEnvelopeOtherThanCall(
     // this path is read-only (C-59).
     if (looksLikeGroupNameEnvelope(payload)) return true
 
-    // Kind 5b — ADR-0065 phase 2 / UX 16.5, the group-closed notice. The same
+    // Kind 5b — ADR-0073 phase 2 / UX 16.5, the group-closed notice. The same
     // NUL-terminated-prefix shape as the group name (`lakko/group-closed/v1`),
     // the same foreground peek, so the two paths cannot drift; a closing must
     // never be previewed as a notification body reading the domain string.
@@ -301,7 +301,7 @@ private fun isServiceEnvelopeOtherThanCall(
     // files it when it next reads the journal.
     if (me.lakko.app.discover.looksLikeSharedChannelsEnvelope(payload)) return true
 
-    // Kind 11 — ADR-0066 part 3, the `key-rotation` envelope. It means
+    // Kind 11 — ADR-0074 part 3, the `key-rotation` envelope. It means
     // something ONLY in the account's own DeviceGroup, which this path never
     // reads; anywhere else it is dropped. The NUL-terminated-prefix peek
     // (`lakko/key-rotation/v1`) is a complete classification, and the bytes

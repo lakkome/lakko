@@ -15,7 +15,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * ADR-0066 "T5 as built" items 21 and 22: the DS refuses an attested `reset`
+ * ADR-0074 "T5 as built" items 21 and 22: the DS refuses an attested `reset`
  * (after a key reset or a recall) without the root endorsement, and takes an
  * attested `root` transfer (after a rotation) with the same two fields.
  */

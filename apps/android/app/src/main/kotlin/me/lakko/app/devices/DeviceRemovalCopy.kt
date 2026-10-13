@@ -87,7 +87,7 @@ internal object RotationCopy {
         "devices.rotate.effect_phrase",
         "devices.rotate.effect_passkeys",
         "devices.rotate.effect_contacts",
-        // ADR-0066 section 3.5a rule 5: what the old key granted is spent.
+        // ADR-0074 section 3.5a rule 5: what the old key granted is spent.
         "devices.rotate.effect_links",
     )
     const val CONFIRM: String = "devices.rotate.confirm"

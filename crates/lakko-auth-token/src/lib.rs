@@ -7,8 +7,8 @@
 //!
 //! # Wire format
 //!
-//! Three credentials, dotted strings ([ADR-0065] section 3.1 and its
-//! 2026-10-04 amendment; [ADR-0066] section 0.4 for the device and the issue
+//! Three credentials, dotted strings ([ADR-0073] section 3.1 and its
+//! 2026-10-04 amendment; [ADR-0074] section 0.4 for the device and the issue
 //! time):
 //!
 //! ```text
@@ -86,8 +86,8 @@
 //!   it expires; the holder cannot decrypt messages, impersonate signatures,
 //!   or read private inbox bytes.
 //!
-//! [ADR-0065]: ../../../docs/adr/0065-account-key-reset.md
-//! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+//! [ADR-0073]: ../../../docs/adr/0073-account-key-reset.md
+//! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

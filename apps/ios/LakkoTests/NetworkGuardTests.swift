@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.13b "Test hygiene" - the suite-wide network guard
+/// ADR-0073 R.13b "Test hygiene" - the suite-wide network guard
 /// (`NetworkGuard.swift`) refuses every request no stub claimed.
 final class NetworkGuardTests: XCTestCase {
 

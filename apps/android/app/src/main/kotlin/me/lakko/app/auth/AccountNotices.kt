@@ -6,7 +6,7 @@ package me.lakko.app.auth
 import android.content.Context
 
 /**
- * ADR-0067 section 9 / `docs/ux/identity-recovery.md` sections 19.2, 19.5
+ * ADR-0075 section 9 / `docs/ux/identity-recovery.md` sections 19.2, 19.5
  * and 19.6 - what happened to the account, told to its own devices.
  * `GET /account/notices?after=<id>` is fetched at each session landing with
  * a per-device cursor; each notice is shown once. The selection is pure.

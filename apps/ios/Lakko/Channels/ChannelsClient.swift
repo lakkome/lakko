@@ -324,7 +324,7 @@ public final class ChannelsClient {
         }
     }
 
-    /// `PUT /v1/channels/{id}/owner` (ADR-0066 section 3.5, "Channels") —
+    /// `PUT /v1/channels/{id}/owner` (ADR-0074 section 3.5, "Channels") —
     /// replace the channel's owner key after a rotation of the account keys.
     /// The body is the NEW owner key (32 raw bytes: the verifying key the new
     /// account identity derives for the channel); the authorisation is the

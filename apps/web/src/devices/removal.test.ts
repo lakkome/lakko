@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The removal operation and its owed record (`removal.ts`, ADR-0066
+ * The removal operation and its owed record (`removal.ts`, ADR-0074
  * section 2.3): the order of the steps, what each answer means, what is kept
  * for a retry, and that a device is never left signed out at auth with
  * nobody coming back for the rest.

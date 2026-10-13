@@ -572,14 +572,14 @@ mod tests {
                 }),
             )
             .unwrap();
-        // The conversation-lineage register (ADR-0065 R.5) rides the same
+        // The conversation-lineage register (ADR-0073 R.5) rides the same
         // bytes, so a restore learns which conversation a successor group
         // continues.
         assert!(state.set_lineage(8, &[1; 32], &[2; 32]).unwrap());
-        // So does the account's recovery email register (ADR-0067, amended
+        // So does the account's recovery email register (ADR-0075, amended
         // 2026-10-13): a restore brings the address back.
         assert!(state.set_recovery_email(9, Some("a@b.example")).unwrap());
-        // And its own-username register (ADR-0068 section 3).
+        // And its own-username register (ADR-0076 section 3).
         assert!(state.set_own_username(10, Some("bob_42")).unwrap());
         let mut payload = sample_payload();
         payload.synced_state = state.to_bytes();

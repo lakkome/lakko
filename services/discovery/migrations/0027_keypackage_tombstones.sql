@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0066 sprint T1 (section 2.2): tombstones for deleted device ids.
+-- ADR-0074 sprint T1 (section 2.2): tombstones for deleted device ids.
 --
 -- Before this, `DELETE /discovery/keypackage/device/{id}` was a plain delete
 -- and the directory kept no record of it, so a removed device that still held
@@ -14,7 +14,7 @@
 -- credential's lifetime: every session the removed device could hold has
 -- expired by then). The pruner drops older rows.
 --
--- An attested key change (ADR-0065: a reset; ADR-0066: a recall or a
+-- An attested key change (ADR-0073: a reset; ADR-0074: a recall or a
 -- rotation) deletes the account's tombstones together with its KeyPackage
 -- rows, and so does the account erasure.
 --

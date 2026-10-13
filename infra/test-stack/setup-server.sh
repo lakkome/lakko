@@ -129,7 +129,7 @@ if ! grep -q '^LAKKO_CHANNELS_DATABASE_URL=' $ENV_FILE; then
   echo "channels database URL added to the env file"
 fi
 
-# The passkey vault (ADR-0064) arrived later still: an older env file gains
+# The passkey vault (ADR-0072) arrived later still: an older env file gains
 # its key here, generated once and then kept (regenerating it would make
 # every passkey blob stored on this stack unreadable).
 if ! grep -q '^LAKKO_VAULT_ENC_KEY=' $ENV_FILE; then
@@ -153,7 +153,7 @@ if ! grep -q '^LAKKO_AUTH_HANDLE_PEPPER=' $ENV_FILE; then
   echo "login-handle pepper added to the env file"
 fi
 
-# The recovery email (ADR-0067) arrived later: an older env file gains the
+# The recovery email (ADR-0075) arrived later: an older env file gains the
 # pepper that keys the stored (login handle, address) values, generated once
 # and then kept (regenerating it turns every recovery email off). The SMTP
 # relay is NOT written here: its password is typed into the env file by the
@@ -163,7 +163,7 @@ if ! grep -q '^LAKKO_AUTH_EMAIL_PEPPER=' $ENV_FILE; then
   echo "recovery-email pepper added to the env file"
 fi
 if ! grep -q '^LAKKO_AUTH_SMTP_HOST=' $ENV_FILE; then
-  echo "note: no LAKKO_AUTH_SMTP_* in the env file; recovery letters are not sent (ADR-0067)"
+  echo "note: no LAKKO_AUTH_SMTP_* in the env file; recovery letters are not sent (ADR-0075)"
 fi
 
 # The DS -> push-gw wake forward (ADR-0054) arrived later: an older env file

@@ -177,9 +177,9 @@ public final class ChannelsUiState: ObservableObject {
         ownerKeyGenerationByChannel = Self.loadOwnerGenerations(accountIdB64: accountIdB64)
     }
 
-    // MARK: - ADR-0065 phase 2 — channels the old keys owned (UX 16.6)
+    // MARK: - ADR-0073 phase 2 — channels the old keys owned (UX 16.6)
 
-    /// The account's key generation the session reports (ADR-0065; `1` =
+    /// The account's key generation the session reports (ADR-0073; `1` =
     /// never reset). Set by the shell at sign-in; `nil` means unknown and
     /// nothing is claimed.
     @Published public var currentKeyGeneration: UInt64?
@@ -206,7 +206,7 @@ public final class ChannelsUiState: ObservableObject {
             forKey: Self.ownerGenerationKey(account))
     }
 
-    /// ADR-0066 section 3.5 — the account's keys were rotated and the owner
+    /// ADR-0074 section 3.5 — the account's keys were rotated and the owner
     /// key of the channels this device created was handed to the new seed's
     /// key (``OwnedChannelGenerations``): re-read the recorded generations
     /// and take the session's new one, in that order, so no channel is read
@@ -796,7 +796,7 @@ public struct ChannelHandle: Equatable, Sendable, Identifiable {
     }
 }
 
-/// ADR-0065 phase 2 (UX 16.6) — the one rule: a channel created under an
+/// ADR-0073 phase 2 (UX 16.6) — the one rule: a channel created under an
 /// earlier key generation than the session's current one was orphaned by a
 /// reset. Unknown on either side claims nothing (the client "does not
 /// invent a signal").

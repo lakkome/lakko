@@ -8,7 +8,7 @@ import java.io.File
 import java.nio.ByteBuffer
 
 /*
- * ADR-0066 section 3.3 - a KEPT device: one of the account's devices that is
+ * ADR-0074 section 3.3 - a KEPT device: one of the account's devices that is
  * not the one that changed the keys.
  *
  * The rotating device sends a `key-rotation` envelope into the account's
@@ -525,7 +525,7 @@ public class OwnPredecessorStore(private val storage: SealedBlobStorage) {
 
 /**
  * The 64-byte seed of the account identity the conversation leaves that
- * exist are bound to (ADR-0066 section 3.1, Stage A): the EARLIEST own
+ * exist are bound to (ADR-0074 section 3.1, Stage A): the EARLIEST own
  * predecessor after a rotation, else [currentSeed]. Everything that speaks
  * AS a member of an existing MLS group (the chat identity's binding, a call
  * founded for a link, a channel's PublisherGroup) uses this; everything the
@@ -584,7 +584,7 @@ public object PreparedRotationCodec {
     }
 }
 
-/** How long a rotation's supersession proof is valid (ADR-0066 section
+/** How long a rotation's supersession proof is valid (ADR-0074 section
  *  3.2: 14 days, as before ADR-0017). */
 public const val ROTATION_PROOF_VALIDITY_SECS: Long = 14L * 24 * 60 * 60
 

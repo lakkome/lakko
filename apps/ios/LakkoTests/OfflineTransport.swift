@@ -5,7 +5,7 @@ import Foundation
 import LakkoCore
 @testable import Lakko
 
-// ADR-0065 R.13b "Test hygiene" - the explicit stub for a client a fixture
+// ADR-0073 R.13b "Test hygiene" - the explicit stub for a client a fixture
 // needs only so that something can be constructed.
 //
 // A default-constructed client (`DiscoveryClient()`, `ChatClient()`,

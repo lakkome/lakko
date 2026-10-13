@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0066 section 3.5a — the mailbox after a key rotation.
+// ADR-0074 section 3.5a — the mailbox after a key rotation.
 //
 // A mailbox's address and the right to read it both derive from an account
 // key. After a PROVEN rotation the account moves to the mailbox of its new
@@ -120,7 +120,7 @@ public enum MailboxAddress {
 extension PredecessorMailbox {
 
     /// How long a predecessor mailbox is read after this device adopted the
-    /// rotation that retired it: the DS journal retention (ADR-0066 section
+    /// rotation that retired it: the DS journal retention (ADR-0074 section
     /// 3.5a rule 4; chosen).
     static let readWindowMs: Int64 = 30 * 24 * 60 * 60 * 1000
 

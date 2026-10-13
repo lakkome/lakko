@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The recovery phrase as numbered slots, one per word (12, ADR-0064).
+ * The recovery phrase as numbered slots, one per word (12, ADR-0072).
  *
  * Every slot autocompletes from the BIP39 English list (the first four
  * letters of a word are unique, so four keystrokes usually settle it), space /

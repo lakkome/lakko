@@ -86,7 +86,7 @@ describe("the Protect your account step", () => {
   });
 });
 
-describe("sign-up shows no recovery phrase (ADR-0067 D2)", () => {
+describe("sign-up shows no recovery phrase (ADR-0075 D2)", () => {
   const ctx = read("../AuthContext.tsx");
   const start = ctx.indexOf("    async signup(username, password, options) {");
   const body = ctx.slice(start, ctx.indexOf("\n    async signupGuest(", start));

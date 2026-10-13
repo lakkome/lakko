@@ -64,7 +64,7 @@ public class ChannelsUiState(
     /** The shared, snapshotted publisher identity every owner-side MLS call
      *  runs on; `null` disables the publisher half (tests). */
     public val publisher: ChannelPublisherIdentity? = null,
-    /** ADR-0065 phase 2 / UX 16.6 — the channels a key reset orphaned on this
+    /** ADR-0073 phase 2 / UX 16.6 — the channels a key reset orphaned on this
      *  device; `null` when none can be recorded (tests). */
     private val orphanStore: OrphanedChannelsStore? = null,
 ) {
@@ -259,7 +259,7 @@ public class ChannelsUiState(
     public suspend fun bind(
         accountIdB64: String,
         accountIdentitySeed: ByteArray,
-        /** ADR-0066 section 3.5 - the account's current phrase seed, which
+        /** ADR-0074 section 3.5 - the account's current phrase seed, which
          *  after a rotation is not [accountIdentitySeed]; see
          *  [ChannelPublisherIdentity.bind]. */
         currentAccountSeed: ByteArray? = null,
@@ -307,7 +307,7 @@ public class ChannelsUiState(
                 }
             }
             publisher?.bind(accountIdB64, accountIdentitySeed, currentAccountSeed)
-            // ADR-0065 phase 2 / UX 16.6 — re-read: the reset that records
+            // ADR-0073 phase 2 / UX 16.6 — re-read: the reset that records
             // the set runs between two binds of the same account.
             _orphaned.value = orphanStore?.load(accountIdB64) ?: emptySet()
             reopenPublisherKeys()
@@ -413,7 +413,7 @@ public class ChannelsUiState(
         // device is no longer a publisher for it.
         publisherSigningSeedByChannel = publisherSigningSeedByChannel - channelId
         persistPublisherSigningSeeds()
-        // ADR-0065 phase 2 / UX 16.6 — `Remove from this device` drops the
+        // ADR-0073 phase 2 / UX 16.6 — `Remove from this device` drops the
         // orphan mark with the channel.
         boundAccountIdB64?.let { acct -> orphanStore?.remove(acct, channelId) }
         _orphaned.update { it - channelId }

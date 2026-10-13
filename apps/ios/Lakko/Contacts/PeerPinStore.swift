@@ -145,7 +145,7 @@ public final class PeerPinStore {
             self.resetSignedAtMs = resetSignedAtMs
         }
 
-        /// ADR-0065 R.2 rule 2 - the key generation this device last
+        /// ADR-0073 R.2 rule 2 - the key generation this device last
         /// ACCEPTED for the account: the bundle's generation at the first
         /// pin, then the generation of each accepted reset. A reset is
         /// accepted only strictly above it, so an old attestation cannot roll
@@ -289,7 +289,7 @@ public final class PeerPinStore {
             logStatus: existing?.logStatus,
             isReset: existing?.isReset,
             pinnedLogVersion: existing?.pinnedLogVersion,
-            // ADR-0065 R.2 - the accepted-generation baseline: the caller's
+            // ADR-0073 R.2 - the accepted-generation baseline: the caller's
             // (a first pin records the bundle's generation) or the one held.
             acceptedKeyGeneration: keyGeneration ?? existing?.acceptedKeyGeneration,
             previousKeysB64: existing?.previousKeysB64,
@@ -402,7 +402,7 @@ public final class PeerPinStore {
 
     /// Remove the pin for `accountIdB64`. No-op when absent. Exposed
     /// for the "forget contact" / re-verify-from-scratch flows.
-    // MARK: - ADR-0065 R.2 - an accepted reset
+    // MARK: - ADR-0073 R.2 - an accepted reset
 
     /// One accepted reset, as ``acceptReset(_:retiredPredecessorsB64:)`` reads it.
     public struct AcceptedReset: Equatable {

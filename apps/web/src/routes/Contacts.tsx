@@ -221,7 +221,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
           sentAtMs: Date.now(),
         });
         // Kept under the device key, so a re-send after a rotation of the
-        // account keys carries the same words (ADR-0066 section 3.5a rule 5).
+        // account keys carries the same words (ADR-0074 section 3.5a rule 5).
         void rememberSentIntro(account, syncGroupIdHex(result.recipientAccountId), introInput());
         setSentVersion((v) => v + 1);
       }
@@ -392,7 +392,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const [filter, setFilter] = createSignal("");
   const selected = (): AcceptedContact | undefined =>
     accepted().find((c) => c.signaturePubkeyB64 === selectedKey()) ??
-    // ADR-0065 R.2 — a contact re-keyed by an accepted reset while its page
+    // ADR-0073 R.2 — a contact re-keyed by an accepted reset while its page
     // is open stays the selected one: found by the key it had.
     accepted().find((c) => {
       const key = selectedKey();
@@ -483,7 +483,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     setDetailError(null);
     setDetailBusy(true);
     try {
-      // ADR-0065 R.5 — every group of the conversation, the head last.
+      // ADR-0073 R.5 — every group of the conversation, the head last.
       const view = lineageView.resolve(g.groupIdB64);
       const held = view?.held ?? [g];
       await deleteConversation({

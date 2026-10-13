@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /*
- * ADR-0065 "Phase 2 revised", R.4 - the CONTINUITY reach key.
+ * ADR-0073 "Phase 2 revised", R.4 - the CONTINUITY reach key.
  *
  * A reset changes every reach key and the mailbox pseudonym, and the new
  * identity knows none of its former contacts, so nobody holds a grant for its

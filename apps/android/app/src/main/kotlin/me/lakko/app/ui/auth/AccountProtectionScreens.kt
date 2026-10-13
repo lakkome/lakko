@@ -94,7 +94,7 @@ import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 
 /*
- * ADR-0067 / `docs/ux/identity-recovery.md` section 19 - the screens of an
+ * ADR-0075 / `docs/ux/identity-recovery.md` section 19 - the screens of an
  * account's protection: the "Protect your account" step of sign-up, the
  * recovery email form, "Save a recovery phrase", the Settings > Account rows
  * and the notices the account's other devices show. Every decision is a pure
@@ -399,7 +399,7 @@ internal fun ResendRow(
 }
 
 /**
- * Save a recovery phrase (UX 19.5): the ADR-0066 key rotation with
+ * Save a recovery phrase (UX 19.5): the ADR-0074 key rotation with
  * `phrase_saved` on its server step, removing no device. The NEW words are
  * shown only once that step succeeded; until then a progress line, and on a
  * failure "We could not finish. Nothing changed." with `Try again`.

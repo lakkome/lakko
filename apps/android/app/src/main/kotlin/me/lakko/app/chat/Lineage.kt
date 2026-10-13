@@ -6,7 +6,7 @@ package me.lakko.app.chat
 import java.nio.ByteBuffer
 
 /*
- * ADR-0065 "Phase 2 revised", R.5 - one conversation over several groups.
+ * ADR-0073 "Phase 2 revised", R.5 - one conversation over several groups.
  *
  * A conversation that cannot be repaired in place continues in a NEW MLS
  * group. The person sees one conversation: the same row, the history above,

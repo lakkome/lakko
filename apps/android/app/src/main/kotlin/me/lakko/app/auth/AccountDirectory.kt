@@ -48,7 +48,7 @@ internal interface AccountDirectory {
     suspend fun registerUsername(sessionToken: String, accountId: ByteArray, username: String): String
 
     /**
-     * ADR-0068: replace the account's current name with [username]
+     * ADR-0076: replace the account's current name with [username]
      * (`POST /discovery/username/replace`); the claimed name and the new
      * certificate. `409 username-taken` / `no-username`, `429 rename-too-soon`.
      */
@@ -177,7 +177,7 @@ internal suspend fun claimUsername(
         } catch (release: Throwable) {
             err.addSuppressed(release)
         }
-        // ADR-0068: the 409 body is JSON now. `username-taken` (or the
+        // ADR-0076: the 409 body is JSON now. `username-taken` (or the
         // older bodiless 409) is the taken line; `username-already-set`
         // (the account already holds a name) is not, and propagates.
         if (isUsernameTaken(err)) {

@@ -66,7 +66,7 @@ final class SyncedStateSupportTests: XCTestCase {
         XCTAssertFalse(SyncedStateMerge.merge(a, into: b), "a second merge changes nothing")
     }
 
-    // ADR-0065 R.5 / R.13b - the lineage is in the backup wherever the other
+    // ADR-0073 R.5 / R.13b - the lineage is in the backup wherever the other
     // synced maps are, and comes back on restore.
 
     func testTheLineageSurvivesABackupRoundTripAndARestoreMerge() throws {

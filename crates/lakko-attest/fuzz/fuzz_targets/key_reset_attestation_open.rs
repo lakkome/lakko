@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Fuzz target — `KeyResetAttestation::open` (the key-reset attestation
-//! parser, ADR-0065). The fuzz input is the attacker-controlled wire envelope:
+//! parser, ADR-0073). The fuzz input is the attacker-controlled wire envelope:
 //! a fixed-layout 177-byte blob (`version | account_ref(32) |
 //! device_group_journal_id(32) | key_generation(8 BE) | new_signature_pubkey(32)
 //! | signed_at(8 BE) | sig(64)`) that reaches discovery's identity upload, the

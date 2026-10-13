@@ -19,14 +19,14 @@ import me.lakko.app.auth.isFreshAuthRequired
 import me.lakko.app.auth.recallFinishAnswerLost
 
 /*
- * ADR-0066 part 3, Stage A - "It was lost or stolen": remove a device AND
+ * ADR-0074 part 3, Stage A - "It was lost or stolen": remove a device AND
  * change the account keys, keeping the other devices
  * (`docs/ux/identity-recovery.md` 18.1; ADR sections 3.2 to 3.5).
  *
  * One owed operation, resumable from one record, in this order:
  *
  *   1. a fresh-auth proof; the record is written before anything is sent;
- *   2. remove the device with the ADR-0066 part 2 steps ([DeviceRemovalRunner])
+ *   2. remove the device with the ADR-0074 part 2 steps ([DeviceRemovalRunner])
  *      and WAIT until its DeviceGroup Remove commit has won the journal;
  *   3. generate the new phrase and seed; sign the supersession proof with
  *      the old key (14 days);
@@ -102,7 +102,7 @@ public class KeyRotationOwed(
     /** Section 3.5a rule 5: the links the old key issued were revoked and
      *  the unanswered contact requests re-sent from the new key. */
     public val oldGrantsSpent: Boolean = false,
-    /** ADR-0067 section 3: this rotation is "Save a recovery phrase". No
+    /** ADR-0075 section 3: this rotation is "Save a recovery phrase". No
      *  device is removed ([deviceIdB64Url] is empty) and `rotate/finish`
      *  carries `phrase_saved: true`. */
     public val phraseSaved: Boolean = false,
@@ -159,7 +159,7 @@ public enum class RotationStep {
     Done,
 }
 
-/** The order of ADR-0066 section 3.2. */
+/** The order of ADR-0074 section 3.2. */
 public fun nextRotationStep(owed: KeyRotationOwed): RotationStep = when {
     !owed.removalWon -> RotationStep.RemoveDevice
     !owed.committed && !owed.prepared -> RotationStep.Prepare
@@ -284,7 +284,7 @@ public interface RotationAnnouncePort {
 }
 
 /**
- * THE seam (ADR-0066 section 3.2, "T5 as built" item 5): the removal, then
+ * THE seam (ADR-0074 section 3.2, "T5 as built" item 5): the removal, then
  * the announcement, as one function so the two cannot be reordered
  * independently. The new seed is sealed at an epoch the removed device never
  * held; that ordering is the sender's obligation and nothing else - no
@@ -323,7 +323,7 @@ public suspend fun removeThenAnnounce(
 }
 
 /**
- * The announcement of a rotation that removes NO device (ADR-0067 section 3,
+ * The announcement of a rotation that removes NO device (ADR-0075 section 3,
  * "Save a recovery phrase"): every device in the list is kept, so there is
  * no epoch the envelope must be past. Sealed at the current epoch and
  * published; returns that epoch.
@@ -458,7 +458,7 @@ public interface KeyRotationPorts : RotationAnnouncePort {
         freshGrant: String,
         /** `null` for a rotation that removes no device. */
         revokeDeviceId: ByteArray?,
-        /** ADR-0067 section 3: "Save a recovery phrase". */
+        /** ADR-0075 section 3: "Save a recovery phrase". */
         phraseSaved: Boolean,
     ): CommitAnswer.Committed
 
@@ -601,7 +601,7 @@ public class KeyRotationRunner(
     }
 
     /**
-     * ADR-0067 section 3 / UX 19.5 - "Save a recovery phrase": change the
+     * ADR-0075 section 3 / UX 19.5 - "Save a recovery phrase": change the
      * account keys, removing no device, and mark the account
      * phrase-protected in the same server step. Also its `Try again`. A
      * rotation already owed for a device that passed its commit finishes

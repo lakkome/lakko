@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.5 / R.8 - the service worker's read-only copy of the keys an
+ * ADR-0073 R.5 / R.8 - the service worker's read-only copy of the keys an
  * accepted reset retired.
  *
  * "Nothing from a superseded sender acts" holds in the app through

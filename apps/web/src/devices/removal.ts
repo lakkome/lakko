@@ -3,7 +3,7 @@
 
 /**
  * Removing a device is ONE operation of four steps with an owed record
- * (ADR-0066 section 2.3; `docs/ux/identity-recovery.md` section 18.1).
+ * (ADR-0074 section 2.3; `docs/ux/identity-recovery.md` section 18.1).
  *
  *   1. `revoke`       `POST /account/devices/revoke` at auth: the device is
  *                     signed out NOW and wipes itself at its next contact.
@@ -440,7 +440,7 @@ export function clearRemovals(storage: MarkerStorage | undefined, accountIdB64: 
 }
 
 /**
- * Whether a removal may START (or continue) now (ADR-0066 T1 point 15):
+ * Whether a removal may START (or continue) now (ADR-0074 T1 point 15):
  * while a key-reset publish is owed, auth verifies a `device-revoke`
  * statement under the new key and the directory under the old one, so no
  * removal runs in that window.

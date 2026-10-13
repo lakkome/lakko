@@ -3,7 +3,7 @@
 
 /**
  * What a device keeps, sealed under its device key, for a key rotation
- * (ADR-0066 part 3, Stage A):
+ * (ADR-0074 part 3, Stage A):
  *
  *   - `predecessorSeeds`: the 64-byte seeds of the account identities this
  *     device held before each PROVEN rotation, oldest first. The
@@ -132,7 +132,7 @@ export function conversationSeed(state: KeyRotationState): Uint8Array | null {
   return first === undefined ? null : base64Decode(first);
 }
 
-/** Every predecessor seed this device holds, OLDEST first (ADR-0066 section
+/** Every predecessor seed this device holds, OLDEST first (ADR-0074 section
  *  3.5a: own predecessors are a chain). The first is the conversation key;
  *  each later one is a key the account held between two rotations. */
 export function predecessorSeeds(state: KeyRotationState): Uint8Array[] {

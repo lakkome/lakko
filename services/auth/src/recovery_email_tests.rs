@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Route tests for ADR-0067: the recovery email (enrol, replace, remove,
+//! Route tests for ADR-0075: the recovery email (enrol, replace, remove,
 //! recover by mailed code in both modes), the account notices, and the
 //! recall's phrase arm.
 //!
@@ -632,7 +632,7 @@ async fn a_change_of_login_handle_drops_the_email_and_the_vault() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(rows(&pool, "recovery_emails", &who.account.id).await, 1);
     let (_, new_handle) = crate::login_handle::random_handle();
-    // A change of handle needs the fresh-auth grant (ADR-0068); with it and
+    // A change of handle needs the fresh-auth grant (ADR-0076); with it and
     // without the address, the recovery email is dropped.
     let (st, body) = call(
         &rig.state,
@@ -1878,7 +1878,7 @@ async fn address_guesses_against_the_stored_key_are_rationed_per_account() {
 }
 
 // ----------------------------------------------------------------
-// ADR-0068 section 2: a change of login handle
+// ADR-0076 section 2: a change of login handle
 // ----------------------------------------------------------------
 
 async fn put_handle(state: &AppState, bearer: &str, body: &Value) -> (StatusCode, Bytes) {

@@ -78,7 +78,7 @@ export class ProfilePublishScheduler<Timer = unknown> {
 
   /**
    * Publish into every group now and answer the ones whose publish FAILED
-   * (ADR-0066 section 3.5a rule 3: the re-send after a key rotation is a
+   * (ADR-0074 section 3.5a rule 3: the re-send after a key rotation is a
    * step that can be owed, so its caller must learn the outcome). A failed
    * one is retried by the scheduler exactly as any other.
    */

@@ -9,7 +9,7 @@
  * nothing replaced). It shows the new 12 words, takes the acknowledgement,
  * then lands the session via `confirmFreshPhraseSaved`.
  *
- * One state comes before the words after a reset (ADR-0065, UX 15.4): the
+ * One state comes before the words after a reset (ADR-0073, UX 15.4): the
  * keys ARE reset (the server step is one operation), but publishing the
  * new identity to the directory and the device list did not finish
  * (offline, a limit, a refusal). Until that is done the contacts and the
@@ -51,7 +51,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
     return s.kind === "save-fresh-phrase" ? s.account.username : "";
   };
   const words = (): string[] => phraseWords(phrase());
-  // ADR-0067 (alignment A and I): the words are shown only to a
+  // ADR-0075 (alignment A and I): the words are shown only to a
   // phrase-protected account. A guest sign-up, and a key reset or a recall
   // on an account whose owner never saved a phrase, show none: the session
   // lands at once (once nothing is owed), and the account reads "Not
@@ -118,7 +118,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
         when={!auth.freshPublishOwed()}
         fallback={
           <>
-            {/* ADR-0067 (alignment P): an account that is not phrase-protected
+            {/* ADR-0075 (alignment P): an account that is not phrase-protected
                 is told its keys changed and the change is finishing, with no
                 mention of words; it was never shown any. */}
             <Show when={wordsShown()}>

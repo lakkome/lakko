@@ -30,7 +30,7 @@ import { t } from "../l10n";
 /** The best-effort transparency-log reset marker for the refused key
  *  (the shape `SupersessionRefused.loggedReset` carries):
  *   * `true`  — never passed any more: a change that IS an attested reset
- *     is accepted silently (ADR-0065 R.2) and reaches no refusal. Rendered
+ *     is accepted silently (ADR-0073 R.2) and reaches no refusal. Rendered
  *     as `unconfirmed` if it ever arrives.
  *   * `false` — the log does NOT show an owner reset.
  *   * `null`  — the log is off / unreachable / absent / inconclusive. */

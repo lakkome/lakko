@@ -169,7 +169,7 @@ function writePredecessorMailboxCursor(accountIdB64: string, keyHex: string, cur
   storage.setItem(predecessorCursorStorageKey(accountIdB64), JSON.stringify(held));
 }
 
-/** The own predecessor keys whose mailbox is still read (ADR-0066 section
+/** The own predecessor keys whose mailbox is still read (ADR-0074 section
  *  3.5a rule 4), each inside its OWN 30-day window. A key with no time
  *  stored (this device adopted before the time was kept) starts its window
  *  now. */
@@ -205,13 +205,13 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
   });
 
-  // ADR-0066 section 3.5a rule 6 - every write to a person's mailbox that is
+  // ADR-0074 section 3.5a rule 6 - every write to a person's mailbox that is
   // refused re-checks that person's address once, through this client's
   // directory fetch and fail-closed gate.
   installAddressRecheck((accountKey) => client.recheckAddress(accountKey));
   onCleanup(() => installAddressRecheck(null));
 
-  // ADR-0066 section 3.5a rule 5 - what was granted before a rotation of
+  // ADR-0074 section 3.5a rule 5 - what was granted before a rotation of
   // this account's keys is spent. The two owed steps of the rotation record
   // (`devices/key-rotation.ts`: `links`, `requests`) run here, where the
   // directory client and the contacts client are.
@@ -519,12 +519,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           if (ev.request.profile !== null) {
             profiles.ingest(base64Encode(ev.request.fromPubkey), ev.request.profile);
           }
-          // ADR-0065 R.7 case 1 / UX 16.6 - a request from an account that is
+          // ADR-0073 R.7 case 1 / UX 16.6 - a request from an account that is
           // ALREADY a contact is never a request row: the R.2 check runs on
           // the sender's account, and the request is answered silently (the
           // conversation continues by itself) or dropped.
           if (await handleKnownContactRequest(ev.request, accountIdB64, ev.row)) continue;
-          // ADR-0066 section 3.5a rule 5 - one request per person: a request
+          // ADR-0074 section 3.5a rule 5 - one request per person: a request
           // from the proven successor of a pending request's key replaces
           // it, silently; a stale one from a superseded key is dropped.
           const known = [...target.pending(), ...fresh.map((f) => f.request)];
@@ -630,7 +630,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     dispatch,
   });
 
-  // ADR-0066 section 3.5 (Stage A) — after a proven key rotation the
+  // ADR-0074 section 3.5 (Stage A) — after a proven key rotation the
   // conversation leaves stay bound to the account key of before it, and a
   // peer that has not observed the rotation addresses the mailbox of the
   // key it knows: a PREDECESSOR's. So those mailboxes are read too, each
@@ -741,7 +741,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       tick: async (signal) => {
         // Long-poll the account mailbox (ADR-0060: the one inbound mailbox).
         // The predecessor's mailbox first, without holding the read open
-        // (ADR-0066 section 3.5); then the long poll of the account's.
+        // (ADR-0074 section 3.5); then the long poll of the account's.
         // Rule 4 of section 3.5a: read only, for 30 days from the adoption,
         // then left. Nothing is registered or written there.
         await pollPredecessorMailboxes(accountIdB64, signal);

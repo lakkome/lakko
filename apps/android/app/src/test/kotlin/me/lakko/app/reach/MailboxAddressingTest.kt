@@ -18,7 +18,7 @@ import java.io.IOException
 import java.util.Base64
 
 /**
- * ADR-0066 section 3.5a - the mailbox after a rotation of the account keys:
+ * ADR-0074 section 3.5a - the mailbox after a rotation of the account keys:
  * resolve before addressing (proven steps only, chains, the own account),
  * grants found across a proven rotation, the 30-day read rule of a
  * predecessor's mailbox, and the profile re-send that stays owed.

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.5 / ADR-0058 section 5.2 - the conversation LINEAGE is in the
+ * ADR-0073 R.5 / ADR-0058 section 5.2 - the conversation LINEAGE is in the
  * client's backup and comes back on restore.
  *
  * On web the lineage is not a store of its own: it is the write-once

@@ -56,7 +56,7 @@ export function knownPerson(
   if (session !== null) {
     try {
       keptGrantWireB64 =
-        // ADR-0066 section 3.5a rule 2 - the grants of the PERSON, under
+        // ADR-0074 section 3.5a rule 2 - the grants of the PERSON, under
         // any key a proven rotation left behind.
         bestGrantForPerson(session.receivedGrants(), personKeysHex(toHex(base64Decode(keyB64))))
           ?.wireB64 ?? null;
@@ -171,7 +171,7 @@ async function reachCheckWith(identityPk: Uint8Array, grantWireB64: string): Pro
 }
 
 /**
- * ADR-0066 section 3.5a - whether the key `accountId` publishes now is the
+ * ADR-0074 section 3.5a - whether the key `accountId` publishes now is the
  * proven successor of `foundKey`: the pin store's proven chain, or the
  * supersession proof the published bundle carries, verified under the found
  * key. A failed fetch proves nothing.

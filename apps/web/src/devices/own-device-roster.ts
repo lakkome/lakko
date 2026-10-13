@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The DeviceGroup filter (ADR-0066 section 2.3, "Own-account admission").
+ * The DeviceGroup filter (ADR-0074 section 2.3, "Own-account admission").
  *
  * A device of THIS account is added to a conversation only when its leaf key
  * is in the account's current DeviceGroup roster. The DeviceGroup is the

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 (a device paired after a key rotation) — which account key a
+ * ADR-0074 (a device paired after a key rotation) — which account key a
  * device of THIS account is bound to inside conversations, and what follows
  * from it. Two pure rules, the twins of iOS `OwnAccountKeys` and Android
  * `DeviceReadmission.ownKeyPackageUsable`.

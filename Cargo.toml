@@ -108,7 +108,7 @@ futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# SMTP client for the one letter `services/auth` sends (ADR-0067 recovery
+# SMTP client for the one letter `services/auth` sends (ADR-0075 recovery
 # email code). Minimal features: the SMTP transport and the message builder
 # over tokio with rustls (ring provider, bundled web PKI roots). Default
 # features are off so native-tls, the connection pool and `hostname` stay out.

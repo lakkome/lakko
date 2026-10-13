@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0017: Phrase-seeded AccountIdentity — decouple identity from the password
 
-> **Amended by ADR-0064 (2026-10-02).** The body below is left as written.
+> **Amended by ADR-0072 (2026-10-02).** The body below is left as written.
 > What no longer holds:
 >
 > - The recovery phrase is **12 words** (128-bit entropy, 16 bytes), not 24.
@@ -17,10 +17,10 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 >   new phrase ran neither. The session alone authorises it (no passkey
 >   gate); it is limited per account. Residual: a stolen session can retire
 >   the owner's phrase as an access credential, and existing sessions are
->   not revoked. See [ADR-0064](0064-recovery-model-simplification.md)
+>   not revoked. See [ADR-0072](0072-recovery-model-simplification.md)
 >   decision 9.
 > - Every device that holds the seed also holds the phrase under its device
->   key (ADR-0064 decision 8).
+>   key (ADR-0072 decision 8).
 
 - **Status:** Accepted — **built + reviewed** (Part 1 of the account-recovery
   overhaul). Phrase-seeded identity + on-device seed store + fresh-device

@@ -211,7 +211,7 @@ final class SessionRestoreTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(PersistedSessionToken.self, from: data), token)
     }
 
-    // MARK: - ADR-0065: the refresh credential restores the session
+    // MARK: - ADR-0073: the refresh credential restores the session
 
     func testAnExpiredAccessTokenWithALiveRefreshCredentialRestores() {
         // The silent restore refreshes instead of reusing the access token.
@@ -318,7 +318,7 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
     }
 
     func testARestoredSessionBindsTheHandleOfItsCanonicalNameOnce() async throws {
-        // ADR-0068: the landing asks first; the account has no handle, so
+        // ADR-0076: the landing asks first; the account has no handle, so
         // this is a first bind.
         let host = NameRouteStub.scope { method, path, _ in
             if path == "/auth/login-handle/check" { return (200, #"{"state":"none"}"#) }
@@ -335,7 +335,7 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
         XCTAssertTrue(bound, "a restored session binds the login handle")
         await settle()
 
-        // ADR-0066: a landing also records the account key at auth (and binds
+        // ADR-0074: a landing also records the account key at auth (and binds
         // the device when the pair can refresh); this test is about the
         // handle, so it reads the handle requests.
         let requests = binds(host)
@@ -346,7 +346,7 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
         XCTAssertEqual(directory.calls, 0)
     }
 
-    /// ADR-0068 section 2 — a device whose name is stale (the account was
+    /// ADR-0076 section 2 — a device whose name is stale (the account was
     /// renamed on another device) must not bind its old handle back.
     func testARestoredSessionWithAStaleNameBindsNothing() async {
         let host = NameRouteStub.scope { _, path, _ in
@@ -413,7 +413,7 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
     }
 
     func testTheSameSessionInstalledTwiceBindsOnce() async {
-        // ADR-0068: the landing asks first; the account has no handle, so
+        // ADR-0076: the landing asks first; the account has no handle, so
         // this is a first bind.
         let host = NameRouteStub.scope { method, path, _ in
             if path == "/auth/login-handle/check" { return (200, #"{"state":"none"}"#) }

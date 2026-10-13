@@ -141,7 +141,7 @@ public struct PeopleSearchPorts {
     /// Verify a username certificate for `(certificate, lookupKey, accountId)`
     /// — the certificate binds the LOOKUP KEY, never the output.
     public var verifyCertificate: (Data, Data, Data) async -> Bool
-    /// ADR-0066 section 3.5a — the current account key of the person a key
+    /// ADR-0074 section 3.5a — the current account key of the person a key
     /// belongs to, across PROVEN rotations only (the key itself otherwise).
     /// Read after ``identityKey`` ran, so a rotation that fetch proved is
     /// already in the map. Defaults to "no rotation known".
@@ -407,7 +407,7 @@ public enum PeopleSearch {
             // must be the account the identity bundle publishes this key for,
             // or a record could pair its author's key with someone else's
             // account id — and that account's username certificate.
-            // ADR-0066 section 3.5a — a record written before its owner
+            // ADR-0074 section 3.5a — a record written before its owner
             // rotated names the key they held then: the same person when that
             // key is a PROVEN predecessor of the published one. The result is
             // then the person under their current key.
@@ -469,7 +469,7 @@ public enum PeopleSearch {
     /// another account, or carries another identity key than `identityKey`,
     /// the key the verified identity bundle serves for that account.
     ///
-    /// ADR-0066 section 3.5a — `currentKey` resolves the record's key across
+    /// ADR-0074 section 3.5a — `currentKey` resolves the record's key across
     /// PROVEN rotations: a record published before its owner rotated still
     /// names the same person.
     static func openPublic(
@@ -498,7 +498,7 @@ public enum PeopleSearch {
             currentKey: { _ in current })
     }
 
-    /// ADR-0066 section 3.5a — whether a hit that names the key `found` is
+    /// ADR-0074 section 3.5a — whether a hit that names the key `found` is
     /// the person the verified identity bundle publishes `published` for: the
     /// same key, or a key whose PROVEN current key (`currentOfFound`, from the
     /// proven-predecessor resolver) is the published one. An unproven

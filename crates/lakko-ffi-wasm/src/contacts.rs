@@ -1009,10 +1009,10 @@ pub fn pin_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> b
 }
 
 // ============================================================================
-// Group-closed envelope — ADR-0065 phase 2
+// Group-closed envelope — ADR-0073 phase 2
 // ============================================================================
 
-/// A group's closed notice (ADR-0065 phase 2, `docs/ux/identity-recovery.md`
+/// A group's closed notice (ADR-0073 phase 2, `docs/ux/identity-recovery.md`
 /// §16.5). Mirror of [`lakko_contacts::group_closed::GroupClosed`].
 ///
 /// **A notice received from someone else is that person's assertion about
@@ -1057,7 +1057,7 @@ impl WasmGroupClosed {
     }
 }
 
-/// Compose a group-closed envelope (ADR-0065 phase 2) — the inner plaintext
+/// Compose a group-closed envelope (ADR-0073 phase 2) — the inner plaintext
 /// to publish as an MLS application message on the OLD group's journal.
 /// `successorGroupId` is the recreated group's 32-byte id, or `undefined`
 /// when the group is closed without one.
@@ -1087,7 +1087,7 @@ pub fn compose_group_closed_envelope(
     }))
 }
 
-/// Strictly decode a group-closed envelope (ADR-0065 phase 2). Fail-closed:
+/// Strictly decode a group-closed envelope (ADR-0073 phase 2). Fail-closed:
 /// anything malformed is refused as a whole.
 ///
 /// Use `dispatchIncomingEnvelope` when the plaintext might be any kind.
@@ -2275,14 +2275,14 @@ pub enum WasmIncomingEnvelopeKind {
     /// empty. Never render it as a chat bubble; store it per member only
     /// when `sharedChannelsIsNewer`.
     SharedChannels = 16,
-    /// An admin closed this group and names the recreated one (ADR-0065
+    /// An admin closed this group and names the recreated one (ADR-0073
     /// phase 2). The decoded notice rides the `groupClosed` getter; `payload`
     /// is empty. Never render it as a chat bubble; the sender's authority is
     /// the receiver's role-table check (owner / admin only), then
     /// `groupClosedIsNewer` for that group.
     GroupClosed = 17,
     /// Another device of this account is changing the account keys
-    /// (ADR-0066 section 3.3). The decoded envelope rides the `keyRotation`
+    /// (ADR-0074 section 3.3). The decoded envelope rides the `keyRotation`
     /// getter; `payload` is empty. Never render it. Meaningful ONLY in the
     /// account's own DeviceGroup: met anywhere else, drop it. There, pass
     /// the original plaintext to `verifyKeyRotationEnvelope` with the
@@ -2444,14 +2444,14 @@ impl WasmIncomingEnvelope {
         self.committer_delegation.clone()
     }
 
-    /// Set only for `GroupClosed` (ADR-0065): the decoded notice. `undefined`
+    /// Set only for `GroupClosed` (ADR-0073): the decoded notice. `undefined`
     /// for every other kind.
     #[wasm_bindgen(getter, js_name = groupClosed)]
     pub fn group_closed(&self) -> Option<WasmGroupClosed> {
         self.group_closed.clone()
     }
 
-    /// Set only for `KeyRotation` (ADR-0066): the decoded envelope, shape
+    /// Set only for `KeyRotation` (ADR-0074): the decoded envelope, shape
     /// only. `undefined` for every other kind.
     #[wasm_bindgen(getter, js_name = keyRotation)]
     pub fn key_rotation(&self) -> Option<crate::key_rotation::WasmKeyRotation> {

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Session issuance, refresh and per-device revocation ([ADR-0065] section
-//! 3, [ADR-0066] sections 0.4 and 2.1).
+//! Session issuance, refresh and per-device revocation ([ADR-0073] section
+//! 3, [ADR-0074] sections 0.4 and 2.1).
 //!
 //! Every route that lands a session issues the same pair: a short-lived
 //! **access token** (`v3`, carried as the bearer on every service) and a
@@ -30,8 +30,8 @@
 //! measured). A refresh credential lives `LAKKO_REFRESH_TOKEN_TTL_DAYS`
 //! (default 30) and slides on every refresh.
 //!
-//! [ADR-0065]: ../../../docs/adr/0065-account-key-reset.md
-//! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+//! [ADR-0073]: ../../../docs/adr/0073-account-key-reset.md
+//! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -352,7 +352,7 @@ pub(crate) async fn read_committed_conn(
 
 /// Begin a transaction that holds the account row's lock and has checked
 /// that the account is still at `expected_generation`: the fence a bearer
-/// route puts around a write that must not survive a key change (ADR-0066
+/// route puts around a write that must not survive a key change (ADR-0074
 /// "T3 as built").
 ///
 /// `require_session` compares the generation before the handler runs; a key
@@ -398,7 +398,7 @@ pub(crate) const FRESH_GRANT_HEADER: &str = "x-lakko-fresh-grant";
 /// A fresh-auth grant as it rides on the wire, flattened into the answer of
 /// `POST /login/finish` (the password), `POST /webauthn/auth/finish` (a
 /// passkey) and `POST /signup/finish` (the password was set in that very
-/// exchange) and of no other route (ADR-0065, amended 2026-10-04 and
+/// exchange) and of no other route (ADR-0073, amended 2026-10-04 and
 /// 2026-10-06).
 ///
 /// Deliberately NOT part of [`SessionPair`]: every session-landing route
@@ -510,13 +510,13 @@ pub(crate) fn fresh_grant_header(headers: &axum::http::HeaderMap) -> Option<&str
 pub(crate) struct RefreshReq {
     /// The `r2` refresh credential a login or an earlier refresh issued.
     pub(crate) refresh_token: String,
-    /// The upgrade of a kept device after a key rotation ([ADR-0066] section
+    /// The upgrade of a kept device after a key rotation ([ADR-0074] section
     /// 3.3): URL-safe base64 of a 138-byte account statement, kind
     /// `session-upgrade`, body `BLAKE3(refresh_token)`, signed by the
     /// account's CURRENT identity key. Read only when the credential is of a
     /// lower key generation than the account's; ignored otherwise.
     ///
-    /// [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+    /// [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
     #[serde(default)]
     pub(crate) key_statement_b64: Option<String>,
 }
@@ -589,7 +589,7 @@ fn upgrade_verdict(
 ///    otherwise a fresh pair naming the same device (the refresh credential
 ///    slides to a fresh 30 days).
 ///
-/// # The upgrade (ADR-0066 section 3.3)
+/// # The upgrade (ADR-0074 section 3.3)
 ///
 /// A credential of a LOWER generation is normally answered `401
 /// key-generation-superseded`: the account's keys changed and this device's
@@ -694,7 +694,7 @@ pub(crate) async fn refresh(
     )?))
 }
 
-/// `POST /auth/session/logout` — bearer; no body, no grant ([ADR-0066]
+/// `POST /auth/session/logout` — bearer; no body, no grant ([ADR-0074]
 /// section 2.1). Raises the session floor of the token's own `(account,
 /// device)` to now, so the access token and every refresh credential this
 /// device holds stop working at auth at once; the other devices of the
@@ -709,7 +709,7 @@ pub(crate) async fn refresh(
 ///
 /// [`ApiError::Db`].
 ///
-/// [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+/// [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 #[axum::debug_handler]
 pub(crate) async fn logout(
     State(state): State<AppState>,
@@ -743,7 +743,7 @@ pub(crate) struct BindDeviceReq {
     pub(crate) refresh_token: String,
 }
 
-/// `POST /auth/session/bind-device` — bearer ([ADR-0066] section 0.4). A
+/// `POST /auth/session/bind-device` — bearer ([ADR-0074] section 0.4). A
 /// session that landed before the device had keys names no device; once the
 /// device has its conversation leaf key it calls this once and uses the pair
 /// it returns, which names the device. The unbound pair it replaces is not
@@ -767,7 +767,7 @@ pub(crate) struct BindDeviceReq {
 /// [`ApiError::KeyGenerationSuperseded`], [`ApiError::DeviceRevoked`],
 /// [`ApiError::DeviceAlreadyBound`], [`ApiError::Db`].
 ///
-/// [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+/// [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 #[axum::debug_handler]
 pub(crate) async fn bind_device(
     State(state): State<AppState>,
@@ -829,7 +829,7 @@ mod tests {
     /// grant: the grant is a separate type only the password login, the
     /// passkey login and the signup finish build. This pins the wire keys, so a grant field added
     /// to the shared type (and so to recovery login, TOTP recovery, the
-    /// device redeem, refresh) fails here. ADR-0066 added no key: the device
+    /// device redeem, refresh) fails here. ADR-0074 added no key: the device
     /// rides inside the two credentials.
     #[test]
     fn the_shared_session_pair_has_no_fresh_grant_field() {

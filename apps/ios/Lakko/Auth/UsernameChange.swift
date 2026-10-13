@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0068 — changing a username, and what keeps a rename from being
+// ADR-0076 — changing a username, and what keeps a rename from being
 // reverted by a device that has not heard of it. Pure rules:
 //
 //   * `LoginHandleState` / `HandleSync`   the session's handle sync: check
@@ -27,7 +27,7 @@ public enum LoginHandleState: String, Equatable, Sendable {
     case none
 }
 
-/// The session's handle sync (ADR-0068 section 2). It replaces the blind
+/// The session's handle sync (ADR-0076 section 2). It replaces the blind
 /// once-per-session `PUT`, which let a device with a stale name revert a
 /// rename made on another device.
 public enum HandleSync {
@@ -52,7 +52,7 @@ public enum HandleSync {
     }
 }
 
-/// What a device does when it reads the own-username register (ADR-0068
+/// What a device does when it reads the own-username register (ADR-0076
 /// section 3).
 public enum OwnUsernameRule {
 
@@ -93,7 +93,7 @@ public enum OwnUsernameRule {
     }
 }
 
-/// The rename (ADR-0068 section 4), pure.
+/// The rename (ADR-0076 section 4), pure.
 public enum UsernameRename {
 
     /// One rename per 30 days (D2).

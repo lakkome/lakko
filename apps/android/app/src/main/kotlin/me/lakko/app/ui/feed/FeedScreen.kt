@@ -343,7 +343,7 @@ public fun FeedScreen(
     // Every group and channel; the editor and the "Hidden from feeds" list
     // read these. The feed itself reads [sources], without the hidden ones.
     val allSources: List<FeedSource> = remember(chatState, flags, channelList, nameVersion, groupNameVersion, strings) {
-        // ADR-0065 R.5 — one source per conversation, drawn from its
+        // ADR-0073 R.5 — one source per conversation, drawn from its
         // current group, keyed for the person's stores on the conversation id.
         val groups = me.lakko.app.feed.groupFeedSources(
             chatState.conversations

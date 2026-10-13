@@ -212,7 +212,7 @@ export type RemoveByKeyResult =
 
 /**
  * Revoke the device whose leaf signature key is `deviceKey` from the
- * DeviceGroup (ADR-0066 section 2.3, step 4 of the removal operation).
+ * DeviceGroup (ADR-0074 section 2.3, step 4 of the removal operation).
  *
  * Addressed by key, not by leaf index, so a retry from the owed record after
  * a reload finds the right leaf whatever the epoch's numbering is, and a

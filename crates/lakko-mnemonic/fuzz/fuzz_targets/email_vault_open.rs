@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Fuzz target — the email-vault open path and the recovery-address rule
-//! (ADR-0067, via `fuzz_api::open_email_vault`). The sealed blob comes back
+//! (ADR-0075, via `fuzz_api::open_email_vault`). The sealed blob comes back
 //! from the server in the answer to a mailed code, so whoever controls
 //! that answer chooses every byte. It is opened under a fixed stretched key
 //! (Argon2id is skipped: its inputs are the person's, not the blob's),

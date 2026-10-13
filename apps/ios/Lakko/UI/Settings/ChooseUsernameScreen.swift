@@ -3,7 +3,7 @@
 
 import SwiftUI
 
-/// "Choose a username" (ADR-0067 pass A, part 2): one screen on which a
+/// "Choose a username" (ADR-0075 pass A, part 2): one screen on which a
 /// guest account gets a username and its first password. What it shows is
 /// ``UsernameClaim``; what a tap does is ``UsernameClaimModel``.
 ///

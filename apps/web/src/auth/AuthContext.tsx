@@ -28,7 +28,7 @@
  * present — no password re-entry required — or land in `anon`
  * otherwise (`silent-restore.ts`).
  *
- * ## The session pair and the key generation (ADR-0065)
+ * ## The session pair and the key generation (ADR-0073)
  *
  * Every landing installs a PAIR (`session-pair.ts`): a fifteen-minute
  * access token and a thirty-day refresh credential, issued under the
@@ -356,7 +356,7 @@ export type AuthState =
       /** If a previous session is cached on this device, expose
        *  the username so the login form can pre-fill it. */
       readonly cachedUsername?: string;
-      /** ADR-0065: the refresh credential was refused as invalid or had
+      /** ADR-0073: the refresh credential was refused as invalid or had
        *  expired, so the session ended on its own; the sign-in screen says
        *  so. Nothing was wiped. */
       readonly sessionExpired?: true;
@@ -392,7 +392,7 @@ export type AuthState =
 /** Result of a signup. */
 export interface SignupOutcome {
   /** The 12-word BIP39 recovery phrase the device generated and stored.
-   *  ADR-0067 D2: a sign-up with a username does NOT show it (the "Protect
+   *  ADR-0075 D2: a sign-up with a username does NOT show it (the "Protect
    *  your account" step follows instead, and the person may save a phrase
    *  later). The guest signup still shows it through its phrase screen. */
   recoveryPhrase: string;
@@ -483,12 +483,12 @@ export interface IdentitySecrets {
    *  that builds the canonical identity reads THIS, not
    *  `exportKey`. */
   readonly accountIdentitySeed: Uint8Array;
-  /** ADR-0066 section 3.5: after a proven key rotation, the 64-byte seed of
+  /** ADR-0074 section 3.5: after a proven key rotation, the 64-byte seed of
    *  the account key the conversation leaves are still bound to (the proven
    *  predecessor this device holds). Absent when the account never rotated.
    *  Read through {@link conversationSeedOf}. */
   readonly conversationIdentitySeed?: Uint8Array;
-  /** The access token of the session pair (ADR-0065). Fifteen minutes
+  /** The access token of the session pair (ADR-0073). Fifteen minutes
    *  long: a consumer that captures it is not wrong, because every bearer
    *  request goes through `sessionFetch`, which swaps in the live token;
    *  this field is updated on every refresh all the same. */
@@ -502,13 +502,13 @@ export interface IdentitySecrets {
 
 /** The seed of the account identity to use INSIDE a conversation (the role
  *  table, the journal ownership): the predecessor's while one is held, else
- *  the account's (ADR-0066 section 3.5). */
+ *  the account's (ADR-0074 section 3.5). */
 export function conversationSeedOf(secrets: IdentitySecrets): Uint8Array {
   return secrets.conversationIdentitySeed ?? secrets.accountIdentitySeed;
 }
 
 /**
- * ADR-0065 sections 3.5 and 4.2 (`docs/ux/identity-recovery.md` 15.2):
+ * ADR-0073 sections 3.5 and 4.2 (`docs/ux/identity-recovery.md` 15.2):
  * this device's keys are not the account's keys any more. One screen,
  * reached two ways:
  *
@@ -519,7 +519,7 @@ export function conversationSeedOf(secrets: IdentitySecrets): Uint8Array {
  *     generation (an anomaly, not a known reset). The screen blocks and the
  *     wipe runs on the person's tap ("Sign out").
  *   - `device-removed`: this device was removed from the account on another
- *     device (ADR-0066). The wipe runs by itself; "Removing..." then
+ *     device (ADR-0074). The wipe runs by itself; "Removing..." then
  *     "Sign in".
  */
 export type SignedOutState =
@@ -531,7 +531,7 @@ export type SignedOutState =
        *  "No more tries", "Not possible any more"); drawn above the body. */
       readonly notice?: RecallEndNotice;
     }
-  /** ADR-0066 section 1.1 (UX 18.4): the keys were reset on another device
+  /** ADR-0074 section 1.1 (UX 18.4): the keys were reset on another device
    *  and this device held them. The staged wipe ran; only the recall record
    *  is left. The screen asks "Was it you?". Driven by the record, so it is
    *  up again after a reload. */
@@ -541,7 +541,7 @@ export type SignedOutState =
       /** When this device learned of the reset, unix ms. */
       readonly learnedAtMs: number;
     }
-  /** ADR-0066 section 2.3 (UX 18.2): another device of the account removed
+  /** ADR-0074 section 2.3 (UX 18.2): another device of the account removed
    *  this one (auth answered `401 device-revoked`, or this device applied
    *  its own removal from the DeviceGroup). The wipe runs by itself, all of
    *  it, with no recall record; then one button, "Sign in". */
@@ -552,7 +552,7 @@ export type SignedOutState =
     }
   | { readonly reason: "identity-mismatch"; readonly phase: "blocked" | "removing" | "removed"; readonly username: string };
 
-/** The "Was it you?" screen's actions (ADR-0066 part 1). */
+/** The "Was it you?" screen's actions (ADR-0074 part 1). */
 export interface RecallApi {
   /** Ask the server whether the account can still be taken back from this
    *  device. Never throws; an expired record reads `closed` without a
@@ -568,7 +568,7 @@ export interface RecallApi {
   takeBack(
     oldPassword: string,
     newPassword: string,
-    /** ADR-0067 section 8 (UX 19.7), "Use my recovery phrase instead": the
+    /** ADR-0075 section 8 (UX 19.7), "Use my recovery phrase instead": the
      *  12 words from before the reset prove it and `oldPassword` is not
      *  used. A phrase the core refuses reads as a wrong one. */
     options?: { readonly phrase?: string },
@@ -605,7 +605,7 @@ export interface AuthApi {
    *  session lands. Kept off the `AuthState` object so it is not
    *  threaded through the route guards. */
   readonly freshPhrase: Accessor<string | null>;
-  /** ADR-0065 (UX 15.4): `true` while the keys were reset but the new
+  /** ADR-0073 (UX 15.4): `true` while the keys were reset but the new
    *  identity is not yet published to the directory and the device list.
    *  The phrase screen then shows the "publish owed" explanation and "Try
    *  again" instead of the words; `retryFreshPublish` repeats only the
@@ -622,7 +622,7 @@ export interface AuthApi {
   /** New recovery words this device owes the person a look at, until they
    *  acknowledge them; `null` otherwise. Set after the account keys were
    *  changed on this device (a key reset, taking the account back, a key
-   *  rotation, "Save a recovery phrase"), never by a sign-up (ADR-0067 D2:
+   *  rotation, "Save a recovery phrase"), never by a sign-up (ADR-0075 D2:
    *  the phrase is not shown at sign-up). While non-null BOTH route guards
    *  render the phrase screen instead of any route (`phrase-gate.ts`).
    *  Survives a reload and a sign-out/sign-in on this device: the fact that
@@ -632,14 +632,14 @@ export interface AuthApi {
   /** The user has written the new words down. Clears them (memory and the
    *  owed marker); the guards then render the route they wrap. */
   acknowledgeSignupPhrase(): void;
-  /** ADR-0067 (UX 19.1a): the sign-up's "Protect your account" step is
+  /** ADR-0075 (UX 19.1a): the sign-up's "Protect your account" step is
    *  owed. While `true` both route guards render that step instead of any
    *  route; it survives a reload (a marker in storage). */
   readonly protectStepOwed: Accessor<boolean>;
   /** The person chose on the "Protect your account" step (an email was
    *  added, a phrase is being saved, or "Continue without"). */
   finishProtectStep(): void;
-  /** A guest account chooses its username (ADR-0067 pass A, part 2): the
+  /** A guest account chooses its username (ADR-0075 pass A, part 2): the
    *  sign-up's claim, run later. Binds the login handle at auth, registers
    *  the name at discovery (releasing the handle again when that fails),
    *  saves the name in the local account marker and in the live session,
@@ -651,7 +651,7 @@ export interface AuthApi {
   claimGuestUsername(
     username: string,
   ): Promise<{ readonly username: string; readonly certificate: Uint8Array | null }>;
-  /** ADR-0068: the account's username changed on THIS device (the rename's
+  /** ADR-0076: the account's username changed on THIS device (the rename's
    *  server steps are done): the local marker, the live session, the handle
    *  marked known for this session, and the own-username register, which
    *  carries the name to the account's other devices. */
@@ -663,7 +663,7 @@ export interface AuthApi {
    *  username: it never saw the step). */
   offerProtectStep(): void;
   /** Land the session `POST /recovery-email/recover/password/finish`
-   *  answered (ADR-0067 section 7, password mode): the password was already
+   *  answered (ADR-0075 section 7, password mode): the password was already
    *  replaced by the mailed code, so no new-password step is owed and no
    *  fresh-auth proof is held. On a device that holds the account's keys the
    *  session lands; otherwise the guard shows "Restore your keys". */
@@ -675,7 +675,7 @@ export interface AuthApi {
   /** URL-safe base64 of this device's id for a landing of `username`'s
    *  account, when this device already holds its keys; else `undefined`. */
   landingDeviceIdFor(username: string): string | undefined;
-  /** ADR-0065: this device's keys are not the account's keys any more
+  /** ADR-0073: this device's keys are not the account's keys any more
    *  (`SignedOutState`). While non-null both route guards render the
    *  signed-out screen instead of any route, whatever `state()` says. */
   readonly signedOut: Accessor<SignedOutState | null>;
@@ -683,7 +683,7 @@ export interface AuthApi {
    *  the wipe; once `removed`, clears the screen so the sign-in page can
    *  show. */
   confirmSignedOut(): Promise<void>;
-  /** ADR-0066 part 1 (UX 18.4): the actions of the "Was it you?" screen.
+  /** ADR-0074 part 1 (UX 18.4): the actions of the "Was it you?" screen.
    *  Each is a no-op (or `unknown` / `closed`) when no recall record is
    *  held. */
   readonly recall: RecallApi;
@@ -691,7 +691,7 @@ export interface AuthApi {
    *  one line at the top of the chat list (`devices.recall.done`). */
   readonly recallDone: Accessor<boolean>;
   dismissRecallDone(): void;
-  /** ADR-0066 section 2.3: this device applied its own removal from the
+  /** ADR-0074 section 2.3: this device applied its own removal from the
    *  account's DeviceGroup (`DeviceGroup.isActive` is `false`), which is
    *  proof of removal by a device of the account. Shows the removed screen
    *  and wipes everything by itself. Called by the DeviceGroup sync runtime;
@@ -711,7 +711,7 @@ export interface AuthApi {
    *  `chat/keypackage-publisher.ts`). Rejects when there is no session or any
    *  step fails. */
   republishKeyPackage(): Promise<void>;
-  /** ADR-0066 (a device paired after a key rotation): after a pairing state
+  /** ADR-0074 (a device paired after a key rotation): after a pairing state
    *  bundle stored the account's earlier keys on a signed-in device, mint
    *  the device binding again under the conversation key and publish the
    *  KeyPackage again, but only while this device holds no conversation.
@@ -724,7 +724,7 @@ export interface AuthApi {
    *  derives the device root key + writes it to IndexedDB, and
    *  flips state to `session` with the "Protect your account" step owed
    *  (`protectStepOwed`). The recovery phrase is stored on the device and
-   *  not shown (ADR-0067 D2). */
+   *  not shown (ADR-0075 D2). */
   /** `options.signal` cancels the account-creation proof of work (ADR-0054
    *  S4) and everything after it; the abort rejects with an `AbortError`
    *  (`auth/pow.ts` `isAbortError`) and nothing is created server-side. */
@@ -830,7 +830,7 @@ export interface AuthApi {
    *  everything else stay) and throws `ThreeWordsSuspendedError`. */
   recoverWithThreeWords(positions: Uint8Array, words: readonly string[]): Promise<boolean>;
   /**
-   * ADR-0066 part 3 (Stage A): changing the account keys with the other
+   * ADR-0074 part 3 (Stage A): changing the account keys with the other
    * devices kept. The auth layer's half; `devices/key-rotation.ts` decides
    * and `devices/key-rotation-runtime.ts` runs the operation.
    */
@@ -859,7 +859,7 @@ export interface AuthApi {
     commit(
       grant: string,
       revokeDeviceIds: readonly Uint8Array[],
-      /** ADR-0067 section 3: `phraseSaved` makes the account
+      /** ADR-0075 section 3: `phraseSaved` makes the account
        *  phrase-protected in the same transaction ("Save a recovery
        *  phrase"); the server deletes the email vault with it. */
       options?: { readonly phraseSaved?: boolean },
@@ -893,8 +893,8 @@ export interface AuthApi {
     reportSuperseded(): void;
   };
   /** Whether this device still owes the directory or the device list the
-   *  signed-in account's new keys (ADR-0065: a reset whose publish has not
-   *  succeeded; ADR-0066: a key rotation with a publishing step owed). While
+   *  signed-in account's new keys (ADR-0073: a reset whose publish has not
+   *  succeeded; ADR-0074: a key rotation with a publishing step owed). While
    *  it does, the phrase is not shown anywhere. */
   publishOwed(): boolean;
   /** Retry the owed publishing steps for the signed-in account with the
@@ -911,7 +911,7 @@ export interface AuthApi {
    *  is discarded. `false` on a wrong password; throws on a limit (`429`),
    *  when offline, or for an account without a username. */
   verifyPassword(password: string): Promise<boolean>;
-  /** Passkey sign-in (ADR-0064 decision 6, UX spec section 4). The
+  /** Passkey sign-in (ADR-0072 decision 6, UX spec section 4). The
    *  ceremony is discoverable: it needs no account cached on this device and
    *  no typed name. On a device that holds the account's keys it lands
    *  signed in. On a device without them it restores the keys when this
@@ -957,7 +957,7 @@ export interface AuthApi {
    *  device that holds the account's keys. */
   readonly canReplacePassword: Accessor<boolean>;
   /** Replace the account's password from a device that holds its keys,
-   *  without typing the phrase (UX spec 7.1, ADR-0064 "Password replacement
+   *  without typing the phrase (UX spec 7.1, ADR-0072 "Password replacement
    *  from a device that holds the keys"). The cached 64-byte identity seed
    *  is the recovery OPAQUE input `/password/reset/*` accepts, so the device
    *  proves it holds the keys and the person types only the new password.
@@ -965,7 +965,7 @@ export interface AuthApi {
    *  stored device key is kept. */
   replacePassword(
     newPassword: string,
-    /** ADR-0067 (UX 19.6): the "It was not me" screen of an account notice
+    /** ADR-0075 (UX 19.6): the "It was not me" screen of an account notice
      *  asks nothing but the new password, since this device holds the keys
      *  and the person was just told someone else changed or used the
      *  account's password. */
@@ -999,7 +999,7 @@ export interface AuthApi {
     session?: SessionPair,
     /** The pairing's own state to land under the device key BEFORE the
      *  session's identities are installed: the in-memory DeviceGroup leaf of
-     *  an anonymous join, and the state bundle (ADR-0066: the account's
+     *  an anonymous join, and the state bundle (ADR-0074: the account's
      *  earlier keys must be stored before the conversation identity is
      *  minted). Best effort. */
     persistJoinState?: (deviceKey: CryptoKey) => Promise<void>,
@@ -1022,7 +1022,7 @@ export interface AuthApi {
      *  CONSUMED: zeroized here, and the seed derived from it is zeroized
      *  on every refusal path. */
     readonly phraseEntropy: Uint8Array;
-    /** The redeemed session pair (ADR-0065). */
+    /** The redeemed session pair (ADR-0073). */
     readonly session: SessionPair;
     /** Persist the pairing's in-memory DeviceIdentity seed +
      *  DeviceGroup snapshot under the freshly-bootstrapped device
@@ -1032,7 +1032,7 @@ export interface AuthApi {
      *  new-password step once the session lands (UX spec section 7). */
     readonly forgotPassword?: boolean;
   }): Promise<void>;
-  /** "Reset account keys" (ADR-0065 section 2.3, UX 15.1): the one path
+  /** "Reset account keys" (ADR-0073 section 2.3, UX 15.1): the one path
    *  that gives the account a new identity. Callable ONLY while
    *  `pendingRecovery() !== null` (the person recovered ACCESS and is
    *  parked in `needs-recovery-phrase` with no phrase and no other device)
@@ -1170,7 +1170,7 @@ interface PendingFreshPhrase {
   readonly seed: Uint8Array;
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  /** The session pair at the NEW generation (ADR-0065). */
+  /** The session pair at the NEW generation (ADR-0073). */
   readonly session: SessionPair;
   readonly username: string;
   /** The freshly-minted 12-word recovery phrase — re-exposed to the
@@ -1186,7 +1186,7 @@ function plainStorage(): Storage | undefined {
   return typeof localStorage === "undefined" ? undefined : localStorage;
 }
 
-/** The `recall-status` kind of an account statement (ADR-0066 section 0.3). */
+/** The `recall-status` kind of an account statement (ADR-0074 section 0.3). */
 const ACCOUNT_STATEMENT_RECALL_STATUS = 1;
 /** How long a kept device waits before it asks again for the new keys. */
 const ADOPTION_RETRY_MS = 20_000;
@@ -1195,7 +1195,7 @@ const ADOPTION_RETRY_MS = 20_000;
 const KEY_ROTATION_PORT_WAIT_MS = 20_000;
 /** How long an unanswered `recall/finish` is asked again before a new
  *  attempt is opened: the server keeps the outcome for the attempt's own ten
- *  minutes (ADR-0066 T5 item 25); a little under it. */
+ *  minutes (ADR-0074 T5 item 25); a little under it. */
 const RECALL_FINISH_RETRY_WINDOW_MS = 9 * 60 * 1000;
 
 const loadPersisted = loadPersistedAccount;
@@ -1244,7 +1244,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // The signup recovery phrase awaiting acknowledgement — see
   // `AuthApi.signupPhrase` and `phrase-gate.ts`.
   const [signupPhrase, setSignupPhrase] = createSignal<string | null>(null);
-  // ADR-0067 (UX 19.1a): bumped when the "Protect your account" marker of
+  // ADR-0075 (UX 19.1a): bumped when the "Protect your account" marker of
   // the signed-in account is written or cleared.
   const [protectVersion, setProtectVersion] = createSignal(0);
   const protectStepOwed = (): boolean => {
@@ -1272,18 +1272,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     );
   };
   const newPasswordOffered = (): boolean => newPasswordOwed() && canReplacePassword();
-  // ADR-0065: this device's keys are not the account's keys any more (a
+  // ADR-0073: this device's keys are not the account's keys any more (a
   // superseded session, or a landing that found other keys published). The
   // guards render the signed-out screen while this is set.
   const [signedOut, setSignedOut] = createSignal<SignedOutState | null>(null);
   // UX 15.3: the keys were reset on this device in this page session.
   const [keyResetNote, setKeyResetNote] = createSignal(false);
-  // ADR-0066 part 1: the recall record this page holds open (the "Was it
+  // ADR-0074 part 1: the recall record this page holds open (the "Was it
   // you?" screen), with the device key that seals it; and whether the
   // account was taken back in this page session.
   let recallHeld: { readonly record: RecallRecord; readonly deviceKey: CryptoKey } | null = null;
   const [recallDone, setRecallDone] = createSignal(false);
-  // ADR-0065 section 4.2, last paragraph: an attestation older than the
+  // ADR-0073 section 4.2, last paragraph: an attestation older than the
   // client-side bound is applied only after an explicit sign-in in this page
   // (a silent restore is not one).
   let explicitSignInThisPage = false;
@@ -1292,14 +1292,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   const discovery = new DiscoveryClient();
   /**
    * Install (or drop) the session everywhere a request draws on it: the
-   * session token provider (ADR-0065: refresh ahead of expiry, one retry on
+   * session token provider (ADR-0073: refresh ahead of expiry, one retry on
    * a 401, the superseded signal), the discovery client's bearer header and
    * the anonymous-token pool (ADR-0054 S3), which draws its tokens WITH this
    * session and spends them without it. A different account swaps the pool
    * to that account's own tokens; `null` stops drawing but keeps what is
    * held until the sign-out has spent its push unregister.
    */
-  // ADR-0065 (amended 2026-10-06): the fresh-auth proof. Memory only, never
+  // ADR-0073 (amended 2026-10-06): the fresh-auth proof. Memory only, never
   // persisted, never logged (`fresh-auth.ts`).
   const freshGrants = createFreshGrantHolder();
   // How this page's session was landed (UX 17.6); with the session, in
@@ -1357,7 +1357,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     discovery.setSessionToken(null);
     anonTokens.setSessionToken(null);
   }
-  /** ADR-0066 section 0.4: the `device_id_b64` a landing for `target`
+  /** ADR-0074 section 0.4: the `device_id_b64` a landing for `target`
    *  asserts, or `undefined` when this browser does not know the device
    *  identity of that account yet (the session is bound afterwards). */
   function landingDevice(target: LandingTarget): string | undefined {
@@ -1368,7 +1368,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     });
   }
   /**
-   * ADR-0066 section 0.4: make the held session name THIS device (its
+   * ADR-0074 section 0.4: make the held session name THIS device (its
    * conversation leaf key, the id of its directory row). A session that
    * landed before the device identity existed (a signup, a first sign-in on
    * this browser) is replaced once through `bind-device`; one that already
@@ -1410,7 +1410,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     await adoptProofSession(accountIdB64, bound);
   }
   /**
-   * ADR-0066 section 0.1: auth records the account's identity key on the
+   * ADR-0074 section 0.1: auth records the account's identity key on the
    * FIRST genesis mint and attests only that key afterwards; without a
    * recorded key no device can be removed. So the mint runs at signup and on
    * every landing until it has succeeded once for the key this device holds
@@ -1456,7 +1456,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       console.warn("genesis-attest (landing) failed", err);
     }
   }
-  /** `POST /auth/session/logout` for `pair` (ADR-0066 section 2.1), with a
+  /** `POST /auth/session/logout` for `pair` (ADR-0074 section 2.1), with a
    *  refresh first when the access token expired. Never throws. */
   function serverLogout(pair: SessionPair | null): Promise<LogoutAttempt> {
     return runServerLogout(pair, {
@@ -1561,7 +1561,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // state doesn't bleed across user sessions on the same tab.
   const chats = useChats();
 
-  // ADR-0066 section 0.4: a landing may hand the secrets the pair it was
+  // ADR-0074 section 0.4: a landing may hand the secrets the pair it was
   // given while `bind-device` has already replaced it. Every reader of
   // `identitySecrets().sessionToken` then gets the live (device-bound) one.
   createEffect(() => {
@@ -1596,7 +1596,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     });
   });
 
-  // ADR-0068: the own-username register. A name auth confirmed, with an
+  // ADR-0076: the own-username register. A name auth confirmed, with an
   // empty register, seeds it once; a register that names another name than
   // the local marker is adopted (the account was renamed, or its name
   // chosen, on another device).
@@ -1695,7 +1695,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     createKeyPackage: (ctx) => ctx.identity.createKeyPackage(),
     persistDurable: (ctx) =>
       chats.persistSnapshotDurable(ctx.accountIdB64, ctx.identity),
-    // ADR-0050: the row is keyed by this device's leaf key. ADR-0066
+    // ADR-0050: the row is keyed by this device's leaf key. ADR-0074
     // section 2.2: the session must name that same device, so it is bound
     // first; `device-mismatch` means the hint was wrong (bind for real, try
     // once more), and discovery's `device-revoked` is not proof of removal:
@@ -1736,7 +1736,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * No publish-back (ADR-0065 section 4.2): read what the directory
+   * No publish-back (ADR-0073 section 4.2): read what the directory
    * publishes for this account BEFORE anything is uploaded, and decide with
    * `landing-rule.ts`:
    *
@@ -1853,7 +1853,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   async function restoreOwedSignupPhrase(accountIdB64: string): Promise<void> {
     const storage = typeof localStorage === "undefined" ? undefined : localStorage;
     if (!isSignupPhraseOwed(storage, accountIdB64)) return;
-    // ADR-0067 (alignment I): new words are shown only to a phrase-protected
+    // ADR-0075 (alignment I): new words are shown only to a phrase-protected
     // account. The owner of any other account was never shown words, so none
     // are shown after a rotation, a reset or a recall either, and a guest
     // sign-up shows none: the owed marker is dropped, nothing is withheld.
@@ -1870,7 +1870,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // not findable yet, so the words are withheld until both publishing
     // steps landed (`settleOwedKeyResetPublish` calls back here then).
     if (isKeyResetOwed(storage, accountIdB64)) return;
-    // ADR-0066 part 3: the same while a key rotation still owes a step.
+    // ADR-0074 part 3: the same while a key rotation still owes a step.
     if (readRotation(storage, accountIdB64) !== null) return;
     try {
       const deviceKey = await getDeviceKey(accountIdB64);
@@ -1906,7 +1906,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     wasm: Wasm,
     canonical: WasmIdentity,
     accountIdB64: string,
-    /** ADR-0066 — `true` when the session is already running (a pairing
+    /** ADR-0074 — `true` when the session is already running (a pairing
      *  state bundle just stored the account's earlier keys). The device
      *  identity the conversations use is then replaced only when the
      *  binding is minted again, which happens only while this device holds
@@ -1921,7 +1921,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     let device: WasmIdentity | null = null;
     // In a live session: whether the device identity is left as it is.
     let keepLiveDevice = live;
-    // ADR-0066 section 3.5 (Stage A): after a proven key rotation the
+    // ADR-0074 section 3.5 (Stage A): after a proven key rotation the
     // conversation leaves stay bound to the account key of before it, and a
     // re-bound device would misjudge its own standing in every group it is
     // in (fact 14). So the binding this device mints is under the OLDEST
@@ -1936,7 +1936,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     try {
       const deviceKey = await getDeviceKey(accountIdB64);
       if (deviceKey !== null) {
-        // ADR-0066 section 3.5a - own predecessors are a chain, oldest
+        // ADR-0074 section 3.5a - own predecessors are a chain, oldest
         // first: the conversation key, then the keys held between it and
         // the current one.
         let seeds: Uint8Array[] = [];
@@ -2007,7 +2007,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
         const remint = live ? rebindsAfterStateBundle(verdict) : verdict === "mint" || verdict === "remint";
         if (remint || live) {
-          // ADR-0065 section 2.3 step 5 covers `mint`: a binding minted
+          // ADR-0073 section 2.3 step 5 covers `mint`: a binding minted
           // before a key reset names the OLD key (a reset keeps no
           // predecessor) and would publish a KeyPackage nobody can resolve
           // to this account. In a live session the parsed copy is dropped
@@ -2055,7 +2055,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     } else {
       chats.setIdentity(device);
     }
-    // ADR-0066 section 0.4: the id this device's sessions name (its leaf
+    // ADR-0074 section 0.4: the id this device's sessions name (its leaf
     // key, the id of its directory row), recorded so the next landing for
     // this account can assert it before any wrapped store is opened.
     const installed = chats.identity()?.signaturePublicKey;
@@ -2066,7 +2066,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * ADR-0065: a reset whose publishing steps did not all succeed leaves a
+   * ADR-0073: a reset whose publishing steps did not all succeed leaves a
    * record (`key-reset-owed.ts`). When a session for that account lands,
    * the device holds the new seed, so the steps are tried again here, in
    * the background. Success clears the record and shows the phrase if it
@@ -2120,7 +2120,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * The publishing half of a key reset (ADR-0065 section 2.3 steps 3-5,
+   * The publishing half of a key reset (ADR-0073 section 2.3 steps 3-5,
    * contract section 5), run from the stored record so a retry after a
    * crash or a failure repeats exactly the steps that did not land, with
    * the SAME attestation:
@@ -2212,10 +2212,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   ): Promise<void> {
     // G-30 #2 (ADR-0019): a new key is a NEW transparency-log binding, so
     // the genesis self-signature authorises it, plus the ADR-0036
-    // attestation (soft-fail), plus the ADR-0065 attestation that lets
+    // attestation (soft-fail), plus the ADR-0073 attestation that lets
     // discovery accept a key change without a supersession proof.
     const leafAuth = await mintLeafGenesisAuth(canonical, accountIdBytes);
-    // ADR-0066 section 0.1: `reset/finish` already recorded the new key at
+    // ADR-0074 section 0.1: `reset/finish` already recorded the new key at
     // auth; this mint is the idempotent call for it and writes the mark.
     const genesisAttest = await mintGenesisAndRecord(
       base64Encode(accountIdBytes),
@@ -2339,7 +2339,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   // -------------------------------------------------------------------
-  // ADR-0065 section 3.5: the old device signs out and wipes
+  // ADR-0073 section 3.5: the old device signs out and wipes
   // -------------------------------------------------------------------
 
   /** The name to show on the signed-out screen. */
@@ -2385,7 +2385,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       fresh.seed.fill(0);
       setPendingFreshPhrase(null);
     }
-    // ADR-0066 section 1.1: the staged wipe is the same list minus the
+    // ADR-0074 section 1.1: the staged wipe is the same list minus the
     // recall record and the device key that seals it.
     if (mode === "staged") await wipeAccountStaged(accountIdB64);
     else await wipeAccountLocalData(accountIdB64);
@@ -2399,7 +2399,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * The recall record a superseded device keeps (ADR-0066 section 1.1), or
+   * The recall record a superseded device keeps (ADR-0074 section 1.1), or
    * `null` when it keeps none: no device key, no account key on this device,
    * or the record could not be written. An existing record (another tab of
    * this account wrote it, or an earlier page) is used as it is, unless it
@@ -2498,7 +2498,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   async function signOutAfterKeyReset(accountIdB64: string): Promise<void> {
     const current = signedOut();
     if (current !== null && (current.reason === "keys-reset" || current.reason === "recall")) return;
-    // ADR-0066 section 3.3: "superseded" is also what a kept device is told
+    // ADR-0074 section 3.3: "superseded" is also what a kept device is told
     // after the keys were changed WITH the devices kept. It adopts the new
     // keys when it holds (or finds in its DeviceGroup journal) the envelope
     // for them; only otherwise is this a reset.
@@ -2673,7 +2673,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     readonly preparedAtMs: number;
   } | null = null;
 
-  /** Take the account back (ADR-0066 part 1). From the server's answer on
+  /** Take the account back (ADR-0074 part 1). From the server's answer on
    *  it is the key reset's client order (`adoptKeyResetOutcome`). */
   function recallTakeBack(
     oldPassword: string,
@@ -2715,7 +2715,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /** What one recall runs against: the recall record of an old device, or
-   *  (ADR-0067 section 8) the key a typed phrase derives. */
+   *  (ADR-0075 section 8) the key a typed phrase derives. */
   interface RecallTarget {
     readonly accountIdB64: string;
     readonly username: string;
@@ -2803,7 +2803,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       let seed: Uint8Array;
       let phrase: string;
       let newPubkey: Uint8Array;
-      // ADR-0066 T5 item 25: a finish that was sent and never answered may
+      // ADR-0074 T5 item 25: a finish that was sent and never answered may
       // have LANDED. Ask it again with the same bytes (the server answers an
       // identical finish 200 again for the attempt's ten minutes) before
       // anything new is generated: the phrase of that attempt is the
@@ -2844,7 +2844,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         setPhraseProtected(plainStorage(), accountIdB64, check.status.phraseArm);
         const wasm = await loadWasm();
         // A brand-new phrase and identity: the old key authorises the recall
-        // and does not return (ADR-0066 section 1.2).
+        // and does not return (ADR-0074 section 1.2).
         const mnemonic = wasm.RecoveryMnemonic.generate();
         phrase = mnemonic.phrase;
         seed = mnemonic.toSeed();
@@ -2913,7 +2913,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
   /** A statement of `kind` by the key `oldSeed` signs with, for a device
    *  that names the account by login handle: the account field carries the
-   *  first 16 bytes of the handle (ADR-0067 section 8). */
+   *  first 16 bytes of the handle (ADR-0075 section 8). */
   async function recallStatusByHandle(
     handle: LoginHandle,
     oldSeed: Uint8Array,
@@ -3039,7 +3039,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * ADR-0066 section 2.3 (UX 18.2): this device was removed from the account
+   * ADR-0074 section 2.3 (UX 18.2): this device was removed from the account
    * on another device. Auth said so (`401 device-revoked`), or this device
    * applied its own removal from the DeviceGroup. Stop every writer, show
    * the removed screen, and wipe EVERYTHING by itself: no button, and no
@@ -3061,7 +3061,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
-  /** A different key at the same generation (ADR-0065 4.2 rule 4): block,
+  /** A different key at the same generation (ADR-0073 4.2 rule 4): block,
    *  wipe on the tap. */
   function blockOnIdentityMismatch(accountIdB64: string, username: string): void {
     if (signedOut() !== null) return;
@@ -3146,12 +3146,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         account: { accountId: args.accountIdB64, username: args.username },
       });
       void (async (): Promise<void> => {
-        // ADR-0065 section 4.2: the published identity is read BEFORE any
+        // ADR-0073 section 4.2: the published identity is read BEFORE any
         // upload, a reload included; a stale device shows the signed-out
         // screen over the session that just landed.
         const verdict = await checkPublished(true);
         if (chats.accountIdentity() === canonical && !landingSignsOut(verdict)) {
-          // ADR-0066: the restored session names this device (it was bound
+          // ADR-0074: the restored session names this device (it was bound
           // when it landed; a no-op then), and the account key is recorded
           // at auth (until it has succeeded once).
           await ensureSessionDeviceBound(args.accountIdB64).catch((err: unknown) => {
@@ -3178,12 +3178,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // Create -> durable persist -> upload (see `chat/keypackage-publisher.ts`).
     // The persist inside it also captures the rehydrated state, which is what
     // the separate post-login snapshot write used to do. The upload binds the
-    // session to this device first (ADR-0066 section 0.4).
+    // session to this device first (ADR-0074 section 0.4).
     await publishKeyPackageBestEffort("sign-in");
     // The bind may have ended the session (this device was removed, or the
     // session named another device): nothing lands then.
     if (sessionTokens.accountIdB64() !== args.accountIdB64) return;
-    // ADR-0066 section 0.1: record the account key at auth, on every landing
+    // ADR-0074 section 0.1: record the account key at auth, on every landing
     // until it has succeeded once.
     await ensureGenesisRecorded(args.accountIdB64, canonical);
 
@@ -3363,7 +3363,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         keysOnDevice = false;
       }
     }
-    // ADR-0067 section 11: three words exist only for a phrase-protected
+    // ADR-0075 section 11: three words exist only for a phrase-protected
     // account (the flag this device keeps; `protect/account-protection.ts`).
     if (!isPhraseProtected(plainStorage(), cached.accountIdB64)) return null;
     if (
@@ -3389,7 +3389,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   ): Promise<Awaited<ReturnType<WebauthnClient["loginWithPasskey"]>>> {
     const webauthn = new WebauthnClient();
     try {
-      // ADR-0066 section 0.4: a discoverable ceremony does not know the
+      // ADR-0074 section 0.4: a discoverable ceremony does not know the
       // account before it finishes, so it asserts no device (the session is
       // bound afterwards); one limited to an account asserts that account's.
       const deviceIdB64 = accountIdB64 === undefined ? undefined : landingDevice({ accountIdB64 });
@@ -3427,7 +3427,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
   /**
    * Ask a passkey for the account's keys, while a recovery context is
-   * parked (ADR-0064 decision 6). The PRF output opens the blob stored for
+   * parked (ADR-0072 decision 6). The PRF output opens the blob stored for
    * the credential into the 12-word phrase, and the phrase goes through
    * `provideRecoveryPhrase`, whose check against the published identity is
    * fail-closed. `restored` means the session landed. The PRF output stays
@@ -3515,7 +3515,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   });
 
   /**
-   * A recall record on this browser (ADR-0066 section 1.1): the "Was it
+   * A recall record on this browser (ADR-0074 section 1.1): the "Was it
    * you?" screen is owed, whatever else the stores say. A row that cannot be
    * opened (no device key, damaged) can take nothing back and is dropped; a
    * record past the window ends here (the rest of the wipe).
@@ -3564,7 +3564,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   async function restoreSessionOnLoad(): Promise<void> {
     if (await restoreOwedRecall()) return;
     const probe = await probeStoredSecrets();
-    // ADR-0066 section 2.3: a logout that could not reach the server left a
+    // ADR-0074 section 2.3: a logout that could not reach the server left a
     // marker and the stored pair. That pair is not a session to restore; it
     // is what the ONE retry signs out with, and it goes whatever the answer.
     const logoutOwed =
@@ -3611,7 +3611,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       return;
     }
     const seed = probe.identitySeed;
-    // ADR-0065 section 3.3: a reload refreshes with the credential instead
+    // ADR-0073 section 3.3: a reload refreshes with the credential instead
     // of reusing the persisted access token. `superseded` and `invalid` are
     // handled by the provider's listener (the signed-out screen and wipe /
     // the sign-in screen); a network failure keeps the persisted pair, and
@@ -3673,9 +3673,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   };
 
   /**
-   * What a device does once the server answered a key reset (ADR-0065
+   * What a device does once the server answered a key reset (ADR-0073
    * section 2.3 from step 3 on), shared by "Reset account keys"
-   * (`mintFreshIdentity`) and by taking the account back (ADR-0066 part 1:
+   * (`mintFreshIdentity`) and by taking the account back (ADR-0074 part 1:
    * from here a recall IS a reset). The new pair, the seed and the phrase
    * are stored and the "publish owed" record written before any further
    * network call; then the phrase screen's state, then the attested
@@ -3743,7 +3743,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       done: { directory: false, deviceGroup: false },
     };
     writeKeyResetOwed(plainStorage(), ctx.accountIdB64, record);
-    // ADR-0065 R.4 - part of the reset's client order: from now until the
+    // ADR-0073 R.4 - part of the reset's client order: from now until the
     // expiry this account's reach sync keeps the continuity key registered
     // on the NEW mailbox (`reach/reach-service.ts`), so a former contact
     // whose device accepted the reset can deliver a Welcome. The marker
@@ -3753,7 +3753,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       keyGeneration: Number(ctx.reset.session.keyGeneration),
       signedAtMs: record.signedAtMs,
     });
-    // ADR-0066 section 3.5: a reset makes every predecessor, proven or not,
+    // ADR-0074 section 3.5: a reset makes every predecessor, proven or not,
     // a superseded key, and ends a rotation this device was finishing.
     clearRotation(plainStorage(), ctx.accountIdB64);
     clearRotatedNotice(plainStorage(), ctx.accountIdB64);
@@ -3828,7 +3828,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   // -------------------------------------------------------------------
-  // ADR-0066 part 3 (Stage A): the account keys changed WITH the devices
+  // ADR-0074 part 3 (Stage A): the account keys changed WITH the devices
   // kept. `devices/key-rotation.ts` decides; this is the auth layer's half.
   // -------------------------------------------------------------------
 
@@ -3899,7 +3899,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }));
     await putAccountIdentitySeed(ctx.accountIdB64, seed, ctx.deviceKey);
     await storeDevicePhrase(ctx.accountIdB64, phrase, ctx.deviceKey, "key-rotation");
-    // ADR-0066 section 3.5a rule 4: the mailbox of the key just left is read
+    // ADR-0074 section 3.5a rule 4: the mailbox of the key just left is read
     // for 30 days from now, then left. Its own window: an earlier
     // predecessor's is not started again.
     stampPredecessorAdoption(
@@ -3911,7 +3911,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * ADR-0066 (a device paired after a key rotation) — a pairing state bundle
+   * ADR-0074 (a device paired after a key rotation) — a pairing state bundle
    * just stored the account's earlier keys on a device whose session is
    * already running (it was signed in, then paired by showing its code).
    * While it holds no conversation its binding is minted again under the
@@ -4046,7 +4046,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * The order on a superseded device (ADR-0066 section 3.3,
+   * The order on a superseded device (ADR-0074 section 3.3,
    * `supersededStep`): exchange the refresh credential with a statement by
    * the held key, then by each pending envelope's key; the key the server
    * accepts is the account's. With nothing accepted, read the DeviceGroup
@@ -4143,7 +4143,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             newPubkeyB64: keyB64,
           });
           markRotatedNotice(plainStorage(), accountIdB64);
-          // ADR-0066 section 3.5a rule 5: this KEPT device's own links and
+          // ADR-0074 section 3.5a rule 5: this KEPT device's own links and
           // unanswered requests were granted under the key just left. The
           // marker keeps their revoke and re-send owed across reloads.
           markSpendOwed(accountIdB64, Date.now(), plainStorage());
@@ -4266,7 +4266,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
-  // ----- The rotating device (ADR-0066 section 3.2) ---------------------
+  // ----- The rotating device (ADR-0074 section 3.2) ---------------------
 
   function rotationSession(): {
     accountIdB64: string;
@@ -4899,7 +4899,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // ADR-0036: also mint the auth-attested genesis (anti-squatting).
       // Soft-fail — the append accepts the self-sig alone while the
       // operator flag is default-OFF, so this never blocks signup.
-      // ADR-0066 section 0.1: this first mint is also what records the
+      // ADR-0074 section 0.1: this first mint is also what records the
       // account key at auth.
       const signupGenesisAttest = await mintGenesisAndRecord(
         accountIdB64,
@@ -4937,7 +4937,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionExpiresAtMs: result.session.sessionExpiresAtMs,
         keyGeneration: result.session.keyGeneration,
       });
-      // ADR-0067 D2: the phrase is generated and stored exactly as before,
+      // ADR-0075 D2: the phrase is generated and stored exactly as before,
       // and NOT shown. A device that holds the keys holds the phrase (the
       // hand-over to a new device, the email vault's seal, a later "Save a
       // recovery phrase").
@@ -4949,7 +4949,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // a reload until the person chose.
       markProtectStepOwed(plainStorage(), accountIdB64);
       setProtectVersion((v) => v + 1);
-      // ADR-0068: the claimed name goes into the own-username register
+      // ADR-0076: the claimed name goes into the own-username register
       // (applied when the synced state of the new account is loaded).
       setConfirmedUsername({ accountIdB64, username: normalisedUsername });
       rememberUsername(accountIdB64, normalisedUsername);
@@ -5249,7 +5249,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async loginWithPasskey(usernameHint, options) {
-      // ADR-0064 decision 6 / UX spec section 4. Discoverable: no account
+      // ADR-0072 decision 6 / UX spec section 4. Discoverable: no account
       // has to be cached on this device and no name typed. The assertion
       // grants ACCESS; what happens next is the shared ACCESS-only landing,
       // with one addition on a device without the keys: this passkey is
@@ -5735,7 +5735,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       try {
         // Not `accessByName`: nothing is re-bound.
         // The pair this yields replaces the session's, so it must name the
-        // same device (ADR-0066 section 0.4).
+        // same device (ADR-0074 section 0.4).
         signedIn = await client.login(
           target.handle.wire,
           utf8(password),
@@ -5816,7 +5816,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async mintFreshIdentity() {
-      // "Reset account keys" (ADR-0065 section 2.3, UX 15.1). Reachable ONLY
+      // "Reset account keys" (ADR-0073 section 2.3, UX 15.1). Reachable ONLY
       // while a `pendingRecovery` is parked: the user recovered ACCESS via
       // an ADR-0018 factor and is sitting in `needs-recovery-phrase` with
       // NO phrase and NO other device. The explicit, typed-confirmation
@@ -6566,7 +6566,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // Drop the in-memory Identity secrets — the user just
       // signed out.
       const cached = loadPersisted();
-      // ADR-0066 section 2.1 (UX 18.2, "Log out"): sign this device's
+      // ADR-0074 section 2.1 (UX 18.2, "Log out"): sign this device's
       // session out at the server too, so a copy of what it held cannot keep
       // using the account. Best effort and invisible: the local sign-out
       // below never waits for it. The marker is set first; when the server
@@ -6606,7 +6606,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // the per-session bearer dies. Fire-and-forget — the API
       // contract is sync and the deletion is best-effort.
       //
-      // ADR-0066: the row is deleted once the server holds the logout; while
+      // ADR-0074: the row is deleted once the server holds the logout; while
       // that is owed it stays for the one retry, and the marker keeps a
       // reload from restoring a session out of it.
       const storedFor = heldAccount ?? cached?.accountIdB64 ?? null;
@@ -6674,7 +6674,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           }
         }
       }
-      // ADR-0066 section 2.1: the session is signed out at the server too,
+      // ADR-0074 section 2.1: the session is signed out at the server too,
       // so a copy of the credentials this device held stops working. Best
       // effort, once: the wipe below leaves nothing to retry it with. (The
       // row delete above tombstoned this device's id; the wipe removes the
@@ -6835,7 +6835,7 @@ async function probeStoredSecrets(): Promise<{
  * this genesis key (closes the first-entry-squatting residual the
  * self-signature only DETECTS). Omitted on every non-genesis path.
  *
- * ADR-0065: `keyResetAttest`, when present, is the key-reset attestation
+ * ADR-0073: `keyResetAttest`, when present, is the key-reset attestation
  * (from `AuthClient.resetAccountKeys`) under which discovery accepts a
  * changed key without a supersession proof. Supplied ONLY by the
  * key-reset publish (`publishResetIdentity`).

@@ -14,7 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0065 section 3.3 — the token provider's rules, over a fake refresh
+ * ADR-0073 section 3.3 — the token provider's rules, over a fake refresh
  * route and a settable clock.
  */
 class SessionTokenProviderTest {
@@ -235,7 +235,7 @@ class SessionTokenProviderTest {
         assertNull(provider(FakeRefresher()).refreshNow())
     }
 
-    // ---- ADR-0066: this device was removed ---------------------------------
+    // ---- ADR-0074: this device was removed ---------------------------------
 
     @Test
     fun `a refresh refused as device-revoked reports it once and keeps the pair`() = runTest {

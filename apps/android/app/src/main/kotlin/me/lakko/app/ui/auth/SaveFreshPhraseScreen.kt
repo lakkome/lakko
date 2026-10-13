@@ -51,7 +51,7 @@ public fun SaveFreshPhraseScreen(
     publishOwed: PublishOwedReason? = null,
     onRetryPublish: suspend () -> Unit = {},
     onLogOut: () -> Unit = {},
-    /** ADR-0067 - the account is NOT phrase-protected: the retry screen says
+    /** ADR-0075 - the account is NOT phrase-protected: the retry screen says
      *  nothing about words (none will be shown). */
     wordless: Boolean = false,
 ) {

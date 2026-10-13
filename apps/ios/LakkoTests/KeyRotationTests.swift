@@ -6,7 +6,7 @@ import XCTest
 
 @testable import Lakko
 
-// ADR-0066 part 3, Stage A — the ROTATING device: the owed record and its
+// ADR-0074 part 3, Stage A — the ROTATING device: the owed record and its
 // state machine, the envelope-after-removal seam with its inverted companion,
 // and the runner over scripted ports.
 
@@ -195,7 +195,7 @@ final class KeyRotationPlanTests: XCTestCase {
 
 // MARK: - The envelope-after-removal seam
 
-/// ADR-0066 section 3.2: the `key-rotation` envelope must be sealed at a
+/// ADR-0074 section 3.2: the `key-rotation` envelope must be sealed at a
 /// DeviceGroup epoch the removed device never held. Nothing but the sender
 /// can check it, so the test asserts on the EPOCH OF THE EMITTED MESSAGE, and
 /// a permanent inverted-order companion shows what the seam prevents.
@@ -706,7 +706,7 @@ final class KeyRotationRunnerTests: XCTestCase {
         XCTAssertEqual(runner.resume, .nothing)
     }
 
-    // MARK: - ADR-0067: new words only for a phrase-protected account
+    // MARK: - ADR-0075: new words only for a phrase-protected account
 
     func testADeviceRotationOnAnAccountWithoutASavedPhraseShowsNoWordsAnywhere() async throws {
         let (runner, world, store) = try make()
@@ -748,7 +748,7 @@ final class KeyRotationRunnerTests: XCTestCase {
         XCTAssertEqual(result, .rotated(phrase: world.material.phrase))
     }
 
-    // MARK: - ADR-0067 section 3: "Save a recovery phrase"
+    // MARK: - ADR-0075 section 3: "Save a recovery phrase"
 
     func testSavingAPhraseRotatesWithoutRemovingADeviceAndShowsTheNewWordsLast() async throws {
         let (runner, world, store) = try make()
@@ -1017,7 +1017,7 @@ final class KeyRotationRunnerTests: XCTestCase {
         }
     }
 
-    // ADR-0066 section 3.5a rule 3 — the profile re-send is a step of the
+    // ADR-0074 section 3.5a rule 3 — the profile re-send is a step of the
     // owed record: a send that did not land keeps it owed and is retried.
 
     func testAProfileReSendThatDidNotLandStaysOwedAndIsRetriedAlone() async throws {

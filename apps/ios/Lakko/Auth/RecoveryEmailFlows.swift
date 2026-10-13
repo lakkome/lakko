@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0067 / docs/ux/identity-recovery.md sections 19.2 and 19.3 — the two
+// ADR-0075 / docs/ux/identity-recovery.md sections 19.2 and 19.3 — the two
 // flows of the recovery email, as pure step machines:
 //
 //   * `EmailEnrol`    adding or replacing the address (signed in);

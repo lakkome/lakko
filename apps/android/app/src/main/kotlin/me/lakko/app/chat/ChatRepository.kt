@@ -111,11 +111,11 @@ private fun logCallRoute(message: String) {
  *  group on this device has ended, so there is nothing to hold open). */
 private const val MILLIS_PER_SECOND: Long = 1_000L
 
-/** ADR-0065 — how long the superseded-key read of the reset ledger is reused
+/** ADR-0073 — how long the superseded-key read of the reset ledger is reused
  *  before the next send reads it again. An accepted reset invalidates it at once. */
 private const val SUPERSEDED_CACHE_MS: Long = 15_000L
 
-/** ADR-0065 R.6 — how often every held group is offered a continuity pass
+/** ADR-0073 R.6 — how often every held group is offered a continuity pass
  *  from the tail of a poll round. Chosen, not measured. */
 private const val CONTINUITY_SWEEP_INTERVAL_MS: Long = 30_000L
 
@@ -124,7 +124,7 @@ private const val CONTINUITY_SWEEP_INTERVAL_MS: Long = 30_000L
  *  The fresh device publishes it after it has landed a session. */
 private const val ADMIT_DEVICE_WAIT_MS: Long = 180_000L
 private const val ADMIT_DEVICE_POLL_MS: Long = 3_000L
-/** ADR-0066 - how long `admitDevice` waits for a readable DeviceGroup roster. */
+/** ADR-0074 - how long `admitDevice` waits for a readable DeviceGroup roster. */
 private const val OWN_ROSTER_WAITS: Int = 10
 private const val OWN_ROSTER_WAIT_MS: Long = 500L
 
@@ -276,7 +276,7 @@ public class ChatRepository(
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     init {
-        // ADR-0065 R.5 — a lineage register that arrives (this device's own
+        // ADR-0073 R.5 — a lineage register that arrives (this device's own
         // write, or another device's over the DeviceGroup) changes which
         // groups are one conversation: the folded list is published again.
         pushScope.launch {
@@ -323,7 +323,7 @@ public class ChatRepository(
      */
     private val accountIdentity = AtomicReference<Identity?>(null)
 
-    /** ADR-0066 part 3 - the account identity the directory serves, when it
+    /** ADR-0074 part 3 - the account identity the directory serves, when it
      *  is NOT the conversation identity ([accountIdentity]): set after a
      *  rotation of the account keys, `null` otherwise. Used only for the
      *  mailbox of the published key, the reach keys and the journal roots
@@ -331,7 +331,7 @@ public class ChatRepository(
     private val publishedAccountIdentity = AtomicReference<Identity?>(null)
 
     /**
-     * ADR-0066 section 3.5, "DS" - the account identity the ROOT of an owned
+     * ADR-0074 section 3.5, "DS" - the account identity the ROOT of an owned
      * journal derives from: the identity the directory serves (the new key
      * after a rotation), else the conversation identity. What the role
      * tables, the registrar-seed envelopes and the invite issuers name stays
@@ -636,7 +636,7 @@ public class ChatRepository(
         withContext(mlsDispatcher) { bootstrapOnMlsThread(secrets) }
 
     /**
-     * ADR-0066 (a device paired after a key rotation) - the pairing state
+     * ADR-0074 (a device paired after a key rotation) - the pairing state
      * bundle just stored this account's earlier keys, so the key its
      * conversation leaves are bound to is no longer the one this repository
      * loaded under. Rebuild the session under it: the device identity's
@@ -675,12 +675,12 @@ public class ChatRepository(
                 accountIdentity.getAndSet(null)?.close()
                 publishedAccountIdentity.getAndSet(null)?.close()
             }
-            android.util.Log.i("ChatRepository", "ADR-0066: conversation identity rebuilt under the account's earlier key")
+            android.util.Log.i("ChatRepository", "ADR-0074: conversation identity rebuilt under the account's earlier key")
             bootstrapOnMlsThread(secrets)
             true
         }
 
-    /** ADR-0066 - the proven steps of this account's OWN key history, from
+    /** ADR-0074 - the proven steps of this account's OWN key history, from
      *  its stored earlier keys to the key the session holds: recorded by the
      *  rotation or the adoption on a device that lived through it, and here
      *  for a device that received the earlier keys in a pairing state bundle
@@ -706,7 +706,7 @@ public class ChatRepository(
                 )
             }
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0066: own key history not recorded: ${cause.javaClass.simpleName}")
+            android.util.Log.w("ChatRepository", "ADR-0074: own key history not recorded: ${cause.javaClass.simpleName}")
         }
     }
 
@@ -723,14 +723,14 @@ public class ChatRepository(
         )
         val existing = currentAccountIdB64.get()
         if (existing == newAccountIdB64) {
-            // ADR-0066 part 3 - the account keys were rotated in this
+            // ADR-0074 part 3 - the account keys were rotated in this
             // session: the published identity (and its mailbox) is the new
             // one; the conversation identity stays the predecessor.
             refreshPublishedAccountIdentity(secrets.accountIdentitySeed)
             // ADR-0053 — a re-authentication of the same account still claims
             // both mailboxes ("after every login").
             claimOwnMailboxesBestEffort()
-            // ADR-0066 section 3.5, "Reach": the reach keys and the mailbox
+            // ADR-0074 section 3.5, "Reach": the reach keys and the mailbox
             // they are registered on follow the published key.
             rootAccountIdentity()?.let { bindReachBestEffort(newAccountIdB64, it) }
             return
@@ -743,7 +743,7 @@ public class ChatRepository(
         // ADR-0017: the AccountIdentity is seeded from the stable BIP39
         // phrase seed, NOT the password export key.
         //
-        // ADR-0066 part 3, Stage A: after a rotation of the account keys the
+        // ADR-0074 part 3, Stage A: after a rotation of the account keys the
         // conversation leaves that exist stay bound to the PREDECESSOR key
         // (no leaf is moved in place), so the account identity the chat
         // layer acts as - role tables, registrar-seed envelopes, the mailbox
@@ -913,14 +913,14 @@ public class ChatRepository(
             }
 
             mutableState.update { it.copy(bootstrapped = true) }
-            // ADR-0065 R.7 case 1 — the messages held when the process died.
+            // ADR-0073 R.7 case 1 — the messages held when the process died.
             restoreHeldSends()
         }
         // ADR-0053 — sign reads of both own mailboxes and claim them.
         claimOwnMailboxesBestEffort()
         // ADR-0060 — bind the reach keys to this account and reconcile its
         // mailbox (the default setting for an account that never chose).
-        // ADR-0066 section 3.5, "Reach": after a rotation the reach keys
+        // ADR-0074 section 3.5, "Reach": after a rotation the reach keys
         // derive from the published key, not the conversation identity's.
         bindReachBestEffort(newAccountIdB64, publishedAccountIdentity.get() ?: account)
 
@@ -1061,7 +1061,7 @@ public class ChatRepository(
             expectedKeyB64 = outboxB64(recipientSignaturePubkey),
         )
         val createdHex = DsClient.pseudonymHex(created.groupId)
-        // ADR-0066 3.5a rule 1 — the recipient is the PERSON: a leaf bound
+        // ADR-0074 3.5a rule 1 — the recipient is the PERSON: a leaf bound
         // to a proven predecessor of the key the caller named is theirs, and
         // two keys of one person are one mailbox (written once).
         val recipientCurrent = mailboxAccountKeyOf(recipientSignaturePubkey)
@@ -1127,7 +1127,7 @@ public class ChatRepository(
     /**
      * Create a group with one other person locally and claim its journal;
      * NOTHING is sent to anyone. The Welcome of the founding commit is in the
-     * result: [startGroupWith] delivers it at once, the ADR-0065 successor
+     * result: [startGroupWith] delivers it at once, the ADR-0073 successor
      * path only after its claim was confirmed (R.6).
      *
      * Only the recipient's devices whose KeyPackage binding names
@@ -1256,7 +1256,7 @@ public class ChatRepository(
     private val welcomeTargetAccounts = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
 
     /**
-     * ADR-0066 section 3.5a rule 1 — the account key whose mailbox is
+     * ADR-0074 section 3.5a rule 1 — the account key whose mailbox is
      * addressed for the person known by [accountKey] (a leaf's binding, a
      * contact row, this account's own conversation key): the key its PROVEN
      * steps lead to, else the key itself. An unproven change is never
@@ -1276,7 +1276,7 @@ public class ChatRepository(
      * device of this account): [accountKey] is what the added leaf's binding
      * names, which after a rotation of that account's keys is a proven
      * predecessor, so it is resolved first and the CURRENT key's mailbox is
-     * addressed, with the grants held for that person (ADR-0066 3.5a).
+     * addressed, with the grants held for that person (ADR-0074 3.5a).
      */
     private fun welcomeMailboxFor(accountKey: ByteArray): ByteArray {
         val current = mailboxAccountKeyOf(accountKey)
@@ -1314,7 +1314,7 @@ public class ChatRepository(
         /** The added person's account id when the caller holds it (rule 6). */
         accountIdHint: ByteArray? = null,
     ): PublishResult {
-        // ADR-0066 section 3.5a rule 6 - a refused write re-checks the
+        // ADR-0074 section 3.5a rule 6 - a refused write re-checks the
         // person's address once: their identity bundle through the gate
         // (which records a proven predecessor), then the mailbox and the
         // grants are resolved again and the write is tried once more.
@@ -1350,7 +1350,7 @@ public class ChatRepository(
     private val addressRecheckedAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /**
-     * ADR-0066 section 3.5a rule 6 - fetch the identity bundle of the person
+     * ADR-0074 section 3.5a rule 6 - fetch the identity bundle of the person
      * known by an account key through the fail-closed gate; `true` when it
      * passed. Set by the contacts repository at construction; `null` runs
      * no check (tests).
@@ -1538,7 +1538,7 @@ public class ChatRepository(
             // grant is retried the moment one for that person arrives.
             reach.onGrantHeld = { ownerKey -> retryOwedWelcomesFor(ownerKey) }
             reach.bind(accountIdB64, account)
-            // ADR-0066 3.5a rule 3 — a re-send the key change left owed (a
+            // ADR-0074 3.5a rule 3 — a re-send the key change left owed (a
             // kept device right after adopting; any device after a restart).
             if (reach.profileResendOwed()) {
                 reachScope.launch {
@@ -1547,11 +1547,11 @@ public class ChatRepository(
                     } catch (cause: kotlinx.coroutines.CancellationException) {
                         throw cause
                     } catch (cause: Throwable) {
-                        android.util.Log.w("ChatRepository", "ADR-0066 3.5a: profile re-send failed: ${cause.javaClass.simpleName}")
+                        android.util.Log.w("ChatRepository", "ADR-0074 3.5a: profile re-send failed: ${cause.javaClass.simpleName}")
                     }
                 }
             }
-            // ADR-0066 3.5a rule 5 — the spend round the key change left owed:
+            // ADR-0074 3.5a rule 5 — the spend round the key change left owed:
             // on a kept device right after adopting, and on any device at
             // each session start until it found nothing left to do.
             if (reach.grantsSpendOwed()) {
@@ -1559,12 +1559,12 @@ public class ChatRepository(
                     try {
                         val spend = spendPreRotationGrants
                         if (spend == null || !spend()) {
-                            android.util.Log.i("ChatRepository", "ADR-0066 3.5a: the spend round stays owed")
+                            android.util.Log.i("ChatRepository", "ADR-0074 3.5a: the spend round stays owed")
                         }
                     } catch (cause: kotlinx.coroutines.CancellationException) {
                         throw cause
                     } catch (cause: Throwable) {
-                        android.util.Log.w("ChatRepository", "ADR-0066 3.5a: spend round failed: ${cause.javaClass.simpleName}")
+                        android.util.Log.w("ChatRepository", "ADR-0074 3.5a: spend round failed: ${cause.javaClass.simpleName}")
                     }
                 }
             }
@@ -1764,7 +1764,7 @@ public class ChatRepository(
         null
 
     /**
-     * ADR-0065 R.12 / UX 16.4 — told the moment a one-to-one becomes a dead
+     * ADR-0073 R.12 / UX 16.4 — told the moment a one-to-one becomes a dead
      * session (the other person's reset was accepted) or its conversation
      * moved to a successor, so a call live in that group ends locally (its
      * `End` frame is not published into a dead session). Installed with
@@ -2661,11 +2661,11 @@ public class ChatRepository(
         // leaf: one proposal (or, in a table-less group, one direct commit) per
         // device KeyPackage. The outcome reported is the last device's; every
         // earlier one either landed or threw.
-        // ADR-0065 rule 2 — the directory is not trusted to say whose devices
+        // ADR-0073 rule 2 — the directory is not trusted to say whose devices
         // it returned: a device whose KeyPackage binding names another
         // account key than the expected person's (the key the caller named,
         // or a proven predecessor of it) is never added, whoever the caller.
-        // ADR-0066 3.5 — the gate runs first: after a proven rotation the
+        // ADR-0074 3.5 — the gate runs first: after a proven rotation the
         // person's devices are still bound to a predecessor of the key the
         // directory serves ([personDevicesToAdd]).
         val devices = personDevicesToAdd(recipientAccountId, outboxB64(recipientSignaturePubkey))
@@ -3842,7 +3842,7 @@ public class ChatRepository(
         groupIdHex: String,
         plaintextBytes: ByteArray,
     ): Unit {
-        // ADR-0065 R.7 case 1 — nothing goes into a dead one-to-one but the claim.
+        // ADR-0073 R.7 case 1 — nothing goes into a dead one-to-one but the claim.
         if (deadOneToOne(groupIdHex)) throw deadSessionError()
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
@@ -3918,7 +3918,7 @@ public class ChatRepository(
     ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
-        // ADR-0065 R.7 case 1 — a message is never sent into a dead
+        // ADR-0073 R.7 case 1 — a message is never sent into a dead
         // one-to-one: it would reach only removed devices. It is HELD: the
         // row shows the ordinary sending state and goes out when the
         // conversation's successor exists on this device.
@@ -3993,7 +3993,7 @@ public class ChatRepository(
         withContext(mlsDispatcher) { retrySendOnMlsThread(groupIdHex, localId) }
 
     private suspend fun retrySendOnMlsThread(groupIdHex: String, localId: Long) {
-        // ADR-0065 R.7 case 1 — the ordinary Retry of a message that gave up
+        // ADR-0073 R.7 case 1 — the ordinary Retry of a message that gave up
         // while held: held again, never sent into the dead one-to-one.
         if (deadOneToOne(groupIdHex)) {
             retryHeld(groupIdHex, localId)
@@ -4070,7 +4070,7 @@ public class ChatRepository(
                     uniffi.lakko_ffi_uniffi.composeReplyEnvelope(
                         text = plaintext,
                         attachments = attachments,
-                        // ADR-0065 rule 7 — a quote of a row of an older
+                        // ADR-0073 rule 7 — a quote of a row of an older
                         // segment keeps its snapshot and carries no jump
                         // target (0): the id belongs to another journal.
                         replyTo = if (reply.target < 0) REPLY_NO_JUMP_TARGET else reply.target,
@@ -4159,10 +4159,10 @@ public class ChatRepository(
         targetMessageId: Long,
         newText: String,
     ): Unit {
-        // ADR-0065 R.5 — a row of an older segment is read-only history: its
+        // ADR-0073 R.5 — a row of an older segment is read-only history: its
         // on-screen id is negative and names no message of this group.
         if (targetMessageId <= 0) return
-        // ADR-0065 R.7 case 1 — an op on a message of a dead one-to-one is
+        // ADR-0073 R.7 case 1 — an op on a message of a dead one-to-one is
         // applied on this device alone and never sent ([opRoute]): its target
         // exists only in the old session.
         if (deadOneToOne(groupIdHex)) {
@@ -4226,10 +4226,10 @@ public class ChatRepository(
         groupIdHex: String,
         targetMessageId: Long,
     ): Unit {
-        // ADR-0065 R.5 — a row of an older segment is read-only history: its
+        // ADR-0073 R.5 — a row of an older segment is read-only history: its
         // on-screen id is negative and names no message of this group.
         if (targetMessageId <= 0) return
-        // ADR-0065 R.7 case 1 — an op on a message of a dead one-to-one is
+        // ADR-0073 R.7 case 1 — an op on a message of a dead one-to-one is
         // applied on this device alone and never sent ([opRoute]): its target
         // exists only in the old session.
         if (deadOneToOne(groupIdHex)) {
@@ -4299,10 +4299,10 @@ public class ChatRepository(
         targetMessageId: Long,
         emoji: String,
     ): Unit {
-        // ADR-0065 R.5 — a row of an older segment is read-only history: its
+        // ADR-0073 R.5 — a row of an older segment is read-only history: its
         // on-screen id is negative and names no message of this group.
         if (targetMessageId <= 0) return
-        // ADR-0065 R.7 case 1 — an op on a message of a dead one-to-one is
+        // ADR-0073 R.7 case 1 — an op on a message of a dead one-to-one is
         // applied on this device alone and never sent ([opRoute]): its target
         // exists only in the old session.
         if (deadOneToOne(groupIdHex)) {
@@ -4368,7 +4368,7 @@ public class ChatRepository(
         withContext(mlsDispatcher) { sendTypingOnMlsThread(groupIdHex = groupIdHex, isTyping = isTyping) }
 
     private suspend fun sendTypingOnMlsThread(groupIdHex: String, isTyping: Boolean): Unit {
-        // ADR-0065 R.7 case 1 — not sent into a dead one-to-one.
+        // ADR-0073 R.7 case 1 — not sent into a dead one-to-one.
         if (deadOneToOne(groupIdHex)) return
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
@@ -4415,7 +4415,7 @@ public class ChatRepository(
         withContext(mlsDispatcher) { sendReadReceiptOnMlsThread(groupIdHex = groupIdHex, upTo = upTo) }
 
     private suspend fun sendReadReceiptOnMlsThread(groupIdHex: String, upTo: Long): Unit {
-        // ADR-0065 R.7 case 1 — not sent into a dead one-to-one.
+        // ADR-0073 R.7 case 1 — not sent into a dead one-to-one.
         if (deadOneToOne(groupIdHex)) return
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
@@ -4609,7 +4609,7 @@ public class ChatRepository(
         publishOwnProfileOutcome(groupIdHex) == me.lakko.app.reach.ProfileResend.SENT
 
     /** [publishOwnProfile], telling "nothing to send here" from "could not
-     *  be sent" (ADR-0066 3.5a rule 3 keeps only the second owed). */
+     *  be sent" (ADR-0074 3.5a rule 3 keeps only the second owed). */
     private suspend fun publishOwnProfileOutcome(groupIdHex: String): me.lakko.app.reach.ProfileResend {
         val nothing = me.lakko.app.reach.ProfileResend.NOTHING_TO_SEND
         val failed = me.lakko.app.reach.ProfileResend.FAILED
@@ -4641,7 +4641,7 @@ public class ChatRepository(
         }
     }
 
-    /** ADR-0066 3.5a rule 3 — the conversations that already took the
+    /** ADR-0074 3.5a rule 3 — the conversations that already took the
      *  profile re-sent under an account key (`"<keyHex>:<groupHex>"`), so a
      *  retry in this process does not send there again. In memory: after a
      *  restart an owed re-send goes to every conversation once more, which a
@@ -4652,7 +4652,7 @@ public class ChatRepository(
     private val profileResendMutex = kotlinx.coroutines.sync.Mutex()
 
     /**
-     * ADR-0066 section 3.5a rule 3 — after the account's reach keys moved to
+     * ADR-0074 section 3.5a rule 3 — after the account's reach keys moved to
      * the mailbox of a new account key (the rotation's reach re-key on the
      * rotating device, the adoption on a kept one), every one-to-one and
      * group this device is in holds grants for the OLD mailbox. Re-send the
@@ -4686,14 +4686,14 @@ public class ChatRepository(
                 reach.profileResendDone()
                 profileResentTo.removeIf { it.startsWith("$keyHex:") }
             } else {
-                android.util.Log.w("ChatRepository", "ADR-0066 3.5a: the profile re-send is still owed")
+                android.util.Log.w("ChatRepository", "ADR-0074 3.5a: the profile re-send is still owed")
             }
             done
         }
     }
 
     /**
-     * ADR-0068 - the account was renamed on another of its devices: the
+     * ADR-0076 - the account was renamed on another of its devices: the
      * certificate held here is the old name's. Drop it, fetch the current
      * one (`GET /discovery/username-certificate` answers for the current
      * name) and re-publish the profile, which the Everyone record and the
@@ -4715,7 +4715,7 @@ public class ChatRepository(
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                android.util.Log.i("ChatRepository", "ADR-0068: username certificate not fetched: ${cause.javaClass.simpleName}")
+                android.util.Log.i("ChatRepository", "ADR-0076: username certificate not fetched: ${cause.javaClass.simpleName}")
             }
         }
     }
@@ -5093,7 +5093,7 @@ public class ChatRepository(
             val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
             val selfHex = reach.ownAccountKey()?.let { me.lakko.app.reach.reachHex(it) } ?: return
             val senderBytes = senderKey?.let { java.util.Base64.getDecoder().decode(it) } ?: return
-            // ADR-0066 3.5a rule 2 — the roster names the keys the leaves are
+            // ADR-0074 3.5a rule 2 — the roster names the keys the leaves are
             // bound to, which after a rotation are proven predecessors (this
             // account's own included). The acceptance rule is about PEOPLE,
             // so every key is mapped to its account's current key first.
@@ -5259,7 +5259,7 @@ public class ChatRepository(
     /** This device's personal pins in the conversation, `messageId -> pinnedAtMs`. */
     public fun personalPins(groupIdHex: String): Map<Long, ULong> = foldedPins(groupIdHex).personal
 
-    /** ADR-0065 R.5 — the held segments of the conversation BEFORE
+    /** ADR-0073 R.5 — the held segments of the conversation BEFORE
      *  [groupIdHex], oldest first. */
     private fun olderSegmentsOf(groupIdHex: String): List<String> {
         val segments = conversationSegments(groupIdHex)
@@ -5268,7 +5268,7 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0065 R.5 — the pins of the conversation as the screen of
+     * ADR-0073 R.5 — the pins of the conversation as the screen of
      * [groupIdHex] shows them: this group's keyed by message id, an older
      * segment's by its on-screen history id ([pinsAcrossSegments]), so a pin
      * of an older segment stays in the bar and opens where it was.
@@ -5374,7 +5374,7 @@ public class ChatRepository(
     /** Pin or unpin [messageId] for this device only. Nothing is sent. */
     public fun setPersonalPin(groupIdHex: String, messageId: Long, pinned: Boolean) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
-        // ADR-0065 R.5 — a row of an older segment can be unpinned, never
+        // ADR-0073 R.5 — a row of an older segment can be unpinned, never
         // pinned; the personal unpin is written under the OLDER group.
         val target = pinTargetFor(groupIdHex, messageId) ?: return
         if (pinRoute(older = target.older, pinned = pinned, shared = false) == PinRoute.REFUSED) return
@@ -5394,7 +5394,7 @@ public class ChatRepository(
         val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
         val accountIdB64 = currentAccountIdB64.get() ?: throw IllegalStateException("no session")
         val stamp = System.currentTimeMillis().toULong()
-        // ADR-0065 R.5 — an older segment is read-only on the wire: its
+        // ADR-0073 R.5 — an older segment is read-only on the wire: its
         // shared unpin is recorded on this device alone, with a fresh stamp
         // so a late re-send of the old pin cannot bring it back; a pin of an
         // older segment is not offered.
@@ -5652,7 +5652,7 @@ public class ChatRepository(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0065 "Phase 2 revised: silent continuity" - a member's account-key
+    // ADR-0073 "Phase 2 revised: silent continuity" - a member's account-key
     // reset was ACCEPTED by the identity gate. Nothing here has a surface: no
     // copy, no row, no flag (R.0).
     // -----------------------------------------------------------------
@@ -5839,10 +5839,10 @@ public class ChatRepository(
         rows.sortBy { it.heldAtMs }
         try {
             if (!heldSendStore.save(account, rows)) {
-                android.util.Log.w("ChatRepository", "ADR-0065 held messages not stored")
+                android.util.Log.w("ChatRepository", "ADR-0073 held messages not stored")
             }
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0065 held messages not stored", cause)
+            android.util.Log.w("ChatRepository", "ADR-0073 held messages not stored", cause)
         }
     }
 
@@ -6032,7 +6032,7 @@ public class ChatRepository(
                     } catch (cause: kotlinx.coroutines.CancellationException) {
                         throw cause
                     } catch (cause: Throwable) {
-                        android.util.Log.w("ChatRepository", "ADR-0065 held message not sent", cause)
+                        android.util.Log.w("ChatRepository", "ADR-0073 held message not sent", cause)
                         groups[held.groupIdHex]?.markFailed(held.localId)
                         publishThreadList()
                     }
@@ -6065,7 +6065,7 @@ public class ChatRepository(
                 try {
                     oneToOneMovedSink?.invoke(groupIdHex)
                 } catch (cause: Throwable) {
-                    android.util.Log.w("ChatRepository", "ADR-0065: call not ended", cause)
+                    android.util.Log.w("ChatRepository", "ADR-0073: call not ended", cause)
                 }
             }
             scheduleResetRepair(groupIdHex)
@@ -6098,7 +6098,7 @@ public class ChatRepository(
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0065 repair failed for $groupIdHex", cause)
+                android.util.Log.w("ChatRepository", "ADR-0073 repair failed for $groupIdHex", cause)
             } finally {
                 resetRepairInFlight.remove(groupIdHex)
             }
@@ -6176,7 +6176,7 @@ public class ChatRepository(
                             // A refusal for a full queue is re-sent when the
                             // queue drains: the next roster change or the
                             // re-admission arm runs this again.
-                            android.util.Log.w("ChatRepository", "ADR-0065 repair: remove not proposed", cause)
+                            android.util.Log.w("ChatRepository", "ADR-0073 repair: remove not proposed", cause)
                         }
                     }
                 }
@@ -6208,7 +6208,7 @@ public class ChatRepository(
                 } catch (cause: kotlinx.coroutines.CancellationException) {
                     throw cause
                 } catch (cause: Throwable) {
-                    android.util.Log.w("ChatRepository", "ADR-0065 repair: admin not restored", cause)
+                    android.util.Log.w("ChatRepository", "ADR-0073 repair: admin not restored", cause)
                 }
                 break
             }
@@ -6376,7 +6376,7 @@ public class ChatRepository(
                     step = continueConversation(continuityPort, key)
                 }
                 if (step != ContinuityStep.NOTHING && step != ContinuityStep.ADOPTED) {
-                    android.util.Log.i("ChatRepository", "ADR-0065 continuity: $step")
+                    android.util.Log.i("ChatRepository", "ADR-0073 continuity: $step")
                 }
             } finally {
                 continuityInFlight.remove(key)
@@ -6392,7 +6392,7 @@ public class ChatRepository(
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0065 lineage not recorded", cause)
+                android.util.Log.w("ChatRepository", "ADR-0073 lineage not recorded", cause)
             }
             retireOldSegmentPushIfDue(account, key)
         }
@@ -6592,7 +6592,7 @@ public class ChatRepository(
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0065 old segment: push not retired", cause)
+            android.util.Log.w("ChatRepository", "ADR-0073 old segment: push not retired", cause)
         }
     }
 
@@ -6607,7 +6607,7 @@ public class ChatRepository(
             try {
                 oneToOneMovedSink?.invoke(groupIdHex)
             } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0065: call not ended", cause)
+                android.util.Log.w("ChatRepository", "ADR-0073: call not ended", cause)
             }
         }
     }
@@ -6733,7 +6733,7 @@ public class ChatRepository(
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0065 continuity: sweep failed", cause)
+            android.util.Log.w("ChatRepository", "ADR-0073 continuity: sweep failed", cause)
         }
     }
 
@@ -6950,7 +6950,7 @@ public class ChatRepository(
                 throw cause
             } catch (cause: Throwable) {
                 // The store holds it; the growth re-send carries it.
-                android.util.Log.w("ChatRepository", "ADR-0065 continuity: name carry-over send failed", cause)
+                android.util.Log.w("ChatRepository", "ADR-0073 continuity: name carry-over send failed", cause)
             }
         }
 
@@ -6970,7 +6970,7 @@ public class ChatRepository(
             } catch (cause: Throwable) {
                 // Not resolvable or not reachable now: they keep writing in
                 // the old group and the completeness re-check tries again.
-                android.util.Log.i("ChatRepository", "ADR-0065 continuity: a member was not added yet (${cause.javaClass.simpleName})")
+                android.util.Log.i("ChatRepository", "ADR-0073 continuity: a member was not added yet (${cause.javaClass.simpleName})")
                 false
             }
         }
@@ -6995,7 +6995,7 @@ public class ChatRepository(
                 throw cause
             } catch (cause: Throwable) {
                 // A pending role change refuses a second one; the next pass.
-                android.util.Log.i("ChatRepository", "ADR-0065 continuity: an admin was not restored yet (${cause.javaClass.simpleName})")
+                android.util.Log.i("ChatRepository", "ADR-0073 continuity: an admin was not restored yet (${cause.javaClass.simpleName})")
             }
         }
 
@@ -7011,7 +7011,7 @@ public class ChatRepository(
                 throw cause
             } catch (cause: Throwable) {
                 // Already pending, or a role change is in the way.
-                android.util.Log.i("ChatRepository", "ADR-0065 continuity: the owner was not restored yet (${cause.javaClass.simpleName})")
+                android.util.Log.i("ChatRepository", "ADR-0073 continuity: the owner was not restored yet (${cause.javaClass.simpleName})")
             }
         }
 
@@ -7142,7 +7142,7 @@ public class ChatRepository(
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0065 continuity pass failed for $groupIdHex", cause)
+                android.util.Log.w("ChatRepository", "ADR-0073 continuity pass failed for $groupIdHex", cause)
             }
         }
     }
@@ -7170,11 +7170,11 @@ public class ChatRepository(
         groupIdHex: String,
         group: Group,
         envelope: ByteArray,
-        /** ADR-0065 R.6 — the successor claim: the one thing that may still be
+        /** ADR-0073 R.6 — the successor claim: the one thing that may still be
          *  published into a dead one-to-one ([publishAllowed]). */
         publishKind: PublishKind = PublishKind.OTHER,
     ): SendMessageResult? {
-        // ADR-0065 R.7 case 1 — no service envelope (profile, pin, routing
+        // ADR-0073 R.7 case 1 — no service envelope (profile, pin, routing
         // secret, beacon) is sent into a dead one-to-one either.
         if (!publishAllowed(deadOneToOne(groupIdHex), publishKind)) return null
         // ADR-0045 — the SEAL and the PUBLISH are both inside the per-group
@@ -7671,7 +7671,7 @@ public class ChatRepository(
         // the rejoin path's question, not this one's.
         if (readIsActive { record.group.isActive() } == false) return GroupPollOutcome.UNAVAILABLE
 
-        // ADR-0065 R.5 "the old segment after the move" — a one-to-one's old
+        // ADR-0073 R.5 "the old segment after the move" — a one-to-one's old
         // journal is not read at all once the conversation moved (its only
         // other sender is the superseded identity); a group's is, for the
         // journal retention window, since members who have not moved yet
@@ -7729,7 +7729,7 @@ public class ChatRepository(
             // apply. Hoisting it out to where the fetch now runs would race the
             // shrink diff against any commit landing in the fetch window.
             val membersBeforePoll = memberSignatureKeysOrNull(record.group)
-            // ADR-0065 R.7 case 2 — the ACCOUNT keys before the batch, so a
+            // ADR-0073 R.7 case 2 — the ACCOUNT keys before the batch, so a
             // commit that only swaps a person's devices leaves no row.
             val accountKeysBeforePoll = memberAccountKeysOrNull(record.group)
             epochBeforeBatch = runCatching { record.group.epoch() }.getOrNull()
@@ -7746,7 +7746,7 @@ public class ChatRepository(
                 // this chat's row of the same number, unread and unrecoverable.
                 groupIdHex = groupIdHex,
             )
-            // ADR-0065 R.5 / R.8 — nothing a superseded sender posted acts:
+            // ADR-0073 R.5 / R.8 — nothing a superseded sender posted acts:
             // dropped here, before any sink, row or call route sees it
             // ([supersededActDropped]). MLS frames were applied above.
             val batchEvents = withoutSupersededSenders(record.group, groupIdHex, result.events)
@@ -7776,7 +7776,7 @@ public class ChatRepository(
                     receiveGroupName(record.group, groupIdHex, senderKey, name)
                 },
                 groupClosedSink = { messageId, senderKey, closed ->
-                    // ADR-0065 R.6 — the same critical section as the group
+                    // ADR-0073 R.6 — the same critical section as the group
                     // name: the roster and role-table read, the stored-claim
                     // read, the verdict and the write are one
                     // read-decide-write (C-62 sub-invariant 5).
@@ -7944,7 +7944,7 @@ public class ChatRepository(
                 currentMemberKeys = membersAfterPoll,
                 selfEvicted = evictedByBatch,
             )
-            // ADR-0065 R.7 — a batch that changed the roster re-runs the
+            // ADR-0073 R.7 — a batch that changed the roster re-runs the
             // repair of every accepted reset this group still carries (the
             // next old leaf, the new devices, the admin restore).
             if (membersBeforePoll != null && membersAfterPoll != null && membersBeforePoll != membersAfterPoll) {
@@ -8289,7 +8289,7 @@ public class ChatRepository(
         val account = keyPackageAccount.get()
             ?: throw IllegalStateException("admitDevice: no session")
         val found = awaitDeviceKeyPackage(account.accountId, deviceKey)
-        // ADR-0066 section 2.3 — "add my own device" obeys the same rule as
+        // ADR-0074 section 2.3 — "add my own device" obeys the same rule as
         // the re-admission arm: only a device the account's DeviceGroup roster
         // lists. Read after the wait, so a device removed meanwhile (or one
         // that was never let in) is not put into any chat.
@@ -8340,7 +8340,7 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0066 section 3.5 x ADR-0065 R.2 — the devices of ANOTHER person
+     * ADR-0074 section 3.5 x ADR-0073 R.2 — the devices of ANOTHER person
      * that may be added to a group, and the one place they are chosen: the
      * user-facing add, a new conversation, a successor build and the
      * ADR-0050 re-request all come here (the re-admission arm runs the same
@@ -8393,7 +8393,7 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0065 R.2 / ADR-0050 — whether [keyPackage]'s device binding names
+     * ADR-0073 R.2 / ADR-0050 — whether [keyPackage]'s device binding names
      * one of [acceptedKeysB64] ([me.lakko.app.contacts.devicesBoundTo]). A
      * KeyPackage that does not parse, and an empty accepted set, are refused.
      */
@@ -8432,7 +8432,7 @@ public class ChatRepository(
                 discovery.fetchKeyPackages(accountId)
                     ?.firstOrNull { it.deviceId.contentEquals(deviceKey) }
                     ?.keyPackage
-                    // ADR-0066: a device paired after a key rotation first
+                    // ADR-0074: a device paired after a key rotation first
                     // publishes under the current key and re-publishes under
                     // the conversation key once the state bundle reached it;
                     // only the second is used, so the wait goes on.
@@ -8457,7 +8457,7 @@ public class ChatRepository(
      * ADR-0050 section 2.10 — retire a device just removed from the DeviceGroup
      * from EVERY chat this device is in (its one leaf per chat, the account's
      * other devices untouched). `failed == 0` in the result means every chat
-     * answered; the owed removal retries until it does (ADR-0066).
+     * answered; the owed removal retries until it does (ADR-0074).
      */
     public suspend fun retireDevice(deviceKey: ByteArray): DeviceFanOut =
         withContext(mlsDispatcher) { retireDeviceOnMlsThread(deviceKey = deviceKey) }
@@ -8465,7 +8465,7 @@ public class ChatRepository(
     private suspend fun retireDeviceOnMlsThread(deviceKey: ByteArray): DeviceFanOut {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped — call bootstrap() first")
-        // ADR-0066 section 2.3 — the directory row is deleted BEFORE this, by
+        // ADR-0074 section 2.3 — the directory row is deleted BEFORE this, by
         // the removal operation itself and with the account statement another
         // device's row needs (`DeviceRemovalRunner`, step 3). Nothing is
         // deleted here any more: a session may delete only its own row
@@ -8474,7 +8474,7 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0066 — the device keys (hex, the roster encoding of this class) in
+     * ADR-0074 — the device keys (hex, the roster encoding of this class) in
      * the account's DeviceGroup roster, or `null` when it cannot be read now.
      * Read from the device-sync runtime's live handle; replaceable in tests.
      */
@@ -8605,7 +8605,7 @@ public class ChatRepository(
         }
         val people = roster.map { it.personKey }.toSet()
         val lookups = mutableListOf(ownPerson to account.accountId)
-        // ADR-0065 R.2 "Triggers" — every roster account whose account id this
+        // ADR-0073 R.2 "Triggers" — every roster account whose account id this
         // device knows, not only its accepted contacts: a contact row, else
         // the account id the member's own profile claims. A claimed id
         // establishes nothing by itself: the identity check below judges it
@@ -8710,8 +8710,8 @@ public class ChatRepository(
                     DeviceReadmission.DirectoryDevice(
                         hex,
                         it.keyPackage,
-                        // ADR-0066: an own device's KeyPackage bound to another
-                        // key than the conversation key is not used. ADR-0065
+                        // ADR-0074: an own device's KeyPackage bound to another
+                        // key than the conversation key is not used. ADR-0073
                         // R.2: nor is another account's device whose binding
                         // names a key that is not the expected person's.
                         admissible = if (person == ownPerson) {
@@ -8733,10 +8733,10 @@ public class ChatRepository(
             ownPersonKey = ownPerson,
             accounts = accounts,
             removed = DeviceReadmission.removed(applicationContext, account.accountIdB64, groupIdHex),
-            // ADR-0066 — own devices only from the DeviceGroup roster.
+            // ADR-0074 — own devices only from the DeviceGroup roster.
             ownDeviceRoster = ownDeviceRoster(),
         )
-        // ADR-0065 R.6 / R.7 — the same cadence re-judges kept claims and
+        // ADR-0073 R.6 / R.7 — the same cadence re-judges kept claims and
         // continues a conversation that cannot be repaired in place.
         if (supersededKeys().isNotEmpty()) {
             scheduleResetRepair(groupIdHex)
@@ -8861,7 +8861,7 @@ public class ChatRepository(
         ) { groupIdHex ->
             pollGroup(groupIdHex, waitSecs = perGroupWait)
         }
-        // ADR-0065 R.6 — an interrupted build of a successor resumes here.
+        // ADR-0073 R.6 — an interrupted build of a successor resumes here.
         continuitySweepIfDue()
         return me.lakko.app.feed.SourceCheck(tried = active.size, answered = answered)
     }
@@ -10346,7 +10346,7 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0066 section 3.5, "DS" - for every group journal this account
+     * ADR-0074 section 3.5, "DS" - for every group journal this account
      * roots (it is the ADR-0022 owner), hand the root from the one the OLD
      * seed derives to the one the new seed derives: the old root seed is
      * kept as the pending takeover seed and the ADR-0057 takeover runs,
@@ -10399,7 +10399,7 @@ public class ChatRepository(
                 takeoverNotBeforeMs.remove(groupIdHex)
                 scheduleTakeover(groupIdHex)
             }
-            android.util.Log.i("ChatRepository", "ADR-0066: ${owned.size} owned journal root transfer(s) scheduled")
+            android.util.Log.i("ChatRepository", "ADR-0074: ${owned.size} owned journal root transfer(s) scheduled")
             owned.size
         }
 
@@ -10573,10 +10573,10 @@ public class ChatRepository(
      * at every bootstrap, i.e. after every signup, login and restore.
      */
     private fun claimOwnMailboxesBestEffort() {
-        // ADR-0066 part 3: and the mailbox of the PUBLISHED account key when
+        // ADR-0074 part 3: and the mailbox of the PUBLISHED account key when
         // it differs from the conversation identity's (after a rotation).
         //
-        // ADR-0066 section 3.5a rule 4: the conversation identity's mailbox
+        // ADR-0074 section 3.5a rule 4: the conversation identity's mailbox
         // is then a PREDECESSOR's: it is read (hence signed for) only for
         // 30 days after this device adopted the new key, and nothing is
         // registered there. Past the window it is left alone.
@@ -10605,7 +10605,7 @@ public class ChatRepository(
     }
 
     /** Whether the mailbox of [predecessor] (one of this account's previous
-     *  identities) is inside its read window (ADR-0066 3.5a rule 4). An
+     *  identities) is inside its read window (ADR-0074 3.5a rule 4). An
      *  unreadable record reads: mail already sent must not be lost to it. */
     private fun predecessorMailboxStillRead(predecessor: Identity): Boolean {
         val accountIdB64 = currentAccountIdB64.get() ?: keyPackageAccount.get()?.accountIdB64 ?: return true
@@ -10998,7 +10998,7 @@ public class ChatRepository(
      * delete, so a user who never presses this button still stops being woken.
      */
     public fun deleteEndedChat(groupIdHex: String) {
-        // ADR-0065 R.5 — deleting a conversation deletes every segment this
+        // ADR-0073 R.5 — deleting a conversation deletes every segment this
         // device holds, the older ones first and the one asked for last
         // ([conversationDeleteOrder]).
         for (hex in olderSegmentsOf(groupIdHex)) deleteOneSegment(hex)
@@ -11042,12 +11042,12 @@ public class ChatRepository(
         }
         // ADR-0059 section 6 — and the channel lists shared in it.
         sharedChannels.forgetGroup(groupIdHex)
-        // ADR-0065 R.6 — the claim state goes with the conversation.
+        // ADR-0073 R.6 — the claim state goes with the conversation.
         try {
             successorClaims.remove(accountIdB64, groupIdHex.lowercase())
             invalidateDeadSession(groupIdHex)
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0065 delete chat: claim state", cause)
+            android.util.Log.w("ChatRepository", "ADR-0073 delete chat: claim state", cause)
         }
         // LAST, and only after everything above had its chance: dropping the
         // registry row is what makes the chat unreachable, so it must not
@@ -11382,7 +11382,7 @@ public class ChatRepository(
         withContext(mlsDispatcher) { sweepIfCommitterOnMlsThread(groupIdHex = groupIdHex) }
 
     private suspend fun sweepIfCommitterOnMlsThread(groupIdHex: String): SweepOutcome? {
-        // ADR-0065 R.7 case 1 — a dead one-to-one commits nothing.
+        // ADR-0073 R.7 case 1 — a dead one-to-one commits nothing.
         if (deadOneToOne(groupIdHex)) return null
         val identity = canonicalIdentity.get() ?: return null
         val record = groups[groupIdHex] ?: return null
@@ -11951,7 +11951,7 @@ public class ChatRepository(
         withContext(mlsDispatcher) { sweepPendingCommitsOnMlsThread(groupIdHex = groupIdHex) }
 
     private suspend fun sweepPendingCommitsOnMlsThread(groupIdHex: String): Unit {
-        // ADR-0065 R.7 case 1 — a dead one-to-one resolves nothing it owed:
+        // ADR-0073 R.7 case 1 — a dead one-to-one resolves nothing it owed:
         // the owed commit / Welcome re-publish is a send into a session whose
         // other leaves are removed devices. A sweep left staged only freezes
         // this group's own membership operations, which it never runs again.
@@ -12021,7 +12021,7 @@ public class ChatRepository(
             val mailbox = entry.secondArtifactMailboxB64 ?: continue
             val account = entry.secondArtifactAccountKeyB64 ?: continue
             try {
-                // ADR-0066 3.5a — the recorded key is what the leaf names;
+                // ADR-0074 3.5a — the recorded key is what the leaf names;
                 // the grant is picked for the person's current key.
                 welcomeTargetAccounts[DsClient.pseudonymHex(java.util.Base64.getDecoder().decode(mailbox))] =
                     mailboxAccountKeyOf(java.util.Base64.getDecoder().decode(account))
@@ -12294,7 +12294,7 @@ public class ChatRepository(
      * clears the count. Driven by the chat screen's lifecycle.
      */
     public fun setThreadOnScreen(groupIdHex: String, onScreen: Boolean) {
-        // ADR-0065 R.5 — the screen shows the whole conversation: the older
+        // ADR-0073 R.5 — the screen shows the whole conversation: the older
         // segments are on screen with the group it is open on.
         for (hex in olderSegmentsOf(groupIdHex)) localUnread.setOnScreen(hex, onScreen)
         localUnread.setOnScreen(groupIdHex, onScreen)
@@ -12400,7 +12400,7 @@ public data class ChatRepositoryState(
     val threads: List<ChatThread> = emptyList(),
     val bootstrapped: Boolean = false,
     /**
-     * ADR-0065 R.5 — one thread per CONVERSATION ([foldConversations] over
+     * ADR-0073 R.5 — one thread per CONVERSATION ([foldConversations] over
      * [threads]): what the chat list, the pickers and an open chat show. A
      * conversation continued in a successor group is one entry here, with the
      * older segments as read-only history above the head's rows. [threads]
@@ -12460,13 +12460,13 @@ public data class ChatThread(
     val feedSeen: Set<Long> = emptySet(),
     /** ADR-0063 section 5 — the feed's own contiguous-seen watermark. */
     val feedSeenThrough: Long? = null,
-    /** ADR-0065 R.5 — the conversation this group belongs to (the hex of the
+    /** ADR-0073 R.5 — the conversation this group belongs to (the hex of the
      *  lineage's first group): the key of every person-facing store. */
     val conversationHex: String = groupIdHex,
-    /** ADR-0065 R.5 — in a folded thread ([foldConversations]), the older
+    /** ADR-0073 R.5 — in a folded thread ([foldConversations]), the older
      *  segments whose rows precede the head's, oldest first. */
     val olderSegments: List<String> = emptyList(),
-    /** ADR-0065 R.5 — the index of THIS group among the conversation's
+    /** ADR-0073 R.5 — the index of THIS group among the conversation's
      *  segments, as the lineage orders them (0 for a conversation that never
      *  moved). A read position names a segment by this index, and a device
      *  that joined at a successor holds no earlier segment, so the index is
@@ -12584,7 +12584,7 @@ public data class ChatMessage(
      */
     val unsupportedVersion: Long? = null,
     /**
-     * ADR-0065 R.5 — set on a row of an OLDER segment of the conversation, as
+     * ADR-0073 R.5 — set on a row of an OLDER segment of the conversation, as
      * the folded timeline shows it ([foldConversations]): the hex id of the
      * group the row is stored in. Such a row is read-only history; its
      * [messageId] is a negative on-screen id ([historyRowId]) and
@@ -12857,7 +12857,7 @@ private class GroupRecord(
         )
     }
 
-    /** ADR-0065 R.7 case 1 — a held row whose message went out in the
+    /** ADR-0073 R.7 case 1 — a held row whose message went out in the
      *  conversation's successor leaves this segment. */
     fun removeLocal(localId: Long) {
         messages.removeAll { it.localId == localId && it.ack != Ack.SENT }
@@ -12973,11 +12973,11 @@ private class GroupRecord(
         registrarSeedSink: ((MemberIdentity?, ByteArray) -> Unit)? = null,
         scopedSink: ((MemberIdentity?, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit)? = null,
         groupClosedSink: ((Long, MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupClosed) -> Unit)? = null,
-        /** ADR-0065 R.7 case 2 / UX 16.5 — the batch changed which devices the
+        /** ADR-0073 R.7 case 2 / UX 16.5 — the batch changed which devices the
          *  group holds and not which PEOPLE: its commit rows are not drawn
          *  ([deviceSwapAcrossCommits]). */
         suppressCommitRows: Boolean = false,
-        /** ADR-0065 R.7 case 1 — whether a received message is a RE-SEND
+        /** ADR-0073 R.7 case 1 — whether a received message is a RE-SEND
          *  whose original this device already holds ([resendVerdict]): such a
          *  row is dropped before storage, so it is shown, counted and
          *  notified once, where it was. */
@@ -13079,7 +13079,7 @@ private class GroupRecord(
                     if (name != null) groupNameSink?.invoke(event.senderKey, name)
                 }
                 is IncomingChatEvent.GroupClosed -> {
-                    // ADR-0065 R.6 — a successor claim. Never a timeline row and
+                    // ADR-0073 R.6 — a successor claim. Never a timeline row and
                     // never drawn (R.0); the sink runs the receive rule and
                     // writes the claim state only on its verdict.
                     val closed = event.closed
@@ -13373,7 +13373,7 @@ private class GroupRecord(
     }
 
     /**
-     * ADR-0065 phase 2 / UX 16.3 — append a local system row ("{name} reset
+     * ADR-0073 phase 2 / UX 16.3 — append a local system row ("{name} reset
      * their account keys. Their old devices were removed from this group.")
      * at the point the eviction landed. Local like a call row (a negative id
      * no DS row can take, no author), rendered in the interface language of

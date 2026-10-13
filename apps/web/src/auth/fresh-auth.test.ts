@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The fresh-auth proof (`fresh-auth.ts`; ADR-0065 as amended 2026-10-06,
+ * The fresh-auth proof (`fresh-auth.ts`; ADR-0073 as amended 2026-10-06,
  * identity-recovery UX sections 17 and 15.1a): the wire read, the in-memory
  * holder, the shared block's decision, each surface's "what is shown", the
  * failure mapping and the password-change gate.
@@ -543,7 +543,7 @@ describe("the grant stays in memory and reaches every gated route", () => {
     const ctx = read("./AuthContext.tsx");
     expect(ctx.match(/freshGrants\.put\(/g)?.length).toBe(6);
     // login, signup, passkey sign-in, the two proof routes, and the recall
-    // (ADR-0066: `recall/finish` answers a grant; the old password proved it).
+    // (ADR-0074: `recall/finish` answers a grant; the old password proved it).
     for (const landing of ["async recoverWithTotp(", "async recoverWithThreeWords("]) {
       const start = ctx.indexOf(landing);
       const end = ctx.indexOf("\n    async ", start + 10);
@@ -557,7 +557,7 @@ describe("the grant stays in memory and reaches every gated route", () => {
     const end = ctx.indexOf("\n    async ", start + 10);
     const body = ctx.slice(start, end);
     // The one exception is the "It was not me" screen of an account notice
-    // (ADR-0067, UX 19.6), which asks nothing but the new password.
+    // (ADR-0075, UX 19.6), which asks nothing but the new password.
     // The other is a guest's FIRST password (it has none to prove), and only
     // while the account's first-password marker is set.
     expect(body.includes("options?.afterAccountNotice === true ||")).toBe(true);

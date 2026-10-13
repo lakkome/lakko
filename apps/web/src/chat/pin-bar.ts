@@ -85,7 +85,7 @@ export interface SegmentPins {
 }
 
 /**
- * ADR-0065 R.5 — a conversation's pins span its segments. The pin store
+ * ADR-0073 R.5 — a conversation's pins span its segments. The pin store
  * stays keyed on `(group, message id)` and is never rewritten when a
  * conversation continues in a successor group, so a pin of an older segment
  * is still held under the older group. This folds every held segment's pins
@@ -123,7 +123,7 @@ export interface PinTarget {
 }
 
 /**
- * ADR-0065 R.5 — the inverse of {@link pinsAcrossSegments}: which stored
+ * ADR-0073 R.5 — the inverse of {@link pinsAcrossSegments}: which stored
  * `(group, message id)` an on-screen row id is. A pin of an older segment
  * is drawn under its history id; to UNPIN it the store has to be told the
  * older group and the original id.
@@ -160,7 +160,7 @@ export type PinRoute =
   | "refused";
 
 /**
- * ADR-0065 R.5 — a pin of an OLDER segment can be removed, and nothing
+ * ADR-0073 R.5 — a pin of an OLDER segment can be removed, and nothing
  * else can be done to it: an older segment is read-only on the wire (no op
  * can name its rows in the current group's journal, and nothing is sent
  * into a superseded session), so its shared unpin is recorded on this
@@ -185,7 +185,7 @@ export function pinRoute(input: {
 }
 
 /**
- * ADR-0065 R.5 — what the action menu of a row of an OLDER segment offers:
+ * ADR-0073 R.5 — what the action menu of a row of an OLDER segment offers:
  * the `Unpin` row alone when the row is pinned in a way this device may
  * clear, and nothing otherwise (a history row takes no edit, delete,
  * reaction, reply, forward or new pin).

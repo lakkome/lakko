@@ -75,7 +75,7 @@ services:
       # after decode). Dev fixture only; never a production value. Unset it
       # to disable the /totp/* routes (they return 503).
       LAKKO_TOTP_ENC_KEY: ${LAKKO_TOTP_ENC_KEY:-ZGV2LXRvdHAtZW5jLWtleS0zMi1ieXRlcy1maXhlZCE=}
-      # ADR-0064 — passkey-vault blob-encryption key (base64, 32 bytes after
+      # ADR-0072 — passkey-vault blob-encryption key (base64, 32 bytes after
       # decode). Dev fixture only; never a production value. Unset it to
       # disable the /vault/passkey* routes (they return 503).
       LAKKO_VAULT_ENC_KEY: ${LAKKO_VAULT_ENC_KEY:-ZGV2LXZhdWx0LWVuYy1rZXktMzItYnl0ZXMtZml4ZWQh}

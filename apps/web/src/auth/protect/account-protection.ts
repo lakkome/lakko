@@ -3,7 +3,7 @@
 
 /**
  * How an account is protected against a forgotten password or a lost device
- * (ADR-0067 section 1, `docs/ux/identity-recovery.md` 19.1), decided from
+ * (ADR-0075 section 1, `docs/ux/identity-recovery.md` 19.1), decided from
  * the three facts `GET /recovery-email` reports, and what Settings > Account
  * shows for it. Pure; the stores at the end hold three per-device facts in
  * plain storage (none of them a secret, none of them the address).
@@ -25,7 +25,7 @@ export interface RecoveryEmailStatus {
   readonly totp: boolean;
 }
 
-/** The three kinds of account of ADR-0067 section 1. */
+/** The three kinds of account of ADR-0075 section 1. */
 export type AccountProtection = "email" | "phrase" | "none";
 
 /**
@@ -169,7 +169,7 @@ export function publishOwedTextKey(wordsShown: boolean): string {
 }
 
 /**
- * Whether a "three words from your phrase" surface is shown (ADR-0067
+ * Whether a "three words from your phrase" surface is shown (ADR-0075
  * section 11): only on a device of a phrase-protected account. The other
  * conditions (the device holds the phrase and the keys) are
  * `recover/three-words.ts`'s.

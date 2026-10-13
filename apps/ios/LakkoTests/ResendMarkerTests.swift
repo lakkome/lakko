@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.7 case 1 - the re-send marker. The cases are those of
+/// ADR-0073 R.7 case 1 - the re-send marker. The cases are those of
 /// `apps/web/src/chat/resend-marker.test.ts` and of `heldResendPredicate` in
 /// `resend-receive.test.ts` (that file's two envelope cases test the wire
 /// codec, which is not this module's).

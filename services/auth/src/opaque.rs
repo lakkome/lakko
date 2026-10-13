@@ -459,7 +459,7 @@ pub(crate) struct SignupFinishRequest {
     #[serde(default)]
     pub(crate) recovery_upload: Option<String>,
     /// URL-safe base64 (no padding) of the 32-byte id of the device this
-    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// session lands on: its conversation leaf signature key (ADR-0074
     /// section 0.4). Absent when the device has no keys yet; the session then
     /// names no device and the client calls `POST /auth/session/bind-device`
     /// once it has them.
@@ -472,11 +472,11 @@ pub(crate) struct SignupFinishResponse {
     pub(crate) ok: bool,
     /// The session pair (`session_token`, `session_expires_at_ms`,
     /// `refresh_token`, `refresh_expires_at_ms`, `key_generation`), the
-    /// same shape `/login/finish` returns (ADR-0065): the client treats
+    /// same shape `/login/finish` returns (ADR-0073): the client treats
     /// signup + auto-login as one ceremony.
     #[serde(flatten)]
     pub(crate) session: crate::session::SessionPair,
-    /// `fresh_grant` + `fresh_grant_expires_at_ms` (ADR-0065, amended
+    /// `fresh_grant` + `fresh_grant_expires_at_ms` (ADR-0073, amended
     /// 2026-10-06): the person typed the new password seconds ago, in this
     /// very exchange, and onboarding offers "add a passkey" right after
     /// signup, which requires a grant. A separate field, never part of the
@@ -685,7 +685,7 @@ struct TakenLoginState {
 /// The transaction also reads the account's key generation, while it holds
 /// the state row's lock. A key reset and a recall delete an account's
 /// in-flight login states inside the transaction that bumps the generation
-/// (ADR-0065 section 2, ADR-0066 section 1.2), so one of two things is true
+/// (ADR-0073 section 2, ADR-0074 section 1.2), so one of two things is true
 /// for a login that straddles one: the state row was already gone (`None`
 /// here), or the generation read here is the one from BEFORE the change, and
 /// the pair the caller issues at it is refused on first use. Reading the
@@ -823,7 +823,7 @@ pub(crate) struct LoginFinishRequest {
     /// Base64-encoded `CredentialFinalization` from `ClientLogin::finish`.
     pub(crate) finalize: String,
     /// URL-safe base64 (no padding) of the 32-byte id of the device this
-    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// session lands on: its conversation leaf signature key (ADR-0074
     /// section 0.4). Absent when the device has no keys yet; the session then
     /// names no device and the client calls `POST /auth/session/bind-device`
     /// once it has them.
@@ -839,7 +839,7 @@ pub(crate) struct LoginFinishResponse {
     pub(crate) account_id: String,
     /// The session pair (`session_token`, `session_expires_at_ms`,
     /// `refresh_token`, `refresh_expires_at_ms`, `key_generation`),
-    /// ADR-0065: the access token is the bearer on every service, the
+    /// ADR-0073: the access token is the bearer on every service, the
     /// refresh credential renews it at `POST /auth/session/refresh`.
     #[serde(flatten)]
     pub(crate) session: crate::session::SessionPair,
@@ -849,7 +849,7 @@ pub(crate) struct LoginFinishResponse {
 /// login answer plus a fresh-auth grant (`fresh_grant`,
 /// `fresh_grant_expires_at_ms`), the proof that the password was proven just
 /// now which reset account keys, delete account and add a device require
-/// (ADR-0065, amended 2026-10-04 and 2026-10-06; the passkey login's answer
+/// (ADR-0073, amended 2026-10-04 and 2026-10-06; the passkey login's answer
 /// carries one too). `/recovery/login/finish` answers the plain
 /// [`LoginFinishResponse`].
 #[derive(Serialize)]
@@ -1199,7 +1199,7 @@ pub(crate) struct PasswordResetFinishRequest {
     /// Base64-encoded `RegistrationUpload` for the new password envelope.
     pub(crate) new_password_upload: String,
     /// URL-safe base64 (no padding) of the 32-byte id of the device this
-    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// session lands on: its conversation leaf signature key (ADR-0074
     /// section 0.4). Absent when the device has no keys yet; the session then
     /// names no device and the client calls `POST /auth/session/bind-device`
     /// once it has them.
@@ -1214,7 +1214,7 @@ pub(crate) struct PasswordResetFinishResponse {
     /// [`LoginFinishResponse::account_id`].
     pub(crate) account_id: String,
     /// The session pair for the rotated password, the same shape as
-    /// [`LoginFinishResponse::session`] (ADR-0065). A password reset does
+    /// [`LoginFinishResponse::session`] (ADR-0073). A password reset does
     /// not bump the key generation: the sessions other devices hold stay
     /// valid (a key reset is what signs them out).
     #[serde(flatten)]
@@ -1358,7 +1358,7 @@ pub(crate) async fn password_reset_start(
 /// The recovery envelope stays untouched — the same mnemonic keeps
 /// working for future resets.
 ///
-/// The replacement is one transaction under the account row's lock (ADR-0066
+/// The replacement is one transaction under the account row's lock (ADR-0074
 /// section 0.2): before the envelope changes, the recall anchor for the
 /// account's current identity key is captured if it has none, so the
 /// password in force before the FIRST change is what a recall is checked
@@ -1443,7 +1443,7 @@ pub(crate) async fn password_reset_finish(
     let new_registration = ServerRegistration::<LakkoCipherSuite>::finish(new_password_upload);
     let new_bytes = new_registration.serialize().to_vec();
 
-    // 3. One transaction (ADR-0066 section 0.2; it was a bare upsert before):
+    // 3. One transaction (ADR-0074 section 0.2; it was a bare upsert before):
     //    lock the account row, hold the proof to the generation it was made
     //    under, capture the recall anchor, then replace the envelope.
     let invalid = || (StatusCode::UNAUTHORIZED, "invalid credentials".to_string());
@@ -2084,7 +2084,7 @@ mod signup_login_limits_e2e_tests {
     }
 
     /// A real Ed25519 public key per tag: the key reset records the key it
-    /// installs and refuses one that is not a usable point (ADR-0066).
+    /// installs and refuses one that is not a usable point (ADR-0074).
     fn pk(tag: u8) -> [u8; 32] {
         lakko_crypto::signing::SigningKey::from_seed(&[tag; 32])
             .verifying_key()
@@ -2909,7 +2909,7 @@ mod signup_login_limits_e2e_tests {
             assert_eq!(err_code(&bytes), "login-by-name-disabled", "{uri}");
         }
         // A bearer passes the middleware only for an account that exists
-        // (ADR-0065: it reads the key generation), so the token is a real
+        // (ADR-0073: it reads the key generation), so the token is a real
         // account's.
         let (a, token) = raw_account(&pool, &state).await;
         for method in [Method::PUT, Method::DELETE] {
@@ -2965,7 +2965,7 @@ mod signup_login_limits_e2e_tests {
     }
 
     /// `PUT /auth/login-handle` with a live fresh-auth grant, which a bind
-    /// that changes the handle needs since ADR-0068 (a first bind ignores
+    /// that changes the handle needs since ADR-0076 (a first bind ignores
     /// it). What these tests are about is everything after that gate.
     async fn put_handle(state: &crate::AppState, token: &str, handle: &str) -> (StatusCode, Bytes) {
         send_json(
@@ -3234,7 +3234,7 @@ mod signup_login_limits_e2e_tests {
     }
 
     // ------------------------------------------------------------------
-    // Reset the account keys (ADR-0065 section 2 and 3)
+    // Reset the account keys (ADR-0073 section 2 and 3)
     // ------------------------------------------------------------------
 
     /// Run the two reset calls with `token` and the key-reset `grant` for
@@ -3517,7 +3517,7 @@ mod signup_login_limits_e2e_tests {
 
         // The reset, from the first device, with the password proven anew.
         let grant = grant_by_password(&state, &handle, pw).await;
-        // ADR-0066: before the reset the genesis mint recorded the old key.
+        // ADR-0074: before the reset the genesis mint recorded the old key.
         let old_pubkey = pk(0x59);
         let genesis = |token: String, key: [u8; 32]| {
             let state = state.clone();
@@ -4211,7 +4211,7 @@ mod signup_login_limits_e2e_tests {
     }
 
     // ------------------------------------------------------------------
-    // The password or a passkey, proven just now (ADR-0065 amended
+    // The password or a passkey, proven just now (ADR-0073 amended
     // 2026-10-04 and 2026-10-06)
     // ------------------------------------------------------------------
 
@@ -4487,7 +4487,7 @@ mod signup_login_limits_e2e_tests {
     }
 
     // ------------------------------------------------------------------
-    // The fresh-auth grant for delete account and add a device (ADR-0065
+    // The fresh-auth grant for delete account and add a device (ADR-0073
     // amended 2026-10-06)
     // ------------------------------------------------------------------
 
@@ -4571,7 +4571,7 @@ mod signup_login_limits_e2e_tests {
     }
 
     // ------------------------------------------------------------------
-    // The fresh-auth grant for adding a passkey (ADR-0065 amended
+    // The fresh-auth grant for adding a passkey (ADR-0073 amended
     // 2026-10-06, second part)
     // ------------------------------------------------------------------
 

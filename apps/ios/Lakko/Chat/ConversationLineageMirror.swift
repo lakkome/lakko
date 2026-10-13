@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 R.5 - which CONVERSATION a successor group belongs to, mirrored
+// ADR-0073 R.5 - which CONVERSATION a successor group belongs to, mirrored
 // into the App Group so the notification extension can answer it.
 //
 // A conversation that continued in a new MLS group keeps its row, its title,

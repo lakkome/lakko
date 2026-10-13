@@ -27,16 +27,16 @@ public enum class ProofSurface {
     AddPasskey,
     ChangePassword,
 
-    /** ADR-0066 / UX 18.1 - remove another device (Settings > Devices). */
+    /** ADR-0074 / UX 18.1 - remove another device (Settings > Devices). */
     RemoveDevice,
 
-    /** ADR-0067 / UX 19.2 - add, replace or remove the recovery email. */
+    /** ADR-0075 / UX 19.2 - add, replace or remove the recovery email. */
     RecoveryEmail,
 
-    /** ADR-0067 / UX 19.5 - save a recovery phrase (a key rotation). */
+    /** ADR-0075 / UX 19.5 - save a recovery phrase (a key rotation). */
     SavePhrase,
 
-    /** ADR-0068 - change the username. */
+    /** ADR-0076 - change the username. */
     ChangeUsername,
 }
 

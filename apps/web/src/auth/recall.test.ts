@@ -3,7 +3,7 @@
 
 /**
  * "Was it you?" and taking the account back: every pure decision
- * (ADR-0066 part 1 and "T3 as built"; UX 18.4).
+ * (ADR-0074 part 1 and "T3 as built"; UX 18.4).
  */
 import { describe, expect, it } from "vitest";
 
@@ -374,7 +374,7 @@ describe("account deletion while the account can be taken back", () => {
   });
 });
 
-// ADR-0067 section 8 (UX 19.7): taking the account back with the phrase.
+// ADR-0075 section 8 (UX 19.7): taking the account back with the phrase.
 describe("the phrase arm", () => {
   it("reads the arm and the account id from the status answer", () => {
     const id = "A".repeat(22);

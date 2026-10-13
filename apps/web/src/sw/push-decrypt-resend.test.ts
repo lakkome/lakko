@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.7 case 1 — the service worker knows the RE-SEND MARKER: a push
+ * ADR-0073 R.7 case 1 — the service worker knows the RE-SEND MARKER: a push
  * for a re-sent message whose original this device already holds posts
  * nothing.
  *

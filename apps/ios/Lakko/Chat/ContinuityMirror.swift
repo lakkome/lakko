@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 R.8 / R.7 case 1 - the facts the notification extension needs to
+// ADR-0073 R.8 / R.7 case 1 - the facts the notification extension needs to
 // stay silent where the app is silent, mirrored into the App Group.
 //
 // The app drops two kinds of row before anything is stored or drawn

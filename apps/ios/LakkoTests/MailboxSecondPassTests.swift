@@ -5,7 +5,7 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-/// ADR-0066 section 3.5a, rules 5 and 6 and the durable re-send: what was
+/// ADR-0074 section 3.5a, rules 5 and 6 and the durable re-send: what was
 /// granted before a rotation is spent, a refused write re-checks the address
 /// once, a kept device's profile re-send survives a restart, people search
 /// accepts a proven predecessor, and a committer signs with the key a

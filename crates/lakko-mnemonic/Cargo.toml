@@ -18,7 +18,7 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 
-# Passkey vault (ADR-0064): HKDF + AEAD for the passkey seal of the phrase
+# Passkey vault (ADR-0072): HKDF + AEAD for the passkey seal of the phrase
 # entropy, and the OS CSPRNG for the three-word check's positions. Workspace
 # crate, no new external dependency.
 lakko-crypto.workspace = true

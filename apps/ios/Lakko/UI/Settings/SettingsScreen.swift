@@ -24,7 +24,7 @@ struct SettingsScreen: View {
     /// object rather than a second implementation.
     @StateObject private var accountDeletion: PasskeysViewModel
 
-    /// ADR-0067 — what protects the account: the status line, the banner
+    /// ADR-0075 — what protects the account: the status line, the banner
     /// and the two rows of the Account section.
     private let accountProtection: AccountProtectionCenter?
 

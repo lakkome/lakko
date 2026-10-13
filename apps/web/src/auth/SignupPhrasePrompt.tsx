@@ -5,8 +5,8 @@
  * "Save your recovery phrase": new recovery words, as a guided flow
  * (docs/ux/client-redesign.md section 5.6). Shown after the account keys
  * were changed on this device (a key reset, taking the account back, a key
- * rotation, "Save a recovery phrase" of ADR-0067), never by a sign-up: the
- * phrase is not shown at sign-up any more (ADR-0067 D2), and the file keeps
+ * rotation, "Save a recovery phrase" of ADR-0075), never by a sign-up: the
+ * phrase is not shown at sign-up any more (ADR-0075 D2), and the file keeps
  * its name from before that decision.
  *
  *
@@ -176,7 +176,7 @@ export function PasskeyOffer(props: {
   /** A passkey now exists for the account (whatever the keys choice that
    *  follows comes to). */
   readonly onAdded?: () => void;
-  /** The "Protect your account" step (ADR-0067): no "Step 3 of 3" line, and
+  /** The "Protect your account" step (ADR-0075): no "Step 3 of 3" line, and
    *  the second button reads Back. */
   readonly standalone?: boolean;
 }): JSX.Element {

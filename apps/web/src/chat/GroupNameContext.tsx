@@ -79,7 +79,7 @@ export interface GroupNameApi {
   /** The creator's name right after the creating commit: store first, then
    *  send best-effort (a failed send is covered by the growth re-send). */
   recordCreated(entry: ActiveGroup, name: string): Promise<void>;
-  /** ADR-0065 R.6 step 4 — the conversation continues in `to`: file the
+  /** ADR-0073 R.6 step 4 — the conversation continues in `to`: file the
    *  name `from` holds under `to` with its ORIGINAL stamp and send it there
    *  (ADR-0051: a re-send never re-stamps). Idempotent; nothing happens when
    *  `from` holds no name or `to` already holds one at least as new. */
@@ -130,7 +130,7 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     // The role table names ACCOUNT keys (ADR-0050), so the account identity
     // is what `ownRole` is asked with. The session-long instance when it is
     // there; a throwaway one from the seed otherwise.
-    // ADR-0066 section 3.5: the role table names the key the leaves are bound
+    // ADR-0074 section 3.5: the role table names the key the leaves are bound
     // to, which after a proven rotation is the predecessor.
     const account = chats.conversationAccountIdentity();
     if (account !== null) return readPushRotationRole(group, account);

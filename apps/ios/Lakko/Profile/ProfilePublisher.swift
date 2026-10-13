@@ -97,7 +97,7 @@ final class ProfilePublisher {
         }
     }
 
-    /// ADR-0066 section 3.5a rule 3 — publish into every group in
+    /// ADR-0074 section 3.5a rule 3 — publish into every group in
     /// `groupIdHexes` now and say which sends did NOT land, so a caller that
     /// owes the re-send (the rotating device, whose new reach grants peers
     /// have no other way to learn) can keep it owed. A group this device can

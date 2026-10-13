@@ -10,7 +10,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 /*
- * ADR-0066 section 3.5 ("Peers") - the proven-predecessor rule.
+ * ADR-0074 section 3.5 ("Peers") - the proven-predecessor rule.
  *
  * An account whose published key changed WITH a supersession proof that
  * verified under the pinned key rotated its keys and kept its devices. The

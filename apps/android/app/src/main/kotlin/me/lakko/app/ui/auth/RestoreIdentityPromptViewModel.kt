@@ -185,7 +185,7 @@ public class RestoreIdentityPromptViewModel(
     }
 
     /**
-     * ADR-0065 "Reset account keys" — the person has NO recovery phrase, NO
+     * ADR-0073 "Reset account keys" — the person has NO recovery phrase, NO
      * other device and NO passkey that restores keys, and typed the
      * confirmation. [AuthRepository.mintFreshIdentity] runs the reset; the
      * repository flips the auth state to `SaveFreshPhrase` and the router

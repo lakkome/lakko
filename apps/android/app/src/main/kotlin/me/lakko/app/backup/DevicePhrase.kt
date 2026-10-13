@@ -55,7 +55,7 @@ public object DevicePhrase {
         /** `mintFreshIdentity`: a new identity and a new phrase. */
         FreshIdentity("fresh-identity"),
 
-        /** ADR-0066 part 3: the account keys were changed and the devices
+        /** ADR-0074 part 3: the account keys were changed and the devices
          *  kept (the rotating device, and a kept device adopting). */
         KeyRotation("key-rotation"),
     }

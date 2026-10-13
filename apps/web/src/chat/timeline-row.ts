@@ -155,7 +155,7 @@ export function dedupByMessageId(rows: readonly TimelineRow[]): TimelineRow[] {
 }
 
 /**
- * ADR-0065 R.5 - a stored row of an OLDER segment of the conversation, as
+ * ADR-0073 R.5 - a stored row of an OLDER segment of the conversation, as
  * the open timeline shows it: the same row under its on-screen history id
  * (`lineage.ts` `historyRowId`), with a reply's target moved the same way so
  * a quote still jumps to the message it answered. A reply target is a

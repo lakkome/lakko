@@ -37,7 +37,7 @@ export function ReachProvider(props: { children: JSX.Element }): JSX.Element {
     return s.kind === "session" ? s.account.accountId : null;
   };
 
-  // ADR-0066 section 3.5a - the own account's keys, for "resolve before you
+  // ADR-0074 section 3.5a - the own account's keys, for "resolve before you
   // address" (another device of this account is bound to the predecessor
   // key) and for the committer delegations that still name that key. Set
   // synchronously, before the session below starts.

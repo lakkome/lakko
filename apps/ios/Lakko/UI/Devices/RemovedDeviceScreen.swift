@@ -5,12 +5,12 @@ import SwiftUI
 
 /// "This device was removed" (docs/ux/second-device.md section 3.1) and its
 /// second variant, "Your account keys were reset" (docs/ux/identity-recovery.md
-/// section 15.2, ADR-0065 section 3.5).
+/// section 15.2, ADR-0073 section 3.5).
 ///
 /// Replaces the whole signed-in app once another device of the account has
 /// removed this one, or reset the account's keys: no chat list behind it,
 /// no dismiss, no retry. In BOTH variants the deletion starts by itself
-/// (ADR-0066 section 2.3, UX 18.2: a removed device no longer waits for a
+/// (ADR-0074 section 2.3, UX 18.2: a removed device no longer waits for a
 /// tap); the one button, "Sign in", appears once it is done. The mismatch variant (the directory publishes
 /// other keys at the same generation, an anomaly) keeps the "Sign out"
 /// button and runs the deletion on the tap. Drawn in the anonymous screens'

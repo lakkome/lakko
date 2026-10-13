@@ -34,14 +34,14 @@ protocol AccountDirectory {
         sessionToken: String
     ) async throws -> RegisterResult
 
-    /// `POST /discovery/username/replace` (ADR-0068): retire the account's
+    /// `POST /discovery/username/replace` (ADR-0076): retire the account's
     /// current name and make `username` its name.
     func replaceUsername(
         accountId: Data, username: String, sessionToken: String
     ) async throws -> ReplacedUsername
 
     /// Upsert the account's identity bundle (`POST /discovery/identity`,
-    /// session-token gated). `keyResetAttest` is the ADR-0065 key-reset
+    /// session-token gated). `keyResetAttest` is the ADR-0073 key-reset
     /// attestation on the upload that installs reset keys, `nil` otherwise.
     /// See
     /// ``DiscoveryClient/uploadIdentityBundle(accountId:signaturePubkey:x25519Pubkey:supersessionProofB64:leafAuth:genesisAttest:keyResetAttest:)``.
@@ -55,7 +55,7 @@ protocol AccountDirectory {
         sessionToken: String
     ) async throws
 
-    /// ADR-0066 section 3.5 — the proven-rotation upload: the new identity
+    /// ADR-0074 section 3.5 — the proven-rotation upload: the new identity
     /// bundle with the supersession proof (signed by the OLD key, which
     /// discovery verifies against the key its row holds) AND the key-reset
     /// attestation. `supersessionProof` is `nil` for the fallback (the row no
@@ -155,7 +155,7 @@ struct ReplacedUsername: Equatable {
 }
 
 extension AccountDirectory {
-    /// `POST /discovery/username/replace` (ADR-0068). A directory that does
+    /// `POST /discovery/username/replace` (ADR-0076). A directory that does
     /// not implement it refuses: a test double scripts its own.
     func replaceUsername(
         accountId: Data, username: String, sessionToken: String
@@ -282,7 +282,7 @@ func claimSignupUsername(
 // MARK: - Sign-in: the published identity
 
 // The decision a session landing takes about the account's published
-// identity is ``KeyResetLanding`` (ADR-0065 section 4.2): land, re-publish,
+// identity is ``KeyResetLanding`` (ADR-0073 section 4.2): land, re-publish,
 // or refuse to upload because this device's keys are not the account's any
 // more. The observation it consumes is read in
 // ``AuthRepository/landWithPublishedIdentityCheck``.

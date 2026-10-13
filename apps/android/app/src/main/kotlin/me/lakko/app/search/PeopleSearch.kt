@@ -119,7 +119,7 @@ public interface PeopleSearchDeps {
     public suspend fun identityKeyOf(accountId: ByteArray): ByteArray?
 
     /**
-     * ADR-0066 section 3.5a - whether [foundKey] is a PROVEN predecessor of
+     * ADR-0074 section 3.5a - whether [foundKey] is a PROVEN predecessor of
      * [publishedKey] (a recorded proven step, or a supersession proof by
      * [foundKey] over [publishedKey] that verifies): the same person after a
      * rotation of their account keys. An unproven change is never one.
@@ -170,7 +170,7 @@ public fun acceptPublicRecord(
     hit: LookupHit,
     oprfOutput: ByteArray,
     bundleKey: ByteArray,
-    /** ADR-0066 3.5a - a record sealed under a proven predecessor of the
+    /** ADR-0074 3.5a - a record sealed under a proven predecessor of the
      *  bundle's key is the same person's. */
     provenPredecessor: (foundKey: ByteArray, publishedKey: ByteArray) -> Boolean = { _, _ -> false },
 ): String? {
@@ -211,7 +211,7 @@ private fun resultFor(
 }
 
 /**
- * ADR-0066 section 3.5a - whether the key a person was FOUND as is the
+ * ADR-0074 section 3.5a - whether the key a person was FOUND as is the
  * person the identity bundle publishes: the published key itself, or a
  * proven predecessor of it ([provenPredecessor]; a throw is "no"). Two keys
  * nothing proved related are two people, whatever account id they claim.

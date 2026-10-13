@@ -5,7 +5,7 @@ import Foundation
 import LakkoCore
 import Security
 
-// ADR-0066 part 3, Stage A — rotating the account keys and keeping the other
+// ADR-0074 part 3, Stage A — rotating the account keys and keeping the other
 // devices: what EVERY device of the account needs, whichever side it is on.
 //
 //   * `KeyRotationWire`                 the fixed sizes and the proof window;
@@ -33,7 +33,7 @@ public enum KeyRotationWire {
     public static let entropyLength = 16
     /// `revoke_device_ids_b64` holds at most this many ids.
     public static let maxRevokedDevices = 8
-    /// The proof's validity: 14 days, as before ADR-0017 (ADR-0066 section
+    /// The proof's validity: 14 days, as before ADR-0017 (ADR-0074 section
     /// 3.2 step 3). The format's ceiling is 30 days.
     public static let proofWindowSecs: Int64 = 14 * 24 * 60 * 60
 }
@@ -114,7 +114,7 @@ public enum OwnAccountKeys {
 
     /// Which account identity a stored device binding may name without being
     /// re-minted: the current account key, or one of this account's own
-    /// predecessors. A device does NOT re-bind after a rotation (ADR-0066
+    /// predecessors. A device does NOT re-bind after a rotation (ADR-0074
     /// fact 14): a leaf under the new key is a different account to every
     /// gate, and a re-bound device misjudges its own standing.
     public static func bindingIsOwn(
@@ -168,7 +168,7 @@ public enum OwnAccountKeys {
         return holdsConversations ? .keepUnderCurrentKey : .remint
     }
 
-    /// ADR-0066 part 3 — whether a KeyPackage of THIS account names the
+    /// ADR-0074 part 3 — whether a KeyPackage of THIS account names the
     /// wrong account key for a conversation: its binding is under one of the
     /// account's own keys, but not the one this account's leaves in that
     /// conversation are bound to. Such a device (one that minted its binding
@@ -355,7 +355,7 @@ public enum KeptDeviceRule {
         /// tokens, so the device still can).
         case readJournalFirst
         /// Nothing to adopt: this is a reset as far as this device can tell.
-        /// The staged wipe and "Was it you?" (ADR-0066 section 1.1).
+        /// The staged wipe and "Was it you?" (ADR-0074 section 1.1).
         case treatAsReset
     }
 
@@ -432,7 +432,7 @@ public enum KeptDeviceRule {
     }
 }
 
-/// `POST /auth/session/refresh` with a `key_statement_b64`, mapped (ADR-0066
+/// `POST /auth/session/refresh` with a `key_statement_b64`, mapped (ADR-0074
 /// "T5 as built" items 15 to 17).
 public enum SessionUpgradeAnswer: Equatable {
     /// A pair at the current generation, naming the same device.

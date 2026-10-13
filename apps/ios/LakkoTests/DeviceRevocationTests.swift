@@ -6,7 +6,7 @@ import XCTest
 
 @testable import Lakko
 
-/// ADR-0066 sprint T2 — removing a device really removes it: what a landing
+/// ADR-0074 sprint T2 — removing a device really removes it: what a landing
 /// sends, the session-names-a-device rule, the recorded account key, Log out
 /// at the server, the removal state machine with its owed record, the
 /// device-revoked verdict (against logout and a superseded generation), and
@@ -735,7 +735,7 @@ final class Counter: @unchecked Sendable {
     var names: [String] { lock.withLock { recorded } }
 }
 
-/// ADR-0066 sprint T2 — the repository around the rules: a landing names the
+/// ADR-0074 sprint T2 — the repository around the rules: a landing names the
 /// device, the account key is recorded, Log out reaches the server, and a
 /// removed device wipes by itself.
 @MainActor
@@ -1014,7 +1014,7 @@ final class DeviceRevocationRepositoryTests: XCTestCase {
         XCTAssertEqual(harness.wiped.accounts, [accountIdB64])
     }
 
-    /// ADR-0066 T3 item 1: an older generation is always told
+    /// ADR-0074 T3 item 1: an older generation is always told
     /// `key-generation-superseded`. On a device that holds the keys that is
     /// the staged wipe and "Was it you?"; a removal signal arriving while it
     /// is up changes nothing and must not destroy the recall record.

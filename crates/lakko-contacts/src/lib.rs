@@ -42,13 +42,13 @@
 //!   for everyone, `updated_at_ms`): fixed-length, fail-closed, classified
 //!   by [`incoming_envelope`]; the order is [`pin::pin_is_newer`], the
 //!   authority is the receiver's role-table check.
-//! - [`group_closed`] — the ADR-0065 phase-2 group-closed envelope (an admin
+//! - [`group_closed`] — the ADR-0073 phase-2 group-closed envelope (an admin
 //!   closes a group whose owner reset their keys and names the recreated
 //!   group, `closed_at_ms`): the group-name template reused, bounded,
 //!   fail-closed, classified by [`incoming_envelope`]; the order is
 //!   [`group_closed::group_closed_is_newer`], the authority is the receiver's
 //!   role-table check.
-//! - [`key_rotation`] — the ADR-0066 key-rotation envelope (the device that
+//! - [`key_rotation`] — the ADR-0074 key-rotation envelope (the device that
 //!   changes the account keys hands the new phrase entropy and the
 //!   supersession proof to the account's other devices, in the DeviceGroup
 //!   only and only after the untrusted device is out): fixed-length,

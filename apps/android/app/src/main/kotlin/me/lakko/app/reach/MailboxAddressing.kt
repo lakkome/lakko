@@ -9,7 +9,7 @@ import me.lakko.app.contacts.keysOfPerson
 import java.util.Base64
 
 /*
- * ADR-0066 section 3.5a - the mailbox after a rotation of the account keys.
+ * ADR-0074 section 3.5a - the mailbox after a rotation of the account keys.
  *
  * A mailbox's address and the right to read it both derive from the account
  * key, so a rotated account moves to the mailbox of its NEW key at once. The
@@ -28,7 +28,7 @@ import java.util.Base64
  */
 
 /** How long a predecessor's mailbox is still read after this device adopted
- *  the successor key: the DS journal retention (chosen, ADR-0066 3.5a
+ *  the successor key: the DS journal retention (chosen, ADR-0074 3.5a
  *  rule 4). */
 public const val PREDECESSOR_MAILBOX_READ_MS: Long = 30L * 24 * 60 * 60 * 1000
 

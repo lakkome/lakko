@@ -32,7 +32,7 @@ public data class FeedSource(
     /** People in a group, for weighing reactions against its size; 0 for a
      *  channel, whose posts carry no reactions. */
     val audience: Int,
-    /** ADR-0065 R.5 — for a group whose conversation continues in a
+    /** ADR-0073 R.5 — for a group whose conversation continues in a
      *  successor, the hex of the conversation id (the lineage's first
      *  group); `null` when [idHex] is the conversation id itself. */
     val conversationHex: String? = null,
@@ -41,7 +41,7 @@ public data class FeedSource(
 /**
  * The key of everything a PERSON attaches to a feed source: the mute flag,
  * "hide from feeds", a feed rule's include / exclude lists. The conversation
- * id, never the group a moved conversation currently lives in (ADR-0065 R.5),
+ * id, never the group a moved conversation currently lives in (ADR-0073 R.5),
  * so none of it is lost or duplicated when the conversation moves.
  */
 public fun feedSourceKey(source: FeedSource): String = source.conversationHex ?: source.idHex

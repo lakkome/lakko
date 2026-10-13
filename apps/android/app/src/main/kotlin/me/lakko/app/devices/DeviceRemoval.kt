@@ -239,7 +239,7 @@ public object DeviceRemoval {
     }
 
     /**
-     * ADR-0066 section 2.3 step 4 — the DeviceGroup Remove for the device
+     * ADR-0074 section 2.3 step 4 — the DeviceGroup Remove for the device
      * whose leaf signature key is [deviceKey], resolved against the roster
      * as it is NOW (an owed removal is retried at a later launch, when leaf
      * indices may have moved).

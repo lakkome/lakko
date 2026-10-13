@@ -7,7 +7,7 @@
 //!
 //! `bip39` (the upstream Rust crate) supports 12 / 15 / 18 / 21 /
 //! 24-word mnemonics across nine languages. Lakko fixes the shape
-//! to **12 English words** (128 bits of entropy, ADR-0064; it was
+//! to **12 English words** (128 bits of entropy, ADR-0072; it was
 //! 24 until then), the only shape the product offers.
 //! Locking the choice down at this layer means:
 //!
@@ -34,11 +34,11 @@
 //!     positions and compares them itself. No server takes part and nothing
 //!     about the words is stored or sent anywhere.
 //!   * [`vault`] — the passkey vault: the 16-byte phrase entropy sealed
-//!     under a passkey's WebAuthn PRF output (ADR-0064 decision 6); and the
+//!     under a passkey's WebAuthn PRF output (ADR-0072 decision 6); and the
 //!     email vault: the same entropy sealed under a key stretched from the
-//!     login handle and the recovery email address (ADR-0067 section 2).
+//!     login handle and the recovery email address (ADR-0075 section 2).
 //!   * [`recovery_email`] — the one rule for what a recovery email address
-//!     is and how it is normalised (ADR-0067 section 4), shared with
+//!     is and how it is normalised (ADR-0075 section 4), shared with
 //!     `services/auth`.
 //!
 //! ## Security notes
@@ -97,7 +97,7 @@ pub mod fuzz_api {
     /// [`Mnemonic::from_phrase`] is the recovery-phrase parser (the
     /// phrase is user-typed or device-relayed during recovery);
     /// [`Mnemonic::from_entropy`] rebuilds the phrase from the entropy
-    /// a passkey-vault blob opens to (ADR-0064), which whoever stored
+    /// a passkey-vault blob opens to (ADR-0072), which whoever stored
     /// the blob chose. The harness runs both on the
     /// same input — the raw bytes through `from_entropy` (the 16-byte
     /// length gate → the BIP39 checksum reconstruction) and, when the
@@ -115,7 +115,7 @@ pub mod fuzz_api {
     }
 
     /// Drive the email-vault open path and the recovery-address rule on
-    /// attacker-chosen bytes (ADR-0067).
+    /// attacker-chosen bytes (ADR-0075).
     ///
     /// The sealed blob is served by the server in the answer to a mailed
     /// code, so every byte of it is chosen by whoever controls that answer.

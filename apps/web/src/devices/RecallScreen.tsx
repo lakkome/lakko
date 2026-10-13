@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * "Was it you?" (docs/ux/identity-recovery.md section 18.4, ADR-0066
+ * "Was it you?" (docs/ux/identity-recovery.md section 18.4, ADR-0074
  * part 1): the screen of a device that held the account's keys when they
  * were reset on another device.
  *
@@ -71,7 +71,7 @@ export function RecallScreen(props: {
   const [oldPassword, setOldPassword] = createSignal("");
   const [newPassword, setNewPassword] = createSignal("");
   const [repeatPassword, setRepeatPassword] = createSignal("");
-  // ADR-0067 section 8 (UX 19.7): "Use my recovery phrase instead". The 12
+  // ADR-0075 section 8 (UX 19.7): "Use my recovery phrase instead". The 12
   // words from before the reset stand in for the old password.
   const [usePhrase, setUsePhrase] = createSignal(false);
   const [oldPhrase, setOldPhrase] = createSignal("");

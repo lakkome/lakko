@@ -3,7 +3,7 @@
 
 /**
  * Which channels' owner key this account handed over to the key of its new
- * identity after a key rotation (ADR-0066 section 3.5, "Channels"). From
+ * identity after a key rotation (ADR-0074 section 3.5, "Channels"). From
  * then on the channel's owner requests are signed by the NEW account
  * identity, while the channel's PublisherGroup stays in the provider of the
  * identity the account's conversation layer runs under.

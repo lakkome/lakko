@@ -285,7 +285,7 @@ pub enum OwnerHandoverError {
     BadKey,
 }
 
-/// The body of `PUT /v1/channels/<id>/owner` ([ADR-0066] section 3.5): the
+/// The body of `PUT /v1/channels/<id>/owner` ([ADR-0074] section 3.5): the
 /// NEW owner public key, 32 raw bytes, nothing else.
 ///
 /// The handover is "the current owner key signs a statement that names the
@@ -299,7 +299,7 @@ pub enum OwnerHandoverError {
 /// device that holds both seeds signs with the key the OLD seed derives and
 /// names the key the NEW seed derives.
 ///
-/// [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+/// [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 #[must_use]
 pub fn owner_handover_body(new_owner_key: &VerifyingKey) -> [u8; OWNER_HANDOVER_BODY_LEN] {
     new_owner_key.to_bytes()

@@ -4,7 +4,7 @@
 package me.lakko.app.chat
 
 /*
- * ADR-0065 R.7 case 1 / UX 16.4 - the HELD send of a one-to-one whose other
+ * ADR-0073 R.7 case 1 / UX 16.4 - the HELD send of a one-to-one whose other
  * person reset their keys.
  *
  * Once the reset is accepted, a message is never sent into the old session
@@ -128,7 +128,7 @@ public fun heldVerdict(route: SendRoute, heldAtMs: Long, nowMs: Long): HeldVerdi
 public const val REPLY_NO_JUMP_TARGET: Long = 0L
 
 /**
- * ADR-0065 R.7 case 1 - the reply target a held message is SENT with.
+ * ADR-0073 R.7 case 1 - the reply target a held message is SENT with.
  *
  * | reply | composed in group      | sent into group | result                     |
  * |-------|------------------------|-----------------|----------------------------|

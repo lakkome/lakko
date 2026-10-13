@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.2 - the acceptance rule's whole table (`reset-verdict.ts`).
+ * ADR-0073 R.2 - the acceptance rule's whole table (`reset-verdict.ts`).
  */
 import { describe, expect, it } from "vitest";
 
@@ -30,7 +30,7 @@ function input(over: Partial<ResetVerdictInput> = {}): ResetVerdictInput {
   };
 }
 
-describe("resetVerdict (ADR-0065 R.2)", () => {
+describe("resetVerdict (ADR-0073 R.2)", () => {
   it("accepts a verified attestation at a higher generation with the log off (D3)", () => {
     expect(logOffAcceptsReset()).toBe(true);
     expect(resetVerdict(input())).toEqual({

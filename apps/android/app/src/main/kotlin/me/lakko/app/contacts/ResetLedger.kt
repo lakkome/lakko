@@ -11,7 +11,7 @@ import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 
 /*
- * ADR-0065 R.2 "The re-pin" - what this device keeps per peer account beside
+ * ADR-0073 R.2 "The re-pin" - what this device keeps per peer account beside
  * the pin: the generation it last ACCEPTED, the keys an accepted reset
  * retired, and when the latest reset was signed.
  *
@@ -73,7 +73,7 @@ public sealed interface AcceptResetPlan {
 }
 
 /**
- * ADR-0065 R.2 "The re-pin", as a pure plan. `pin[account] = new key`, marker
+ * ADR-0073 R.2 "The re-pin", as a pure plan. `pin[account] = new key`, marker
  * `max(held marker, now in seconds)`, accepted generation `g`. The held key
  * and its proven predecessors (a reset makes every predecessor a superseded
  * key) are appended to the previous and superseded keys.
@@ -81,7 +81,7 @@ public sealed interface AcceptResetPlan {
 public fun acceptResetPlan(
     pin: Pin?,
     row: ResetLedgerRow?,
-    /** The proven predecessors of the pinned key (ADR-0066 section 3.5). */
+    /** The proven predecessors of the pinned key (ADR-0074 section 3.5). */
     provenPredecessorsB64: List<String>,
     reset: AcceptedReset,
 ): AcceptResetPlan {
@@ -127,7 +127,7 @@ public fun withGenerationBaseline(row: ResetLedgerRow?, bundleGeneration: Long):
     return (row ?: ResetLedgerRow()).copy(acceptedKeyGeneration = bundleGeneration)
 }
 
-/** ADR-0065 R.5 / R.6: every key an accepted reset retired, across all
+/** ADR-0073 R.5 / R.6: every key an accepted reset retired, across all
  *  accounts, mapped to the account id it belonged to. */
 public fun supersededKeysOf(rows: Map<String, ResetLedgerRow>): Map<String, String> {
     val out = LinkedHashMap<String, String>()

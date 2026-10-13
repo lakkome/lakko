@@ -30,7 +30,7 @@ public struct InviteLandingScreen: View {
 
     @ObservedObject public var viewModel: InviteLandingViewModel
     public var onDone: () -> Void
-    /// ADR-0065 R.7 case 1 / UX 16.6 — a link from a person who is already a
+    /// ADR-0073 R.7 case 1 / UX 16.6 — a link from a person who is already a
     /// contact opens that contact (the route's key is the contact's request
     /// id): this screen is replaced, it shows no result of its own.
     public var onOpenContact: (Int64) -> Void

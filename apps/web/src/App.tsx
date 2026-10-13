@@ -130,7 +130,7 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     the same reasons, and ABOVE the mailbox, whose Welcome joins title
  *     from it.
  *
- *   <GroupClosedProvider> — ADR-0065 R.6 successor claims: the per-group
+ *   <GroupClosedProvider> — ADR-0073 R.6 successor claims: the per-group
  *     claim state and the receive rule (first eligible claim wins). No
  *     surface: nothing reads it to draw anything.
  *     Beside the group-name provider, for the same reasons.
@@ -218,21 +218,21 @@ const App: Component = () => (
            */}
           <ScopedDiscoveryRuntime />
           {/*
-           * ADR-0066 section 2.3 — a device removal whose later steps are
+           * ADR-0074 section 2.3 — a device removal whose later steps are
            * still owed is finished at every landing, whatever screen shows.
            */}
           <OwedDeviceRemovals />
           <OwedKeyRotation />
           {/*
-           * ADR-0067 section 9 - how the account is protected is read at
+           * ADR-0075 section 9 - how the account is protected is read at
            * every landing, and what happened to the account (its password
            * changed by email, a recovery email added) is shown once on each
            * of its devices.
            */}
           <AccountNotices />
-          {/* ADR-0067 pass A - a guest chooses a username and a password. */}
+          {/* ADR-0075 pass A - a guest chooses a username and a password. */}
           <UsernameClaimHost />
-          {/* ADR-0068 - changing a username, and finishing one left undone. */}
+          {/* ADR-0076 - changing a username, and finishing one left undone. */}
           <UsernameChangeHost />
           {/*
            * A Welcome this device could not open. Top level for the same

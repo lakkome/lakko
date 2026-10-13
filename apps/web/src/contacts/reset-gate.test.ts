@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.2 - the identity gate END TO END for a proof-less key change:
+ * ADR-0073 R.2 - the identity gate END TO END for a proof-less key change:
  * `ContactsClient.verifyBundleAccountKey` gathers the attestation check and
  * the verified log read, asks `resetVerdict`, and on `accepted` re-pins and
  * tells the reset listeners; nothing else.

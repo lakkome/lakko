@@ -509,7 +509,7 @@ public object ChannelMemberCards {
             }
             verifiedGrants[cacheKey]?.let { return it }
             return try {
-                // ADR-0066 3.5a rule 1: the person's CURRENT mailbox.
+                // ADR-0074 3.5a rule 1: the person's CURRENT mailbox.
                 val mailbox = reach.mailboxOf(accountKey)
                 val ok = me.lakko.app.ds.DsClient().use { ds ->
                     ds.checkReach(mailbox, me.lakko.app.ds.reachSigner(grant.seed))

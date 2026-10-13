@@ -4587,7 +4587,7 @@ untouched.
 
 ### C-71: A key change at the directory is attested or proven; the old key never comes back by re-publishing
 
-[ADR-0065](../adr/0065-account-key-reset.md) section 4.1. **The rule.** The
+[ADR-0073](../adr/0073-account-key-reset.md) section 4.1. **The rule.** The
 identity bundle `services/discovery` publishes for an account changes its
 signature key in exactly two ways: with an ADR-0016 supersession proof (the
 dormant proven rotation, presence-checked by discovery and verified by peers),
@@ -4605,7 +4605,7 @@ and appends the KT-log leaf with `is_reset`. A session token issued under a
 generation below the row's is refused `401 key-generation-superseded` on the
 two identity writes (`POST /discovery/identity`, `POST /discovery/keypackage`).
 
-**Why it is indexed.** Before ADR-0065 the directory accepted an unattested
+**Why it is indexed.** Before ADR-0073 the directory accepted an unattested
 key change whenever the new key was the immediately-previous one (the ADR-0017
 "heal" in `cooldown_outcome`), and every client re-uploaded its own bundle on
 landing. So a device signed out by a fresh identity put the old key straight

@@ -3,7 +3,7 @@
 
 /**
  * What the signed-in account's protection is, as last read from
- * `GET /recovery-email` (ADR-0067): one reactive value for the page, shared
+ * `GET /recovery-email` (ADR-0075): one reactive value for the page, shared
  * by Settings > Account, the "Protect your account" step, the recovery
  * surfaces and the notices. Read at every session landing
  * (`AccountProtectionRuntime`) and after every change this device makes.

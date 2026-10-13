@@ -412,7 +412,7 @@ export async function approveCoPublisher(
       // way a direct add delivers one; never to the journal. ADR-0060
       // section 6: the mailbox is closed, so the write is signed under the
       // `reply` grant the joiner's attribution carried (kept by the poll).
-      // ADR-0066 section 3.5a rule 1 - resolved to the joiner's CURRENT
+      // ADR-0074 section 3.5a rule 1 - resolved to the joiner's CURRENT
       // mailbox when the key named is a proven predecessor.
       // Rule 6: a refused write re-checks the address once.
       const welcome = wrapEnvelope(KIND_WELCOME, added.welcome);
@@ -546,7 +546,7 @@ export async function pollForCoPublishWelcome(
   existingSigningSeed?: Uint8Array,
 ): Promise<ChannelPublisherKeys | null> {
   const wasm = await loadWasm();
-  // ADR-0066 section 3.5a - an owner that has observed this account's proven
+  // ADR-0074 section 3.5a - an owner that has observed this account's proven
   // rotation writes the Welcome to the CURRENT mailbox; one that has not
   // writes to the mailbox of `joinerKey` (after a rotation: the predecessor
   // the PublisherGroup's provider is bound to). Both are this account's and

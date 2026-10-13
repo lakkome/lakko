@@ -8,7 +8,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * ADR-0065 section 3.3 — the ONE token provider every authenticated client
+ * ADR-0073 section 3.3 — the ONE token provider every authenticated client
  * goes through. Mirror of the web `SessionTokenProvider` and the iOS one.
  *
  * The clients keep handing their requests the access token they captured
@@ -29,7 +29,7 @@ import kotlinx.coroutines.sync.withLock
  *   * A refresh answered `key-generation-superseded` reports
  *     [SessionRefusal.KeysReset] ONCE and keeps the stale pair: the device is
  *     about to wipe, and requests that are still in flight may fail as they
- *     like. A refresh answered `device-revoked` (ADR-0066) reports
+ *     like. A refresh answered `device-revoked` (ADR-0074) reports
  *     [SessionRefusal.DeviceRevoked] the same way.
  *   * A refresh answered `refresh-invalid` reports
  *     [SessionRefusal.RefreshInvalid] and drops the pair: the device goes to
@@ -99,7 +99,7 @@ public class SessionTokenProvider(
     }
 
     /**
-     * ADR-0066 - `bind-device` replaced the installed session's pair with
+     * ADR-0074 - `bind-device` replaced the installed session's pair with
      * one that names this device: serve it and persist it like a refreshed
      * pair. A no-op when nothing is installed or the pair names another
      * account.
@@ -137,7 +137,7 @@ public class SessionTokenProvider(
     }
 
     /**
-     * ADR-0066 - a bearer route of auth answered `401 device-revoked`:
+     * ADR-0074 - a bearer route of auth answered `401 device-revoked`:
      * another device of the account removed this one. Reported once per
      * installed session, like the refresh refusal.
      */
@@ -212,7 +212,7 @@ public class SessionTokenProvider(
                         inst.onRefusal(SessionRefusal.KeysReset)
                     }
                     SessionRefusal.DeviceRevoked -> {
-                        // ADR-0066 "T3 as built" item 1: auth reads the
+                        // ADR-0074 "T3 as built" item 1: auth reads the
                         // generation BEFORE the device floor, so this answer
                         // only ever reaches a credential of the CURRENT
                         // generation. A removed device whose account was

@@ -19,7 +19,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   (`ui/devices/DevicesScreen.kt`). See also
   [ADR-0015](./0015-device-removal-authorization.md), which took the
   remove-device half from client-gated to peer-verified.
-- **Amended 2026-10-06 by [ADR-0065](./0065-account-key-reset.md)** (section
+- **Amended 2026-10-06 by [ADR-0073](./0073-account-key-reset.md)** (section
   "Amended 2026-10-06: fresh-auth grant for delete and add-device"):
   `DELETE /account` now requires a fresh-auth grant (header
   `x-lakko-fresh-grant`, minted by a password or passkey sign-in within the

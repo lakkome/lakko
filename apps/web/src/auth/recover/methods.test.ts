@@ -140,7 +140,7 @@ describe("the restore prompt's rows", () => {
   });
 });
 
-// ADR-0067 (alignment J): Restore your keys reads how the account is protected.
+// ADR-0075 (alignment J): Restore your keys reads how the account is protected.
 describe("the restore prompt and the recovery email", () => {
   const ids = (protection: { enabled: boolean; vault: boolean; phraseSaved: boolean } | null): string[] =>
     restoreIdentityMethods({ passkeysSupported: true, passkeysWithKeys: 1, protection }).map((m) => m.id);

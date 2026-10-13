@@ -297,7 +297,7 @@ describe("a device that holds the address (amended 2026-10-13)", () => {
   });
 });
 
-describe("the banner while a re-seal is pending (ADR-0068 pass B, item 6)", () => {
+describe("the banner while a re-seal is pending (ADR-0076 pass B, item 6)", () => {
   it("is not shown: the device holds the address and is putting the vault back", () => {
     const NOW = 1_800_000_000_000;
     expect(protectBannerShown("none", null, NOW, false, true)).toBe(false);

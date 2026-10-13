@@ -561,7 +561,7 @@ internal fun rememberConversationRows(
             context = context,
             repository = repository,
             directory = directory,
-            // ADR-0065 R.5 — one row per conversation.
+            // ADR-0073 R.5 — one row per conversation.
             threads = state.conversations,
             flagsMap = flagsMap,
             readCursorMap = readCursorMap,
@@ -601,7 +601,7 @@ internal fun rememberConversationRows(
             ?: MutableStateFlow(me.lakko.app.feed.FeedReading())
     }
     val reading by readingFlow.collectAsStateWithLifecycle()
-    // ADR-0065 phase 2 / UX 16.6 — the channels a key reset orphaned on this
+    // ADR-0073 phase 2 / UX 16.6 — the channels a key reset orphaned on this
     // device carry their own secondary line.
     val orphanedChannels = channels?.orphaned?.collectAsStateWithLifecycle()?.value ?: emptySet()
     val channelRows = remember(channelHandles, channelPosts, channelKeys, channelPostCursors, reading.channelRead, strings, orphanedChannels) {
@@ -882,7 +882,7 @@ internal fun threadConversationRows(
     val flags = flagsMap[thread.conversationHex]
     val title = conversationTitle(context, repository, directory, thread.groupIdHex, strings)
     ConversationListRow(
-        // ADR-0065 R.5 — the conversation id: pins, mutes, the archive,
+        // ADR-0073 R.5 — the conversation id: pins, mutes, the archive,
         // folders and the order are keyed on it and stay with the
         // conversation when it continues in a successor group.
         id = thread.conversationHex,
@@ -969,7 +969,7 @@ internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
     // the chat was opened: its id sits in `feedSeen` or under the feed's own
     // watermark.
     val feedThrough = thread.feedSeenThrough
-    // ADR-0065 R.5 — the cursor is a position in the conversation's
+    // ADR-0073 R.5 — the cursor is a position in the conversation's
     // TIMELINE (segment, message id): a row of an older segment the position
     // has not passed is unread, and a position that only reached the old
     // group reads nothing of its successor, whose ids restart.

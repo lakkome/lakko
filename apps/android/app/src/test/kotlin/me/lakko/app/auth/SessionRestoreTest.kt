@@ -122,7 +122,7 @@ class SessionRestoreTest {
 
     @Test
     fun `an expired access token still restores while the refresh credential lives`() {
-        // ADR-0065 section 3.3: the restore refreshes the access token, so
+        // ADR-0073 section 3.3: the restore refreshes the access token, so
         // only the refresh credential's expiry decides.
         val source = complete().apply { token = pair("v2.acct.1.old.sig", now - 1, refreshExpiresAtMs = now + 1) }
         val decision = decide(source)

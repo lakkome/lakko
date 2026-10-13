@@ -97,7 +97,7 @@ export interface ConversationSegment {
 }
 
 /**
- * ADR-0065 R.5 — the order in which a conversation's groups are deleted:
+ * ADR-0073 R.5 — the order in which a conversation's groups are deleted:
  * every held segment that is not the head first (in the order given), the
  * HEAD last. The head's registry row is what keeps the conversation's row
  * on screen, so a failure at any earlier segment leaves the conversation
@@ -122,7 +122,7 @@ export function conversationDeleteOrder(
 
 /**
  * Delete a whole CONVERSATION from this device: every group of its lineage
- * this device holds (ADR-0065 R.5: one conversation over several groups).
+ * this device holds (ADR-0073 R.5: one conversation over several groups).
  * A conversation that never moved has one segment and this is
  * {@link deleteChat}.
  *

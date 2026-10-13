@@ -120,7 +120,7 @@ export function forwardJumpTarget(
 }
 
 /**
- * ADR-0065 R.5 — the origin of a forward names a GROUP and a message id; the
+ * ADR-0073 R.5 — the origin of a forward names a GROUP and a message id; the
  * conversation that group belongs to may since have continued in a successor
  * group. The jump then lands in an OLDER segment of the conversation, whose
  * rows the timeline draws under `rowId(messageId, distance)`

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.5 — the contact store after a PROVEN rotation (a re-pin
+ * ADR-0074 section 3.5 — the contact store after a PROVEN rotation (a re-pin
  * the fail-closed gate authorised with a supersession proof): the replaced
  * key is a proven predecessor, the contact is NOT flagged, its row and its
  * one-to-one are untouched, and both keys name the same person. An unproven
@@ -200,7 +200,7 @@ describe("an unproven change never gets predecessor treatment", () => {
   });
 });
 
-describe("the account a key is known under (ADR-0066 section 3.5a rule 6)", () => {
+describe("the account a key is known under (ADR-0074 section 3.5a rule 6)", () => {
   it("a pinned key and its proven predecessors name the account; a stranger's key names none", () => {
     setPin(ANNA, OLD, 0);
     setPin(ANNA, NEW, 500, undefined, { proven: true });

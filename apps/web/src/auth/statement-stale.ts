@@ -3,7 +3,7 @@
 
 /**
  * `401 {"error":"statement-stale","server_time_ms":T}` and the lost answer of
- * `recall/finish` (ADR-0066 "T5 as built", items 17, 24 and 25), as pure
+ * `recall/finish` (ADR-0074 "T5 as built", items 17, 24 and 25), as pure
  * rules. The network and the wasm signer are the caller's.
  *
  * An account statement is good for 120 s either side of the server's clock.

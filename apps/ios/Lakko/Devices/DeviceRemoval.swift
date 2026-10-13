@@ -173,7 +173,7 @@ public enum DeviceRemoval {
         )
     }
 
-    /// ADR-0066 section 2.3 step 4 — remove the leaf holding `deviceKey` from
+    /// ADR-0074 section 2.3 step 4 — remove the leaf holding `deviceKey` from
     /// the DeviceGroup, found by KEY (a leaf index does not survive a
     /// relaunch, and the owed record of a removal names the device).
     ///

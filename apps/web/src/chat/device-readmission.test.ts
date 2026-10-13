@@ -40,7 +40,7 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
     expect(plan.admit).toEqual([]);
   });
 
-  it("does not admit an own device whose KeyPackage names another own key (ADR-0066)", () => {
+  it("does not admit an own device whose KeyPackage names another own key (ADR-0074)", () => {
     const plan = planReadmission({
       roster: [{ leafKeyB64: "me-1", personKeyB64: "me" }],
       ownPersonKeyB64: "me",
@@ -57,7 +57,7 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
     expect(plan.retire).toEqual([]);
   });
 
-  it("counts a stale own row as listed: its existing leaf is not retired (ADR-0066)", () => {
+  it("counts a stale own row as listed: its existing leaf is not retired (ADR-0074)", () => {
     const plan = planReadmission({
       roster: [
         { leafKeyB64: "me-1", personKeyB64: "me" },
@@ -73,7 +73,7 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
     expect(plan.retire).toEqual([]);
   });
 
-  it("never applies the flag to a contact's device (ADR-0066)", () => {
+  it("never applies the flag to a contact's device (ADR-0074)", () => {
     const plan = planReadmission({
       roster: [
         { leafKeyB64: "me-1", personKeyB64: "me" },
@@ -134,7 +134,7 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
     expect(plan.admit).toHaveLength(1);
   });
 
-  // ADR-0066 section 2.3 - the DeviceGroup filter.
+  // ADR-0074 section 2.3 - the DeviceGroup filter.
   describe("own-account devices are admitted only from the DeviceGroup roster", () => {
     const base = {
       roster: [
@@ -196,11 +196,11 @@ describe("planReadmission (ADR-0050 section 2.4)", () => {
   });
 });
 
-// ---- ADR-0065 R.2: the wider lookup ----------------------------------------
+// ---- ADR-0073 R.2: the wider lookup ----------------------------------------
 
 import { lookupStanding, readmissionCandidates } from "./device-readmission";
 
-describe("readmissionCandidates (ADR-0065 R.2)", () => {
+describe("readmissionCandidates (ADR-0073 R.2)", () => {
   const HEX_A = "0123456789abcdef0123456789abcdef";
   const HEX_B = "fedcba9876543210fedcba9876543210";
   it("looks up every roster person with a known account id, contact or not", () => {
@@ -230,7 +230,7 @@ describe("readmissionCandidates (ADR-0065 R.2)", () => {
   });
 });
 
-describe("lookupStanding (ADR-0065 R.2 / R.7 case 2)", () => {
+describe("lookupStanding (ADR-0073 R.2 / R.7 case 2)", () => {
   it("the pin or a proven predecessor of it is the same person", () => {
     expect(lookupStanding({ rosterKeyB64: "k", pin: { pinnedSignaturePubkeyB64: "k" } })).toBe("same-person");
     expect(

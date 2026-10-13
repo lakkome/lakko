@@ -5,8 +5,8 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-/// ADR-0065 R.13b item A - the junction of the add-member filter (R.2) with
-/// an ADR-0066 key rotation.
+/// ADR-0073 R.13b item A - the junction of the add-member filter (R.2) with
+/// an ADR-0074 key rotation.
 ///
 /// After a PROVEN rotation an account's kept devices are still bound to its
 /// old key while the directory serves the new one. Every path that adds a

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.5a rule 2 - grants are keyed on the person, not on the
+ * ADR-0074 section 3.5a rule 2 - grants are keyed on the person, not on the
  * key they arrived under; and the reach book follows the account key
  * (section 3.5, "Reach").
  */

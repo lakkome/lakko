@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The lineage envelope ([ADR-0065](../../../../docs/adr/0065-account-key-reset.md)
+//! The lineage envelope ([ADR-0073](../../../../docs/adr/0073-account-key-reset.md)
 //! R.5): how conversation-lineage registers travel between the account's own
 //! devices.
 //!

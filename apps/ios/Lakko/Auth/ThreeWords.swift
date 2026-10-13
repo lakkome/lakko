@@ -54,7 +54,7 @@ enum ThreeWords {
         suspended: Bool,
         phraseSaved: Bool
     ) -> Bool {
-        // ADR-0067 — an account whose phrase was never saved has no words
+        // ADR-0075 — an account whose phrase was never saved has no words
         // the person could know: no three-word surface exists for it.
         guard phraseSaved else { return false }
         guard !suspended else { return false }
@@ -157,7 +157,7 @@ enum ThreeWords {
 
     /// The rule. The three-word route is suspended only when the recovery
     /// login made from the stored phrase's seed was refused as invalid
-    /// credentials. Since ADR-0065 the server's recovery credential moves in
+    /// credentials. Since ADR-0073 the server's recovery credential moves in
     /// the same transaction as the keys, so a stored phrase the server does
     /// not know is never a pending state, only a stale one. A network error,
     /// `429` or `503` never suspends anything, and no outcome deletes the

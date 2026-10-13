@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! wasm-bindgen surface for `lakko-attest`'s key-reset attestation (ADR-0065
+//! wasm-bindgen surface for `lakko-attest`'s key-reset attestation (ADR-0073
 //! S5).
 //!
 //! Mirror of `crates/lakko-ffi-uniffi/src/key_reset.rs` for the web client.
@@ -18,7 +18,7 @@
 //! **Error posture (the backup-head convention).** Every refusal throws a
 //! `JsError` whose message starts with a stable code: `stale: ...` when the
 //! attestation verified but `signed_at` is outside the window the fresh entry
-//! point was given (ADR-0065 section 4.2 turns that into a sign-in prompt,
+//! point was given (ADR-0073 section 4.2 turns that into a sign-in prompt,
 //! not a refusal), `invalid: ...` for every hard fail-closed cause.
 
 use lakko_attest::KeyResetAttestError;
@@ -122,7 +122,7 @@ fn verify_fresh_inner(
 
 /// Verify a key-reset attestation's signature and its binding to
 /// `expectedAccountId` (through the derived `account_ref` and DeviceGroup
-/// journal id) and to `expectedPubkey`, with **no** freshness check (ADR-0065
+/// journal id) and to `expectedPubkey`, with **no** freshness check (ADR-0073
 /// section 2.2). Returns the authenticated generation and mint time.
 ///
 /// `attestation` is the raw 177-byte blob (`key_reset_attest_b64` decoded);
@@ -152,7 +152,7 @@ pub fn verify_key_reset_attestation(
 /// within `maxAgeMillis` of `nowMillis` (both BigInt, Unix milliseconds), and
 /// no further in the future than a five-minute skew. The entry point for a
 /// client applying its own reset from persisted `publish-owed` state
-/// (ADR-0065 section 4.2, 30 days chosen there).
+/// (ADR-0073 section 4.2, 30 days chosen there).
 ///
 /// Throws `stale: ...` when the attestation verified but is outside the
 /// window, otherwise as `verifyKeyResetAttestation`.

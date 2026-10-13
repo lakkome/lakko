@@ -450,11 +450,11 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .FeedRule, .ChannelListing, .ChannelCoPublisherBinding, .L10n,
                 // The local three-word check and the passkey vault.
                 .PhraseCheck, .PasskeyVaultNotOpened, .PasskeyVault,
-                // ADR-0065 key-reset attestation (verify only).
+                // ADR-0073 key-reset attestation (verify only).
                 .KeyResetAttestation, .KeyResetAttestationStale, .AccountStatement,
-                // ADR-0066 key-rotation envelope and root endorsement.
+                // ADR-0074 key-rotation envelope and root endorsement.
                 .KeyRotation,
-                // ADR-0067 the email vault and the recovery-email address.
+                // ADR-0075 the email vault and the recovery-email address.
                 .EmailVaultNotOpened, .EmailVault, .RecoveryEmail:
                 return nil
             }

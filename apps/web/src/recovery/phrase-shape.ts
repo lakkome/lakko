@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The shape of the recovery phrase (ADR-0064 decision 3): 12 BIP39 English
+ * The shape of the recovery phrase (ADR-0072 decision 3): 12 BIP39 English
  * words, 128 bits of entropy. The authority is `lakko-mnemonic`
  * (`WORD_COUNT`, `ENTROPY_LEN`), which the wasm surface does not export as
  * constants; `phrase-shape.test.ts` pins these two against what the wasm

@@ -55,7 +55,7 @@ public fun offersThreeWords(
     phraseOnDevice: Boolean,
     keysOnDevice: Boolean,
     suspended: Boolean,
-    /** ADR-0067 - the account is phrase-protected: the person was shown the
+    /** ADR-0075 - the account is phrase-protected: the person was shown the
      *  words. In a mail-protected account the row is absent. */
     phraseSaved: Boolean = true,
 ): Boolean =
@@ -368,7 +368,7 @@ public enum class StoredPhraseVerdict {
 /**
  * The rule. The three-word route is suspended only when the recovery login
  * made with the stored seed was refused as invalid credentials. A network
- * error, a `429` or a `503` changes nothing. (ADR-0065: a reset replaces
+ * error, a `429` or a `503` changes nothing. (ADR-0073: a reset replaces
  * the recovery credential in the same server transaction that stores the
  * new seed here, so there is no longer a window in which the stored phrase
  * is "not registered yet"; the old recovery-credential-pending verdict is

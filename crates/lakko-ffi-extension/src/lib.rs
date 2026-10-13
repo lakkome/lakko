@@ -64,13 +64,13 @@
 //!   one (C-59).
 //! - [`key_rotation::is_key_rotation_envelope`] +
 //!   [`key_rotation::key_rotation_envelope_len`] — the same filter for the
-//!   ADR-0066 key-rotation envelope, with one difference: it answers yes or
+//!   ADR-0074 key-rotation envelope, with one difference: it answers yes or
 //!   no and returns NO field, because the envelope carries the account's new
 //!   recovery-phrase entropy and this process has no use for it.
 //! - [`group_closed::decode_group_closed_envelope`] +
 //!   [`group_closed::group_closed_envelope_min_len`] /
 //!   [`group_closed::group_closed_envelope_max_len`] — the same filter
-//!   question for the ADR-0065 phase-2 group-closed envelope. Decode returns
+//!   question for the ADR-0073 phase-2 group-closed envelope. Decode returns
 //!   the stamp and the successor id (to word a preview); nothing here
 //!   composes, orders or persists one (C-59).
 //! - [`scoped_discovery::decode_scoped_discovery_envelope`] +

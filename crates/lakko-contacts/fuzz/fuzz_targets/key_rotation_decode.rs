@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Fuzz target — `decode_key_rotation` and the dispatcher's view of the same
-//! bytes (ADR-0066 section 3.3).
+//! bytes (ADR-0074 section 3.3).
 //!
 //! A key-rotation envelope arrives as an MLS application message in the
 //! account's DeviceGroup. A device of the account that is compromised, or the

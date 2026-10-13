@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The automatic re-seal of the email vault (ADR-0067, "Amended 2026-10-13:
+ * The automatic re-seal of the email vault (ADR-0075, "Amended 2026-10-13:
  * the account's devices keep the address").
  *
  * After a key reset, a recall or a rotation the server has dropped the email

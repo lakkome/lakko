@@ -156,7 +156,7 @@ export interface MessageMenuProps {
   onEdit: () => void;
   onDelete: () => void;
   onClose: () => void;
-  /** ADR-0065 R.5 — a row of an OLDER segment of the conversation: the menu
+  /** ADR-0073 R.5 — a row of an OLDER segment of the conversation: the menu
    *  is the pin row alone (`pin-bar.ts` `historyRowOffersUnpin`). No
    *  reaction row and no other action: nothing else can name that row. */
   pinOnly?: boolean;

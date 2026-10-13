@@ -40,7 +40,7 @@
 //! ## The continuity key
 //!
 //! One reach key is **not** derived from the account seed:
-//! [`continuity_reach_seed`] ([ADR-0065](../../../docs/adr/0065-account-key-reset.md)
+//! [`continuity_reach_seed`] ([ADR-0073](../../../docs/adr/0073-account-key-reset.md)
 //! R.4). After an account key reset the new identity knows none of its former
 //! contacts and so can hand nobody a grant, while the peers hold only grants
 //! for a mailbox that no longer exists. Both sides can compute this seed from
@@ -70,7 +70,7 @@ use thiserror::Error;
 /// every reach key of every account.
 pub const REACH_SEED_DOMAIN: &str = "lakko/reach/v1";
 
-/// BLAKE3 derive-key context for the continuity reach seed (ADR-0065 R.4).
+/// BLAKE3 derive-key context for the continuity reach seed (ADR-0073 R.4).
 /// Frozen: changing it strands every peer of every account that reset.
 pub const CONTINUITY_REACH_SEED_DOMAIN: &str = "lakko/reach/continuity/v1";
 
@@ -259,7 +259,7 @@ pub fn reach_seed(
 }
 
 /// Derive the continuity reach seed of an account at a key generation
-/// (ADR-0065 R.4):
+/// (ADR-0073 R.4):
 ///
 /// ```text
 /// BLAKE3-derive-key("lakko/reach/continuity/v1",

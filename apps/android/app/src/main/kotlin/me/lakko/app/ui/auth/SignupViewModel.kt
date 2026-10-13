@@ -35,7 +35,7 @@ import me.lakko.app.profile.usernameFieldErrorText
  * Mirror of `apps/web/src/routes/Signup.tsx`'s `createSignal`
  * collection. The form is the only stage here: on success the
  * repository records that the "Protect your account" step is owed
- * ([AuthRepository.protectStepOwed], ADR-0067) and the app root shows it
+ * ([AuthRepository.protectStepOwed], ADR-0075) and the app root shows it
  * ([ProtectAccountStep])
  * before the session is usable.
  */

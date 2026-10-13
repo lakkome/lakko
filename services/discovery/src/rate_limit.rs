@@ -471,7 +471,7 @@ impl DiscoveryLimits {
             .strip_prefix("Bearer ")?;
         // The generation the token carries is not consulted here: the
         // limiter keys on the account, and only the two identity writes apply
-        // a generation floor (ADR-0065 S3).
+        // a generation floor (ADR-0073 S3).
         Some(self.token_secret.verify(token, now_ms).ok()?.account_id)
     }
 

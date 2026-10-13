@@ -516,7 +516,7 @@ final class TransparencyVerifyTests: XCTestCase {
             XCTFail("expected SupersessionRefused")
         } catch let refused as SupersessionRefused {
             XCTAssertEqual(refused.reason, .proofAbsent)
-            // ADR-0065 R.2 — a log that records a reset does not make an
+            // ADR-0073 R.2 — a log that records a reset does not make an
             // UNATTESTED change one: with no attestation the verdict is the
             // refusal, with the neutral copy, and nothing is re-pinned.
             XCTAssertNil(refused.loggedReset)
@@ -597,7 +597,7 @@ final class TransparencyVerifyTests: XCTestCase {
 
     // MARK: - KT-log S4: reset-aware message mapping
 
-    /// ADR-0065 R.2 — an attested reset is accepted silently and reaches no
+    /// ADR-0073 R.2 — an attested reset is accepted silently and reaches no
     /// refusal; a `true` marker, should one ever arrive, has no copy of its
     /// own and reads as the neutral `unconfirmed`.
     func testMessageLoggedResetTrueHasNoCopyOfItsOwn() {
@@ -1032,7 +1032,7 @@ final class TransparencyVerifyTests: XCTestCase {
             XCTFail("expected SupersessionRefused")
         } catch let refused as SupersessionRefused {
             XCTAssertEqual(refused.reason, .proofAbsent)
-            // ADR-0065 R.2 — no attestation: refused, neutral copy.
+            // ADR-0073 R.2 — no attestation: refused, neutral copy.
             XCTAssertNil(refused.loggedReset)
         } catch {
             XCTFail("unexpected error: \(error)")

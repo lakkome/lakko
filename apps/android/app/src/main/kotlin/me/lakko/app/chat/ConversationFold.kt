@@ -4,7 +4,7 @@
 package me.lakko.app.chat
 
 /*
- * ADR-0065 "Phase 2 revised", R.5 - ONE thread per conversation.
+ * ADR-0073 "Phase 2 revised", R.5 - ONE thread per conversation.
  *
  * The repository holds one record per MLS group. A conversation that was
  * continued in a successor group is several of them, and the person sees one:

@@ -364,7 +364,7 @@ describe("searchPeople: a contact nothing names", () => {
   });
 });
 
-describe("a found key against the published one (ADR-0066 section 3.5a)", () => {
+describe("a found key against the published one (ADR-0074 section 3.5a)", () => {
   const FOUND = new Uint8Array(32).fill(0x11);
   const PUBLISHED = new Uint8Array(32).fill(0x22);
   const ACCOUNT = new Uint8Array(16).fill(0x33);

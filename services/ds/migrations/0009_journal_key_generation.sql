@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 --
--- ADR-0065 section 5 (S4): a journal records the key generation of the last
+-- ADR-0073 section 5 (S4): a journal records the key generation of the last
 -- attested key reset that re-rooted it.
 --
 -- `PUT /ds/group/{hex}/reset` may carry a key-reset attestation minted by

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Slim `lakko-contacts` group-closed surface — the CLASSIFY half only
-//! (ADR-0041 Phase 2, for the ADR-0065 phase-2 group-closed envelope).
+//! (ADR-0041 Phase 2, for the ADR-0073 phase-2 group-closed envelope).
 //!
 //! ## Why the NSE needs this at all
 //!
@@ -51,7 +51,7 @@ use lakko_contacts::group_closed::{
 
 use crate::FfiError;
 
-/// A group's closed notice (ADR-0065 phase 2), as decoded by the slim
+/// A group's closed notice (ADR-0073 phase 2), as decoded by the slim
 /// surface. Field-identical to `lakko-ffi-uniffi`'s `FfiGroupClosed`, so the
 /// two frameworks present one shape to Swift.
 ///
@@ -67,7 +67,7 @@ pub struct FfiGroupClosed {
     pub successor_group_id: Option<Vec<u8>>,
 }
 
-/// Strictly decode a group-closed envelope (ADR-0065 phase 2). Fail-closed:
+/// Strictly decode a group-closed envelope (ADR-0073 phase 2). Fail-closed:
 /// a plaintext without the group-closed domain separator, truncated, with
 /// trailing bytes, an unknown version or a successor of the wrong length is
 /// refused as a whole.

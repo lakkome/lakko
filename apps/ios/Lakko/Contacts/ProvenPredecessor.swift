@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0066 section 3.5, "Peers" — the proven-predecessor rule (Stage A).
+// ADR-0074 section 3.5, "Peers" — the proven-predecessor rule (Stage A).
 //
 // An account that changes its keys WITH a valid supersession proof (the
 // ADR-0016 gate verified it under the pinned key and re-pinned) is the same
@@ -13,7 +13,7 @@ import Foundation
 // successor is founded, and NOTHING IS SHOWN to anyone.
 //
 // An UNPROVEN change (a reset, attested or not; a refusal of the gate) never
-// gets this treatment: its old key is a superseded key, handled by ADR-0065
+// gets this treatment: its old key is a superseded key, handled by ADR-0073
 // phase 2.
 //
 //   * `KeyChangeEvidence` / `ProvenPredecessorRule`   what earns the treatment;
@@ -49,7 +49,7 @@ public enum ProvenPredecessorRule {
         /// The old key is the proven predecessor of the new one: the same
         /// person. No flag, no banner, no closed chat, no eviction.
         case provenPredecessor
-        /// The old key is NOT a predecessor. Whatever ADR-0065 phase 2 does
+        /// The old key is NOT a predecessor. Whatever ADR-0073 phase 2 does
         /// for a reset applies; this rule adds nothing.
         case none
     }
@@ -58,7 +58,7 @@ public enum ProvenPredecessorRule {
         evidence == .verifiedProof ? .provenPredecessor : .none
     }
 
-    /// Whether the ADR-0065 phase-2 "keys reset" state may be recorded for a
+    /// Whether the ADR-0073 phase-2 "keys reset" state may be recorded for a
     /// key change: never for a proven rotation.
     public static func flagsAsReset(_ evidence: KeyChangeEvidence) -> Bool {
         evidence != .verifiedProof
@@ -151,7 +151,7 @@ public struct ProvenPredecessors: Codable, Equatable {
     }
 
     /// A later RESET of the account whose current key is `currentKeyB64`
-    /// makes every predecessor, proven or not, a superseded key (ADR-0066
+    /// makes every predecessor, proven or not, a superseded key (ADR-0074
     /// section 3.5): drop them all. Returns whether anything was dropped.
     @discardableResult
     public mutating func forgetPerson(currentKeyB64: String) -> Bool {

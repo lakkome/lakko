@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Fuzz target — `lakko_channels::parse_owner_handover_body` and
-//! `OwnerProof::parse` (ADR-0066 section 3.5, the channel owner handover).
+//! `OwnerProof::parse` (ADR-0074 section 3.5, the channel owner handover).
 //!
 //! `PUT /v1/channels/<id>/owner` takes a body anyone can send (the owner
 //! proof beside it is what authorises it) and a proof header anyone can

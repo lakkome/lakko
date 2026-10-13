@@ -288,7 +288,7 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
       // Wipes this device and lands on the sign-in screen.
       await auth.forgetDevice();
     } catch (err) {
-      // ADR-0066 section 1.3: while the account can still be taken back
+      // ADR-0074 section 1.3: while the account can still be taken back
       // after a key reset, the server refuses the deletion and names the
       // date. Nothing was deleted and the proof is not at fault.
       const blockedUntilMs =

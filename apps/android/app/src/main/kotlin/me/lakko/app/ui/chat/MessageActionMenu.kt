@@ -210,7 +210,7 @@ internal fun messageActionsFor(
  * the clip itself.
  */
 /**
- * ADR-0065 R.5 — the card of a row of an OLDER segment of the conversation:
+ * ADR-0073 R.5 — the card of a row of an OLDER segment of the conversation:
  * the `Unpin` row alone when the row is pinned, and nothing otherwise
  * ([me.lakko.app.chat.historyRowOffersUnpin]). A history row takes no edit,
  * delete, reaction, reply, forward, selection or new pin.

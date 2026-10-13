@@ -70,18 +70,18 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// whose name has arrived, never a deleted one (the fold decides both).
     @Published public private(set) var folders: [FolderView] = []
 
-    /// ADR-0065 R.5 — the conversation lineage registers: which group
+    /// ADR-0073 R.5 — the conversation lineage registers: which group
     /// continues which conversation. Read through ``ConversationLineage``.
     @Published public private(set) var lineage: [LineageEntry] = []
 
-    /// ADR-0067 (amended 2026-10-13) — the account's recovery email address,
+    /// ADR-0075 (amended 2026-10-13) — the account's recovery email address,
     /// as this account's devices keep it: one register of the synced state,
     /// so it is on disk under the device key, with the sibling devices and in
     /// the phrase-sealed backup. `nil` when no device ever wrote one, or it
     /// was removed. Never logged.
     @Published public private(set) var recoveryEmail: String?
 
-    /// ADR-0068 section 3 — the account's own username, as its devices keep
+    /// ADR-0076 section 3 — the account's own username, as its devices keep
     /// it: one more register of the synced state. `nil` when never written.
     @Published public private(set) var ownUsername: String?
 
@@ -147,14 +147,14 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
     }
 
-    /// ADR-0066 section 3.3 — where a `key-rotation` envelope received in
+    /// ADR-0074 section 3.3 — where a `key-rotation` envelope received in
     /// THIS account's DeviceGroup goes (the kept device's pending store, via
     /// ``AuthRepository/receiveKeyRotationEnvelope(_:arrival:)``). It carries
     /// the account's next seed, so it is handed over as bytes and never
     /// logged, rendered, or passed to ``onServiceEnvelope``. The default
     /// drops it.
     var onKeyRotationEnvelope: @MainActor (Data) -> Void = { _ in
-        NSLog("ADR-0066: a key-rotation envelope arrived with no receiver wired; dropped")
+        NSLog("ADR-0074: a key-rotation envelope arrived with no receiver wired; dropped")
     }
     /// When the poll loop last completed a fetch that reached the journal's
     /// head (unix ms); 0 before the first one. Read by
@@ -576,12 +576,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// The pending-send slot of `envelope`: its dispatched kind, so a newer
     /// envelope of the same kind replaces an older unsent one.
     static func serviceEnvelopeSlot(_ envelope: Data) -> String {
-        // ADR-0065 R.5 — every lineage register is its own slot: one never
+        // ADR-0073 R.5 — every lineage register is its own slot: one never
         // replaces another.
         if isLineageEnvelope(bytes: envelope) { return "lineage:" + envelope.base64EncodedString() }
-        // ADR-0067 — one register: a newer unsent one replaces an older.
+        // ADR-0075 — one register: a newer unsent one replaces an older.
         if isRecoveryEmailEnvelope(bytes: envelope) { return "recovery-email" }
-        // ADR-0068 — likewise the own-username register.
+        // ADR-0076 — likewise the own-username register.
         if isOwnUsernameEnvelope(bytes: envelope) { return "own-username" }
         guard let kind = try? dispatchIncomingEnvelope(plaintext: envelope).kind else {
             return envelope.base64EncodedString()
@@ -614,7 +614,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         (try? dispatchIncomingEnvelope(plaintext: envelope).kind) == .keyRotation
     }
 
-    // MARK: - ADR-0066 section 3.2: the rotating device
+    // MARK: - ADR-0074 section 3.2: the rotating device
 
     /// The epoch of the live DeviceGroup handle (the one every message of
     /// this repository is sealed at).
@@ -661,7 +661,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// poll (25 s) and a margin. Chosen, not measured.
     public static let journalHeadTimeoutMs: Int64 = 30_000
 
-    /// ADR-0066 section 3.3, "order on a superseded device" — wait until the
+    /// ADR-0074 section 3.3, "order on a superseded device" — wait until the
     /// poll loop has read the DeviceGroup journal to its head once more (a
     /// fetch that completed after this call and found nothing further). The
     /// DS does not use session tokens, so a device whose session is
@@ -727,7 +727,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
 
     // MARK: - Inbound poll loop
 
-    /// When the last ADR-0065 supersession probe ran (unix ms), per process.
+    /// When the last ADR-0073 supersession probe ran (unix ms), per process.
     private var lastSupersessionProbeMs: Int64 = 0
     /// At most one probe a minute while the journal keeps answering 401.
     static let supersessionProbeIntervalMs: Int64 = 60_000
@@ -745,9 +745,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     private func runPollLoop(accountIdB64: String, groupId: Data, startCursor: Int64 = 0) async {
         let ds = DsClient()
         var cursor: Int64 = startCursor
-        // ADR-0065 R.5 — a lineage register whose send was never confirmed.
+        // ADR-0073 R.5 — a lineage register whose send was never confirmed.
         await flushUnsentLineage()
-        // ADR-0067 — the same for the recovery-email register.
+        // ADR-0075 — the same for the recovery-email register.
         await flushUnsentRecoveryEmail()
         await flushUnsentOwnUsername()
         while !Task.isCancelled {
@@ -778,7 +778,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     continue
                 }
                 if case .http(401, _, _) = err {
-                    // ADR-0065 section 5 — an attested reset on another device
+                    // ADR-0073 section 5 — an attested reset on another device
                     // drops this journal's epoch chain, so the DeviceGroup
                     // read answers 401 at once while the session token is
                     // still within its TTL. The DS cannot say why; auth can:
@@ -1060,7 +1060,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// nothing (older, or already held) is a no-op.
     func applyParsed(_ parsed: ParsedDeviceGroupPayload) {
         if case .serviceEnvelope(let envelope) = parsed.body {
-            // ADR-0065 R.5 / R.13a — a lineage envelope is routed BEFORE the
+            // ADR-0073 R.5 / R.13a — a lineage envelope is routed BEFORE the
             // lakko-contacts dispatcher: it is a `lakko-sync` register,
             // folded by the one fold. A malformed register is dropped.
             if isLineageEnvelope(bytes: envelope) {
@@ -1070,11 +1070,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                         stateChanged()
                     }
                 } catch {
-                    NSLog("ADR-0065: lineage envelope refused: %@", error.localizedDescription)
+                    NSLog("ADR-0073: lineage envelope refused: %@", error.localizedDescription)
                 }
                 return
             }
-            // ADR-0067 — the recovery-email register, routed before the
+            // ADR-0075 — the recovery-email register, routed before the
             // lakko-contacts dispatcher for the same reason.
             if isRecoveryEmailEnvelope(bytes: envelope) {
                 do {
@@ -1083,11 +1083,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                         stateChanged()
                     }
                 } catch {
-                    NSLog("ADR-0067: recovery-email envelope refused")
+                    NSLog("ADR-0075: recovery-email envelope refused")
                 }
                 return
             }
-            // ADR-0068 — the own-username register, the same way.
+            // ADR-0076 — the own-username register, the same way.
             if isOwnUsernameEnvelope(bytes: envelope) {
                 do {
                     if try syncedState.applyOwnUsernameEnvelope(envelope: envelope) {
@@ -1095,11 +1095,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                         stateChanged()
                     }
                 } catch {
-                    NSLog("ADR-0068: own-username envelope refused")
+                    NSLog("ADR-0076: own-username envelope refused")
                 }
                 return
             }
-            // ADR-0066 section 3.3 — the account's own `key-rotation`
+            // ADR-0074 section 3.3 — the account's own `key-rotation`
             // envelope: meaningful here and nowhere else. It never reaches
             // the reach / profile adopters.
             if Self.isKeyRotation(envelope) {
@@ -1148,7 +1148,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
     }
 
-    /// ADR-0066 section 2.3 — the leaf keys of the account's DeviceGroup as
+    /// ADR-0074 section 2.3 — the leaf keys of the account's DeviceGroup as
     /// the live handle reads them: the account's own, MLS-authenticated
     /// record of its devices, which the conversations' own-device admission
     /// is filtered by. `nil` when no handle is held, this device was removed,
@@ -1198,24 +1198,24 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 pending?.markFailed()
             }
         }
-        // ADR-0065 R.13a — the lineage is not in `snapshotParts()`: a
+        // ADR-0073 R.13a — the lineage is not in `snapshotParts()`: a
         // catch-up is the snapshot parts PLUS every lineage envelope, each
         // with its original stamp.
         for envelope in (try? syncedState.lineageEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
-        // ADR-0067 — nor is the recovery-email register: it is re-sent with
+        // ADR-0075 — nor is the recovery-email register: it is re-sent with
         // its original stamp beside them.
         if let envelope = (try? syncedState.recoveryEmailEnvelope()).flatMap({ $0 }) {
             await sendServiceEnvelope(envelope)
         }
-        // ADR-0068 — and the own-username register.
+        // ADR-0076 — and the own-username register.
         if let envelope = (try? syncedState.ownUsernameEnvelope()).flatMap({ $0 }) {
             await sendServiceEnvelope(envelope)
         }
     }
 
-    // MARK: - ADR-0068: the own-username register
+    // MARK: - ADR-0076: the own-username register
 
     static func ownUsernameUnsentKey(accountIdB64: String) -> String {
         "lakko.own-username.unsent.v1.\(accountIdB64)"
@@ -1231,7 +1231,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             }
             UserDefaults.standard.removeObject(forKey: key)
         } catch {
-            NSLog("ADR-0068: own-username register send failed; retried at the next start")
+            NSLog("ADR-0076: own-username register send failed; retried at the next start")
         }
     }
 
@@ -1245,7 +1245,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         do {
             written = try syncedState.setOwnUsername(hlc: Hlc.mint(), username: username)
         } catch {
-            NSLog("ADR-0068: own-username register refused")
+            NSLog("ADR-0076: own-username register refused")
             return false
         }
         guard written else { return true }
@@ -1258,12 +1258,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             }
             UserDefaults.standard.removeObject(forKey: Self.ownUsernameUnsentKey(accountIdB64: account))
         } catch {
-            NSLog("ADR-0068: own-username register send failed; retried at the next start")
+            NSLog("ADR-0076: own-username register send failed; retried at the next start")
         }
         return true
     }
 
-    // MARK: - ADR-0067: the recovery-email register
+    // MARK: - ADR-0075: the recovery-email register
 
     /// `UserDefaults` marker: the register written here has not been
     /// confirmed sent (the lineage marker's pattern).
@@ -1282,7 +1282,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             }
             UserDefaults.standard.removeObject(forKey: key)
         } catch {
-            NSLog("ADR-0067: recovery-email register send failed; retried at the next start")
+            NSLog("ADR-0075: recovery-email register send failed; retried at the next start")
         }
     }
 
@@ -1298,7 +1298,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         do {
             written = try syncedState.setRecoveryEmail(hlc: Hlc.mint(), address: address)
         } catch {
-            NSLog("ADR-0067: recovery-email register refused")
+            NSLog("ADR-0075: recovery-email register refused")
             return false
         }
         guard written else { return true }
@@ -1312,12 +1312,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             }
             UserDefaults.standard.removeObject(forKey: Self.recoveryEmailUnsentKey(accountIdB64: account))
         } catch {
-            NSLog("ADR-0067: recovery-email register send failed; retried at the next start")
+            NSLog("ADR-0075: recovery-email register send failed; retried at the next start")
         }
         return true
     }
 
-    // MARK: - ADR-0065 R.5: the lineage register
+    // MARK: - ADR-0073 R.5: the lineage register
 
     /// `UserDefaults` marker: a lineage register written here has not been
     /// confirmed sent. Set before the publish and cleared after it, so a
@@ -1352,7 +1352,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             try await sendLineageEnvelopes(try syncedState.lineageEnvelopes())
             UserDefaults.standard.removeObject(forKey: key)
         } catch {
-            NSLog("ADR-0065: lineage register send failed; retried at the next start")
+            NSLog("ADR-0073: lineage register send failed; retried at the next start")
         }
     }
 
@@ -1369,7 +1369,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 rootConversationId: rootConversationId)
         } catch {
             // An id out of bounds, or a successor naming itself.
-            NSLog("ADR-0065: lineage register refused: %@", error.localizedDescription)
+            NSLog("ADR-0073: lineage register refused: %@", error.localizedDescription)
             return false
         }
         guard written else { return false }
@@ -1389,7 +1389,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 UserDefaults.standard.removeObject(forKey: Self.lineageUnsentKey(accountIdB64: account))
             }
         } catch {
-            NSLog("ADR-0065: lineage register send failed; retried at the next start")
+            NSLog("ADR-0073: lineage register send failed; retried at the next start")
         }
         return true
     }

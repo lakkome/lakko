@@ -103,7 +103,7 @@ export interface JoinRecoveryOutcome {
    *  zeroize on any refusal. */
   readonly phraseEntropy: Uint8Array;
   /** The fresh session pair from redeeming the device grant (ACCESS half,
-   *  ADR-0065), or `null` when the redeem failed (grant expired / already
+   *  ADR-0073), or `null` when the redeem failed (grant expired / already
    *  consumed / auth service unreachable) — the entropy is still usable on
    *  a path that already holds its own session. */
   readonly session: SessionPair | null;
@@ -211,7 +211,7 @@ export async function prepareJoinFlow(args: {
   /** ADR-0056 — the 32-byte login handle of this account's username; the
    *  payload names the account by it, never by the id. */
   readonly loginHandle: Uint8Array;
-  /** ADR-0066 — called after a state bundle stored the account's earlier
+  /** ADR-0074 — called after a state bundle stored the account's earlier
    *  keys on this (signed-in) device, before the rest of the bundle is
    *  applied. The session re-mints its conversation binding there
    *  (`AuthApi.rebindAfterStateBundle`). Must not throw. */
@@ -312,7 +312,7 @@ export async function prepareJoinFlow(args: {
               opts.welcomeCursor,
             );
             if (bundle !== null) {
-              // ADR-0066: the own predecessors first, under the device key.
+              // ADR-0074: the own predecessors first, under the device key.
               // On the restore route this runs before the session's
               // identities exist, so the conversation identity is minted
               // under the same account key the sending device's leaves use.
@@ -372,7 +372,7 @@ function accountKeyHexOfSeed(wasm: Wasm, seed: Uint8Array): string {
   }
 }
 
-/** ADR-0066 — store a bundle's own predecessors under the device key. Best
+/** ADR-0074 — store a bundle's own predecessors under the device key. Best
  *  effort and never throws: a failure leaves the device as one that knows
  *  only the current key (logged without any key material). */
 async function storeOwnPredecessors(
@@ -738,7 +738,7 @@ export async function prepareAnonymousJoinFlow(args: {
         }
       }
       if (pendingState !== null) {
-        // ADR-0066: before `finishCanonicalSession` installs the session's
+        // ADR-0074: before `finishCanonicalSession` installs the session's
         // identities (the caller's next step), so the conversation identity
         // is minted under the account key the sending device's leaves use.
         await storeOwnPredecessors(pendingState, account.b64, deviceKey);
@@ -1013,7 +1013,7 @@ export async function runScanFlow(args: {
       try {
         const wasm = await loadWasm();
         const snapshot = await loadMlsSnapshot(args.accountIdB64, args.deviceKey);
-        // ADR-0066: the account's earlier keys, so a device paired after a
+        // ADR-0074: the account's earlier keys, so a device paired after a
         // rotation binds its conversation leaves under the same account key
         // as this device and reads the predecessor mailboxes.
         let ownPredecessors: CarriedOwnPredecessor[] = [];

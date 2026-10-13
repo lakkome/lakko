@@ -99,7 +99,7 @@ public class AuthRepository(
     private val discoveryClientFactory: () -> DiscoveryClient = { DiscoveryClient() },
     /** ADR-0054 S5 - username to login handle (the native core). */
     private val loginHandleSource: LoginHandleSource = UniffiLoginHandleSource,
-    /** ADR-0066 - this device's id for an account (its conversation leaf
+    /** ADR-0074 - this device's id for an account (its conversation leaf
      *  signature key); the native core derives it from the device seed. */
     private val deviceIds: DeviceIdSource = OnDeviceIdSource(applicationContext),
 ) {
@@ -129,7 +129,7 @@ public class AuthRepository(
             binder = loginHandleBinder,
             launch = { block -> pushScope.launch { block() } },
             log = { message -> Log.w("lakko-auth", message) },
-            // ADR-0068 - a confirmed handle may let this device seed the
+            // ADR-0076 - a confirmed handle may let this device seed the
             // own-username register: the rule is evaluated again.
             onConfirmed = {
                 pushScope.launch {
@@ -149,7 +149,7 @@ public class AuthRepository(
     public val state: StateFlow<AuthState> = mutableState.asStateFlow()
 
     /**
-     * ADR-0065 section 3.5 / 4.2 — non-null once this device learned that its
+     * ADR-0073 section 3.5 / 4.2 — non-null once this device learned that its
      * keys are not the account's keys any more: a `401
      * key-generation-superseded` from the refresh or a bearer route (the
      * account was reset elsewhere), or a landing that found the directory
@@ -186,7 +186,7 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0065 section 3.3 — the one token provider every request of this
+     * ADR-0073 section 3.3 — the one token provider every request of this
      * process goes through ([me.lakko.app.transport.SessionBearerEngine]
      * reads it per request). Installed with the pair of every landing;
      * refreshes ahead of expiry; reports the refresh route's refusals here.
@@ -297,7 +297,7 @@ public class AuthRepository(
      *  publish of a reset's new keys ([RecoveryOwedStore]). */
     private val owedStore: RecoveryOwedStore by lazy { RecoveryOwedStore.onDevice(applicationContext) }
 
-    // ADR-0066 - declared ahead of `init`, which starts the restore that reads them.
+    // ADR-0074 - declared ahead of `init`, which starts the restore that reads them.
     private val genesisRecorded: GenesisRecordedStore by lazy { GenesisRecordedStore.onDevice(applicationContext) }
 
     private val logoutOwedStore: LogoutOwedStore by lazy { LogoutOwedStore.onDevice(applicationContext) }
@@ -316,9 +316,9 @@ public class AuthRepository(
 
     public val deviceBoundRevision: StateFlow<Int> = mutableDeviceBoundRevision.asStateFlow()
 
-    /** ADR-0065: the attestation and step markers of a reset whose publish is
+    /** ADR-0073: the attestation and step markers of a reset whose publish is
      *  still owed. */
-    /** ADR-0066 T5 item 25 - a `recall/finish` that was sent and not
+    /** ADR-0074 T5 item 25 - a `recall/finish` that was sent and not
      *  answered, with the phrase it would make the account's. Memory only:
      *  a process death loses it, and the person then opens another attempt. */
     private class PendingRecallFinish(
@@ -348,7 +348,7 @@ public class AuthRepository(
     /**
      * The recovery phrase a fresh identity generated and whose screen was
      * left, until the person confirms they saved it; `null` otherwise. (A
-     * sign-up shows no phrase: ADR-0067 D2.) While non-null the app root shows the phrase step instead
+     * sign-up shows no phrase: ADR-0075 D2.) While non-null the app root shows the phrase step instead
      * of the app. The fact that it is owed survives a restart
      * ([RecoveryOwedStore]); the phrase itself is read back from the phrase
      * store when the next session for the account lands.
@@ -357,7 +357,7 @@ public class AuthRepository(
 
     public val signupPhrase: StateFlow<String?> = mutableSignupPhrase.asStateFlow()
 
-    // ---- ADR-0067: how the account is protected --------------------------
+    // ---- ADR-0075: how the account is protected --------------------------
 
     private val protectionStore: AccountProtectionStore by lazy { AccountProtectionStore.onDevice(applicationContext) }
 
@@ -383,7 +383,7 @@ public class AuthRepository(
 
     public val accountNotices: StateFlow<List<AccountNotice>> = mutableAccountNotices.asStateFlow()
 
-    /** The synced state's recovery-email register (ADR-0067, amended
+    /** The synced state's recovery-email register (ADR-0075, amended
      *  2026-10-13); set by the app root, which owns the sync runtime. */
     @Volatile
     public var recoveryAddressPort: RecoveryAddressPort? = null
@@ -394,7 +394,7 @@ public class AuthRepository(
 
     public val recoveryAddress: StateFlow<String?> = mutableRecoveryAddress.asStateFlow()
 
-    /** The synced state's own-username register (ADR-0068). */
+    /** The synced state's own-username register (ADR-0076). */
     @Volatile
     public var ownUsernamePort: OwnUsernamePort? = null
 
@@ -452,7 +452,7 @@ public class AuthRepository(
     public val newPasswordOwed: StateFlow<Boolean> = mutableNewPasswordOwed.asStateFlow()
 
     /**
-     * ADR-0065 section 2.3 — non-null while the account keys were reset on
+     * ADR-0073 section 2.3 — non-null while the account keys were reset on
      * this device but the new identity is not yet published to the directory
      * and the device list (a step failed, or the attestation is too old to
      * use without a sign-in). The phrase screen then shows the reason and
@@ -495,11 +495,11 @@ public class AuthRepository(
         // unreachable: [rehydrate] still writes the secrets flow BEFORE the
         // state flow, in one coroutine, and nothing observes `Session` until
         // the state flips. `AppRoot` renders its loading screen meanwhile.
-        // ADR-0065 - the transport reads this provider on every bearer request.
+        // ADR-0073 - the transport reads this provider on every bearer request.
         SessionTokens.provider = sessionTokenProvider
         restoreScope.launch {
             rehydrate()
-            // ADR-0066 - a logout made offline is told to the server now.
+            // ADR-0074 - a logout made offline is told to the server now.
             retryOwedLogouts()
         }
         // ADR-0054 S5 - every landed session whose username this device knows
@@ -550,7 +550,7 @@ public class AuthRepository(
      * signed in.
      */
     private fun rehydrate() {
-        // ADR-0066 - a device that was mid-"Was it you?" comes back to it.
+        // ADR-0074 - a device that was mid-"Was it you?" comes back to it.
         // The staged wipe left no session, so the decision below lands Anon
         // underneath; the app root draws the recall screen over it.
         restoreRecallAtLaunch()
@@ -567,7 +567,7 @@ public class AuthRepository(
                 mutableState.value = AuthState.Anon(cachedUsername = decision.cachedUsername)
             }
             is SessionRestoreDecision.Restored -> {
-                // ADR-0065 section 3.3 - the restore refreshes the access token
+                // ADR-0073 section 3.3 - the restore refreshes the access token
                 // instead of reusing the persisted one: the provider is
                 // installed with the persisted pair and asked for a fresh
                 // token before the landing's first request. Offline, the app
@@ -584,7 +584,7 @@ public class AuthRepository(
                 // (a used-up allowance, no network) is retried silently at the
                 // next launch, which is this restore.
                 subscribePushBestEffort("restore")
-                // ADR-0065 section 4.2 - the same read-before-write check a
+                // ADR-0073 section 4.2 - the same read-before-write check a
                 // password login runs (does the directory still serve OUR
                 // keys, at OUR generation?), re-publishing only when the
                 // directory is missing the bundle; stale keys land the
@@ -659,14 +659,14 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0065 section 3.3 — hand [pair] to the token provider as the session
+     * ADR-0073 section 3.3 — hand [pair] to the token provider as the session
      * of [accountIdB64]: every refreshed pair is persisted under the same
      * account, and a refresh refused as `key-generation-superseded` lands the
      * signed-out screen ([onKeysSuperseded]); `refresh-invalid` lands the
      * sign-in screen with nothing wiped ([onRefreshInvalid]).
      */
     private fun installSessionPair(accountIdB64: String, pair: SessionPair) {
-        // ADR-0066 - a logout of an EARLIER session of this account that the
+        // ADR-0074 - a logout of an EARLIER session of this account that the
         // server was not told about must not be replayed now: its floor
         // would refuse the session that is landing.
         logoutOwedStore.clear(accountIdB64)
@@ -742,13 +742,13 @@ public class AuthRepository(
         mutableIdentitySecrets.value = secrets
         settleOwedPublish(accountIdB64, secrets.accountId, secrets.accountIdentitySeed)
         runSessionDuties(secrets)
-        // ADR-0067 - how the account is protected, and what happened to it
+        // ADR-0075 - how the account is protected, and what happened to it
         // elsewhere, read at every landing.
         mutableProtectStepOwed.value = protectionStore.protectStepOwed(accountIdB64)
         mutableRecoveryEmail.value = null
         resealTried.remove(accountIdB64)
         pushScope.launch { refreshAccountProtection(accountIdB64) }
-        // ADR-0066 section 3.3 - a pending key rotation whose key the
+        // ADR-0074 section 3.3 - a pending key rotation whose key the
         // directory already serves is adopted at the landing.
         pushScope.launch {
             try {
@@ -761,7 +761,7 @@ public class AuthRepository(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0066: the session names this device; auth records the account key
+    // ADR-0074: the session names this device; auth records the account key
     // -----------------------------------------------------------------
 
     /** What a landing sends as `device_id_b64` when it expects to land
@@ -977,7 +977,7 @@ public class AuthRepository(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0066 section 2: logout tells the server
+    // ADR-0074 section 2: logout tells the server
     // -----------------------------------------------------------------
 
     /**
@@ -1045,7 +1045,7 @@ public class AuthRepository(
     private fun restoreOwedPhrase(accountIdB64: String) {
         if (mutableSignupPhrase.value != null) return
         if (!owedStore.phraseShowable(accountIdB64)) return
-        // ADR-0067 - new words are shown only to a phrase-protected account.
+        // ADR-0075 - new words are shown only to a phrase-protected account.
         if (!showsNewWords(protectionStore.phraseSaved(accountIdB64))) {
             owedStore.clearPhraseOwed(accountIdB64)
             return
@@ -1069,7 +1069,7 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0065 section 2.3 — a reset whose publish did not finish leaves the
+     * ADR-0073 section 2.3 — a reset whose publish did not finish leaves the
      * attestation and the `publish-owed` marker. When a session for that
      * account lands, the device holds the new seed, so the remaining steps
      * are tried again here, in the background, with the SAME attestation.
@@ -1102,7 +1102,7 @@ public class AuthRepository(
     }
 
     /**
-     * The retry of a reset's publish for [accountIdB64] (ADR-0065 section
+     * The retry of a reset's publish for [accountIdB64] (ADR-0073 section
      * 2.3 steps 3 and 5): the directory upload with the attestation, then
      * the DeviceGroup re-root, each skipped when its marker says it landed.
      * On success the debt is cleared and a phrase that was never confirmed
@@ -1143,7 +1143,7 @@ public class AuthRepository(
                 return
             }
             is ResetAttestationVerdict.Usable -> {
-                // ADR-0065 R.4 - the marker of this device's own reset: the
+                // ADR-0073 R.4 - the marker of this device's own reset: the
                 // continuity key of the new mailbox is registered from it,
                 // with its expiry, by the reach sync that follows the reset.
                 me.lakko.app.reach.ContinuityMarkerStore.write(
@@ -1210,7 +1210,7 @@ public class AuthRepository(
      */
     public fun publishOwed(): Boolean {
         val accountIdB64 = signedInAccountIdB64() ?: return false
-        // ADR-0066 part 3: and while a rotation this device ran has not
+        // ADR-0074 part 3: and while a rotation this device ran has not
         // published the new keys yet (the same rule, UX 18.1).
         return owedStore.isPublishOwed(accountIdB64) || rotationPublishOwed(accountIdB64)
     }
@@ -1257,7 +1257,7 @@ public class AuthRepository(
      *   6. Zeroize the OPAQUE export key + the derived root key.
      *   6a. Publish the identity bundle (genesis, fail loud).
      *   7. Flip state to [AuthState.Session].
-     *   8. Record that the "Protect your account" step is owed (ADR-0067).
+     *   8. Record that the "Protect your account" step is owed (ADR-0075).
      *      The 12-word phrase is generated and stored on the device as
      *      before, and is NOT shown or returned (D2).
      *
@@ -1286,7 +1286,7 @@ public class AuthRepository(
                 password,
                 enrolRecovery = true,
                 onProofSolved = onProofSolved,
-                // ADR-0066 - the session names this device from its first
+                // ADR-0074 - the session names this device from its first
                 // credential (the device seed for the new account is minted
                 // here; the ensure further down finds it).
                 deviceIdFor = { accountId -> landingDeviceId(base64Encode(accountId)) },
@@ -1321,7 +1321,7 @@ public class AuthRepository(
                 // The claim above bound the handle for this session; the
                 // session landing below need not repeat it.
                 loginHandleRebinder.markBound(result.sessionToken, normalisedUsername)
-                // ADR-0068 - the name goes into the own-username register
+                // ADR-0076 - the name goes into the own-username register
                 // once the synced state is open.
                 pendingUsernameWrite.set(accountIdB64 to normalisedUsername)
                 sessionStore.save(
@@ -1431,7 +1431,7 @@ public class AuthRepository(
                     accountIdentitySeed.fill(0)
                     throw cause
                 }
-                // ADR-0067 D2 - the phrase is NOT shown at sign-up. It is
+                // ADR-0075 D2 - the phrase is NOT shown at sign-up. It is
                 // stored on this device as before; what the person owes is
                 // the "Protect your account" step (UX 19.1a), up before the
                 // session lands and recorded so a restart shows it again.
@@ -1495,7 +1495,7 @@ public class AuthRepository(
      * cache + the first-ever identity-bundle publish (with the genesis
      * `leafAuth`) — but SKIPS the username claim, yielding a username-less
      * account. The recovery phrase is stored on the device and NOT shown
-     * (ADR-0067 D2); the session lands at once through the shared completion
+     * (ADR-0075 D2); the session lands at once through the shared completion
      * ([confirmFreshPhraseSaved]).
      *
      * SECURITY: guest creation routes through the SAME PoW-gated signup — no
@@ -1583,7 +1583,7 @@ public class AuthRepository(
                     accountId = result.accountId,
                     accountIdentitySeed = accountIdentitySeed,
                 )
-                // ADR-0067 D2 - the phrase is not shown at sign-up, a guest's
+                // ADR-0075 D2 - the phrase is not shown at sign-up, a guest's
                 // included: it stays stored on this device and the person
                 // may save one later in Settings (the no-protection banner
                 // says so). The session is persisted and landed at once
@@ -1662,7 +1662,7 @@ public class AuthRepository(
                 cached = null,
                 typed = trimmed,
                 source = loginHandleSource,
-                // ADR-0066 - name this device at the landing when the device
+                // ADR-0074 - name this device at the landing when the device
                 // already knows the account behind the typed name; else bind
                 // right after the answer.
                 call = { client.login(it.handle, password, landingDeviceId(candidateAccount(trimmed))).bound() },
@@ -1802,7 +1802,7 @@ public class AuthRepository(
                         username = resolvedUsername,
                     ),
                 )
-                // ADR-0065 section 4.2 - read the directory before any write:
+                // ADR-0073 section 4.2 - read the directory before any write:
                 // stale keys land the signed-out screen; our key is
                 // re-published. Before this, a password login never
                 // published the bundle, so an account whose bundle was missing
@@ -2290,7 +2290,7 @@ public class AuthRepository(
             phraseOnDevice = phrase != null,
             keysOnDevice = keysOnDevice,
             suspended = threeWordsBudgetStore.isSuspended(cached.accountIdB64),
-            // ADR-0067 - only a phrase-protected account has words the
+            // ADR-0075 - only a phrase-protected account has words the
             // person was ever shown.
             phraseSaved = protectionStore.phraseSaved(cached.accountIdB64),
         )
@@ -2444,7 +2444,7 @@ public class AuthRepository(
 
 
     // -----------------------------------------------------------------
-    // ADR-0067: the recovery email, the account's protection, its notices
+    // ADR-0075: the recovery email, the account's protection, its notices
     // -----------------------------------------------------------------
 
     private fun deviceLanguageTag(): String? =
@@ -2482,7 +2482,7 @@ public class AuthRepository(
     }
 
     /** Whether new words are shown on this device after its account's keys
-     *  changed (ADR-0067: only to a phrase-protected account). */
+     *  changed (ADR-0075: only to a phrase-protected account). */
     public fun showsNewWordsHere(): Boolean = showsNewWords(phraseProtected())
 
     /** Whether the account on this device is phrase-protected, as last
@@ -2804,7 +2804,7 @@ public class AuthRepository(
         }
     }
 
-    // ---- the own-username register and a rename (ADR-0068) ---------------
+    // ---- the own-username register and a rename (ADR-0076) ---------------
 
     private suspend fun writeOwnUsername(accountIdB64: String, username: String) {
         val port = ownUsernamePort
@@ -2954,7 +2954,7 @@ public class AuthRepository(
     }
 
     /**
-     * Change the account's username (ADR-0068 section 4): one resumable
+     * Change the account's username (ADR-0076 section 4): one resumable
      * operation ([UsernameRenameRunner]) - bind the new handle at auth, replace
      * the name at discovery (a refusal binds the old handle back), then the
      * marker, the session state, the register and the re-publish.
@@ -3556,7 +3556,7 @@ public class AuthRepository(
                     username = username,
                 ),
             )
-            // ADR-0065 section 4.2 - read the directory before any write (same
+            // ADR-0073 section 4.2 - read the directory before any write (same
             // as a password login): stale keys land the signed-out screen.
             refreshPublishedIdentityInBackground(
                 landing = IdentityLanding.SIGN_IN,
@@ -3777,7 +3777,7 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0065 "Reset account keys" (the successor of the ADR-0017
+     * ADR-0073 "Reset account keys" (the successor of the ADR-0017
      * lost-everything fallback): give the account new keys and a new 12-word
      * phrase when the person recovered ACCESS via an ADR-0018 factor but has
      * NO recovery phrase and NO other device. The reset signs every other
@@ -3830,7 +3830,7 @@ public class AuthRepository(
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
         val proof = freshAuth.live(pending.accountIdB64, System.currentTimeMillis())
             ?: throw FreshAuthRequired()
-        // ADR-0067 - whether the new words will be shown depends on the
+        // ADR-0075 - whether the new words will be shown depends on the
         // account's mode, read with the parked session before the reset
         // (best effort: the flag as last learned otherwise).
         learnPhraseSaved(pending.accountIdB64, pending.sessionToken)
@@ -3891,9 +3891,9 @@ public class AuthRepository(
 
     /**
      * Everything a key reset does on this device AFTER its server step
-     * answered (ADR-0065 section 2.3 steps 3 to 6): the point of no return.
+     * answered (ADR-0073 section 2.3 steps 3 to 6): the point of no return.
      * Shared by [mintFreshIdentity] (`reset/finish`) and by the recall
-     * ([recallSubmit], `recall/finish`, ADR-0066 section 1.2: "from the
+     * ([recallSubmit], `recall/finish`, ADR-0074 section 1.2: "from the
      * reset's client order onward the recall IS a reset"), so there is one
      * such path.
      *
@@ -3944,7 +3944,7 @@ public class AuthRepository(
         )
         owedStore.markPhraseOwed(accountIdB64, OwedPhraseOrigin.FreshIdentity)
         owedStore.markPublishOwed(accountIdB64)
-        // ADR-0065 phase 2 / UX 16.6 — the channels this account owned under
+        // ADR-0073 phase 2 / UX 16.6 — the channels this account owned under
         // the OLD keys are orphaned by the reset (their owner key derives from
         // the seed that just changed): recorded here, the one moment this
         // device knows, so the channels list says so before the person tries
@@ -4252,14 +4252,14 @@ public class AuthRepository(
      *  account (so the three-word check can be offered). Off the main thread. */
     public fun holdsPhraseForPasswordChange(): Boolean {
         val accountIdB64 = (mutableState.value as? AuthState.Session)?.account?.accountIdB64 ?: return false
-        // ADR-0067 - three words exist only for a phrase-protected account.
+        // ADR-0075 - three words exist only for a phrase-protected account.
         if (!threeWordsSurfaceOffered(protectionStore.phraseSaved(accountIdB64))) return false
         return DevicePhrase.read(applicationContext, accountIdB64) != null
     }
 
     /**
      * Verify a key-reset attestation on this device before it is handed to
-     * discovery or the DS (ADR-0065 section 2.2): the signature under the
+     * discovery or the DS (ADR-0073 section 2.2): the signature under the
      * attest verifying key, and its binding to THIS account and the NEW key.
      * The build-time pinned key ([DeviceAttestKey.pinnedKey]) is used when
      * present — fail closed; when no key is pinned the JWKS endpoint is
@@ -4304,7 +4304,7 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0065 section 2.3 step 3: `POST /discovery/identity` with the new
+     * ADR-0073 section 2.3 step 3: `POST /discovery/identity` with the new
      * bundle, the genesis self-signature and attestation as a first publish
      * carries, AND the key-reset attestation. `409 key-generation-not-newer`
      * on a retry means the upload already landed.
@@ -4346,7 +4346,7 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0065 section 2.3 step 4: found the DeviceGroup anew and re-root its
+     * ADR-0073 section 2.3 step 4: found the DeviceGroup anew and re-root its
      * journal with the attested `Reset`
      * ([me.lakko.app.devices.DeviceGroupJournalAccess.reRootAfterKeyReset]).
      */
@@ -4448,7 +4448,7 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0065 section 4.2 — the directory check of a landing that holds the
+     * ADR-0073 section 4.2 — the directory check of a landing that holds the
      * phrase seed, fire-and-forget: read the published bundle BEFORE any
      * upload; equal keys re-publish ours (where the landing did before),
      * other keys at a higher generation sign this device out
@@ -4492,7 +4492,7 @@ public class AuthRepository(
     }
 
     /**
-     * The silent restore's half (ADR-0065 section 3.3 and 4.2): refresh the
+     * The silent restore's half (ADR-0073 section 3.3 and 4.2): refresh the
      * access token first - a reset the server already knows about is then
      * learned from the refresh refusal, before anything is read or written -
      * then run the same directory check a sign-in runs. Offline, the refresh
@@ -4587,7 +4587,7 @@ public class AuthRepository(
                         }
                         val genesisAttest = if (withGenesisAuth) {
                             mintGenesisAttestBestEffort(sessionToken, signaturePubkey)?.also {
-                                // ADR-0066 - auth signed this key, so it is
+                                // ADR-0074 - auth signed this key, so it is
                                 // the recorded one.
                                 genesisRecorded.markRecorded(accountIdB64, base64Encode(signaturePubkey))
                             }
@@ -4787,7 +4787,7 @@ public class AuthRepository(
             phraseEntropy.fill(0)
             throw AuthClientArgError("no pending identity recovery — sign in first")
         }
-        // ADR-0066 - the grant redeem named no device (it learned its account
+        // ADR-0074 - the grant redeem named no device (it learned its account
         // from the answer): bind before the pair is used.
         @Suppress("NAME_SHADOWING")
         val session = session?.let { boundSession(pending.accountIdB64, it) }
@@ -4906,7 +4906,7 @@ public class AuthRepository(
         persistJoin: suspend () -> Unit = {},
         forgotPassword: Boolean = false,
     ) {
-        // ADR-0066 - the grant redeem named no device: bind before use.
+        // ADR-0074 - the grant redeem named no device: bind before use.
         @Suppress("NAME_SHADOWING")
         val session = boundSession(accountIdB64, session)
         // Nothing is written before the gates of [runCheckedDeviceRestore].
@@ -5238,7 +5238,7 @@ public class AuthRepository(
                 it.loginWithPasskey(
                     activityContext,
                     accountIdB64 = accountIdB64Url,
-                    // ADR-0066 - the account is known only when the ceremony
+                    // ADR-0074 - the account is known only when the ceremony
                     // was limited to it; a discoverable sign-in binds after.
                     deviceIdB64Url = accountIdB64Url
                         ?.let { url -> landingDeviceId(base64Encode(base64UrlDecodeNoPad(url))) }
@@ -5253,7 +5253,7 @@ public class AuthRepository(
             throw AuthClientArgError("passkey sign-in failed: ${cause.javaClass.simpleName}", passkeyFailureText(cause))
         }
         val landed = assertion ?: throw PasskeyCancelled()
-        // ADR-0066 - a discoverable sign-in learns its account here: bind
+        // ADR-0074 - a discoverable sign-in learns its account here: bind
         // the session to this device before anything uses it.
         val accountIdB64 = try {
             base64Encode(accountIdOfAssertion(landed))
@@ -5365,7 +5365,7 @@ public class AuthRepository(
         // ADR-0054 - the push unregister below spends one push-register
         // token, drawn with THIS session after the live one is gone.
         val departingSession = currentAnonSession()
-        // ADR-0066 section 2 - the session is ended at the server too, so a
+        // ADR-0074 section 2 - the session is ended at the server too, so a
         // copy of what this device held cannot keep using the account. Best
         // effort; offline, the server is told at the next launch.
         val departingPair = sessionTokenProvider.peek()
@@ -5408,7 +5408,7 @@ public class AuthRepository(
         me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
         val accountIdB64 = identitySecrets.value?.let { base64Encode(it.accountId) }
             ?: sessionStore.load()?.accountIdB64
-        // ADR-0066 - read before the wipe: the session is ended at the
+        // ADR-0074 - read before the wipe: the session is ended at the
         // server as well (one attempt; nothing of it is kept on a device
         // that is forgetting the account).
         val departingPair = sessionTokenProvider.peek()
@@ -5444,7 +5444,7 @@ public class AuthRepository(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0065 section 3.5 / 4.2: this device's keys are not the account's
+    // ADR-0073 section 3.5 / 4.2: this device's keys are not the account's
     // keys any more
     // -----------------------------------------------------------------
 
@@ -5459,7 +5459,7 @@ public class AuthRepository(
      * this device's.
      */
     public fun onKeysSuperseded(accountIdB64: String) {
-        // ADR-0066 section 3.3 - a device that holds the account's keys does
+        // ADR-0074 section 3.3 - a device that holds the account's keys does
         // not yet know whether this is a reset or a rotation that kept it:
         // the server does not say. It looks for the rotation first.
         if (ownRotationInFlight(accountIdB64)) {
@@ -5485,7 +5485,7 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0065 section 4.2 rule 4 — the directory serves other keys at the
+     * ADR-0073 section 4.2 rule 4 — the directory serves other keys at the
      * SAME generation: an anomaly, not a known reset. The same screen with
      * the mismatch line and the **Sign out** button; the wipe runs on the
      * tap ([wipeAfterKeyReset]), not by itself. Never an upload.
@@ -5495,7 +5495,7 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0066 section 2.3 — another device of the account removed this
+     * ADR-0074 section 2.3 — another device of the account removed this
      * one: auth answered `401 device-revoked` (to the refresh, a bearer
      * route or the bind), or this device applied its own removal from the
      * account's DeviceGroup ([onRemovedFromDeviceGroup]). The removed screen
@@ -5530,7 +5530,7 @@ public class AuthRepository(
         val username = sessionStore.load()?.takeIf { it.accountIdB64 == accountIdB64 }?.username
             ?: (mutableState.value as? AuthState.Session)?.account?.username
             ?: ""
-        // ADR-0066 section 1.1 - a device that holds the account's keys
+        // ADR-0074 section 1.1 - a device that holds the account's keys
         // keeps a recall record through the wipe; one that never held them,
         // and a REMOVED device, keep nothing.
         val holdsKeys = mutableIdentitySecrets.value?.let { base64Encode(it.accountId) == accountIdB64 } == true ||
@@ -5547,7 +5547,7 @@ public class AuthRepository(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0066 part 3 (Stage A): changing the account keys, devices kept
+    // ADR-0074 part 3 (Stage A): changing the account keys, devices kept
     // -----------------------------------------------------------------
 
     private val pendingRotationStore: PendingRotationStore by lazy { PendingRotationStore.onDevice(applicationContext) }
@@ -5736,7 +5736,7 @@ public class AuthRepository(
     public suspend fun rotationCommit(
         freshGrant: String,
         revokeDeviceId: ByteArray?,
-        /** ADR-0067 section 3: this rotation is "Save a recovery phrase". */
+        /** ADR-0075 section 3: this rotation is "Save a recovery phrase". */
         phraseSaved: Boolean = false,
     ): me.lakko.app.devices.CommitAnswer.Committed {
         val secrets = rotationSecrets()
@@ -6428,7 +6428,7 @@ public class AuthRepository(
     }
 
     /**
-     * The wipe of the signed-out screen (ADR-0065 section 3.5): the FULL
+     * The wipe of the signed-out screen (ADR-0073 section 3.5): the FULL
      * forget-device wipe, run by the app root after it stopped every
      * runtime, with two differences from the tapped Forget device - nothing
      * is published or deleted server-side first (the KeyPackage row is
@@ -6448,7 +6448,7 @@ public class AuthRepository(
             ?: pendingRecovery.get()?.let {
                 me.lakko.app.anon.AnonSession(accountKey = it.accountIdB64, bearer = it.sessionToken)
             }
-        // ADR-0066 section 1.1 - the recall record is written BEFORE
+        // ADR-0074 section 1.1 - the recall record is written BEFORE
         // anything is deleted (the seed it holds is about to go). A record
         // that could not be written means the full wipe: nothing half-kept.
         val recallRecord = if (signOut.keepsRecall) writeRecallRecord(accountIdB64, signOut.username) else null
@@ -6480,7 +6480,7 @@ public class AuthRepository(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0066 part 1: "Was it you?" and taking the account back
+    // ADR-0074 part 1: "Was it you?" and taking the account back
     // -----------------------------------------------------------------
 
     /**
@@ -6642,7 +6642,7 @@ public class AuthRepository(
     public suspend fun recallSubmit(
         oldPassword: ByteArray,
         newPassword: ByteArray,
-        /** ADR-0067 section 8 / UX 19.7: `Use my recovery phrase instead` -
+        /** ADR-0075 section 8 / UX 19.7: `Use my recovery phrase instead` -
          *  the 12 words the account had before the reset, in place of the
          *  password. A phrase that does not parse is a wrong proof. */
         oldPhrase: String? = null,
@@ -6680,7 +6680,7 @@ public class AuthRepository(
             endRecall(working, RecallEnd.Closed)
             return
         }
-        // ADR-0066 T5 item 25 - a `finish` of an earlier press that was sent
+        // ADR-0074 T5 item 25 - a `finish` of an earlier press that was sent
         // and never answered is asked again FIRST, with the same bytes: if
         // it landed, the account already has the phrase generated then.
         var phrase: String? = null
@@ -6798,7 +6798,7 @@ public class AuthRepository(
         // record has done its work.
         record.zero()
         recallStore.delete(ui.accountIdB64)
-        // ADR-0067 - the staged wipe dropped this device's phrase-saved
+        // ADR-0075 - the staged wipe dropped this device's phrase-saved
         // flag; the anchor's phrase arm says whether the account had a
         // saved phrase, and so whether the new words are shown.
         protectionStore.setPhraseSaved(ui.accountIdB64, open.status.phraseArm)
@@ -7184,7 +7184,7 @@ public class AuthRepository(
             secrets.accountId.fill(0)
         }
         mutableIdentitySecrets.value = null
-        // ADR-0067 - what was read for the departing session goes with it.
+        // ADR-0075 - what was read for the departing session goes with it.
         mutableRecoveryEmail.value = null
         mutableRecoveryAddress.value = null
         loginHandleRebinder.forgetConfirmed()
@@ -7249,7 +7249,7 @@ public sealed interface AuthState {
      *  session. */
     public data class NeedsRecoveryPhrase(val account: SessionAccount) : AuthState
 
-    /** ADR-0065 "Reset account keys" (the ADR-0017 lost-everything
+    /** ADR-0073 "Reset account keys" (the ADR-0017 lost-everything
      *  fallback). The user recovered ACCESS via an ADR-0018 factor but has
      *  NO recovery phrase and NO other device, and reset the account keys:
      *  the server step is done, the new phrase is minted, and the new
@@ -7399,7 +7399,7 @@ public data class IdentitySecrets(
      *  that builds the canonical identity reads THIS, not
      *  `exportKey`. */
     val accountIdentitySeed: ByteArray,
-    /** ADR-0065: the session pair issued at the landing (the access token
+    /** ADR-0073: the session pair issued at the landing (the access token
      *  every client captures as its bearer - the transport substitutes the
      *  provider's current one -, the refresh credential and the key
      *  generation). The provider's refresh updates it in place. */
@@ -7432,7 +7432,7 @@ public data class IdentitySecrets(
 }
 
 /**
- * ADR-0065 section 3.5 / 4.2 — the signed-out screen's state: this device's
+ * ADR-0073 section 3.5 / 4.2 — the signed-out screen's state: this device's
  * keys are not the account's keys any more. Shown by the app root instead
  * of the app, in every auth state, until its one button is tapped.
  */
@@ -7442,7 +7442,7 @@ public data class KeyResetSignOut(
     val username: String,
     val kind: Kind,
     val phase: Phase,
-    /** ADR-0066 section 1.1 - the wipe keeps the recall record and the
+    /** ADR-0074 section 1.1 - the wipe keeps the recall record and the
      *  screen that follows is "Was it you?" ([supersededWipeFor]). Only ever
      *  `true` for [Kind.Reset] on a device that holds the account's keys. */
     val keepsRecall: Boolean = false,
@@ -7459,7 +7459,7 @@ public data class KeyResetSignOut(
          *  anomaly: the wipe runs on the tap). */
         Mismatch,
 
-        /** ADR-0066: another device of the account removed this one (the
+        /** ADR-0074: another device of the account removed this one (the
          *  wipe runs by itself; nothing is kept to take the account back
          *  with, since a removal changes no keys). */
         Removed,
@@ -7480,7 +7480,7 @@ public data class KeyResetSignOut(
 
 /**
  * The phase a sign-out screen opens in: a known reset and a removal by
- * another device (ADR-0066) delete everything BY THEMSELVES; only the
+ * another device (ADR-0074) delete everything BY THEMSELVES; only the
  * same-generation mismatch waits for the person's tap.
  */
 public fun signOutPhaseFor(kind: KeyResetSignOut.Kind): KeyResetSignOut.Phase = when (kind) {
@@ -7489,7 +7489,7 @@ public fun signOutPhaseFor(kind: KeyResetSignOut.Kind): KeyResetSignOut.Phase = 
 }
 
 /**
- * The screen a refused session leads to (ADR-0066 section 2.3, UX 18.7):
+ * The screen a refused session leads to (ADR-0074 section 2.3, UX 18.7):
  * three answers, three screens, three deletions. `null` = no full-screen
  * state: the sign-in screen with nothing wiped (a logout at the server, an
  * expired refresh credential), or one refresh and one retry.
@@ -7501,7 +7501,7 @@ public fun signOutKindFor(refusal: SessionRefusal): KeyResetSignOut.Kind? = when
 }
 
 /** Result of a sign-up. The recovery phrase is generated and stored on the
- *  device but NOT handed to the screen (ADR-0067 D2): it is shown only when
+ *  device but NOT handed to the screen (ADR-0075 D2): it is shown only when
  *  the person saves it (UX 19.5). */
 public data class SignupOutcome(
     val accountIdB64: String,
@@ -7569,7 +7569,7 @@ internal data class PendingFreshPhrase(
     val username: String,
     val phrase: String,
     /** `true` while the new keys of a reset are not yet published to the
-     *  directory and the device list (ADR-0065 section 2.3). The phrase is
+     *  directory and the device list (ADR-0073 section 2.3). The phrase is
      *  not shown and the session does not land until it is `false`. Always
      *  `false` for a guest signup, which published its genesis bundle. */
     val publishOwed: Boolean,

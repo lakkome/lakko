@@ -9,7 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0067 section 9 / UX 19.6 - which notices a landing shows. */
+/** ADR-0075 section 9 / UX 19.6 - which notices a landing shows. */
 class AccountNoticesTest {
 
     private class MapStorage : MarkerStorage {

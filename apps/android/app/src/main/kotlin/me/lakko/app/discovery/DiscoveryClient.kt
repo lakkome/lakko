@@ -592,7 +592,7 @@ public class DiscoveryClient(
     }
 
     /**
-     * ADR-0068 - replace the account's current username with [username]:
+     * ADR-0076 - replace the account's current username with [username]:
      * OPRF, then `POST /discovery/username/replace`. The old name is retired
      * (nobody finds the account by it; nobody else takes it for 30 days), and
      * the account leaves Everyone on the server until the client publishes
@@ -940,7 +940,7 @@ public class DiscoveryClient(
      * the authenticated account's device KeyPackages (ADR-0050 device removal).
      * Bearer-auth; idempotent (204).
      *
-     * ADR-0066 section 2.2: the session's OWN device row needs nothing more.
+     * ADR-0074 section 2.2: the session's OWN device row needs nothing more.
      * ANOTHER device's row needs [statement], the 138-byte `device-revoke`
      * account statement for that id, sent as the `x-lakko-account-statement`
      * header ([statementHeaderName]; base64url without padding); without it
@@ -1565,7 +1565,7 @@ public class DiscoveryClient(
         supersessionProofB64: String? = null,
         leafAuth: ByteArray? = null,
         genesisAttest: ByteArray? = null,
-        /** ADR-0065: the raw 177-byte key-reset attestation of a reset's
+        /** ADR-0073: the raw 177-byte key-reset attestation of a reset's
          *  publish; `null` for every other upload. The server refuses an
          *  unattested, unproven key change (`409
          *  identity-change-needs-attestation`), so a changed key is never
@@ -1596,7 +1596,7 @@ public class DiscoveryClient(
                 // ADR-0036 — standard-alphabet base64 (mirrors `leaf_auth`;
                 // the discovery upload decodes it with the STANDARD engine).
                 genesis_attest = genesisAttest?.let { base64Encode(it) },
-                // ADR-0065 - standard base64 of the 177 bytes, like the two
+                // ADR-0073 - standard base64 of the 177 bytes, like the two
                 // sidecars above (re-encoded from the server's base64url).
                 key_reset_attest = keyResetAttest?.let { base64Encode(it) },
             ),
@@ -1776,7 +1776,7 @@ public class DiscoveryClient(
     }
 
     public companion object {
-        /** ADR-0066 - the header a statement rides in on a route with no
+        /** ADR-0074 - the header a statement rides in on a route with no
          *  JSON body. The native core names it (`accountStatementHeaderName`);
          *  this is the same value for code that runs without the core. */
         public const val ACCOUNT_STATEMENT_HEADER: String = "x-lakko-account-statement"

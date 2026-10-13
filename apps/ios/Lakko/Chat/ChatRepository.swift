@@ -141,7 +141,7 @@ public final class ChatRepository: ObservableObject {
     /// capabilities (issuer key) and their revocation.
     var accountIdentity: Identity?
 
-    /// ADR-0066 section 3.1 (Stage A) — the account identity this device's
+    /// ADR-0074 section 3.1 (Stage A) — the account identity this device's
     /// conversation leaves are BOUND to when that is not the current one: the
     /// account rotated its keys and the leaves keep their bindings under the
     /// old key until Stage B. `nil` when the binding names the current key
@@ -205,7 +205,7 @@ public final class ChatRepository: ObservableObject {
                             keyPackageBytes: upload.keyPackage
                         )
                 } catch {
-                    // ADR-0066 section 2.2 — discovery's `403 device-revoked`
+                    // ADR-0074 section 2.2 — discovery's `403 device-revoked`
                     // is NOT proof of removal: auth is asked (a refresh), and
                     // its answer is what the session layer acts on. A
                     // `device-mismatch` is a session that does not name this
@@ -232,17 +232,17 @@ public final class ChatRepository: ObservableObject {
     /// `GroupRecord` it captured before the wait.
     var groups: [String: GroupRecord] = [:]
 
-    /// ADR-0065 R.5 — the conversation lineage: which group continues which
+    /// ADR-0073 R.5 — the conversation lineage: which group continues which
     /// conversation. A projection of the DeviceGroup synced state's lineage
     /// registers, handed in by the composition root
     /// (``applyLineage(_:)``); empty until then, so every group is its own
     /// conversation.
     var conversationLineage = ConversationLineage.none
-    /// ADR-0065 R.5 — writes the register `successor -> root conversation`
+    /// ADR-0073 R.5 — writes the register `successor -> root conversation`
     /// (write-once) and sends it to the account's other devices. The
     /// composition root points it at
     /// ``DeviceGroupSyncRepository/setLineage(successorGroupId:rootConversationId:)``.
-    /// ADR-0065 R.6 step 1 — successors this device created and has not yet
+    /// ADR-0073 R.6 step 1 — successors this device created and has not yet
     /// made held conversations, by successor group id (standard base64). In
     /// memory; after a restart the group is loaded from the MLS snapshot the
     /// creation persisted.
@@ -253,13 +253,13 @@ public final class ChatRepository: ObservableObject {
     var lastContinuitySweepAtMs: Int64 = 0
     /// One flush of the held messages at a time.
     var heldFlushRunning = false
-    /// ADR-0065 R.7 case 1 — where the pending row of each held message is
+    /// ADR-0073 R.7 case 1 — where the pending row of each held message is
     /// drawn: queue entry id -> (group, the row's local id).
     var heldRows: [String: (groupIdHex: String, localId: Int64)] = [:]
     /// When the roster identities of a group were last re-checked because a
     /// claim was kept pending, UNIX ms.
     var claimIdentityCheckedAtMs: [String: Int64] = [:]
-    /// ADR-0065 R.7 case 1 — how the held-message queue is sealed at rest:
+    /// ADR-0073 R.7 case 1 — how the held-message queue is sealed at rest:
     /// under the Keychain wrap key the message log uses (a held message is
     /// message plaintext). Injectable for a test host with no Keychain.
     var heldSendSealer = HeldSendQueue.Sealer(
@@ -453,7 +453,7 @@ public final class ChatRepository: ObservableObject {
     /// demand; this only says "read them again".
     @Published public private(set) var pinRevision: Int = 0
 
-    /// A pin store changed outside the two ordinary setters (ADR-0065 R.5:
+    /// A pin store changed outside the two ordinary setters (ADR-0073 R.5:
     /// a shared pin of an older segment cleared on this device alone).
     func notePinsChanged() { pinRevision &+= 1 }
 
@@ -523,7 +523,7 @@ public final class ChatRepository: ObservableObject {
     /// region, so taking the commit chain from it would nest the lock.
     let groupNameLock = GroupMlsLock()
 
-    /// ADR-0065 R.12 — a one-to-one moved to a successor group. The
+    /// ADR-0073 R.12 — a one-to-one moved to a successor group. The
     /// composition root points this at the call host, which ends a call live
     /// in the old group: its keys belong to devices that were removed.
     var onOneToOneMoved: ((_ groupIdHex: String) -> Void)?
@@ -692,7 +692,7 @@ public final class ChatRepository: ObservableObject {
             guard let self, self.currentAccountIdB64 == accountIdB64 else { return .notPermitted }
             return await self.bindPushRouting(groupIdHex: groupIdHex, secret: secret)
         }
-        // ADR-0066 part 3 — a pairing state bundle may bring the account's
+        // ADR-0074 part 3 — a pairing state bundle may bring the account's
         // own predecessors to a session that is already running.
         stateBundleObserver = NotificationCenter.default.addObserver(
             forName: .lakkoStateBundleApplied, object: nil, queue: .main
@@ -746,7 +746,7 @@ public final class ChatRepository: ObservableObject {
         // ADR-0050 — the chats run on the DEVICE identity.
         let device = deviceIdentityInstaller(newAccountIdB64, account)
         let identity = device ?? account
-        // ADR-0066 Stage A — a binding kept under the account's own old key.
+        // ADR-0074 Stage A — a binding kept under the account's own old key.
         let predecessor = Self.boundPredecessor(
             accountIdB64: newAccountIdB64, device: device, account: account)
 
@@ -842,7 +842,7 @@ public final class ChatRepository: ObservableObject {
             threads: buildThreadList(),
             bootstrapped: true
         )
-        // ADR-0065 — the dead-session publish guard, the reset-accepted
+        // ADR-0073 — the dead-session publish guard, the reset-accepted
         // trigger, the held messages a restart left on disk, and one
         // continuity pass.
         installContinuity()
@@ -941,14 +941,14 @@ public final class ChatRepository: ObservableObject {
     /// account's own predecessor seeds (oldest first) and whether this device
     /// is in any conversation.
     ///
-    /// ADR-0066 section 3.1 (Stage A) — after a rotation of the account keys
+    /// ADR-0074 section 3.1 (Stage A) — after a rotation of the account keys
     /// a device does NOT re-bind: its leaves stay under the old key, and a
     /// binding minted under the new key would make this device a different
     /// account to every gate, and misjudge its own standing. A binding under
     /// one of the account's OWN predecessor keys is kept. (A reset keeps no
     /// predecessor, so it still re-mints.)
     ///
-    /// ADR-0066 part 3 — a device paired AFTER a rotation gets the
+    /// ADR-0074 part 3 — a device paired AFTER a rotation gets the
     /// predecessor seeds from the pairing state bundle and mints its binding
     /// under the conversation key (the oldest predecessor), the key the
     /// account's other devices are bound to. A binding minted under the
@@ -973,10 +973,10 @@ public final class ChatRepository: ObservableObject {
             case .keep:
                 if let stored { return stored }
             case .keepUnderCurrentKey:
-                NSLog("ADR-0066: the device binding names the current account key and this device holds conversations; kept")
+                NSLog("ADR-0074: the device binding names the current account key and this device holds conversations; kept")
                 if let stored { return stored }
             case .remint:
-                NSLog("ADR-0066: the device binding is minted again under the conversation key")
+                NSLog("ADR-0074: the device binding is minted again under the conversation key")
             case .mint:
                 if stored != nil {
                     NSLog("ChatRepository: stored device binding names another account key; re-minting")
@@ -998,7 +998,7 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0066 part 3 — a pairing state bundle just stored the account's
+    /// ADR-0074 part 3 — a pairing state bundle just stored the account's
     /// own predecessors on a device whose chat layer is already running (it
     /// signed in with the phrase and paired afterwards). While it holds no
     /// conversation its binding is minted again under the conversation key
@@ -1019,7 +1019,7 @@ public final class ChatRepository: ObservableObject {
         return true
     }
 
-    /// ADR-0066 Stage A — the account's own predecessor identity the device
+    /// ADR-0074 Stage A — the account's own predecessor identity the device
     /// binding names, or `nil` when the binding names the current key (or
     /// there is no device identity).
     static func boundPredecessor(accountIdB64: String, device: Identity?, account: Identity) -> Identity? {
@@ -1031,7 +1031,7 @@ public final class ChatRepository: ObservableObject {
             .first { $0.signaturePublicKey() == boundKey }
     }
 
-    /// ADR-0066 section 3.2 step 6 / section 3.3 — the account's keys were
+    /// ADR-0074 section 3.2 step 6 / section 3.3 — the account's keys were
     /// rotated and this device holds the new ones. Nothing of the
     /// conversations changes: the device identity, its binding and every
     /// group stay. What moves is the ACCOUNT identity used outside MLS (the
@@ -1047,14 +1047,14 @@ public final class ChatRepository: ObservableObject {
             predecessorAccountIdentity = old
         }
         accountIdentity = rotated
-        // ADR-0066 section 3.5a rule 3 — from now the profile re-send is
+        // ADR-0074 section 3.5a rule 3 — from now the profile re-send is
         // owed, durably, on this device (rotating or kept).
         markProfileResendOwed()
         // The new mailbox (its pseudonym follows the new key).
         claimOwnMailboxes()
     }
 
-    /// ADR-0066 section 3.5, "DS" — for every group journal this account
+    /// ADR-0074 section 3.5, "DS" — for every group journal this account
     /// roots (it is the ADR-0022 owner), hand the root from the OLD seed's
     /// root to the new seed's: the old root seed is kept as the pending
     /// takeover seed and the ADR-0057 takeover runs, exactly as after an
@@ -1083,11 +1083,11 @@ public final class ChatRepository: ObservableObject {
             scheduleRootTakeover(groupIdHex: groupIdHex)
             scheduled += 1
         }
-        NSLog("ADR-0066: %d owned journal root transfer(s) scheduled", scheduled)
+        NSLog("ADR-0074: %d owned journal root transfer(s) scheduled", scheduled)
         return scheduled
     }
 
-    /// ADR-0066 section 3.5 — re-publish this device's KeyPackage after a
+    /// ADR-0074 section 3.5 — re-publish this device's KeyPackage after a
     /// rotation: every row of the account was deleted by the directory, the
     /// device id stays, and the binding is NOT re-minted (it stays under the
     /// old key). Throws when the publish did not upload, so the rotation
@@ -1146,7 +1146,7 @@ public final class ChatRepository: ObservableObject {
         // core verifies. ADR-0057 — remembered so the registrar appointment
         // can fetch the recipient's identity bundle.
         memberAccountIdHints[recipientSignaturePubkey] = recipientAccountId
-        // ADR-0065 R.2 / ADR-0066 3.5 — the identity gate for the account,
+        // ADR-0073 R.2 / ADR-0074 3.5 — the identity gate for the account,
         // then only the devices bound to the key the caller expects this
         // person to have or a proven predecessor of it
         // (``expectedPersonDevices``); none left is the same answer as an
@@ -1212,7 +1212,7 @@ public final class ChatRepository: ObservableObject {
             (recipientSignaturePubkey,
              recipientWriteAuth ?? ReachCenter.shared.writeAuth(toAccountKey: recipientSignaturePubkey))
         ]
-        // ADR-0066 section 3.5a rule 1 — each account key is resolved before
+        // ADR-0074 section 3.5a rule 1 — each account key is resolved before
         // its mailbox is derived: a contact stored under a key they have
         // since rotated away by proof, and this account's own devices (whose
         // bindings name the old key in Stage A), are written to at the
@@ -1230,7 +1230,7 @@ public final class ChatRepository: ObservableObject {
         let groupId = try group.groupId()
         let groupIdHex = DsClient.pseudonymHex(groupId)
         groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
-        // ADR-0065 R.5 — a group that continues a conversation is known to
+        // ADR-0073 R.5 — a group that continues a conversation is known to
         // the notification extension as that conversation.
         mirrorLineage()
         dsSigners.observe(journal: groupIdHex, signer: joinSigner)
@@ -1255,7 +1255,7 @@ public final class ChatRepository: ObservableObject {
 
     /// Write one Welcome envelope to one account's mailbox.
     ///
-    /// ADR-0066 section 3.5a rule 6 — a refused Welcome re-checks the
+    /// ADR-0074 section 3.5a rule 6 — a refused Welcome re-checks the
     /// person's address once. After the re-check a grant held for the person
     /// goes first: one the caller handed in (a link's) opened the mailbox it
     /// was issued for only.
@@ -1718,7 +1718,7 @@ public final class ChatRepository: ObservableObject {
             groupName: FfiGroupName(name: stored.name, updatedAtMs: stored.updatedAtMs))
     }
 
-    /// ADR-0065 R.7 case 3 — carry the group's name into the successor with
+    /// ADR-0073 R.7 case 3 — carry the group's name into the successor with
     /// its ORIGINAL stamp (ADR-0051), so a later rename there still wins and
     /// a re-send can never clobber one. Idempotent: nothing is sent once the
     /// successor holds a name at least as new.
@@ -1928,7 +1928,7 @@ public final class ChatRepository: ObservableObject {
     /// adoption and the session-start retry all come through here.
     private var profileResendRunning = false
 
-    /// ADR-0066 section 3.5a rule 3 — the account's keys moved on this
+    /// ADR-0074 section 3.5a rule 3 — the account's keys moved on this
     /// device (it rotated them, or it adopted a rotation): the profile
     /// re-send is owed from now until every conversation took the envelope.
     public func markProfileResendOwed() {
@@ -1945,7 +1945,7 @@ public final class ChatRepository: ObservableObject {
         currentAccountIdB64.flatMap { profileResendOwed.load(accountIdB64: $0) } != nil
     }
 
-    /// ADR-0066 section 3.5a rule 3 — the account moved to the new mailbox,
+    /// ADR-0074 section 3.5a rule 3 — the account moved to the new mailbox,
     /// and the grants every peer holds open only the old one. Re-send the own
     /// profile, which carries this conversation's grants derived from the NEW
     /// seed, into every one-to-one and group. Throws while any send has not
@@ -1980,7 +1980,7 @@ public final class ChatRepository: ObservableObject {
         await sendIntroductions()
     }
 
-    /// ADR-0066 section 3.5a rule 3 — a KEPT device adopted the rotation: it
+    /// ADR-0074 section 3.5a rule 3 — a KEPT device adopted the rotation: it
     /// owes the re-send too. The account's devices all adopt within moments
     /// of each other, so this one waits a random moment first; what does not
     /// land stays in the durable marker and is retried at the next session
@@ -1999,7 +1999,7 @@ public final class ChatRepository: ObservableObject {
         do {
             try await resendProfileAfterKeyRotation()
         } catch {
-            NSLog("ADR-0066 3.5a: the profile re-send is still owed: \(type(of: error))")
+            NSLog("ADR-0074 3.5a: the profile re-send is still owed: \(type(of: error))")
         }
     }
 
@@ -2296,7 +2296,7 @@ public final class ChatRepository: ObservableObject {
     /// open.
     @discardableResult
     public func deleteChat(groupIdHex: String) -> Bool {
-        // ADR-0065 R.5 — what is deleted is the CONVERSATION: every segment
+        // ADR-0073 R.5 — what is deleted is the CONVERSATION: every segment
         // of it this device holds, the current group last, so a failure part
         // way leaves the row reachable rather than orphaning a transcript
         // behind it. The gate is the current group's: an older segment's own
@@ -2324,7 +2324,7 @@ public final class ChatRepository: ObservableObject {
         guard let accountIdB64 = currentAccountIdB64,
               let record = groups[groupIdHex] else { return false }
         let groupIdB64 = base64Encode(record.groupId)
-        // ADR-0065 R.6 — the claim state of a group that is gone from here.
+        // ADR-0073 R.6 — the claim state of a group that is gone from here.
         groupClosedStore.drop(groupIdB64: groupIdB64)
         // The transcript first: it is the only thing here that is irreplaceable,
         // so if anything is going to fail it should fail before the row that
@@ -2694,7 +2694,7 @@ public final class ChatRepository: ObservableObject {
         // holding a group's commit chain across it would stall unrelated
         // membership work on that group for its whole duration.
         // ADR-0050 — every device of the person.
-        // ADR-0065 R.2 / ADR-0066 3.5 — the identity gate for the account
+        // ADR-0073 R.2 / ADR-0074 3.5 — the identity gate for the account
         // first (it is what records a proven rotation, and this is also the
         // path the ADR-0050 re-request of an older add rides). The directory
         // is then not trusted to say whose devices it returned: only those
@@ -2748,7 +2748,7 @@ public final class ChatRepository: ObservableObject {
     /// for tests.
     var provenPredecessorsProvider: () -> ProvenPredecessors = { ProvenPredecessorStore().load() }
 
-    /// ADR-0065 R.2 / ADR-0066 section 3.5 — the identity gate an account is
+    /// ADR-0073 R.2 / ADR-0074 section 3.5 — the identity gate an account is
     /// put through before its devices are fetched to be added. Injectable for
     /// tests; production runs the fail-closed check of
     /// ``ContactsClient/checkContactIdentity(accountId:heldKeyB64:)`` with no
@@ -2762,7 +2762,7 @@ public final class ChatRepository: ObservableObject {
     /// forget either step.
     ///
     /// 1. The identity gate for the account runs FIRST, unless the caller
-    ///    just ran it (`gateAlreadyRan`). After an ADR-0066 rotation the
+    ///    just ran it (`gateAlreadyRan`). After an ADR-0074 rotation the
     ///    account's kept devices are still bound to the OLD key while the
     ///    directory serves the new one; the gate is what records the proven
     ///    rotation (old key -> new key), and for a person who is not a
@@ -2790,7 +2790,7 @@ public final class ChatRepository: ObservableObject {
         return devicesOfExpectedPerson(listed, expectedKey: expectedKey)
     }
 
-    /// ADR-0065 R.2 — the listed devices that are the expected person's.
+    /// ADR-0073 R.2 — the listed devices that are the expected person's.
     func devicesOfExpectedPerson<D>(
         _ devices: [D], expectedKey: Data, keyPackageOf: (D) -> Data
     ) -> [D] {
@@ -2915,7 +2915,7 @@ public final class ChatRepository: ObservableObject {
                     // ADR-0060 section 6 (amending ADR-0050 2.7) — the Welcome
                     // is addressed to the ACCOUNT mailbox of the leaf's owner,
                     // resolved through the leaf's device binding.
-                    // ADR-0066 section 3.5a rule 1 — the binding names the key
+                    // ADR-0074 section 3.5a rule 1 — the binding names the key
                     // the leaf was bound under, which a proven rotation left
                     // behind: the mailbox is the CURRENT key's.
                     let accountKey = try keyPackageAccountKey(keyPackage: keyPackageBytes)
@@ -3457,7 +3457,7 @@ public final class ChatRepository: ObservableObject {
     /// rule refuses fails the mint rather than minting a link that says
     /// something else.
     public func createGroupInviteLink(groupIdHex: String) async throws -> String {
-        // ADR-0066 Stage A — the issuer is the key the roster knows this
+        // ADR-0074 Stage A — the issuer is the key the roster knows this
         // person by.
         guard let identity = conversationAccountIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
@@ -3652,7 +3652,7 @@ public final class ChatRepository: ObservableObject {
         guard let row = record.messages.first(where: { $0.localId == localId }),
               row.ack == .failed
         else { return }
-        // ADR-0065 R.7 case 1 — a retry in a dead one-to-one holds the
+        // ADR-0073 R.7 case 1 — a retry in a dead one-to-one holds the
         // message again: the ordinary retry of the ordinary failed state.
         if sendRoute(groupIdHex: groupIdHex) == .hold {
             guard holdMessage(
@@ -3745,7 +3745,7 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
-        // ADR-0065 R.7 case 1 — nothing is sent into a one-to-one whose other
+        // ADR-0073 R.7 case 1 — nothing is sent into a one-to-one whose other
         // person's reset this device accepted (only removed devices would get
         // it). The message is HELD: the bubble shows the ordinary sending
         // state and it goes out when the successor exists.
@@ -3967,7 +3967,7 @@ public final class ChatRepository: ObservableObject {
         envelopeBytes: Data,
         applyLocally: @escaping @MainActor (GroupRecord) -> Void
     ) async throws {
-        // ADR-0065 R.7 case 1 — an op on a message of a dead one-to-one is
+        // ADR-0073 R.7 case 1 — an op on a message of a dead one-to-one is
         // applied on this device alone: its target exists only in the old
         // session, so there is nothing a successor could apply it to.
         let localOnly = HeldSend.opRoute(
@@ -4105,7 +4105,7 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String,
         isTyping: Bool
     ) async throws {
-        // ADR-0065 R.7 case 1 — typing is not sent into a dead one-to-one.
+        // ADR-0073 R.7 case 1 — typing is not sent into a dead one-to-one.
         if isDeadSession(groupIdHex: groupIdHex) { return }
         let envelopeBytes: Data
         do {
@@ -4130,7 +4130,7 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String,
         upTo: Int64
     ) async throws {
-        // ADR-0065 R.7 case 1 — nor is a read receipt.
+        // ADR-0073 R.7 case 1 — nor is a read receipt.
         if isDeadSession(groupIdHex: groupIdHex) { return }
         let envelopeBytes: Data
         do {
@@ -4580,7 +4580,7 @@ public final class ChatRepository: ObservableObject {
             chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
             return
         }
-        // ADR-0065 R.5 "the old segment after the move" — an older segment
+        // ADR-0073 R.5 "the old segment after the move" — an older segment
         // of a one-to-one is no longer polled (its journal has no sender left
         // but the superseded identity); an older segment of a group is, for
         // the DS retention window, since members who have not moved yet
@@ -4739,7 +4739,7 @@ public final class ChatRepository: ObservableObject {
             raw: raw,
             after: after
         )
-        // ADR-0065 — two silent drops before anything is counted or drawn: a
+        // ADR-0073 — two silent drops before anything is counted or drawn: a
         // chat row whose sender is a key an accepted reset retired (a removed
         // device still holding the old keys), and a founder's re-send of a
         // message this device already holds in an older segment (rule 6: it
@@ -4825,7 +4825,7 @@ public final class ChatRepository: ObservableObject {
             sharedChannelsSink: { [weak self] list, senderKey in
                 self?.sharedChannels.receive(groupIdHex: groupIdHex, list: list, senderKey: senderKey)
             },
-            // ADR-0065 R.6 — a successor claim: judged synchronously against
+            // ADR-0073 R.6 — a successor claim: judged synchronously against
             // the live group (the sender and the admin set are those of the
             // roster right after the apply) and this device's own accepted
             // resets. Never drawn.
@@ -4895,7 +4895,7 @@ public final class ChatRepository: ObservableObject {
         // roster comparison, other direction. Only schedules.
         noteProfileGrowthIfMembershipGrew(
             groupIdHex: groupIdHex, previousMemberKeys: membersBeforePoll)
-        // ADR-0065 R.6 / R.7 — the continuity pass is offered from the tail
+        // ADR-0073 R.6 / R.7 — the continuity pass is offered from the tail
         // of every applied batch (an own claim waits for the journal to be
         // read up to it; a kept claim is judged again). Only schedules.
         // Forced only when the journal moved AND a reset was ever accepted
@@ -5155,7 +5155,7 @@ public final class ChatRepository: ObservableObject {
 
     func isChatOpen(groupIdHex: String) -> Bool {
         if openChats[groupIdHex] != nil { return true }
-        // ADR-0065 R.5 — the screen is open on the conversation's current
+        // ADR-0073 R.5 — the screen is open on the conversation's current
         // group; a row applied in an older segment of it (a member who has
         // not moved yet) is read on that same screen.
         guard let plan = conversationPlan(ofGroup: groupIdHex), plan.heldSegments.count > 1 else {
@@ -5287,7 +5287,7 @@ public final class ChatRepository: ObservableObject {
     /// Best-effort: a directory failure yields an empty list, and the
     /// re-admission arm adds the missing devices later.
     ///
-    /// ADR-0066 section 2.3 — only devices in the account's DeviceGroup: a
+    /// ADR-0074 section 2.3 — only devices in the account's DeviceGroup: a
     /// removed device that put a directory row back is not added.
     func ownOtherDevices(identity: Identity) async -> [DeviceKeyPackage] {
         guard let accountId = currentAccountId else { return [] }
@@ -5310,7 +5310,7 @@ public final class ChatRepository: ObservableObject {
     /// a member may add a leaf of its own account or of an account already in
     /// the group. `nil` when a leaf with that key is already in the roster.
     ///
-    /// ADR-0066 section 2.3 — a device of THIS account is admitted only when
+    /// ADR-0074 section 2.3 — a device of THIS account is admitted only when
     /// its key is a leaf of the account's DeviceGroup; otherwise `nil`, like
     /// a device already in the roster. Every own-device add path comes
     /// through here (the pairing fan-out, the re-admission arm).
@@ -5325,10 +5325,10 @@ public final class ChatRepository: ObservableObject {
                base64Encode(account) == own,
                !DeviceReadmission.ownDeviceAdmissible(
                 deviceKeyB64: base64Encode(deviceKey), ownDeviceGroupRoster: ownDeviceGroupRosterB64()) {
-                NSLog("ADR-0066: a device of this account that is not in its DeviceGroup was not admitted")
+                NSLog("ADR-0074: a device of this account that is not in its DeviceGroup was not admitted")
                 return nil
             }
-            // ADR-0066 part 3 — a device of this account whose binding names
+            // ADR-0074 part 3 — a device of this account whose binding names
             // another of the account's keys than the one its leaves here are
             // bound to (it minted before the pairing bundle reached it) is
             // not admitted: to every gate it would be another account.
@@ -5339,7 +5339,7 @@ public final class ChatRepository: ObservableObject {
                 keyPackageAccountKey: account, ownKeyInConversation: own,
                 currentAccountKey: accountIdentity?.signaturePublicKey(),
                 predecessorKeys: OwnAccountKeys.predecessorPublicKeys(accountIdB64: accountIdB64)) {
-                NSLog("ADR-0066: a device of this account bound under another of its keys was not admitted")
+                NSLog("ADR-0074: a device of this account bound under another of its keys was not admitted")
                 return nil
             }
             if (try? record.group.members())?.contains(where: { $0.signaturePublicKey == deviceKey }) ?? false {
@@ -5439,7 +5439,7 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0050 section 2.10 — retire a device just removed from the
     /// DeviceGroup from EVERY chat this device is in (its one leaf per chat).
     /// The directory row is NOT deleted here any more:
-    /// ADR-0066 section 2.3 deletes it first, with the account statement
+    /// ADR-0074 section 2.3 deletes it first, with the account statement
     /// (``DeviceRemovalRunner``), because that delete is what closes the
     /// directory.
     @discardableResult
@@ -5468,7 +5468,7 @@ public final class ChatRepository: ObservableObject {
         return tally
     }
 
-    /// ADR-0066 section 2.3 — the leaf keys (base64) of the account's own
+    /// ADR-0074 section 2.3 — the leaf keys (base64) of the account's own
     /// DeviceGroup, or `nil` when they cannot be read. Wired by the
     /// composition root from the DeviceGroup sync runtime; the default reads
     /// nothing, which admits no own device.
@@ -5480,7 +5480,7 @@ public final class ChatRepository: ObservableObject {
 
     /// ADR-0050 section 2.10 — delete THIS device's own directory KeyPackage
     /// with this session's bearer token (Forget this device). Best-effort;
-    /// logged on failure. The row is tombstoned for 30 days (ADR-0066), which
+    /// logged on failure. The row is tombstoned for 30 days (ADR-0074), which
     /// is why the wipe that follows also deletes this device's identity seed:
     /// the next setup mints a new device key.
     public func deleteDirectoryKeyPackage(deviceKey: Data) async {
@@ -5503,7 +5503,7 @@ public final class ChatRepository: ObservableObject {
     /// accepted contact whose account id is known. Wired by the composition
     /// root from the contacts store.
     /// The identity gate the scheduled re-admission arm runs each account
-    /// through (ADR-0065 R.2). Injectable for tests.
+    /// through (ADR-0073 R.2). Injectable for tests.
     var identityGateClient: () -> ContactsClient = { ContactsClient() }
 
     var readmissionContactsProvider: @MainActor () -> [DeviceReadmission.LookupContact] = { [] }
@@ -5513,7 +5513,7 @@ public final class ChatRepository: ObservableObject {
     var readmissionPins: () -> PeerPinStore = { PeerPinStore() }
     var readmissionBindings: () -> VerifiedBindingStore = { VerifiedBindingStore() }
 
-    /// ADR-0065 R.7 case 2 — one pass of the repair of `groupIdHex` for a
+    /// ADR-0073 R.7 case 2 — one pass of the repair of `groupIdHex` for a
     /// member whose reset this device accepted: where this account is owner
     /// or admin of a role-table group the old identity did not own, propose
     /// the removal of the old identity's devices and the addition of the new
@@ -5563,7 +5563,7 @@ public final class ChatRepository: ObservableObject {
                 // the pending-requests list.
                 _ = try await removeOneLeafFromGroup(groupIdHex: groupIdHex, leafIndex: leaf)
             } catch {
-                NSLog("ADR-0065 repair: removal not proposed in \(groupIdHex): \(error)")
+                NSLog("ADR-0073 repair: removal not proposed in \(groupIdHex): \(error)")
             }
         }
         if plan.mayAdd, ResetRepair.mayAddResetIdentity(ownRole) {
@@ -5582,7 +5582,7 @@ public final class ChatRepository: ObservableObject {
                 do {
                     _ = try await admitDeviceToGroup(groupIdHex: groupIdHex, keyPackage: device.keyPackage)
                 } catch {
-                    NSLog("ADR-0065 repair: add not proposed in \(groupIdHex): \(error)")
+                    NSLog("ADR-0073 repair: add not proposed in \(groupIdHex): \(error)")
                 }
             }
         }
@@ -5611,7 +5611,7 @@ public final class ChatRepository: ObservableObject {
                     }
                 }
             } catch {
-                NSLog("ADR-0065 repair: role change not proposed in \(groupIdHex): \(error)")
+                NSLog("ADR-0073 repair: role change not proposed in \(groupIdHex): \(error)")
             }
         }
         await sweepIfCommitter(groupIdHex: groupIdHex)
@@ -5637,7 +5637,7 @@ public final class ChatRepository: ObservableObject {
                 leafKeyB64: base64Encode($0.signaturePublicKey),
                 personKeyB64: base64Encode(PersonKey.of($0)))
         }
-        // ADR-0065 R.2 — the wider lookup: every roster person whose account
+        // ADR-0073 R.2 — the wider lookup: every roster person whose account
         // id this device knows, from a contact row (under the person's current
         // key or one a reset retired) or from the member's own profile. The
         // id from a profile is a CLAIM; the gate below judges the roster key
@@ -5706,7 +5706,7 @@ public final class ChatRepository: ObservableObject {
                 }
             }
         }
-        // ADR-0065 R.7 case 2 — the silent repair of a role-table group for
+        // ADR-0073 R.7 case 2 — the silent repair of a role-table group for
         // each member whose reset this device accepted.
         for repair in resetRepairs {
             await repairResetMember(
@@ -5752,7 +5752,7 @@ public final class ChatRepository: ObservableObject {
         Array(groups.keys).sorted()
     }
 
-    /// ADR-0065 R.5 — one entry per CONVERSATION, the group it currently is.
+    /// ADR-0073 R.5 — one entry per CONVERSATION, the group it currently is.
     /// What a screen that lists or looks up chats reads: an older segment is
     /// history, never a second chat with the same person.
     public var conversationHeadIdHexes: [String] {
@@ -5780,7 +5780,7 @@ public final class ChatRepository: ObservableObject {
         keyPackageRepublisher.request()
     }
 
-    /// ADR-0065 section 2.3 step 5 — after a key reset, publish this device's
+    /// ADR-0073 section 2.3 step 5 — after a key reset, publish this device's
     /// KeyPackage under a device binding signed by the NEW account key.
     ///
     /// The repository may still hold the identity it built for the SAME
@@ -6234,7 +6234,7 @@ public final class ChatRepository: ObservableObject {
                         // nothing to disagree about.
                         group: record.group
                     )
-                    // ADR-0065 — the same two silent drops the poll applies
+                    // ADR-0073 — the same two silent drops the poll applies
                     // (a superseded sender, a re-send of a message already
                     // held in an older segment): the two receive paths must
                     // not disagree.
@@ -6513,7 +6513,7 @@ public final class ChatRepository: ObservableObject {
             // (``publishSweepWelcome``).
             welcomeMailbox: { [weak self] key in
                 if let self, let accountKey = self.resolveAddedAccountKey(record: record, leafKey: key) {
-                    // ADR-0066 section 3.5a rule 1 — resolved before addressing.
+                    // ADR-0074 section 3.5a rule 1 — resolved before addressing.
                     return try self.resolvedMailbox(ofAccountKey: accountKey)
                 }
                 return key
@@ -7539,7 +7539,7 @@ public final class ChatRepository: ObservableObject {
     /// Everything else is dropped without a trace in the timeline.
     /// Synchronous: the apply region stays non-suspending.
     func receiveRegistrarSeed(groupIdHex: String, plaintext: Data, senderLeaf: UInt32?) {
-        // ADR-0066 Stage A — a seed envelope is addressed and sealed to the
+        // ADR-0074 Stage A — a seed envelope is addressed and sealed to the
         // account key the group knows this person by.
         guard let record = groups[groupIdHex], let accountIdB64 = currentAccountIdB64,
               let accountIdentity = conversationAccountIdentity,
@@ -7911,7 +7911,7 @@ public final class ChatRepository: ObservableObject {
         return senderKey != AuthorIdentity.own(group: record.group)
     }
 
-    /// ADR-0066 section 3.5a rule 1 — the mailbox of the person holding
+    /// ADR-0074 section 3.5a rule 1 — the mailbox of the person holding
     /// `accountKey`: the key is resolved through the proven-predecessor
     /// resolver first (this account's own old keys included), so a key left
     /// behind by a PROVEN rotation addresses the current key's mailbox. An
@@ -7953,7 +7953,7 @@ public final class ChatRepository: ObservableObject {
     private func publishSweepWelcome(
         target: Data, bytes: Data, record: GroupRecord, groupIdHex: String
     ) async throws -> Int64 {
-        // ADR-0066 section 3.5a rule 1 — a leaf resolved through the roster
+        // ADR-0074 section 3.5a rule 1 — a leaf resolved through the roster
         // names the key it is BOUND under; a mailbox recorded earlier may be a
         // predecessor's. Either way the write goes to the current key's.
         let memberAccountKey = (try? record.group.members())?
@@ -7972,7 +7972,7 @@ public final class ChatRepository: ObservableObject {
         do {
             let client = dsClient
             var delivered: Data?
-            // ADR-0066 section 3.5a rule 6 — when every key held was refused,
+            // ADR-0074 section 3.5a rule 6 — when every key held was refused,
             // the person's address is re-checked once (throttled per person:
             // an owed Welcome is retried on every poll) and the Welcome goes
             // again when the mailbox or the keys moved.
@@ -8009,7 +8009,7 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0066 section 3.5a rule 6 — publish a Welcome addressed by a
+    /// ADR-0074 section 3.5a rule 6 — publish a Welcome addressed by a
     /// mailbox recorded earlier (the ADR-0040 outbox): to the current mailbox
     /// of whoever it names, and after a refusal once more when a gated fetch
     /// of that person's identity moved the mailbox or the grant.
@@ -8588,7 +8588,7 @@ public final class ChatRepository: ObservableObject {
                let secondBytes = base64Decode(secondB64),
                let mailboxB64 = entry.secondArtifactMailboxB64,
                let recorded = base64Decode(mailboxB64) {
-                // ADR-0066 section 3.5a rule 1 — the entry may have been
+                // ADR-0074 section 3.5a rule 1 — the entry may have been
                 // recorded before the addressee's rotation was observed.
                 // Welcome -> the new member's mailbox (NOT this device's group
                 // journal), so no echo re-arm — the committer never re-fetches
@@ -8662,7 +8662,7 @@ public final class ChatRepository: ObservableObject {
         messageLogStore.putLog(accountIdB64: accountIdB64, payload: payload)
     }
 
-    /// ADR-0065 R.5 — one thread per CONVERSATION. The groups this device
+    /// ADR-0073 R.5 — one thread per CONVERSATION. The groups this device
     /// holds are folded by lineage: the thread is the conversation's current
     /// group (the head), with the rows of the older segments it still holds
     /// in front, under history ids.
@@ -8776,7 +8776,7 @@ public struct ChatThread: Equatable {
     public let feedSeen: Set<Int64>
     /// ADR-0063 section 5 — this device's read watermark for the group.
     public let lastViewedMessageId: Int64?
-    /// ADR-0065 R.5 — the CONVERSATION this thread is: the hex of the
+    /// ADR-0073 R.5 — the CONVERSATION this thread is: the hex of the
     /// lineage's first group. The key of everything a person attaches to a
     /// conversation (pin / mute / archive, folders, the draft, the read
     /// position, the route). Equal to ``groupIdHex`` until the conversation
@@ -8784,11 +8784,11 @@ public struct ChatThread: Equatable {
     /// conversation's CURRENT group (the head: sends, polls, calls) and this
     /// stays what it was.
     public let conversationIdHex: String
-    /// ADR-0065 R.5 — the older groups of the conversation this device still
+    /// ADR-0073 R.5 — the older groups of the conversation this device still
     /// holds, oldest first. Their rows are in ``messages`` under history ids
     /// (``LineageRules/historyRowId(_:distanceFromHead:)``), read-only.
     public let historyGroupIdHexes: [String]
-    /// ADR-0065 R.5 — the index of ``groupIdHex`` in the conversation's
+    /// ADR-0073 R.5 — the index of ``groupIdHex`` in the conversation's
     /// segments: what the cross-device read position carries past the first
     /// segment.
     public let segmentIndex: Int
@@ -8959,7 +8959,7 @@ public struct ChatMessage: Equatable, Identifiable {
     /// build a new one, losing any selection or animation mid-send.
     public var id: Int64 { localId != 0 ? localId : messageId }
 
-    /// ADR-0065 R.5 — this stored row of an OLDER segment of the
+    /// ADR-0073 R.5 — this stored row of an OLDER segment of the
     /// conversation, as the open timeline shows it: the same row under its
     /// on-screen history id, with a reply's target moved the same way so a
     /// quote still jumps to the message it answered (a reply target is a
@@ -9220,7 +9220,7 @@ final class GroupRecord {
     }
 
     /// Adopt an unsent row from another segment of the same conversation
-    /// (ADR-0065 R.5): the same row under a local id of this record, in the
+    /// (ADR-0073 R.5): the same row under a local id of this record, in the
     /// state it was in.
     @discardableResult
     func adoptUnsentRow(_ row: ChatMessage, reply: ReplyRef?) -> Int64 {
@@ -9233,7 +9233,7 @@ final class GroupRecord {
         return localId
     }
 
-    /// Take a row this device created out of the timeline (ADR-0065 R.7
+    /// Take a row this device created out of the timeline (ADR-0073 R.7
     /// case 1: a held message leaves the old segment when it is flushed into
     /// the successor).
     func removeLocalRow(localId: Int64) {
@@ -9553,7 +9553,7 @@ final class GroupRecord {
                 // order can refuse a stale re-send.
                 groupNameSink?(name, updatedAtMs, senderLeaf)
             case .groupClosed(let messageId, _, let successorGroupId, let senderLeaf, _):
-                // ADR-0065 R.6 — a successor claim. Never a timeline row and
+                // ADR-0073 R.6 — a successor claim. Never a timeline row and
                 // never anything a person sees: routed out to the repository,
                 // which judges it against its own accepted reset.
                 groupClosedSink?(messageId, successorGroupId, senderLeaf)

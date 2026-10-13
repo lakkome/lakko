@@ -3,7 +3,7 @@
 
 /**
  * "Three words from your phrase": the pure rules of the local three-word
- * check (maintainer decision 2026-10-02, which supersedes ADR-0064
+ * check (maintainer decision 2026-10-02, which supersedes ADR-0072
  * decision 5 and the three-word sections of docs/ux/identity-recovery.md).
  *
  * The check is LOCAL, like a wallet's "enter words 7, 3 and 12". A device

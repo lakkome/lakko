@@ -7,7 +7,7 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-// ADR-0065 R.13b "Test hygiene" - no unit test may reach the network.
+// ADR-0073 R.13b "Test hygiene" - no unit test may reach the network.
 //
 // Two runs of an earlier suite published MLS ciphertext to the test stack's
 // Delivery Service because a fixture built `ChatClient()`, whose default

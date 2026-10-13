@@ -6,11 +6,11 @@
 UX spec for getting an account back: on a device that does not hold its keys
 (a new browser, a new phone, a reinstalled app), or on a device that still
 holds them when the password is forgotten. Architecture:
-[ADR-0064](../adr/0064-recovery-model-simplification.md), which amends
+[ADR-0072](../adr/0072-recovery-model-simplification.md), which amends
 [ADR-0049](../adr/0049-identity-recovery-word-vault.md),
 [ADR-0018](../adr/0018-recovery-factor-cascade.md) and
 [ADR-0017](../adr/0017-phrase-seeded-identity.md); and
-[ADR-0065](../adr/0065-account-key-reset.md) for what resetting the account
+[ADR-0073](../adr/0073-account-key-reset.md) for what resetting the account
 keys does to the other devices (section 15, added 2026-10-03) and what a
 contact of the person sees afterwards (section 16: rewritten 2026-10-04 as
 the silent model, where the answer is "nothing"; designed, not built).
@@ -30,7 +30,7 @@ decisions and with what was built on web. The model:
   check three words and hand the keys to a further device.
 - Guardian shares and the email / phone code are gone.
 
-Build status is recorded in ADR-0064 and `docs/PRODUCT-READINESS.md`. In
+Build status is recorded in ADR-0072 and `docs/PRODUCT-READINESS.md`. In
 short: the web client is built to this spec and was not walked in a browser
 against a server; iOS and Android are being brought to it on the same day.
 Where this spec follows the web build rather than the earlier text, or keeps
@@ -398,7 +398,7 @@ Log out
   passes.
 - **I have none of these** expands to the **Reset account keys** panel: a
   warning, a typed confirmation, then section 9.1. The warning's text is
-  section 15.1 (ADR-0065 widened what a reset does; the earlier text here,
+  section 15.1 (ADR-0073 widened what a reset does; the earlier text here,
   "This resets your account keys. Your contacts will need to verify you
   again, messages on your lost devices stay unreadable, and you get a new
   12-word recovery phrase to save. Only do this if ...", is replaced by it).
@@ -604,7 +604,7 @@ Copy still to be changed in the catalog (not done by this spec):
 
 ## 12. Data the UI needs
 
-From the server (all in ADR-0064):
+From the server (all in ADR-0072):
 
 - **Nothing for three words.** No positions, no verifier, no setting.
 - `429` with a retry time in seconds on every limited route; `503` when a
@@ -707,7 +707,7 @@ Open, not built on web:
 
 ## 15. Resetting the account keys: the other devices, the passkeys, the signed-out device
 
-Added 2026-10-03 with [ADR-0065](../adr/0065-account-key-reset.md).
+Added 2026-10-03 with [ADR-0073](../adr/0073-account-key-reset.md).
 **Status (2026-10-03): built on web, iOS and Android the same day, unit-tested
 (web vitest, iOS `LakkoTests` on a simulator, Android host unit tests), NOT
 walked on any device or in a browser against a server; nobody has seen any
@@ -868,7 +868,7 @@ the device that reset them.
   the account's published identity." and the **Sign out** button of 3.1
   instead of an automatic deletion, is shown when a device finds at sign-in
   that the account publishes other keys of the **same** generation (an
-  anomaly, not a known reset; ADR-0065 4.2 rule 4). It is not expected to
+  anomaly, not a known reset; ADR-0073 4.2 rule 4). It is not expected to
   be seen; it exists so the device never publishes its keys over the
   account's.
 - Accessibility: the title and the body are one announcement; the progress
@@ -932,7 +932,7 @@ devices were signed out. Add them again from Settings > Devices."
 
 ### 15.5 Data the UI needs
 
-From the server (all in ADR-0065):
+From the server (all in ADR-0073):
 
 - A reset operation that in one step gives the account new keys, replaces
   the recovery phrase, deletes the passkeys, signs out the other devices,
@@ -971,11 +971,11 @@ Kept by the client:
 ### 15.7 Open in this section
 
 - Whether the password and the authenticator should also stop working
-  after a reset (ADR-0065 open question 1). The copy above says they keep
+  after a reset (ADR-0073 open question 1). The copy above says they keep
   working; it changes if the maintainer decides otherwise.
 - What a contact sees when the person who reset the keys writes to them
   from the new keys, and the eviction of the old devices from shared
-  groups: ADR-0065 phase 2, section 16 of this spec (rewritten 2026-10-04).
+  groups: ADR-0073 phase 2, section 16 of this spec (rewritten 2026-10-04).
 - Strings: all of the groups proposed here are in `l10n/catalog/en.json`
   since 2026-10-03: `restore_identity.reset.*` (the warning, the
   confirmation word, the failure lines), `devices.signed_out.*` (`title`,
@@ -1005,7 +1005,7 @@ system row, declined that too: no line of any kind.
 
 **Status: designed, not built.** What is in the three clients today is the
 visible flow this section replaces; 16.9 lists what has to be removed. The
-architecture is [ADR-0065](../adr/0065-account-key-reset.md), section "Phase
+architecture is [ADR-0073](../adr/0073-account-key-reset.md), section "Phase
 2 revised (2026-10-04): silent continuity".
 
 Section 15 is the person who resets. This section is everyone else: a
@@ -1694,7 +1694,7 @@ disabled control.
 
 Added 2026-10-07 (maintainer's decisions of that day). **Status: designed,
 not built.** Nothing in this section exists in any service or client.
-Architecture: [ADR-0066](../adr/0066-account-takeover-resistance.md). The
+Architecture: [ADR-0074](../adr/0074-account-takeover-resistance.md). The
 catalog was **not** edited; the new keys are listed in 18.6 with their
 English text.
 
@@ -2008,7 +2008,7 @@ Retired when this is built: `devices.removed.body`, `devices.removed.sign_out`
 
 ### 18.7 Data the UI needs
 
-From the server (none of it exists; routes in ADR-0066):
+From the server (none of it exists; routes in ADR-0074):
 
 - Removing: an answer that tells "signed out at the server" from every
   failure, before anything else is attempted; a refusal that means "proof
@@ -2076,14 +2076,14 @@ Kept by the client:
   on the first.
 - **After "remove and change keys", conversations keep working unchanged,
   and a device added later joins them as before.** Moving every
-  conversation onto the new keys is a later build (ADR-0066 section 3.6)
+  conversation onto the new keys is a later build (ADR-0074 section 3.6)
   with nothing to show.
 - **Account deletion is blocked for about a month after a reset**, with one
-  line and a date. Open: the maintainer may prefer to allow it (ADR-0066
+  line and a date. Open: the maintainer may prefer to allow it (ADR-0074
   D3).
 - **The password asked for is the one from before the first change**, which
   for a person who changed their own password in the last month is the
-  older one. The error line says it. Open (ADR-0066 D2).
+  older one. The error line says it. Open (ADR-0074 D2).
 - No list of "devices that were removed", no undo of a removal, no email or
   push about any of this to the person or to anyone else.
 - Whether the take-back form should also offer the old device's own screen
@@ -2096,7 +2096,7 @@ Kept by the client:
 
 Added 2026-10-12 (maintainer's decisions of that day). **Status: designed,
 not built.** Nothing in this section exists in `services/auth` or in any
-client. Architecture: ADR-0067. Where this section and sections 1 to 10
+client. Architecture: ADR-0075. Where this section and sections 1 to 10
 disagree about sign-up or the phrase, this section is the newer decision;
 the older sections are reconciled when it is built.
 

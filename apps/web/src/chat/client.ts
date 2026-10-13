@@ -189,7 +189,7 @@ export type IncomingChatEvent =
        *  original author's name and / or the origin reference, as the
        *  forwarder wrote them. Absent on a plain message. */
       forward?: ForwardRef;
-      /** ADR-0065 R.7 case 1 — set on a message RE-SENT into a successor
+      /** ADR-0073 R.7 case 1 — set on a message RE-SENT into a successor
        *  one-to-one: the original group id and message id. Never drawn; a
        *  device that holds the original drops this row
        *  (`resend-marker.ts`). */
@@ -458,7 +458,7 @@ export type IncomingChatEvent =
       createdAt: string;
     }
   | {
-      /** ADR-0065 R.6 — a successor CLAIM: a device founding the group this
+      /** ADR-0073 R.6 — a successor CLAIM: a device founding the group this
        *  conversation continues in names it here. Never a timeline bubble:
        *  the receive loop runs it through the claim rule
        *  (`chat/successor-claim.ts`) under the per-group lock.
@@ -607,7 +607,7 @@ export class ChatClientArgError extends Error {
 }
 
 /**
- * ADR-0065 R.7 case 1 — nothing is sent into a session only removed devices
+ * ADR-0073 R.7 case 1 — nothing is sent into a session only removed devices
  * can read. Thrown BEFORE anything is sealed by {@link ChatClient.sendMessage}
  * and {@link ChatClient.broadcastControl} when the installed guard says the
  * group is a one-to-one whose other person's reset this device accepted (the
@@ -707,7 +707,7 @@ export interface BroadcastControlOptions {
    */
   readonly wake?: Exclude<OutboundWake, null | "message">;
   /**
-   * ADR-0065 R.6 — the ONE frame that is posted into a superseded
+   * ADR-0073 R.6 — the ONE frame that is posted into a superseded
    * one-to-one on purpose: the successor claim, which the person's other
    * devices read there. Everything else is refused ({@link HeldForSuccessor}).
    */
@@ -861,7 +861,7 @@ export class ChatClient {
     if (plaintext.length === 0) {
       throw new ChatClientArgError("plaintext must be non-empty");
     }
-    // ADR-0065 R.7 case 1 — before anything is sealed.
+    // ADR-0073 R.7 case 1 — before anything is sealed.
     refuseDeadSession(group);
     const myIdentity = await this.resolveIdentity(identity);
 
@@ -1657,7 +1657,7 @@ export async function toEvent(
         };
       }
     }
-    // ADR-0065 R.6 — the group-closed envelope (a successor claim), the group name's twin:
+    // ADR-0073 R.6 — the group-closed envelope (a successor claim), the group name's twin:
     // same reason, same gate shape. A domain match that fails its bounds is
     // dropped here too (`groupClosed: undefined`), never parsed as chat.
     {
@@ -1772,7 +1772,7 @@ export async function toEvent(
         // ADR-0052 decision 2 — the forward attribution rides through
         // unchanged; the name is the forwarder's claim and is never resolved.
         ...(body.forward === undefined ? {} : { forward: body.forward }),
-        // ADR-0065 R.7 case 1 — the re-send marker, for the receive rule.
+        // ADR-0073 R.7 case 1 — the re-send marker, for the receive rule.
         ...(body.resendOrigin === undefined ? {} : { resendOrigin: body.resendOrigin }),
       };
     }

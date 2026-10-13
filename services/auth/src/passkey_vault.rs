@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The passkey vault: the server side of ADR-0064 decision 6. (The routes
+//! The passkey vault: the server side of ADR-0072 decision 6. (The routes
 //! keep their `/vault` prefix from ADR-0049.)
 //!
 //! One opaque blob per passkey: the phrase entropy sealed by the client
@@ -798,7 +798,7 @@ mod vault_e2e_tests {
         )
         .await;
         // The account has a passkey, so the action grant alone deletes it
-        // (ADR-0065, amended 2026-10-06): no fresh-auth header is sent.
+        // (ADR-0073, amended 2026-10-06): no fresh-auth header is sent.
         let (st, bytes) = delete_account(&state, &acct.bearer, None).await;
         assert_eq!(
             st,
@@ -811,7 +811,7 @@ mod vault_e2e_tests {
         drop_account(&pool, &other.id).await;
     }
 
-    /// ADR-0064 decision 6 on a device that knows nothing: no cached account
+    /// ADR-0072 decision 6 on a device that knows nothing: no cached account
     /// id, no username typed. The discoverable passkey sign-in names the
     /// account from the authenticator's user handle, and the session it
     /// issues reads the blob that passkey's PRF output opens.
@@ -958,7 +958,7 @@ mod vault_e2e_tests {
         .await
     }
 
-    /// ADR-0065 amended 2026-10-06: a passkey sign-in mints a fresh-auth
+    /// ADR-0073 amended 2026-10-06: a passkey sign-in mints a fresh-auth
     /// grant, like the password login. That grant lets a device in (twice
     /// within its lifetime: it is not spent). It does NOT delete an account
     /// that has a passkey: that takes the ADR-0014 passkey action grant, and

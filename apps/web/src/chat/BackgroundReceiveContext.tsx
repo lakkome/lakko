@@ -234,12 +234,12 @@ export interface BackgroundReceiveApi {
    * ADR-0050 section 2.10 — retire a device just removed from the DeviceGroup
    * from EVERY chat this device is in (its one leaf per chat, the account's
    * other devices untouched). The directory row is deleted before this, by
-   * the removal operation (ADR-0066 section 2.3, `devices/removal.ts`), which
+   * the removal operation (ADR-0074 section 2.3, `devices/removal.ts`), which
    * retries this fan-out from its owed record while `failed` is not 0.
    */
   retireDevice(deviceKey: Uint8Array): Promise<DeviceFanOut>;
   /**
-   * ADR-0065 R.6 / R.7 — offer `groupIdB64` (and, throttled, every other
+   * ADR-0073 R.6 / R.7 — offer `groupIdB64` (and, throttled, every other
    * held group) a continuity pass now. The chat view calls it at the tail
    * of its own poll: the background sweep does not poll the group a view
    * has open, so without this a claim posted for the open chat would never
@@ -264,7 +264,7 @@ export interface DeviceFanOut {
 export const ADMIT_DEVICE_WAIT_MS = 180_000;
 export const ADMIT_DEVICE_POLL_MS = 3_000;
 /** How long `admitDevice` waits for the account's DeviceGroup roster to name
- *  the device (ADR-0066 section 2.3). The pairing added it there before this
+ *  the device (ADR-0074 section 2.3). The pairing added it there before this
  *  runs; the wait covers the sync runtime reloading its handle. Chosen. */
 export const ADMIT_DEVICE_ROSTER_WAIT_MS = 30_000;
 export const ADMIT_DEVICE_ROSTER_POLL_MS = 1_000;
@@ -430,7 +430,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // ADR-0045 UX §6.2.8 — a group this device is no longer in is never polled:
     // every row would be refused and logged, forever.
     if (entry === undefined || readIsActive(entry.group) === false) return true;
-    // ADR-0065 R.5 — an older group of a conversation that moved: a
+    // ADR-0073 R.5 — an older group of a conversation that moved: a
     // one-to-one's old journal is not read at all (its only other sender is
     // the superseded identity); a group's is read for the retention window,
     // for the members who have not moved yet.
@@ -506,15 +506,15 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       // eslint-disable-next-line no-console
       console.warn("ADR-0050 re-admission check failed", err);
     });
-    // ADR-0065 R.7 case 2 — an accepted reset reaches every shared group
+    // ADR-0073 R.7 case 2 — an accepted reset reaches every shared group
     // here, chat open or not: where this account administers the group the
     // removal of the superseded leaves is proposed. Silent (R.0). The chat
     // view runs the same pass for the group it has open.
     void repairResetFor(entry).catch((err: unknown) => {
       // eslint-disable-next-line no-console
-      console.warn("ADR-0065 reset repair pass failed", err);
+      console.warn("ADR-0073 reset repair pass failed", err);
     });
-    // ADR-0065 R.6 / R.7 cases 1 and 3 — a conversation that cannot be
+    // ADR-0073 R.6 / R.7 cases 1 and 3 — a conversation that cannot be
     // repaired in place continues in a successor: this group's own pass, and
     // (throttled) every other held group's, since an old one-to-one is no
     // longer polled once it moved.
@@ -543,7 +543,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   }
 
   /**
-   * ADR-0065 R.7 case 2 — the background half of the in-place repair
+   * ADR-0073 R.7 case 2 — the background half of the in-place repair
    * (`chat/reset-repair.ts`): in a role-table group this account
    * administers and the superseded identity does not own, propose the
    * removal of a leaf still bound to a superseded key. The new identity's
@@ -619,7 +619,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       } catch (err) {
         // Silent by design: the next pass tries again.
         // eslint-disable-next-line no-console
-        console.warn("ADR-0065 reset repair: remove not proposed", err);
+        console.warn("ADR-0073 reset repair: remove not proposed", err);
       } finally {
         evictionInFlight.delete(key);
       }
@@ -664,7 +664,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           proposed += 1;
         } catch (err) {
           // eslint-disable-next-line no-console
-          console.warn("ADR-0065 reset repair: admin not restored yet", err);
+          console.warn("ADR-0073 reset repair: admin not restored yet", err);
         }
         break;
       }
@@ -673,7 +673,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   }
 
   // ---------------------------------------------------------------------
-  // ADR-0065 R.5 to R.7 — a conversation that continues in a successor
+  // ADR-0073 R.5 to R.7 — a conversation that continues in a successor
   // ---------------------------------------------------------------------
   //
   // The rules are `successor-claim.ts` / `reset-repair.ts`, the order is
@@ -1034,7 +1034,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const CONTINUITY_SWEEP_INTERVAL_MS = 30_000;
   let lastContinuitySweepAtMs = 0;
   /**
-   * ADR-0065 R.5 — once this device is in the group that continues a
+   * ADR-0073 R.5 — once this device is in the group that continues a
    * conversation, its push subscription for the OLDER group is retired: the
    * conversation's wakes come through the successor's own routing id. Once
    * per old group; best-effort like every push teardown (a failed
@@ -1082,7 +1082,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     });
   }
 
-  // ADR-0065 R.7 case 1 — nothing is published into a one-to-one whose other
+  // ADR-0073 R.7 case 1 — nothing is published into a one-to-one whose other
   // person's reset this device accepted, by ANY client in the tab; the
   // successor claim alone goes there.
   installDeadSessionGuard((group) =>
@@ -1096,7 +1096,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   let heldFlushRunning = false;
 
   /**
-   * ADR-0065 R.7 case 1 — send the messages held for conversations whose
+   * ADR-0073 R.7 case 1 — send the messages held for conversations whose
    * successor now exists on this device, when no view of the conversation is
    * mounted to do it (`held-send.ts` `flushVerdict`). Each goes into the
    * conversation's current group and into that group's slot of the message
@@ -1214,7 +1214,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       // R.7 case 2 — the owner's admin restore for the OPEN chat.
       void repairResetFor(entry, true).catch((err: unknown) => {
         // eslint-disable-next-line no-console
-        console.warn("ADR-0065 reset repair pass failed", err);
+        console.warn("ADR-0073 reset repair pass failed", err);
       });
     }
     if (entry !== undefined && loadSupersededKeys().size > 0) {
@@ -1231,7 +1231,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
 
   // An accepted reset (wherever the identity gate met it) starts the work at
   // once, for every conversation shared with that account.
-  /** ADR-0065 R.8 — the service worker's copy of the retired keys
+  /** ADR-0073 R.8 — the service worker's copy of the retired keys
    *  (`push/superseded-mirror.ts`), so a push from a removed device that
    *  still holds old keys neither rings nor posts a preview. Best effort. */
   function mirrorSupersededKeys(): void {
@@ -1349,7 +1349,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
    * this account only — a Remove for a leaf whose directory row is gone
    * (`forgetDevice`). Accounts are resolved to directory ids through this
    * device's own account, its accepted contacts and the account id a
-   * member's profile carries (ADR-0065 R.2); a member with none is left as
+   * member's profile carries (ADR-0073 R.2); a member with none is left as
    * is. Each chat is checked at most once per
    * `READMISSION_INTERVAL_MS`.
    */
@@ -1375,7 +1375,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     }));
     // The accounts we can look up: ours, and every OTHER person of the roster
     // whose account id this device knows: a contact row, else the id the
-    // person's own profile carries (ADR-0065 R.2 "Triggers").
+    // person's own profile carries (ADR-0073 R.2 "Triggers").
     const lookups: { personKeyB64: string; accountId: Uint8Array }[] = [
       { personKeyB64: own, accountId: secrets.accountId },
     ];
@@ -1432,7 +1432,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       try {
         const list = await discovery.fetchKeyPackages(l.accountId);
         for (const d of list ?? []) accountOfDevice.set(base64Encode(d.deviceId), l.accountId);
-        // ADR-0066 — an own device's KeyPackage bound to another of the
+        // ADR-0074 — an own device's KeyPackage bound to another of the
         // account's keys than this device's leaves is not admitted; its row
         // still counts as listed, so its existing leaf is not retired.
         const ownRow = l.personKeyB64 === own;
@@ -1453,7 +1453,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         accounts.push({ personKeyB64: l.personKeyB64, devices: null });
       }
     }
-    // ADR-0066 section 2.3 — an own device is admitted only when the
+    // ADR-0074 section 2.3 — an own device is admitted only when the
     // account's DeviceGroup holds it.
     const deviceGroup = ownDeviceRoster(account);
     const plan = planReadmission({
@@ -1605,7 +1605,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     for (;;) {
       const list = await discovery.fetchKeyPackages(accountId);
       const hit = list?.find((d) => bytesEqual(d.deviceId, deviceKey));
-      // ADR-0066 — a KeyPackage the device published before the pairing
+      // ADR-0074 — a KeyPackage the device published before the pairing
       // state bundle reached it names another of the account's keys; wait
       // for the one it publishes after it re-minted its binding.
       if (
@@ -1645,7 +1645,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     const secrets = auth.identitySecrets();
     if (secrets === null) throw new Error("admitDevice: no session");
     const keyPackage = await awaitDeviceKeyPackage(secrets.accountId, deviceKey);
-    // ADR-0066 section 2.3 — only a device the account's DeviceGroup holds
+    // ADR-0074 section 2.3 — only a device the account's DeviceGroup holds
     // is fanned into the chats. The pairing that calls this added it there
     // first; the sync runtime reloads its handle after that change, so the
     // roster is given a moment to show it.
@@ -1713,7 +1713,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         console.warn("ADR-0050 retire device: chat skipped", entry.groupIdB64, err);
       }
     }
-    // ADR-0066 section 2.3 — the directory row is deleted FIRST now, with
+    // ADR-0074 section 2.3 — the directory row is deleted FIRST now, with
     // the account statement, by the removal operation that calls this
     // (`devices/removal.ts`), not here.
     return { offered, skipped, failed };
@@ -1731,7 +1731,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   ): Promise<void> {
     const groupIdB64 = entry.groupIdB64;
     const superseded = loadSupersededKeys();
-    // ADR-0065 R.7 case 1 — a re-sent message whose original this device
+    // ADR-0073 R.7 case 1 — a re-sent message whose original this device
     // already holds in an older segment is dropped before it is stored.
     const aliases = loadKeyAliases();
     const resendHeld = await heldResendPredicate(events, {
@@ -1745,7 +1745,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         return deviceKey === null ? null : loadMessageLog(account, deviceKey);
       },
     });
-    // ADR-0065 R.8 — in a conversation that cannot be repaired in place for
+    // ADR-0073 R.8 — in a conversation that cannot be repaired in place for
     // a reset, or that already moved, nothing from the retired key acts:
     // its control and service envelopes are dropped with its rows.
     const inertFacts = superseded.size === 0 ? undefined : continuityFacts(groupIdB64);
@@ -1763,7 +1763,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         }),
       senderKeyOfLeaf: (leaf) => personKeyAtLeafB64(entry, leaf),
     });
-    // ADR-0065 R.7 case 2 / UX 16.5 — a batch that only swapped the devices
+    // ADR-0073 R.7 case 2 / UX 16.5 — a batch that only swapped the devices
     // of people who stay leaves no `Members changed` row, in the log or in
     // the view.
     let swapOnly = false;
@@ -1833,7 +1833,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         console.warn("background receive: group name receive failed", err);
       });
     }
-    // ADR-0065 R.6 — a successor claim, through the claim rule under the
+    // ADR-0073 R.6 — a successor claim, through the claim rule under the
     // per-group lock. Never a row, whatever the verdict.
     for (const c of plan.groupClosed) {
       void groupClosed.receive(entry, c).catch((err) => {
@@ -2038,7 +2038,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     stop();
     activeAccount = accountIdB64;
     mirrorSupersededKeys();
-    // ADR-0065 R.7 case 1 — messages held before a reload are read back.
+    // ADR-0073 R.7 case 1 — messages held before a reload are read back.
     void restoreHeldSends(accountIdB64);
     const controller = new AbortController();
     loopAbort = controller;

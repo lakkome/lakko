@@ -10,7 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0065 R.6 / R.7 cases 1 and 3 - the ORDER of claim-then-build, driven
+ * ADR-0073 R.6 / R.7 cases 1 and 3 - the ORDER of claim-then-build, driven
  * through a recording port (mirror of the web `continuity-runtime` cases).
  * The property under test is the sequence: nothing is delivered before the
  * claim is decided, and a lost claim delivers nothing at all.

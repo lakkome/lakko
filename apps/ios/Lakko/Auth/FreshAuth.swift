@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065, amended 2026-10-06: the fresh-auth proof.
+// ADR-0073, amended 2026-10-06: the fresh-auth proof.
 //
 // Resetting the account keys, deleting the account, adding a device, adding
 // a passkey and changing the password each need the person to prove who they
@@ -245,7 +245,7 @@ enum PasswordChangeGate {
     }
 
     /// - Parameter noticeAnsweredAtMs: when the person answered `It was not
-    ///   me` to an account notice (ADR-0067, UX 19.6): the same ten minutes.
+    ///   me` to an account notice (ADR-0075, UX 19.6): the same ten minutes.
     static func allowed(
         holdsLiveProof: Bool, threeWordsPassedAtMs: Int64?, noticeAnsweredAtMs: Int64? = nil, nowMs: Int64
     ) -> Bool {

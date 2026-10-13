@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The own-username envelope ([ADR-0068](../../../../docs/adr/0068-username-change.md)
+//! The own-username envelope ([ADR-0076](../../../../docs/adr/0076-username-change.md)
 //! section 3): how the account's own username register travels between the
 //! account's own devices.
 //!

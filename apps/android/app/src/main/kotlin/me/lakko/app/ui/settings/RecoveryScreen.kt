@@ -162,7 +162,7 @@ public fun RecoveryScreen(
                 return@Column
             }
 
-            // ADR-0067 / UX 19.1 - the phrase and the three words exist only
+            // ADR-0075 / UX 19.1 - the phrase and the three words exist only
             // for an account whose owner saved the phrase.
             val protection by authRepository.recoveryEmail.collectAsStateWithLifecycle()
             val phraseProtected = protection?.phraseSaved

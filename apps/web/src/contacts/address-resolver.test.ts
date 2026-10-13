@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.5a - resolve before you address (rule 1), the keys of
+ * ADR-0074 section 3.5a - resolve before you address (rule 1), the keys of
  * one person (rule 2) and the read window of a predecessor mailbox (rule 4).
  */
 import { afterEach, describe, expect, it } from "vitest";

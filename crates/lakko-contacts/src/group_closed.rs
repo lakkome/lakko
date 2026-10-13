@@ -3,7 +3,7 @@
 
 //! Group-closed envelope — an admin tells every member that this group is
 //! closed, and where to continue
-//! ([ADR-0065](../../../docs/adr/0065-account-key-reset.md) phase 2;
+//! ([ADR-0073](../../../docs/adr/0073-account-key-reset.md) phase 2;
 //! `docs/ux/identity-recovery.md` §16.5 / §16.8).
 //!
 //! ## Why this exists

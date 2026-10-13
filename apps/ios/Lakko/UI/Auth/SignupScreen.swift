@@ -118,7 +118,7 @@ public struct SignupScreen: View {
 /// session; `onDone` lets the session through (UX 19.1a).
 ///
 /// "Protect your account": `Add an email`, the passkey row, `Save a
-/// recovery phrase`. The recovery phrase is NOT shown here (ADR-0067 D2):
+/// recovery phrase`. The recovery phrase is NOT shown here (ADR-0075 D2):
 /// the device keeps it unseen, and saving a phrase gives the account new
 /// keys and new words. The email and the passkey return to the step with
 /// their row marked done and `Continue` under the rows; saving a phrase

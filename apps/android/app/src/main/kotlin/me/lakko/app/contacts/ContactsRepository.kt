@@ -105,7 +105,7 @@ public class ContactsRepository(
             lastSeenRoot = appContext?.let {
                 me.lakko.app.transparency.LastSeenRoot(it)
             } ?: me.lakko.app.transparency.InMemoryLastSeenRoot(),
-            // ADR-0066 section 3.5 - a contact's proven rotation makes the
+            // ADR-0074 section 3.5 - a contact's proven rotation makes the
             // key pinned until now a proven predecessor of the new one.
             onProvenRotation = { peer, oldKey, newKey ->
                 val ctx = appContext
@@ -120,7 +120,7 @@ public class ContactsRepository(
                     )
                 }
             },
-            // ADR-0066 section 3.5a rule 1 - mailboxes are addressed by the
+            // ADR-0074 section 3.5a rule 1 - mailboxes are addressed by the
             // current key of the person (proven steps only).
             mailboxKeyOf = { key ->
                 appContext?.let { ctx ->
@@ -131,7 +131,7 @@ public class ContactsRepository(
                     }
                 } ?: key
             },
-            // ADR-0065 R.2 - the reset ledger and the verified bindings are
+            // ADR-0073 R.2 - the reset ledger and the verified bindings are
             // the signed-in account's, like the pins.
             ownerAccountIdB64 = authRepo.identitySecrets.value?.let { base64Encode(it.accountId) }.orEmpty(),
             resetLedger = appContext?.let { SharedPrefsResetLedgerStore(it) } ?: InMemoryResetLedgerStore(),
@@ -169,21 +169,21 @@ public class ContactsRepository(
      *  in memory without a [Context]). */
     private val inviteSecretStore: InviteLinkSecretStore =
         appContext?.let { EncryptedInviteLinkSecretStore(it) } ?: InMemoryInviteLinkSecretStore(),
-    /** ADR-0065 R.2 - the accepted generation, the retired keys and the
+    /** ADR-0073 R.2 - the accepted generation, the retired keys and the
      *  reset's `signed_at` per peer account (public values only). */
     private val resetLedgerStore: ResetLedgerStore =
         appContext?.let { SharedPrefsResetLedgerStore(it) } ?: InMemoryResetLedgerStore(),
-    /** ADR-0065 R.2 - what this device verified for accounts it never
+    /** ADR-0073 R.2 - what this device verified for accounts it never
      *  pinned. */
     private val verifiedBindingStore: VerifiedBindingStore =
         appContext?.let { SharedPrefsVerifiedBindingStore(it) } ?: InMemoryVerifiedBindingStore(),
-    /** ADR-0066 part 3 - which key's mailbox the kept inbox cursor reads,
+    /** ADR-0074 part 3 - which key's mailbox the kept inbox cursor reads,
      *  and the cursor of each later mailbox of the account. */
     private val inboxMailboxStore: InboxMailboxStore? =
         appContext?.let {
             InboxMailboxStore(me.lakko.app.auth.SharedPrefsMarkerStorage(it, InboxMailboxStore.PREFS_NAME))
         },
-    /** ADR-0066 section 3.5 - the proven steps of contacts' key histories
+    /** ADR-0074 section 3.5 - the proven steps of contacts' key histories
      *  (public keys only). */
     private val provenLinkStore: ProvenLinkStore =
         appContext?.let { SharedPrefsProvenLinkStore(it) } ?: InMemoryProvenLinkStore(),
@@ -197,7 +197,7 @@ public class ContactsRepository(
     },
 ) {
     // -----------------------------------------------------------------
-    // ADR-0065 "Phase 2 revised: silent continuity" - a contact reset their
+    // ADR-0073 "Phase 2 revised: silent continuity" - a contact reset their
     // account keys. Nothing here has a surface (R.0).
     // -----------------------------------------------------------------
 
@@ -308,15 +308,15 @@ public class ContactsRepository(
             }
             if (changed) persistAccepted()
         }
-        // ADR-0066 section 3.5 - a RESET ends every proven predecessor the
+        // ADR-0074 section 3.5 - a RESET ends every proven predecessor the
         // account had: none of its earlier keys is the person any more.
         ProvenPredecessors.dropAccount(provenLinkStore, owner, peer)
         pushAliasesToDirectory()
-        Log.i(TAG, "ADR-0065: an attested key reset was accepted")
+        Log.i(TAG, "ADR-0073: an attested key reset was accepted")
         try {
             chatRepo?.onResetAccepted(event)
         } catch (cause: Throwable) {
-            Log.w(TAG, "ADR-0065: chat layer not told: ${cause.javaClass.simpleName}")
+            Log.w(TAG, "ADR-0073: chat layer not told: ${cause.javaClass.simpleName}")
         }
     }
 
@@ -339,13 +339,13 @@ public class ContactsRepository(
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
-            Log.w(TAG, "ADR-0065: contact identity check failed: ${cause.javaClass.simpleName}")
+            Log.w(TAG, "ADR-0073: contact identity check failed: ${cause.javaClass.simpleName}")
             KnownRequestCheck.INCONCLUSIVE
         }
     }
 
     /**
-     * ADR-0066 section 3.5a rule 6 - a write into the mailbox of the person
+     * ADR-0074 section 3.5a rule 6 - a write into the mailbox of the person
      * known by [accountKey] was refused: fetch their identity bundle through
      * the fail-closed gate (a proven rotation re-pins there and records the
      * predecessor, which is what moves the address), then tell the reach
@@ -372,7 +372,7 @@ public class ContactsRepository(
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
-            Log.w(TAG, "ADR-0066 3.5a: address re-check failed: ${cause.javaClass.simpleName}")
+            Log.w(TAG, "ADR-0074 3.5a: address re-check failed: ${cause.javaClass.simpleName}")
             return false
         } ?: return false
         // The bundle must be this person's: the key in hand, or one its
@@ -394,7 +394,7 @@ public class ContactsRepository(
     }
 
     /**
-     * ADR-0066 section 3.5a rule 5 - on the device that rotated the account
+     * ADR-0074 section 3.5a rule 5 - on the device that rotated the account
      * keys, and on every kept device once it adopted them (over its own
      * links and requests): what was granted before the rotation is spent.
      *
@@ -437,7 +437,7 @@ public class ContactsRepository(
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
-            Log.w(TAG, "ADR-0066 3.5a: spent links not revoked: ${cause.javaClass.simpleName}")
+            Log.w(TAG, "ADR-0074 3.5a: spent links not revoked: ${cause.javaClass.simpleName}")
             false
         } finally {
             predecessors.forEach { it.zero() }
@@ -571,7 +571,7 @@ public class ContactsRepository(
         } catch (_: IllegalArgumentException) {
             return null
         }
-        // ADR-0066 section 3.5 - a key of the same person through proven
+        // ADR-0074 section 3.5 - a key of the same person through proven
         // rotations names the row the person already has.
         val links = provenLinks()
         if (links.isNotEmpty()) {
@@ -587,7 +587,7 @@ public class ContactsRepository(
      *  learned under the key it replaced until a profile arrives for it. */
     private fun pushAliasesToDirectory() {
         val directory = profileDirectory ?: return
-        // ADR-0066 section 3.5 - and from a proven successor key to the key
+        // ADR-0074 section 3.5 - and from a proven successor key to the key
         // the person was first known by: a proven rotation is the same
         // person, with nothing shown.
         val rows = resetLedgerRows()
@@ -602,14 +602,14 @@ public class ContactsRepository(
         boundAccountB64?.let { provenLinkStore.load(it) }.orEmpty()
 
     /**
-     * ADR-0066 section 3.5 - whether two account keys are the same person
+     * ADR-0074 section 3.5 - whether two account keys are the same person
      * across PROVEN rotations (never across a reset or an unproven change).
      * Standard base64 keys.
      */
     public fun sameProvenPerson(aKeyB64: String, bKeyB64: String): Boolean =
         samePerson(aKeyB64, bKeyB64, provenLinks())
 
-    /** ADR-0066 section 3.5a - whether [foundKeyB64] is a proven
+    /** ADR-0074 section 3.5a - whether [foundKeyB64] is a proven
      *  predecessor of [publishedKeyB64] by the steps recorded here. */
     public fun isProvenPredecessor(foundKeyB64: String, publishedKeyB64: String): Boolean =
         keyPrecedes(foundKeyB64, publishedKeyB64, provenLinks())
@@ -651,7 +651,7 @@ public class ContactsRepository(
 
     private val bindLock = Any()
 
-    /** ADR-0066 3.5a rule 5 - the unanswered outgoing requests, durable
+    /** ADR-0074 3.5a rule 5 - the unanswered outgoing requests, durable
      *  under the device key so a re-send after a rotation of the account
      *  keys survives a process death and carries the intro. `null` in tests
      *  that supply no [Context] (in memory only, as before). */
@@ -697,7 +697,7 @@ public class ContactsRepository(
      */
     public fun bindAccount(accountId: ByteArray) {
         val accountB64 = base64Encode(accountId)
-        // ADR-0066 section 3.5 - a proven rotation recorded by the gate
+        // ADR-0074 section 3.5 - a proven rotation recorded by the gate
         // reaches name resolution at once.
         ProvenPredecessors.onChanged = { pushAliasesToDirectory() }
         var acceptedGrew = false
@@ -746,7 +746,7 @@ public class ContactsRepository(
         pushAliasesToDirectory()
     }
 
-    // ---- ADR-0065 R.7 case 1 / UX 16.6: a request from an existing contact --
+    // ---- ADR-0073 R.7 case 1 / UX 16.6: a request from an existing contact --
 
     /** Requests from existing contacts with no verdict yet ("the request
      *  waits, unshown, for the next check"). The mailbox cursor has moved
@@ -808,7 +808,7 @@ public class ContactsRepository(
                 } catch (cause: kotlinx.coroutines.CancellationException) {
                     throw cause
                 } catch (cause: Throwable) {
-                    Log.w(TAG, "ADR-0065: silent ack to an existing contact failed: ${cause.javaClass.simpleName}")
+                    Log.w(TAG, "ADR-0073: silent ack to an existing contact failed: ${cause.javaClass.simpleName}")
                 }
             }
             KnownRequestVerdict.DROP -> Unit
@@ -976,7 +976,7 @@ public class ContactsRepository(
     }
 
     init {
-        // ADR-0065 R.2 - the scheduled device-list arm checks an account's
+        // ADR-0073 R.2 - the scheduled device-list arm checks an account's
         // published identity through this repository's fail-closed gate,
         // which is what accepts an attested reset.
         chatRepo?.contactIdentityCheck = { accountId, heldKeyB64 -> checkContactIdentity(accountId, heldKeyB64) }
@@ -986,13 +986,13 @@ public class ContactsRepository(
         // R.4 - a Welcome to a person whose reset this device accepted may be
         // signed with the continuity key of their new mailbox.
         reach()?.acceptedResetOf = { ownerKey -> acceptedResetOfKey(base64Encode(ownerKey)) }
-        // ADR-0066 section 3.5a rule 6 - a refused mailbox write re-checks
+        // ADR-0074 section 3.5a rule 6 - a refused mailbox write re-checks
         // the person's address through the same gate, once.
         chatRepo?.addressRecheck = { accountKey, accountId -> recheckAddress(accountKey, accountId) }
         // Rule 5 - the rotating device's owed step, and the round a kept
         // device runs over its own links and requests after adopting.
         chatRepo?.spendPreRotationGrants = { spendPreRotationGrants() }
-        // ADR-0066 (a device paired after a rotation) - a pairing state
+        // ADR-0074 (a device paired after a rotation) - a pairing state
         // bundle that moved the conversation key rebuilds a chat layer that
         // was already loaded under the current key.
         if (appContext != null) {
@@ -1328,7 +1328,7 @@ public class ContactsRepository(
         // thread: the state is a `MutableStateFlow` and the stores below it
         // are their own.
         withContext(Dispatchers.IO) {
-            // ADR-0066 part 3, Stage A - after a rotation of the account
+            // ADR-0074 part 3, Stage A - after a rotation of the account
             // keys the device bindings that exist still name the previous
             // key, so a Welcome for one of them arrives in the PREVIOUS
             // identity's mailbox. Read it first (no long poll).
@@ -1370,7 +1370,7 @@ public class ContactsRepository(
                     val fetchedRequests = result.events.filterIsInstance<
                         IncomingMailboxEvent.ContactRequest>(
                     ).map { it.request }
-                    // ADR-0065 R.7 case 1 / UX 16.6 — a request from an
+                    // ADR-0073 R.7 case 1 / UX 16.6 — a request from an
                     // account that is ALREADY a contact is never a request
                     // row: the R.2 check runs on the sender's account and the
                     // request is answered silently or dropped. The ones that
@@ -1463,7 +1463,7 @@ public class ContactsRepository(
                         inboxMailboxStore?.advance(accountB64, currentKeyB64, result.cursor)
                     }
 
-                    // ADR-0066 3.5a rule 5 - a request sent again from a
+                    // ADR-0074 3.5a rule 5 - a request sent again from a
                     // rotated key replaces the row it re-sends: by the steps
                     // the gate recorded, or by the proof the directory serves
                     // with the new key (checked here, off the state update).
@@ -1633,7 +1633,7 @@ public class ContactsRepository(
             )
 
         return useClientWith(secrets) { client, sender ->
-            // ADR-0066 3.5a rule 6 - a refused ack re-checks the requester's
+            // ADR-0074 3.5a rule 6 - a refused ack re-checks the requester's
             // address once. Each attempt re-resolves the mailbox (inside the
             // client) and tries every grant held for the person in turn: the
             // reply key first, and one kept beside a newer grant.
@@ -1857,7 +1857,7 @@ public class ContactsRepository(
             val inviterSigPubkey = capability.ownerSignaturePubkey()
             val inviterX25519Pubkey = capability.ownerX25519Pubkey()
 
-            // ADR-0016 rule 2 / ADR-0065 R.2 — the capability's inline bundle
+            // ADR-0016 rule 2 / ADR-0073 R.2 — the capability's inline bundle
             // never went through the fetch gate. An inviter whose account is
             // pinned to another key the directory cannot explain (neither a
             // proven rotation nor an attested reset) is refused HERE: before the use
@@ -1878,7 +1878,7 @@ public class ContactsRepository(
                 )
             }
 
-            // ADR-0065 R.7 case 1 / UX 16.6 — a link from a person who is
+            // ADR-0073 R.7 case 1 / UX 16.6 — a link from a person who is
             // already a contact (a reset loses their contacts; they may hand
             // out a new link) opens the existing contact: no request is sent
             // and no use of the link is spent. The gate above ran R.2 first,
@@ -2262,7 +2262,7 @@ public class ContactsRepository(
     }
 
     /**
-     * ADR-0066 part 3, Stage A - read the mailbox of each of this account's
+     * ADR-0074 part 3, Stage A - read the mailbox of each of this account's
      * own previous identities and join the groups its Welcomes invite this
      * device to. Section 3.5a rule 4: senders that observed the rotation
      * address the NEW mailbox, so this only catches what was sent before
@@ -2283,7 +2283,7 @@ public class ContactsRepository(
         val nowMs = System.currentTimeMillis()
         try {
             for (previous in predecessors) {
-                // ADR-0066 section 3.5a rule 4 - read for 30 days after this
+                // ADR-0074 section 3.5a rule 4 - read for 30 days after this
                 // device adopted the successor, then left for good. Nothing
                 // is ever written or registered there.
                 if (!me.lakko.app.reach.predecessorMailboxIsRead(previous.supersededAtMs, nowMs)) continue
@@ -2522,7 +2522,7 @@ public sealed interface AcceptInviteResult {
 
     public data object AlreadyAccepted : AcceptInviteResult
 
-    /** ADR-0065 UX 16.6 — the link's owner is already a contact: nothing was
+    /** ADR-0073 UX 16.6 — the link's owner is already a contact: nothing was
      *  sent or spent; the caller opens the contact [routeKey] names. */
     public data class ExistingContact(val routeKey: String) : AcceptInviteResult
     public data object Expired : AcceptInviteResult
@@ -2645,7 +2645,7 @@ public data class SentContactRequest(
     val messageId: Long,
     val createdAt: String,
     /** The intro the request carried, kept (stored with the entry) so
-     *  the request can be sent again from a rotated account key (ADR-0066
+     *  the request can be sent again from a rotated account key (ADR-0074
      *  section 3.5a rule 5). */
     val introMessage: ByteArray = ByteArray(0),
     /** When this device sent it (unix ms). Not part of the entry's
@@ -2664,7 +2664,7 @@ public data class SentContactRequest(
 }
 
 /**
- * ADR-0066 section 3.5a rule 5 - what a failed re-send of an unanswered
+ * ADR-0074 section 3.5a rule 5 - what a failed re-send of an unanswered
  * request means: the person's mailbox refused the write, their username or
  * bundle is gone, or their keys changed without a proof - the spent entry is
  * dropped; anything else (the network) keeps it and the step owed.
@@ -2689,7 +2689,7 @@ internal fun isMailboxRefusal(cause: Throwable): Boolean = when (cause) {
 }
 
 /**
- * ADR-0066 section 3.5a rule 5 - the ledger ids (base64url slugs) the
+ * ADR-0074 section 3.5a rule 5 - the ledger ids (base64url slugs) the
  * rotating device tries to revoke: what the directory lists for the account,
  * then what this device recorded for links it minted, each once.
  */

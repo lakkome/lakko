@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Seal and open the email vault (ADR-0067 section 2) without blocking the
+ * Seal and open the email vault (ADR-0075 section 2) without blocking the
  * page: each job runs in its own module worker (`email-vault-worker.ts`),
  * which is terminated when it answers. Where a worker cannot be started or
  * cannot load the wasm core, the job runs on the main thread after one

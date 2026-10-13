@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The recall record (ADR-0066 section 1.1): what it holds, that it is sealed
+ * The recall record (ADR-0074 section 1.1): what it holds, that it is sealed
  * under the device key, and that it survives a reload (the store, over the
  * in-memory IndexedDB fake).
  */

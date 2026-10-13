@@ -260,7 +260,7 @@ export interface MessageLogPayload {
   readonly version: number;
   readonly groups: { readonly [groupIdHex: string]: PersistedGroup };
   /**
-   * ADR-0065 R.7 case 1 — messages composed for a one-to-one whose successor
+   * ADR-0073 R.7 case 1 — messages composed for a one-to-one whose successor
    * did not exist yet (`held-send.ts`), kept here so a reload does not lose
    * them: this is the one store that already holds message plaintext under
    * the device key. Written only through {@link setHeldInMessageLog}; every
@@ -532,7 +532,7 @@ export function withoutGroup(
 }
 
 /**
- * Replace the held sends kept in the log (ADR-0065 R.7 case 1). Serialized
+ * Replace the held sends kept in the log (ADR-0073 R.7 case 1). Serialized
  * with every other write of the log; creates the payload when none exists.
  */
 export function setHeldInMessageLog(

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0065 S3 — the key-reset half of the identity directory.
+//! ADR-0073 S3 — the key-reset half of the identity directory.
 //!
 //! A reset (`POST /account/keys/reset/finish` on `services/auth`) bumps the
 //! account's key generation and hands the resetting device a signed
@@ -13,7 +13,7 @@
 //!   the transparency service pins it for the genesis gate and the clients
 //!   pin it for device removal (ADR-0015); never fetched. Unset: an upload
 //!   that carries an attestation answers `503 key-reset-disabled`, and since
-//!   ADR-0065 retired every unattested key change, no key can change at all
+//!   ADR-0073 retired every unattested key change, no key can change at all
 //!   without a supersession proof — fail-closed, logged loudly at startup.
 //! - **The attestation check** ([`verify_upload_attestation`]): signature
 //!   under the pinned key, `account_ref` of the session account, the uploaded
@@ -22,7 +22,7 @@
 //!   refuse a session token whose generation is below the row's.
 //!
 //! Every refusal here is a JSON `{"error": <code>}` body, the one shape a
-//! client branches on (ADR-0065 sections 3.5 and 4.1).
+//! client branches on (ADR-0073 sections 3.5 and 4.1).
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
@@ -39,11 +39,11 @@ use sqlx::MySqlPool;
 pub(crate) const ATTEST_KEY_ENV: &str = "LAKKO_DISCOVERY_ATTEST_KEY";
 
 /// `401` body of a session token issued under a key generation below the
-/// row's (ADR-0065 section 4.1): this device's keys were reset elsewhere.
+/// row's (ADR-0073 section 4.1): this device's keys were reset elsewhere.
 pub(crate) const CODE_KEY_GENERATION_SUPERSEDED: &str = "key-generation-superseded";
 
 /// `409` body of a key change that carries neither a supersession proof nor
-/// a key-reset attestation (ADR-0065 section 4.1).
+/// a key-reset attestation (ADR-0073 section 4.1).
 pub(crate) const CODE_NEEDS_ATTESTATION: &str = "identity-change-needs-attestation";
 
 /// `409` body of an attested key change whose generation is not strictly
@@ -60,26 +60,26 @@ pub(crate) const CODE_ATTESTATION_INVALID: &str = "key-reset-attestation-invalid
 pub(crate) const CODE_KEY_RESET_DISABLED: &str = "key-reset-disabled";
 
 /// `429` body of an attested key change inside the ADR-0017 cool-down
-/// window (kept as defence in depth on attested changes, ADR-0065 4.1).
+/// window (kept as defence in depth on attested changes, ADR-0073 4.1).
 pub(crate) const CODE_COOLING_DOWN: &str = "identity-changed-too-recently";
 
 /// `400` body of an identity upload whose supersession proof does not
-/// verify (ADR-0066 section 3.5): not a proof by the key the directory holds
+/// verify (ADR-0074 section 3.5): not a proof by the key the directory holds
 /// for the account, not for the uploaded key, malformed, a validity window
 /// the format does not allow, or expired.
 pub(crate) const CODE_PROOF_INVALID: &str = "supersession-proof-invalid";
 
 /// `403` body of a KeyPackage publish whose `device_id` is not the device the
-/// session token names (ADR-0066 section 2.2), an unbound session included.
+/// session token names (ADR-0074 section 2.2), an unbound session included.
 pub(crate) const CODE_DEVICE_MISMATCH: &str = "device-mismatch";
 
 /// `403` body of a KeyPackage publish under a device id that was deleted
-/// from the directory within the tombstone window (ADR-0066 section 2.2).
+/// from the directory within the tombstone window (ADR-0074 section 2.2).
 /// Auth answers a `401` with the same code to the removed device's session.
 pub(crate) const CODE_DEVICE_REVOKED: &str = "device-revoked";
 
 /// `403` body of a delete of ANOTHER device's KeyPackage that carries no
-/// statement signed by the account's published identity key (ADR-0066
+/// statement signed by the account's published identity key (ADR-0074
 /// section 2.2).
 pub(crate) const CODE_ACCOUNT_KEY_REQUIRED: &str = "account-key-required";
 
@@ -195,7 +195,7 @@ pub(crate) fn verify_upload_attestation(
     Ok(Some((claims, bytes)))
 }
 
-/// The ADR-0065 generation floor: `true` when a session token issued under
+/// The ADR-0073 generation floor: `true` when a session token issued under
 /// `token_generation` is below the account's stored `key_generation`. An
 /// account with no identity bundle has no floor (a first publish). A token
 /// of a higher generation than the row is accepted (the attested upload has
@@ -342,7 +342,7 @@ mod tests {
     }
 }
 
-/// ADR-0065 S3 route tests, driven through the real router. DB-gated on
+/// ADR-0073 S3 route tests, driven through the real router. DB-gated on
 /// `LAKKO_DISCOVERY_TEST_DATABASE_URL` (skip, not fail, when unset).
 #[cfg(test)]
 mod route_tests {
@@ -461,7 +461,7 @@ mod route_tests {
             generation: u64,
             device: u8,
         ) -> (StatusCode, String) {
-            // ADR-0066: a KeyPackage is published by a session that names the
+            // ADR-0074: a KeyPackage is published by a session that names the
             // device.
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -527,7 +527,7 @@ mod route_tests {
     const K3: [u8; 32] = [0x33; 32];
     const K4: [u8; 32] = [0x44; 32];
 
-    /// ADR-0065 R.3: the identity fetch serves the stored key-reset
+    /// ADR-0073 R.3: the identity fetch serves the stored key-reset
     /// attestation to peers, the stored bytes unparsed, and omits the field
     /// for an account that never reset.
     #[tokio::test]
@@ -782,7 +782,7 @@ mod route_tests {
 
         // The supersession-proof path (ADR-0016): a key change carrying a
         // proof by the published key applies with no attestation and leaves
-        // the generation alone. Since ADR-0066 the proof is VERIFIED: bytes
+        // the generation alone. Since ADR-0074 the proof is VERIFIED: bytes
         // that are not a proof, and a proof by another key, change nothing.
         let (status, text) = c
             .publish(
@@ -908,7 +908,7 @@ mod route_tests {
             .unwrap();
     }
 
-    /// ADR-0066 section 3.5: the supersession proof is verified, and a proof
+    /// ADR-0074 section 3.5: the supersession proof is verified, and a proof
     /// together with an attestation is a proven rotation.
     mod rotation_tests {
         use super::*;

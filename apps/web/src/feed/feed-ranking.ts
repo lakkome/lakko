@@ -56,7 +56,7 @@ export function rankFeedInput(
   const conversations = input.sources.map(
     (s) =>
       new core.FeedConversation(
-        // The conversation id: what a feed rule's lists name (ADR-0065 R.5).
+        // The conversation id: what a feed rule's lists name (ADR-0073 R.5).
         hexToBytes(feedSourceKey(s)),
         s.kind === "channel" ? core.FeedConversationKind.Channel : core.FeedConversationKind.Group,
         s.muted,

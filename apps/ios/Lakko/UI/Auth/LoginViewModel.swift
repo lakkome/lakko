@@ -39,7 +39,7 @@ public final class LoginViewModel: ObservableObject {
     public init(repository: AuthRepository, cachedUsername: String? = nil) {
         self.repository = repository
         self.username = cachedUsername ?? ""
-        // ADR-0065 section 3.3 — the session was refused as expired on the
+        // ADR-0073 section 3.3 — the session was refused as expired on the
         // way here (the refresh credential is dead): say so, once.
         if repository.sessionExpiredNotice {
             self.errorText = .key("common.error.session_expired")

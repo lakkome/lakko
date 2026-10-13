@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.7 case 1 - a held reply flushed into the successor keeps its
+ * ADR-0073 R.7 case 1 - a held reply flushed into the successor keeps its
  * quote and drops its jump target; and a view shows what a background
  * flush sent while it was mounting.
  */

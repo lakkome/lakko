@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.7 case 1 - the re-send marker end to end on this client: the
+ * ADR-0073 R.7 case 1 - the re-send marker end to end on this client: the
  * envelope the founder composes carries it, the parser reads it back, and
  * the receive predicate drops the successor row exactly when the original
  * is held (`resend-receive.ts`).

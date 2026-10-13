@@ -82,7 +82,7 @@ public fun RestoreIdentityPrompt(
 
     BackHandler(enabled = way != null && !state.busy) { closeWay() }
 
-    // ADR-0067 / UX section 8 - which rows this account has: the 12-word
+    // ADR-0075 / UX section 8 - which rows this account has: the 12-word
     // phrase only when its owner saved one, `Email code` only while a mailed
     // code brings the keys. Read with the parked session.
     val protection by androidx.compose.runtime.produceState<me.lakko.app.auth.RecoveryEmailStatus?>(
@@ -243,7 +243,7 @@ public fun RestoreIdentityPrompt(
             Spacer(Modifier.height(16.dp))
         }
 
-        // ADR-0065 / docs/ux/identity-recovery.md 15.1 - the warning before a
+        // ADR-0073 / docs/ux/identity-recovery.md 15.1 - the warning before a
         // reset of the account keys, with the typed confirmation. Nothing is
         // sent until the button is tapped; the bullets are unconditional (the
         // device does not know how many devices or passkeys the account has).

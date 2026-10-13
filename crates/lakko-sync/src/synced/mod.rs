@@ -19,11 +19,11 @@
 //! - [`entry`] — the register types, their bounds and their canonical
 //!   encoding (the tie-break and the persistence element).
 //! - [`lineage`] — the envelope the conversation-lineage register
-//!   (ADR-0065 R.5) travels in between the account's devices.
+//!   (ADR-0073 R.5) travels in between the account's devices.
 //! - [`recovery_email`] — the envelope the account's recovery email register
-//!   (ADR-0067) travels in between the account's devices.
+//!   (ADR-0075) travels in between the account's devices.
 //! - [`own_username`] — the envelope the account's own username register
-//!   (ADR-0068) travels in between the account's devices.
+//!   (ADR-0076) travels in between the account's devices.
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 

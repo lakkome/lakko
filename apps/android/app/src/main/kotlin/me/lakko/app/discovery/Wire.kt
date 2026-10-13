@@ -249,7 +249,7 @@ data class IdentityUploadRequest(
      *  attest flag defaults OFF, so the leaf still appends). Preserved across
      *  non-rotation re-uploads server-side via `COALESCE`, like [leaf_auth]. */
     val genesis_attest: String? = null,
-    /** ADR-0065: base64 of the optional 177-byte key-reset attestation auth
+    /** ADR-0073: base64 of the optional 177-byte key-reset attestation auth
      *  minted in `POST /account/keys/reset/finish`. Required for a key
      *  change that carries no supersession proof; the server verifies it
      *  under the pinned attest key, requires a strictly greater generation
@@ -274,11 +274,11 @@ data class IdentityFetchResponse(
      *  account rotated recently; `null` otherwise. Verified locally by the
      *  peer — the server passes the bytes through opaquely. */
     val supersession_proof: String? = null,
-    /** ADR-0065: the key generation the published bundle belongs to (1 =
+    /** ADR-0073: the key generation the published bundle belongs to (1 =
      *  never reset). A device compares it with the generation of its own
      *  session pair before it uploads anything. */
     val key_generation: Long = 1L,
-    /** ADR-0065 R.3: standard base64 of the latest key-reset attestation the
+    /** ADR-0073 R.3: standard base64 of the latest key-reset attestation the
      *  account published, absent when it never reset. Opaque to discovery;
      *  verified locally under the trusted attest key before a proof-less key
      *  change is accepted as a reset. After a later PROVEN rotation it no

@@ -3,7 +3,7 @@
 
 /**
  * Get back in with a code sent to the recovery email
- * (docs/ux/identity-recovery.md section 19.3, ADR-0067 section 7).
+ * (docs/ux/identity-recovery.md section 19.3, ADR-0075 section 7).
  *
  *   1. username and address;
  *   2. the code. This step looks and behaves the same for a matching pair, a

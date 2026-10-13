@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The two device-key stores the spend round of ADR-0066 section 3.5a rule 5
+ * The two device-key stores the spend round of ADR-0074 section 3.5a rule 5
  * reads, through the in-memory IndexedDB: the intro kept for a sent request,
  * and the list of links this device minted.
  */

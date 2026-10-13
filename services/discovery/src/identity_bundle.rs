@@ -72,7 +72,7 @@ const MAX_GENESIS_ATTEST_LEN: usize = 256;
 /// A fetched `identity_bundles` row: `(signature_pubkey, x25519_pubkey,
 /// supersession_proof?, key_generation, key_reset_attest?)` — the proof
 /// column is nullable (G-4, ADR-0016); the generation and the nullable
-/// key-reset attestation are ADR-0065's.
+/// key-reset attestation are ADR-0073's.
 type IdentityBundleRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, u64, Option<Vec<u8>>);
 
 fn decode_fixed<const N: usize>(
@@ -102,7 +102,7 @@ fn decode_fixed<const N: usize>(
 /// proof. A present value is base64-decoded and length-capped to
 /// [`MAX_SUPERSESSION_PROOF_LEN`]
 /// here; the bytes are VERIFIED later, inside the upload's transaction and
-/// against the key the row holds (`proof_is_valid`, ADR-0066 section 3.5).
+/// against the key the row holds (`proof_is_valid`, ADR-0074 section 3.5).
 /// The receiving peer still verifies for itself (`verify_supersession`).
 fn decode_optional_proof(b64: Option<&str>) -> Result<Option<Vec<u8>>, (StatusCode, String)> {
     let Some(b64) = b64 else {
@@ -197,13 +197,13 @@ pub(crate) struct UploadRequest {
     pub(crate) x25519_pubkey: String,
     /// G-4 (ADR-0016): base64 of an optional old-key-signed supersession
     /// proof bridging this rotation. Absent for a normal (non-rotation)
-    /// upload, which PRESERVES any stored proof. Since ADR-0066 the server
+    /// upload, which PRESERVES any stored proof. Since ADR-0074 the server
     /// VERIFIES it (`proof_is_valid`): on a key change it must be signed by
     /// the key the directory holds and authorise the uploaded key; on a
     /// re-upload it must be the proof of the rotation that produced the
     /// uploaded key. A public artefact, so verifying it reads nothing
     /// private (invariant #2). Sent together with `key_reset_attest` it is a
-    /// proven rotation at a new generation (ADR-0066 section 3.5).
+    /// proven rotation at a new generation (ADR-0074 section 3.5).
     #[serde(default)]
     pub(crate) supersession_proof: Option<String>,
     /// G-30 #2 (ADR-0019): base64 of an optional client leaf authorisation
@@ -222,7 +222,7 @@ pub(crate) struct UploadRequest {
     /// forwarded verbatim to the transparency append as `genesis_attest_b64`.
     #[serde(default)]
     pub(crate) genesis_attest: Option<String>,
-    /// ADR-0065 (S3): base64 (standard alphabet, like every sibling field —
+    /// ADR-0073 (S3): base64 (standard alphabet, like every sibling field —
     /// auth hands it out URL-safe, the client re-encodes as it does for
     /// `genesis_attest`) of the 177-byte key-reset attestation minted by
     /// `POST /account/keys/reset/finish`. Required for a key CHANGE that
@@ -247,11 +247,11 @@ pub(crate) struct UploadResponse {
 /// `updated_at` column auto-bumps via the table's
 /// `ON UPDATE CURRENT_TIMESTAMP` clause.
 ///
-/// ADR-0065 section 4.1 — the change rule: a key CHANGE is accepted only with
-/// a supersession proof (ADR-0016; verified since ADR-0066, `400
+/// ADR-0073 section 4.1 — the change rule: a key CHANGE is accepted only with
+/// a supersession proof (ADR-0016; verified since ADR-0074, `400
 /// {"error":"supersession-proof-invalid"}` otherwise) or a verified key-reset
 /// attestation of a strictly greater generation, or both (a proven rotation,
-/// ADR-0066 section 3.5); an unattested, unproven change is `409
+/// ADR-0074 section 3.5); an unattested, unproven change is `409
 /// {"error":"identity-change-needs-attestation"}`. The session token's
 /// generation must not be below the row's (`401
 /// {"error":"key-generation-superseded"}`). An attested change deletes every
@@ -308,13 +308,13 @@ pub(crate) async fn upload(
         ));
     }
 
-    // ADR-0066 section 3.5: the log leaf of a proven change is authorised by
+    // ADR-0074 section 3.5: the log leaf of a proven change is authorised by
     // the proof itself (ADR-0019). A client that sends the proof and no
     // separate `leaf_auth` gets the proof as the leaf authorisation; the
     // proof is verified in the transaction before anything is stored.
     let leaf_auth = leaf_auth.or_else(|| supersession_proof.clone());
 
-    // ADR-0065: the one attestation discovery parses. Verified here — the
+    // ADR-0073: the one attestation discovery parses. Verified here — the
     // signature under the pinned key, the session account's `account_ref`,
     // the uploaded key — and compared against the row's generation inside
     // the transaction below.
@@ -325,7 +325,7 @@ pub(crate) async fn upload(
         &signature_pubkey,
     )?;
 
-    // ADR-0065 4.1 change rule + the generation floor, under the ADR-0017
+    // ADR-0073 4.1 change rule + the generation floor, under the ADR-0017
     // cool-down kept as defence in depth on attested changes (see
     // `apply_identity_upload_gated`).
     let decision = apply_identity_upload_gated(
@@ -463,8 +463,8 @@ impl From<sqlx::Error> for AttemptError {
     }
 }
 
-/// What an upload carries to justify a key CHANGE (ADR-0065 section 4.1,
-/// ADR-0066 section 3.5). Both are the decoded bytes. The proof is verified
+/// What an upload carries to justify a key CHANGE (ADR-0073 section 4.1,
+/// ADR-0074 section 3.5). Both are the decoded bytes. The proof is verified
 /// inside the transaction, against the key the row holds under its lock
 /// ([`proof_is_valid`]); the attestation has already been verified by
 /// [`crate::key_reset::verify_upload_attestation`] and is carried with its
@@ -474,7 +474,7 @@ pub(crate) struct Evidence<'a> {
     /// G-4 (ADR-0016): a supersession proof, the previous key signing the
     /// uploaded one.
     pub(crate) supersession_proof: Option<&'a [u8]>,
-    /// ADR-0065: `(key_generation, wire bytes)` of a verified key-reset
+    /// ADR-0073: `(key_generation, wire bytes)` of a verified key-reset
     /// attestation naming this account and the uploaded key.
     pub(crate) key_reset_attest: Option<(u64, &'a [u8])>,
 }
@@ -483,7 +483,7 @@ impl Evidence<'_> {
     /// The rule's view of what the upload carries.
     const fn kind(self) -> EvidenceKind {
         match (self.supersession_proof, self.key_reset_attest) {
-            // ADR-0066 section 3.5: both together are a proven rotation at a
+            // ADR-0074 section 3.5: both together are a proven rotation at a
             // new generation, the account's own "change my keys".
             (Some(_), Some((generation, _))) => EvidenceKind::ProvenRotation { generation },
             (Some(_), None) => EvidenceKind::Proof,
@@ -501,21 +501,21 @@ enum EvidenceKind {
     /// A supersession proof alone (ADR-0016): the key changes, the
     /// generation does not.
     Proof,
-    /// A verified key-reset attestation of this generation (ADR-0065), with
+    /// A verified key-reset attestation of this generation (ADR-0073), with
     /// no proof: a reset.
     Attested {
         /// The generation the attestation moves the account to.
         generation: u64,
     },
     /// A supersession proof AND a verified attestation of this generation
-    /// (ADR-0066 section 3.5): a rotation the previous key signed.
+    /// (ADR-0074 section 3.5): a rotation the previous key signed.
     ProvenRotation {
         /// The generation the attestation moves the account to.
         generation: u64,
     },
 }
 
-/// `true` when `proof` may ride on this upload (ADR-0066 section 3.5; before
+/// `true` when `proof` may ride on this upload (ADR-0074 section 3.5; before
 /// it the directory tested for presence only, so a session alone could
 /// publish a key every client then refused).
 ///
@@ -589,15 +589,15 @@ pub(crate) enum LogAppendDecision {
     /// A key change happened — append a leaf to the transparency log. The
     /// `is_reset` flag is the KT-log "fresh start" marker: `false` for a
     /// first publish or a proven rotation; `true` for an attested key reset
-    /// (ADR-0065, the successor of ADR-0017's unproven change — the only
+    /// (ADR-0073, the successor of ADR-0017's unproven change — the only
     /// key change without a supersession proof the directory accepts).
     Append {
-        /// ADR-0017 / ADR-0065 fresh-start marker.
+        /// ADR-0017 / ADR-0073 fresh-start marker.
         is_reset: bool,
     },
 }
 
-/// Apply the identity-bundle upsert under the ADR-0065 change rule, the
+/// Apply the identity-bundle upsert under the ADR-0073 change rule, the
 /// generation floor and the ADR-0017 (ii) cool-down, retrying a lost race
 /// ([`is_lost_race`]: the concurrent-first-publish INSERT race, whose loser
 /// then takes the row-locked UPDATE path, and the gap-lock deadlock between
@@ -658,7 +658,7 @@ type ExistingRow = (Vec<u8>, u64, i64, Option<Vec<u8>>);
 /// a row lock so the check is race-free. A database error drops the
 /// transaction (rollback); a refusal rolls it back explicitly.
 ///
-/// **The change rule (ADR-0065 section 4.1).** A same-key re-upload always
+/// **The change rule (ADR-0073 section 4.1).** A same-key re-upload always
 /// applies and changes nothing but the sibling columns. A key CHANGE applies
 /// only with a supersession proof (ADR-0016; never gated, never a reset) or a
 /// key-reset attestation whose generation is strictly above the row's
@@ -674,7 +674,7 @@ type ExistingRow = (Vec<u8>, u64, i64, Option<Vec<u8>>);
 /// (`401 key-generation-superseded`); a higher one is accepted and raises
 /// nothing (the attested upload has not landed yet).
 ///
-/// **A proven rotation (ADR-0066 section 3.5).** A key change carrying a
+/// **A proven rotation (ADR-0074 section 3.5).** A key change carrying a
 /// proof AND an attestation is the account changing its own keys while its
 /// other devices stay: the proof must verify, the attestation's generation
 /// must be strictly above the row's (`409` otherwise), both are stored, the
@@ -759,7 +759,7 @@ async fn try_apply_identity_once(
             .bind(evidence.supersession_proof)
             .bind(leaf_auth)
             .bind(genesis_attest)
-            // Genesis is generation 1 (ADR-0065 section 1).
+            // Genesis is generation 1 (ADR-0073 section 1).
             .bind(attested.map_or(1u64, |(g, _)| g))
             .bind(attested.map(|(_, bytes)| bytes))
             .execute(&mut *tx)
@@ -773,7 +773,7 @@ async fn try_apply_identity_once(
             LogAppendDecision::Append { is_reset: false }
         },
         Some((current, stored_generation, within_cooldown, previous)) => {
-            // ADR-0065: the generation floor, before any change is judged.
+            // ADR-0073: the generation floor, before any change is judged.
             if crate::key_reset::floor_decision(Some(stored_generation), token_generation) {
                 tx.rollback().await?;
                 tracing::warn!(
@@ -788,7 +788,7 @@ async fn try_apply_identity_once(
                 )));
             }
 
-            // ADR-0066 section 3.5: a proof that rides on the upload is
+            // ADR-0074 section 3.5: a proof that rides on the upload is
             // verified against the key this row holds, under its lock.
             if evidence.supersession_proof.is_some_and(|proof| {
                 !proof_is_valid(
@@ -871,7 +871,7 @@ async fn try_apply_identity_once(
             .execute(&mut *tx)
             .await?;
 
-            // ADR-0065 section 5: an attested change removes every device of
+            // ADR-0073 section 5: an attested change removes every device of
             // the old generation from the directory, the resetting device's
             // own row included (its binding was signed by the old account
             // key; it re-publishes right after).
@@ -892,7 +892,7 @@ async fn try_apply_identity_once(
 }
 
 /// Delete every KeyPackage row of `account_id` and KEEP its device
-/// tombstones: the proven-rotation arm (ADR-0066 section 3.5; see
+/// tombstones: the proven-rotation arm (ADR-0074 section 3.5; see
 /// [`try_apply_identity_once`] for why the tombstones stay).
 async fn delete_keypackage_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
@@ -912,8 +912,8 @@ async fn delete_keypackage_rows(
 }
 
 /// Delete every KeyPackage row of `account_id` inside the upload's
-/// transaction (ADR-0065 section 4.1 / 5), and with them the account's
-/// device tombstones (ADR-0066 section 2.2): the generation supersedes every
+/// transaction (ADR-0073 section 4.1 / 5), and with them the account's
+/// device tombstones (ADR-0074 section 2.2): the generation supersedes every
 /// device of the old one, and a device that re-publishes under the new
 /// generation holds the new keys.
 async fn delete_keypackages(
@@ -937,7 +937,7 @@ async fn delete_keypackages(
     Ok(())
 }
 
-/// The ADR-0065 change-rule decision for an upload against an existing
+/// The ADR-0073 change-rule decision for an upload against an existing
 /// row. `Apply` carries the writes the caller must perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChangeOutcome {
@@ -1006,7 +1006,7 @@ const fn log_append_decision(key_changed: bool, attested_reset: bool) -> LogAppe
     }
 }
 
-/// Pure decision matrix of the ADR-0065 change rule (no I/O so it is
+/// Pure decision matrix of the ADR-0073 change rule (no I/O so it is
 /// unit-testable). NEVER refuses a no-change re-upload or a proven rotation;
 /// an attested change needs a strictly greater generation and an elapsed
 /// cool-down; everything else is refused.
@@ -1260,11 +1260,11 @@ pub(crate) struct FetchResponse {
     /// when absent. Opaque server bytes — the peer verifies it locally.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) supersession_proof: Option<String>,
-    /// ADR-0065: the key generation the published key belongs to (1 =
+    /// ADR-0073: the key generation the published key belongs to (1 =
     /// genesis; an attested reset stores its strictly greater value), so a
     /// client can compare the published generation with its own token's.
     pub(crate) key_generation: u64,
-    /// ADR-0065 R.3: standard base64 of the stored key-reset attestation
+    /// ADR-0073 R.3: standard base64 of the stored key-reset attestation
     /// (the latest attested reset's), omitted from the JSON when the account
     /// never reset. The stored bytes unparsed: discovery verified them at
     /// upload, and at fetch they are an opaque pass-through like
@@ -1348,7 +1348,7 @@ pub(crate) async fn fetch(
         // without interpreting them; the peer verifies the proof locally.
         supersession_proof: proof.map(|p| B64.encode(&p)),
         key_generation,
-        // The same opaque pass-through (ADR-0065 R.3).
+        // The same opaque pass-through (ADR-0073 R.3).
         key_reset_attest: key_reset_attest.map(|a| B64.encode(&a)),
     }))
 }
@@ -1607,7 +1607,7 @@ mod tests {
             "genesis_attest PRESERVED across a non-rotation re-upload (COALESCE)"
         );
 
-        // 3. An attested key reset (ADR-0065: the only unproven key change the
+        // 3. An attested key reset (ADR-0073: the only unproven key change the
         //    directory accepts) WITH a new genesis attestation -> Append
         //    {is_reset} and the stored attestation is REPLACED. (Not gated:
         //    the first publish never armed the cool-down marker.)

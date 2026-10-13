@@ -3,7 +3,7 @@
 
 /**
  * "This device still owes the directory and the device list the new keys"
- * (ADR-0065 section 2.3; `docs/ux/identity-recovery.md` section 15.4).
+ * (ADR-0073 section 2.3; `docs/ux/identity-recovery.md` section 15.4).
  *
  * A reset is one server operation (`POST /account/keys/reset/finish`): once
  * it answered, the account is at a new key generation, every other device is
@@ -18,19 +18,19 @@
  * Only public, auth-signed material is stored; the seed stays under the
  * device key.
  *
- * The successor of the "recovery credential owed" marker of ADR-0064: the
+ * The successor of the "recovery credential owed" marker of ADR-0072: the
  * credential now moves with the generation in the reset transaction, so
  * there is nothing of it left to owe.
  *
  * While the publish is owed the new words are withheld (a phrase for an
  * identity nobody can find is not yet a recovery phrase), and an attestation
  * older than {@link KEY_RESET_ATTESTATION_MAX_AGE_MS} is not applied until
- * the person signs in again (ADR-0065 section 4.2, last paragraph).
+ * the person signs in again (ADR-0073 section 4.2, last paragraph).
  */
 import type { MarkerStorage } from "./phrase-gate";
 
 /** The client-side bound on applying a stored attestation: 30 days from its
- *  `signed_at`. Chosen (ADR-0065 section 4.2), not measured. */
+ *  `signed_at`. Chosen (ADR-0073 section 4.2), not measured. */
 export const KEY_RESET_ATTESTATION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** The two server steps a reset still owes after `reset/finish`. */
@@ -128,7 +128,7 @@ export function isKeyResetOwed(storage: MarkerStorage | undefined, accountIdB64:
 // The pure rules
 // ---------------------------------------------------------------------------
 
-/** The fixed length of the attestation (`lakko-attest`, ADR-0065 2.2). */
+/** The fixed length of the attestation (`lakko-attest`, ADR-0073 2.2). */
 export const KEY_RESET_ATTESTATION_LEN = 177;
 
 /** Byte offset of `signed_at_unix_millis` in the fixed layout:
@@ -195,7 +195,7 @@ export function attestationAge(signedAtMs: number, nowMs: number): AttestationAg
  * the bound; past it, only after an explicit sign-in in this page (a
  * password, a passkey, a recovery factor), which issues nothing new but
  * confirms the account is still the person's before a weeks-old reset is
- * pushed to the directory (ADR-0065 section 4.2). A silent restore does not
+ * pushed to the directory (ADR-0073 section 4.2). A silent restore does not
  * count.
  */
 export function attestationGate(
@@ -221,7 +221,7 @@ export type KeyResetStepOutcome =
   | "refused";
 
 /**
- * The directory upload's answer (ADR-0065 section 4.1, contract section 5
+ * The directory upload's answer (ADR-0073 section 4.1, contract section 5
  * step 3). A `409 key-generation-not-newer` on a retry means the reset
  * already landed there; `409 identity-change-needs-attestation` means the
  * attestation did not reach the server (a client defect, not retryable as

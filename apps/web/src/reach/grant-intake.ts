@@ -27,7 +27,7 @@ export function foldProfileGrants(
   args: {
     readonly senderHex: string;
     /** The account key the sender is ADDRESSED by now (resolved through the
-     *  proven-predecessor table); the sender's own key when omitted. ADR-0066
+     *  proven-predecessor table); the sender's own key when omitted. ADR-0074
      *  section 3.5a rule 6. */
     readonly addressHex?: string;
     readonly ownHex: string;

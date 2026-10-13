@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0066 section 2.3 — removing ANOTHER device of the account, as one
+// ADR-0074 section 2.3 — removing ANOTHER device of the account, as one
 // operation with an owed record.
 //
 // The order, on the removing device:
@@ -94,7 +94,7 @@ public enum DeviceRemovalPlan {
     public enum Start: Equatable {
         case proceed
         /// A key-reset publish is owed: auth's recorded key and the
-        /// directory's differ in that window (ADR-0066 "T1 as built" point
+        /// directory's differ in that window (ADR-0074 "T1 as built" point
         /// 15), so the two halves of a removal would be checked under two
         /// keys. The surface shows the owed copy.
         case blockedPublishOwed
@@ -579,7 +579,7 @@ extension DeviceRemovalRunner.Ports {
             retireFromChats: { [weak chat] deviceId in
                 guard let chat else { return false }
                 let tally = await chat.retireDevice(deviceKey: deviceId)
-                NSLog("ADR-0066 retire device: offered %d, skipped %d, failed %d",
+                NSLog("ADR-0074 retire device: offered %d, skipped %d, failed %d",
                       tally.offered, tally.skipped, tally.failed)
                 return tally.failed == 0
             },

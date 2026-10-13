@@ -10,7 +10,7 @@
  * pinned, a key that is not the pin sends the published identity through
  * the fail-closed gate first (`ContactsClient.checkContactIdentity`), where
  * a proven rotation re-pins and an attested reset is accepted silently
- * (ADR-0065 R.2); a key that is then still neither the pin nor a proven
+ * (ADR-0073 R.2); a key that is then still neither the pin nor a proven
  * predecessor of it is refused. Old keys do not come back.
  */
 
@@ -40,7 +40,7 @@ export function contactRequestGate(
 }
 
 /** Which keys a contact request goes out to once the recipient's published
- *  identity has passed the fail-closed gate (ADR-0066 section 3.5a rule 1). */
+ *  identity has passed the fail-closed gate (ADR-0074 section 3.5a rule 1). */
 export type RequestTarget =
   /** The keys in hand are the published ones. */
   | "as-supplied"

@@ -25,7 +25,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0066 - a device paired AFTER a rotation of the account keys: what the
+ * ADR-0074 - a device paired AFTER a rotation of the account keys: what the
  * pairing state bundle carries of the account's earlier keys and of each
  * contact's proven predecessors, and what the receiving device stores.
  *

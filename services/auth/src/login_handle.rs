@@ -20,7 +20,7 @@
 //! leak without the pepper is not a dictionary over usernames.
 //!
 //! - **`PUT /auth/login-handle`** — bearer. Binds the caller's account to a
-//!   handle, replacing its previous one (one per account). Since ADR-0068 a
+//!   handle, replacing its previous one (one per account). Since ADR-0076 a
 //!   bind that CHANGES the handle (the account already holds another) needs
 //!   `fresh_grant` (`403 fresh-auth-required`, before any counter); a first
 //!   bind and a re-bind of the held handle do not. With `recovery_email`
@@ -45,7 +45,7 @@
 //! same unknown name gets the same OPRF key every time), the same dummy
 //! verify. Nothing a caller can observe says whether a handle is bound.
 //!
-//! **A change of handle turns the recovery email off** (ADR-0067 section 6):
+//! **A change of handle turns the recovery email off** (ADR-0075 section 6):
 //! re-binding to another handle, or removing the handle, deletes the
 //! account's `recovery_emails` and `email_vaults` rows (and its challenges
 //! and tickets) in the same transaction and writes the "recovery email
@@ -212,7 +212,7 @@ pub(crate) async fn resolve(
 }
 
 /// What a bind may do when it turns out to CHANGE the account's handle
-/// (ADR-0068 section 2). Decided by the caller before the transaction; the
+/// (ADR-0076 section 2). Decided by the caller before the transaction; the
 /// transaction applies it to what it finds under the account row's lock.
 #[derive(Default)]
 pub(crate) struct ChangeTerms {
@@ -378,7 +378,7 @@ async fn bind_once(
         tx.commit().await?;
         return Ok(BindOutcome::Unchanged);
     }
-    // ADR-0068 section 2: a CHANGE of handle (the account holds another one)
+    // ADR-0076 section 2: a CHANGE of handle (the account holds another one)
     // needs a fresh-auth grant: a session alone must not move the name the
     // account is signed into by. Decided here, under the lock, on the handle
     // the account holds NOW; a first bind needs none. Before the interval
@@ -431,10 +431,10 @@ async fn bind_once(
         Err(e) => return Err(e.into()),
     }
     if let Some(current) = current.as_deref() {
-        // ADR-0067 section 6: the recovery email was made from the old name
+        // ADR-0075 section 6: the recovery email was made from the old name
         // (the server's `email_key` and the client's vault key both take the
         // handle), so a change of handle turns it off in this transaction,
-        // unless the bind carries the confirmed address (ADR-0068 section
+        // unless the bind carries the confirmed address (ADR-0076 section
         // 2): then the key is moved to the new handle here, with no letter.
         match terms.rekey.as_ref() {
             None => crate::recovery_email::drop_for_handle_change(&mut tx, account_id).await?,
@@ -474,7 +474,7 @@ pub(crate) struct PutReq {
     /// The 32-byte handle, base64url without padding.
     pub handle: String,
     /// The `k1` fresh-auth grant. Needed only when the bind CHANGES the
-    /// account's handle (ADR-0068 section 2).
+    /// account's handle (ADR-0076 section 2).
     #[serde(default)]
     pub fresh_grant: Option<String>,
     /// The handle the account holds now, base64url without padding. Needed
@@ -527,7 +527,7 @@ pub(crate) async fn put(
         .map(|r| crate::recovery_email::rekey_plan(&state, previous.as_ref(), &handle, r))
         .transpose()?;
 
-    // ADR-0068 section 2: a change needs the grant, and the refusal comes
+    // ADR-0076 section 2: a change needs the grant, and the refusal comes
     // before any counter, so a session without one spends none of the
     // owner's bind budget. Whether this IS a change is read here and decided
     // again under the row lock in `bind_once`.
@@ -604,7 +604,7 @@ pub(crate) struct CheckReq {
     pub handle: String,
 }
 
-/// `POST /auth/login-handle/check {handle}` — bearer (ADR-0068 section 2).
+/// `POST /auth/login-handle/check {handle}` — bearer (ADR-0076 section 2).
 /// How the handle a device holds relates to the one its account is bound to:
 ///
 /// - `{"state":"same"}`: it is the bound one; nothing to do;
@@ -691,7 +691,7 @@ async fn remove(pool: &MySqlPool, account_id: &[u8; ACCOUNT_ID_LEN]) -> Result<b
         .bind(account_id.as_slice())
         .execute(&mut *tx)
         .await?;
-    // ADR-0067 section 6: without the handle the recovery email names nobody.
+    // ADR-0075 section 6: without the handle the recovery email names nobody.
     crate::recovery_email::drop_for_handle_change(&mut tx, account_id).await?;
     sqlx::query(
         "INSERT INTO login_handle_changes (account_id, last_changed_at, previous_handle_key) \

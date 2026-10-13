@@ -10,7 +10,7 @@ import androidx.security.crypto.MasterKey
 
 /**
  * Encrypted cache of the auth service's **session pair** for the active
- * account (ADR-0065 section 3: the short-lived access token, the refresh
+ * account (ADR-0073 section 3: the short-lived access token, the refresh
  * credential and the key generation they were issued under), so a process
  * restart can re-attach to the live session without a password round-trip.
  *

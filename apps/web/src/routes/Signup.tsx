@@ -5,7 +5,7 @@
  * Signup route (docs/ux/client-redesign.md section 5.6): username with the
  * live availability hint, name, password, confirm password, Create account.
  *
- * No recovery phrase is shown at sign-up (ADR-0067 D2): the phrase is
+ * No recovery phrase is shown at sign-up (ADR-0075 D2): the phrase is
  * generated and stored on the device, and the person may save one later.
  * What follows the form is the "Protect your account" step
  * (docs/ux/identity-recovery.md section 19.1a), which is NOT rendered here:

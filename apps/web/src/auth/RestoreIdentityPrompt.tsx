@@ -8,13 +8,13 @@
  * that does not hold the account's keys. The keys are never derived from
  * the password and never silently re-minted (either would break every
  * contact's pin); they come from one of three places, in this order
- * (ADR-0064 decision 7):
+ * (ADR-0072 decision 7):
  *
  *   - another device that is still signed in (ADR-0018 factor (a)), which
  *     transfers the recovery phrase (as its entropy) end-to-end encrypted;
  *     `completeFromPairing` checks the keys it gives against the published
  *     identity before storing the keys and the phrase;
- *   - a passkey that carries the keys (ADR-0064 decision 6),
+ *   - a passkey that carries the keys (ADR-0072 decision 6),
  *     `restoreKeysWithPasskey`; the row is shown only while the account has
  *     such a passkey;
  *   - the 12-word phrase, `provideRecoveryPhrase` (checked against the
@@ -127,7 +127,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       }
     },
   );
-  // ADR-0067 (alignment J): how the account is protected, read with the
+  // ADR-0075 (alignment J): how the account is protected, read with the
   // session this device holds. It decides the phrase row and the email row,
   // and keeps the device's "phrase-protected" flag in step, which is what
   // decides whether new words are shown should the keys be reset from here.
@@ -303,7 +303,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                       await auth.completeFromPairing(
                         outcome.phraseEntropy,
                         outcome.session ?? undefined,
-                        // ADR-0066: the state bundle's earlier account keys
+                        // ADR-0074: the state bundle's earlier account keys
                         // are stored before the session's identities exist.
                         persistAnonymousJoin ?? undefined,
                       );
@@ -368,7 +368,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
 
 /**
  * "I have none of these" (docs/ux/identity-recovery.md sections 8 and 15.1,
- * ADR-0065): for a person who is signed in but has no other device, no
+ * ADR-0073): for a person who is signed in but has no other device, no
  * passkey that restores keys and no phrase. The one path that gives the
  * account a new identity, so it is collapsed behind a warning that states
  * what it does (other devices signed out and removed, passkeys deleted,

@@ -83,7 +83,7 @@ public protocol DeviceLinkRelay: AnyObject {
     func postPayload(requestIdB64: String, sealed: DeviceLinkSealed) async throws
     // Old device (bearer).
     func openRequest(sessionToken: String) async throws -> DeviceLinkPendingRequest?
-    // `answer` and `postResult` carry the fresh-auth grant (ADR-0065, amended
+    // `answer` and `postResult` carry the fresh-auth grant (ADR-0073, amended
     // 2026-10-06); without a valid one they throw the `403
     // fresh-auth-required` (``FreshAuthRefusal/isRequired(_:)``).
     func answer(requestIdB64: String, pakeB: Data, sessionToken: String, freshGrant: String) async throws
@@ -489,7 +489,7 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         case proofNeeded
     }
 
-    /// The fresh-auth side of the flow (ADR-0065, amended 2026-10-06).
+    /// The fresh-auth side of the flow (ADR-0073, amended 2026-10-06).
     public struct ProofPorts {
         /// "Yes, it's me" asks for the proof first: `true` when a proof is
         /// live afterwards. On `false` the block says why and the request

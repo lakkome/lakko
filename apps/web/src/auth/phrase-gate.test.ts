@@ -21,7 +21,7 @@ const ALL_KINDS: GuardAuthKind[] = [
   "save-fresh-phrase",
 ];
 
-describe("the sign-up's protect step (ADR-0067, UX 19.1a)", () => {
+describe("the sign-up's protect step (ADR-0075, UX 19.1a)", () => {
   it("keeps /signup on the step when signup lands the session", () => {
     // `/signup` sits in the anonymous guard, which would otherwise navigate
     // home in the same tick the session landed.

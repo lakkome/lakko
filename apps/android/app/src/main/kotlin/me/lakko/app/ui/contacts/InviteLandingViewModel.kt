@@ -116,7 +116,7 @@ public class InviteLandingViewModel(
 public sealed interface InviteLandingState {
     public data object Loading : InviteLandingState
 
-    /** ADR-0065 UX 16.6 — the link's owner is already a contact: the screen
+    /** ADR-0073 UX 16.6 — the link's owner is already a contact: the screen
      *  opens that contact and draws nothing of its own. */
     public data class ExistingContact(val routeKey: String) : InviteLandingState
 

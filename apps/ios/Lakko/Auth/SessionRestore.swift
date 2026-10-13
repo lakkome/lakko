@@ -111,7 +111,7 @@ public enum SessionRestore {
     ///   * an empty access token, or a pair whose refresh credential AND
     ///     access token are both expired → logged out AND discard the token.
     ///
-    /// ADR-0065 section 3.3: the REFRESH credential is what restores the
+    /// ADR-0073 section 3.3: the REFRESH credential is what restores the
     /// session. The access token may already be expired — the silent restore
     /// refreshes instead of reusing it. A pair with no refresh credential (a
     /// keys-only pairing outcome, a fixture) restores only while its access

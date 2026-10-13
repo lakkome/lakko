@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065, amended 2026-10-06 — the fresh-auth proof: the holder, the wire
+/// ADR-0073, amended 2026-10-06 — the fresh-auth proof: the holder, the wire
 /// fields, the refusals, the reset warning screen's decision (UX 17.2) and
 /// the password-change gate. The flows around them are in
 /// `RecoveryFlowTests`; the shared block is in `FreshAuthBlockTests`.

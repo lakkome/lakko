@@ -486,7 +486,7 @@ public fun ChannelDetailScreen(
     val channels by state.channels.collectAsState()
     val keysByChannel by state.keysByChannel.collectAsState()
     val subscriberKeysByChannel by state.subscriberKeysByChannel.collectAsState()
-    // ADR-0065 phase 2 / UX 16.6 — a channel this account owned under keys it
+    // ADR-0073 phase 2 / UX 16.6 — a channel this account owned under keys it
     // reset: the notice and one control, nothing else.
     val orphaned by state.orphaned.collectAsState()
     val isOrphaned = me.lakko.app.channels.channelIsOrphaned(channelId, orphaned)
@@ -670,7 +670,7 @@ public fun ChannelSubscribeScreen(
 }
 
 /**
- * ADR-0065 phase 2 / UX 16.6 — the owner's view of an orphaned channel: one
+ * ADR-0073 phase 2 / UX 16.6 — the owner's view of an orphaned channel: one
  * notice stating what the reset did (the old keys signed the posts; subscribers
  * are not told) and one control, `Remove from this device`. The composer, the
  * rotation and the subscriber management are gone.

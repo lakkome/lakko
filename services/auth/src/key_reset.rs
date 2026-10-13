@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Reset the account keys: `POST /account/keys/reset/{start,finish}`
-//! ([ADR-0065] section 2).
+//! ([ADR-0073] section 2).
 //!
 //! The interface calls it "Reset account keys"; it is the server half of the
 //! client's `mintFreshIdentity`. The person holds a session and no route to
@@ -19,11 +19,11 @@
 //!    after ONE transaction, in this order:
 //!    1. lock the account row and compare its key generation with the
 //!       grant's (equal, or the whole reset is refused), capture the recall
-//!       anchor (ADR-0066 section 0.2: the identity key and the password
+//!       anchor (ADR-0074 section 0.2: the identity key and the password
 //!       envelope as they are before this change, unless an anchor for the
 //!       current key already exists; see `crate::recall`), then bump
 //!       `accounts.identity_version`, record the new key in
-//!       `accounts.identity_pubkey` (ADR-0066 section 0.1) and read the new
+//!       `accounts.identity_pubkey` (ADR-0074 section 0.1) and read the new
 //!       value `g` in one statement (the `LAST_INSERT_ID` idiom);
 //!    2. replace the recovery credential: delete the account's in-flight
 //!       recovery-login and password-reset states, upsert `KIND_RECOVERY`;
@@ -110,7 +110,7 @@
 //! The `503 key-reset-disabled` the ADR names for a missing attest key cannot
 //! occur: `load_or_init_attest_key` runs at boot and the key is not optional.
 //!
-//! [ADR-0065]: ../../../docs/adr/0065-account-key-reset.md
+//! [ADR-0073]: ../../../docs/adr/0073-account-key-reset.md
 
 use axum::extract::State;
 use axum::response::Json;
@@ -163,10 +163,10 @@ pub(crate) struct ResetFinishReq {
     pub(crate) recovery_upload: String,
     /// URL-safe base64 of the new identity's 32-byte Ed25519 signature
     /// pubkey: the key the reset installs, bound into the attestation and
-    /// recorded as the account's identity key (ADR-0066 section 0.1).
+    /// recorded as the account's identity key (ADR-0074 section 0.1).
     pub(crate) new_signature_pubkey_b64: String,
     /// URL-safe base64 of the 32-byte device id the new pair names
-    /// (ADR-0066 section 0.4). Absent: the pair names the device the
+    /// (ADR-0074 section 0.4). Absent: the pair names the device the
     /// caller's bearer names. A reset that gives the device a new
     /// conversation leaf key sends the new id here.
     #[serde(default)]
@@ -207,7 +207,7 @@ fn decode_pubkey(b64: &str) -> Result<[u8; 32], ApiError> {
 /// account's device grants and device requests. Shared with the recall
 /// (`crate::recall::finish`), which is this reset plus a password change.
 ///
-/// ADR-0067: the email vault goes too. It seals the OLD phrase, which is no
+/// ADR-0075: the email vault goes too. It seals the OLD phrase, which is no
 /// longer the account's; a vault of the new phrase is stored by enrolling the
 /// recovery email again. Recovery tickets in flight go with it. The
 /// `recovery_emails` row (the password route) is kept by a reset and deleted
@@ -338,7 +338,7 @@ pub(crate) async fn finish(
         Some(_) => {},
     }
 
-    //    The recall anchor (ADR-0066 section 0.2), before anything changes:
+    //    The recall anchor (ADR-0074 section 0.2), before anything changes:
     //    the identity key and the password envelope as they are now, unless
     //    an anchor for this identity key already holds an earlier state.
     //    Under the row lock just taken, so two changes capture one anchor.
@@ -353,7 +353,7 @@ pub(crate) async fn finish(
     .map_err(ApiError::Db)?;
 
     //    Bump the key generation and read the new value in one statement.
-    //    The same statement records the new identity key (ADR-0066 section
+    //    The same statement records the new identity key (ADR-0074 section
     //    0.1): the reset is the one writer that moves it.
     let bumped = sqlx::query(
         "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), \

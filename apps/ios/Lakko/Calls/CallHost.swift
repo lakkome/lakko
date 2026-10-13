@@ -73,7 +73,7 @@ final class CallHost: ObservableObject {
         /// shows. One value, because the whole point is that neither surface
         /// stores the finished sentence.
         var recordCall: @MainActor (_ call: FinishedCall) -> Void = { _ in }
-        /// ADR-0065 R.7 case 1 — where a one-to-one call asked for in
+        /// ADR-0073 R.7 case 1 — where a one-to-one call asked for in
         /// `groupIdHex` is dialled: that group, the group the conversation
         /// moved to, or nowhere (`CallContinuity.oneToOneCallTarget`). The
         /// ids are the app's hex keys.
@@ -349,7 +349,7 @@ final class CallHost: ObservableObject {
             callError = CallSlot.busyText(other, verb: .start)
             return
         }
-        // ADR-0065 R.7 case 1 — a call started in a one-to-one whose other
+        // ADR-0073 R.7 case 1 — a call started in a one-to-one whose other
         // person reset their keys dials the group the conversation continues
         // in, when there is one and it is not dead itself; otherwise it fails
         // here, before anything is signalled, with the ordinary copy.
@@ -447,7 +447,7 @@ final class CallHost: ObservableObject {
         }
     }
 
-    /// ADR-0065 R.12 — the one-to-one a call is in MOVED to a successor group
+    /// ADR-0073 R.12 — the one-to-one a call is in MOVED to a successor group
     /// (the other person reset their account keys and the conversation
     /// continues on new keys). The call's keys come from the old group, whose
     /// other side is devices that were removed: end it here. The session

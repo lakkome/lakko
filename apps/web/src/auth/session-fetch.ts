@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `fetch` for every bearer request of the app (ADR-0065 section 3.3).
+ * `fetch` for every bearer request of the app (ADR-0073 section 3.3).
  *
  * A drop-in for `globalThis.fetch`: a request whose `Authorization` header
  * carries a token the session provider manages is refreshed ahead of expiry

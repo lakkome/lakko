@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Finish the key rotation this device still owes (ADR-0066 section 3.2): a
+ * Finish the key rotation this device still owes (ADR-0074 section 3.2): a
  * rotation whose commit landed and whose publishing steps (the directory,
  * the KeyPackage, the journal roots, the channel owner keys, the backup) did
  * not all get an answer is continued here at every landing and whenever the

@@ -236,7 +236,7 @@ public class PeopleSearchService(
     }
 
     /**
-     * ADR-0066 section 3.5a - [foundKey] is a proven predecessor of
+     * ADR-0074 section 3.5a - [foundKey] is a proven predecessor of
      * [publishedKey]: a step the gate recorded, or the proof the directory
      * served with [publishedKey] verifies as signed by [foundKey] over
      * exactly that key. Nothing is pinned or recorded here (a search is a
@@ -258,7 +258,7 @@ public class PeopleSearchService(
     /** The DS reach check of a person's account mailbox with a grant wire. */
     private suspend fun reachCheckWith(identityPk: ByteArray, grantWireB64: String): Boolean {
         val grant = uniffi.lakko_ffi_uniffi.decodeReachGrant(Base64.getDecoder().decode(grantWireB64))
-        // ADR-0066 3.5a rule 1: the person's CURRENT mailbox (a proven
+        // ADR-0074 3.5a rule 1: the person's CURRENT mailbox (a proven
         // predecessor key resolves to its successor; nothing else does).
         val mailbox = reach().mailboxOf(identityPk)
         return me.lakko.app.ds.DsClient().use { ds -> ds.checkReach(mailbox, me.lakko.app.ds.reachSigner(grant.seed)) }

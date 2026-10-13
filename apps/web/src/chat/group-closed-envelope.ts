@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.6 — recognising a group-closed envelope (a successor CLAIM) in
+ * ADR-0073 R.6 — recognising a group-closed envelope (a successor CLAIM) in
  * an application plaintext. The twin of `group-name-envelope.ts`.
  *
  * The claim rides an MLS application message; without this arm ahead of

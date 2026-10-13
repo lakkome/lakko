@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * A session names a device (`session-device.ts`, ADR-0066 section 0.4):
+ * A session names a device (`session-device.ts`, ADR-0074 section 0.4):
  * what a landing sends, when a session is bound afterwards, what a refused
  * bind means, and the genesis-recorded rule (section 0.1).
  */

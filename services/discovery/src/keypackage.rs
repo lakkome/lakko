@@ -26,7 +26,7 @@
 //! * Upload and delete are bearer-bound to the token's account; fetch is
 //!   public by design (KeyPackages are public artefacts).
 //!
-//! ## Removal that holds (ADR-0066 section 2.2)
+//! ## Removal that holds (ADR-0074 section 2.2)
 //!
 //! A device removed from the account keeps a valid access token for up to
 //! the access lifetime, and it holds the account seed, so it can mint a
@@ -49,7 +49,7 @@
 //!   rows with its token alone. (It holds the account seed and could sign a
 //!   statement; taking the seed away is a key rotation, not a removal.)
 //!
-//! Both writes are under the ADR-0065 generation floor.
+//! Both writes are under the ADR-0073 generation floor.
 //!
 //! The server still parses no KeyPackage and does not check that `device_id`
 //! is the KeyPackage's leaf key.
@@ -119,7 +119,7 @@ async fn is_tombstoned(
     Ok(deleted_at.is_some_and(|at| at > now_ms().saturating_sub(TOMBSTONE_RETENTION_MS)))
 }
 
-/// The ADR-0066 gate of a KeyPackage publish: `device_id` is the device the
+/// The ADR-0074 gate of a KeyPackage publish: `device_id` is the device the
 /// session names and not the all-zero "no device" id (`403 device-mismatch`),
 /// and is not tombstoned (`403 device-revoked`).
 async fn require_publishable_device(
@@ -247,12 +247,12 @@ pub(crate) struct UploadResponse {
 
 /// `POST /discovery/keypackage` — upsert.
 ///
-/// ADR-0065 section 4.1: one of the two identity writes under the generation
+/// ADR-0073 section 4.1: one of the two identity writes under the generation
 /// floor — a session token issued under a key generation below the account's
 /// `identity_bundles.key_generation` is refused `401
 /// {"error":"key-generation-superseded"}` before anything is written.
 ///
-/// ADR-0066 section 2.2, after the floor: the body's `device_id` must be the
+/// ADR-0074 section 2.2, after the floor: the body's `device_id` must be the
 /// device the token names and not the all-zero "no device" id (`403
 /// {"error":"device-mismatch"}`), and must not be tombstoned (`403
 /// {"error":"device-revoked"}`).
@@ -283,7 +283,7 @@ pub(crate) async fn upload(
         ));
     }
 
-    // ADR-0065: the generation floor. Read before the device cap, so a
+    // ADR-0073: the generation floor. Read before the device cap, so a
     // superseded device learns the one code it acts on and writes nothing.
     if crate::key_reset::floor_refuses(&state.db, &account_id, token_generation).await? {
         tracing::warn!(
@@ -297,7 +297,7 @@ pub(crate) async fn upload(
         ));
     }
 
-    // ADR-0066: the device gate, then the tombstone.
+    // ADR-0074: the device gate, then the tombstone.
     require_publishable_device(&state.db, &account_id, &device_id, &session_device.0).await?;
 
     let kp_bytes = B64.decode(&payload.keypackage).map_err(|e| {
@@ -431,9 +431,9 @@ async fn require_revoke_statement(
 
 /// `DELETE /discovery/keypackage/device/{device_id_b64url}` — remove one
 /// device's KeyPackage for the authenticated account (ADR-0050 device
-/// removal) and tombstone its id (ADR-0066 section 2.2).
+/// removal) and tombstone its id (ADR-0074 section 2.2).
 ///
-/// Checks, in order: the path id decodes to 32 bytes (`400`); the ADR-0065
+/// Checks, in order: the path id decodes to 32 bytes (`400`); the ADR-0073
 /// generation floor (`401 key-generation-superseded`: a session of a
 /// superseded generation deletes nothing); then by whose row it is:
 ///
@@ -649,7 +649,7 @@ mod tests {
     }
 }
 
-/// ADR-0066 sprint T1 route tests for the KeyPackage directory, driven
+/// ADR-0074 sprint T1 route tests for the KeyPackage directory, driven
 /// through the real router: the device gate, the tombstones, the delete gate
 /// and the generation floor on the delete. DB-gated on
 /// `LAKKO_DISCOVERY_TEST_DATABASE_URL` (skip, not fail, when unset).
@@ -1137,7 +1137,7 @@ mod route_tests {
         assert!(c.listed(&acct).await.is_empty());
     }
 
-    /// The delete is under the generation floor (the ADR-0065 residual), and
+    /// The delete is under the generation floor (the ADR-0073 residual), and
     /// an attested key change clears the account's tombstones with its rows.
     #[tokio::test]
     async fn the_delete_is_under_the_generation_floor_and_a_key_change_clears_tombstones() {

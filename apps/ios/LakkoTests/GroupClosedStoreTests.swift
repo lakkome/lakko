@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.6 - the claim state's transitions, codec and store. The cases
+/// ADR-0073 R.6 - the claim state's transitions, codec and store. The cases
 /// are those of `apps/web/src/chat/group-closed-store.test.ts`; the store
 /// cases are restated for `UserDefaults` (which cannot throw on a read, so
 /// the web "unreadable backend" case becomes "an unreadable blob is none").
@@ -170,7 +170,7 @@ final class GroupClosedStoreTests: XCTestCase {
         XCTAssertEqual(store.read(groupIdB64: "G2")?.pending.map(\.messageId), [2])
     }
 
-    // ADR-0065 R.13b - the claim store is sealed under the device key: it
+    // ADR-0073 R.13b - the claim store is sealed under the device key: it
     // can hold a prepared Welcome.
 
     func testThePreparedWelcomeIsNeverStoredAsItIs() throws {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Route tests of ADR-0066 sprint T5, through the router with the real
+//! Route tests of ADR-0074 sprint T5, through the router with the real
 //! OPAQUE client: `POST /account/keys/rotate/{start,finish}`, the session
 //! upgrade of `POST /auth/session/refresh`, and the two recall follow-ups
 //! (a stale statement is told the time; a lost `finish` answer can be asked

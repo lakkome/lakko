@@ -16,7 +16,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0066 section 3.5a rule 5 - the durable Sent list (so a re-send after a
+ * ADR-0074 section 3.5a rule 5 - the durable Sent list (so a re-send after a
  * rotation survives a process death and carries the intro), the marker that
  * retries the spend round, and the re-check throttle of rule 6.
  */

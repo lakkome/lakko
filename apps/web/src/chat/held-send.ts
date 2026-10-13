@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.7 case 1 / UX 16.4 - the HELD send of a one-to-one whose other
+ * ADR-0073 R.7 case 1 / UX 16.4 - the HELD send of a one-to-one whose other
  * person reset their keys.
  *
  * Once the reset is accepted, a message is never sent into the old session
@@ -167,7 +167,7 @@ export function heldVerdict(input: {
 export const REPLY_NO_JUMP_TARGET = 0;
 
 /**
- * ADR-0065 R.7 case 1 - the reply reference a held message is SENT with.
+ * ADR-0073 R.7 case 1 - the reply reference a held message is SENT with.
  *
  * A reply names its original by that message's id in the journal it was
  * composed in. A held reply is composed in the old one-to-one and flushed
@@ -196,7 +196,7 @@ export function replyForSend<R extends { readonly target: number }>(
 }
 
 /**
- * ADR-0065 R.7 case 1 - which of the messages a background flush just sent
+ * ADR-0073 R.7 case 1 - which of the messages a background flush just sent
  * the open view still has to show.
  *
  * The background flushes a conversation's held messages only while no view

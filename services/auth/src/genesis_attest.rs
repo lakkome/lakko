@@ -39,7 +39,7 @@
 //! definition ([`lakko_transparency::account_username_hash`]) so it is
 //! byte-identical to the discovery log-append side ([ADR-0036] drift hazard).
 //!
-//! ## The recorded key ([ADR-0066] section 0.1)
+//! ## The recorded key ([ADR-0074] section 0.1)
 //!
 //! The first mint for an account records the attested key in
 //! `accounts.identity_pubkey`, in one conditional statement. From then on the
@@ -65,7 +65,7 @@
 //! `lakko/genesis-attest/v1` domain separator makes the two attestation kinds
 //! cryptographically non-interchangeable.
 //!
-//! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+//! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 //! [ADR-0036]: ../../../docs/adr/0036-auth-attested-genesis.md
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -163,7 +163,7 @@ pub(crate) async fn genesis_attest(
 ) -> Result<Json<GenesisAttestRes>, ApiError> {
     let pubkey = decode_pubkey(&req.pubkey_b64)?;
 
-    // ADR-0066 section 0.1: record the key on the first mint, attest only the
+    // ADR-0074 section 0.1: record the key on the first mint, attest only the
     // recorded key afterwards. The conditional write and the read-back are
     // two statements; the write is atomic, so whichever of two racing first
     // mints loses reads the winner's key and is refused when its own differs.

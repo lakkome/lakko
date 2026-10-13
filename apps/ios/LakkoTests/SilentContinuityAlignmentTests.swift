@@ -5,7 +5,7 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-/// ADR-0065 R.13b - the alignment pass of the silent-continuity model: the
+/// ADR-0073 R.13b - the alignment pass of the silent-continuity model: the
 /// pure decisions it added on iOS (items C to G and the iOS half of H).
 final class SilentContinuityAlignmentTests: XCTestCase {
 

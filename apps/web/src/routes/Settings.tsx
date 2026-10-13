@@ -81,7 +81,7 @@ export default function Settings(): JSX.Element {
   const params = useParams<{ section?: string }>();
   const auth = useAuth();
   const profiles = useProfiles();
-  // ADR-0067 (alignment M): whenever Settings opens, how the account is
+  // ADR-0075 (alignment M): whenever Settings opens, how the account is
   // protected is read again, which keeps this device's "phrase-protected"
   // flag in step with a phrase saved on another device.
   onMount(() => {

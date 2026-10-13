@@ -362,7 +362,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
         return payload[0] == 0x02 && (payload[65] == 0x01 || payload[65] == 0x02)
     }
 
-    // MARK: - Kind 9: group closed (ADR-0065 phase 2, UX 16.5)
+    // MARK: - Kind 9: group closed (ADR-0073 phase 2, UX 16.5)
 
     /// The frozen 22-byte domain separator `lakko/group-closed/v1\0`.
     private static let groupClosedDomain: Data = {

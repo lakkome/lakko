@@ -491,7 +491,7 @@ public enum class ReachRekey {
 }
 
 /**
- * ADR-0066 section 3.5, "Reach" - a reach key and the mailbox it is
+ * ADR-0074 section 3.5, "Reach" - a reach key and the mailbox it is
  * registered on both derive from the account seed, so after a rotation of
  * the account keys the registrations a device recorded describe the OLD
  * mailbox. [boundKeyHex] is the account key being bound now,

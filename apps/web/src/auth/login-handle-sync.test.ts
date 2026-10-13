@@ -33,7 +33,7 @@ interface Seen {
   readonly body: Record<string, unknown> | null;
 }
 
-/** The handle checks the stub answered (ADR-0068), apart from `seen`. */
+/** The handle checks the stub answered (ADR-0076), apart from `seen`. */
 let checks: Seen[] = [];
 
 /** `status` / `json` answer the PUT; the handle check answers `checkState`
@@ -190,7 +190,7 @@ describe("a session binds its username's login handle", () => {
   });
 });
 
-// ADR-0068: the session never binds blindly.
+// ADR-0076: the session never binds blindly.
 describe("the handle is checked before anything is bound", () => {
   it("the rule: same is nothing, none is a first bind, other waits for the register", () => {
     expect(handleSyncAction("same")).toBe("nothing");

@@ -77,7 +77,7 @@ export function RecoveryPage(): JSX.Element {
 
       <section class="lk-card">
         <h2>{t("settings.recovery.group.keys")}</h2>
-        {/* ADR-0067: the words were never shown to the owner of an account
+        {/* ADR-0075: the words were never shown to the owner of an account
             without a saved phrase, so there is nothing to show again; saving
             one is in Settings > Account. */}
         <Show when={showPhraseOffered(phraseProtected(), phraseSaved() === true)}>
@@ -98,7 +98,7 @@ export function RecoveryPage(): JSX.Element {
         </div>
       </section>
 
-      {/* ADR-0067 section 11: three words exist only for a phrase-protected
+      {/* ADR-0075 section 11: three words exist only for a phrase-protected
           account. */}
       <Show when={threeWordsShown(phraseProtected())}>
       <section class="lk-card">

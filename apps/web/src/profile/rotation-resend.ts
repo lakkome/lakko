@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.5a rule 3 - after a rotation of the account keys the
+ * ADR-0074 section 3.5a rule 3 - after a rotation of the account keys the
  * profile envelope is re-sent to every one-to-one and group, because the
  * grants it carries are derived from the account seed: the ones peers hold
  * open the mailbox that was left, and the new mailbox is reachable only with

@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
 
-# ADR-0066: Account takeover resistance: recall after a reset, device removal that revokes, and a key rotation that keeps the other devices
+# ADR-0074: Account takeover resistance: recall after a reset, device removal that revokes, and a key rotation that keeps the other devices
 
 - **Status:** Accepted (2026-10-07; the maintainer accepted D1 to D11 as
   recommended). Sprint T1 (core + server: credentials that name a device,
@@ -19,9 +19,9 @@
   was done by reading the tree.
 - **Date:** 2026-10-07
 - **Context:** account recovery, Part 5 (after
-  [ADR-0064](0064-recovery-model-simplification.md) and
-  [ADR-0065](0065-account-key-reset.md))
-- **Amends (when built):** [ADR-0065](0065-account-key-reset.md) (section 3:
+  [ADR-0072](0072-recovery-model-simplification.md) and
+  [ADR-0073](0073-account-key-reset.md))
+- **Amends (when built):** [ADR-0073](0073-account-key-reset.md) (section 3:
   the credentials gain a device id and an issue time; section 3.5: the
   signed-out device no longer wipes everything at once; "per-device session
   tokens" leaves the rejected list in a narrower form; R.2: a proven
@@ -37,8 +37,8 @@
 - **UX spec:** [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md)
   section 18 (added with this ADR).
 
-Number check: `ls docs/adr` on 2026-10-07 in this worktree showed 0065 as
-the highest file. Other branches were not checked.
+Renumbered from 0066 on 2026-10-13: the main branch had taken 0064 to 0071 for
+other decisions. Commit messages before that date name this ADR as 0066.
 
 ## Context
 
@@ -52,7 +52,7 @@ person's hands, or the person never opens that screen".)
 The three scenarios the maintainer walked:
 
 1. **One phone, and a new one.** The person knows only the password. They
-   sign in on the new phone and reset the account keys (ADR-0065). The
+   sign in on the new phone and reset the account keys (ADR-0073). The
    server cannot tell them from someone who learned the password: both get
    the new phrase, can set a new password with it, and the other party is
    locked out. A delay before the reset takes effect was rejected: it
@@ -71,13 +71,13 @@ The three scenarios the maintainer walked:
    was stolen": remove it and change the account keys, keeping the other
    devices and the chats.**
 
-Contacts see nothing for any of the three (the rule of ADR-0065 "Phase 2
+Contacts see nothing for any of the three (the rule of ADR-0073 "Phase 2
 revised").
 
 ### Facts about the code (read on 2026-10-07)
 
-Line numbers are of this worktree on that day. "(0065)" marks a fact
-carried from ADR-0065's own recon without a re-read.
+Line numbers are of this worktree on that day. "(0073)" marks a fact
+carried from ADR-0073's own recon without a re-read.
 
 **Auth: credentials and what is stored.**
 
@@ -187,7 +187,7 @@ carried from ADR-0065's own recon without a re-read.
     cool-down does not apply, and the log append is `is_reset: false`
     (`:720`, `:743`, `:827-870`). The transparency append does verify the
     proof against the previous entry (`services/transparency/src/store.rs:334-351`),
-    under a flag (`handlers.rs:168`); the log is not deployed (0065 R.1
+    under a flag (`handlers.rs:168`); the log is not deployed (0073 R.1
     fact 4).
 14. A conversation leaf is a per-device identity whose credential is a
     137-byte binding signed by the account key, with no expiry
@@ -233,7 +233,7 @@ carried from ADR-0065's own recon without a re-read.
     carries `lakko-contacts` envelopes, and the intake drops any kind it
     does not know (`apps/web/src/reach/service-envelope-intake.ts:9-18`).
 
-**One race in ADR-0065 as designed (not built).** The DS hears an attested
+**One race in ADR-0073 as designed (not built).** The DS hears an attested
 `Reset` of the DeviceGroup journal "from ANY signer" carrying a valid
 attestation at a strictly higher generation
 (`services/ds/src/key_reset.rs:4-35`). R.3 has discovery serve the
@@ -408,7 +408,7 @@ r2.<account_id>.<key_generation>.<device_id>.<issued_at_ms>.<expires_at_ms>.<tag
 
 `v2` and `r1` are refused (nothing is deployed). `device_id` is 32 bytes,
 base64url: the device's conversation leaf signature key, which is already
-the public `device_id` of discovery's directory (ADR-0065 fact 6). It is
+the public `device_id` of discovery's directory (ADR-0073 fact 6). It is
 **asserted by the client** at every session-landing route (a new body field
 `device_id_b64`) and copied by the refresh. It is not proven: the thing it
 protects against is a credential that was already issued, and whoever can
@@ -440,13 +440,13 @@ existing `refresh-invalid` / plain `401`. A row is pruned once
 could refuse has expired). What auth now holds per account is a list of
 device ids **that were logged out or removed in the last 30 days**, not a
 registry of devices; discovery already publishes the live ones. This is the
-narrower form of the alternative ADR-0065 rejected.
+narrower form of the alternative ADR-0073 rejected.
 
 ### 1. Recall: taking the account back after a reset
 
 #### 1.1 What the old device keeps
 
-On `key-generation-superseded` (ADR-0065 section 3.5 and landing rule 3),
+On `key-generation-superseded` (ADR-0073 section 3.5 and landing rule 3),
 the device does what it does today **except**:
 
 - It wipes immediately, as today: the message log, contacts, every MLS
@@ -512,7 +512,7 @@ Checks, in this order:
    `401 {"error":"wrong-password"}`; at 20 failures (chosen) the anchor is
    deleted. Only a holder of the anchor's key reaches this step, so only
    they can spend the 20.
-4. One transaction, the reset's (ADR-0065 section 2) with these
+4. One transaction, the reset's (ADR-0073 section 2) with these
    differences: no fresh-auth grant is asked for; the anchor is locked
    (`FOR UPDATE`) and it and every higher `seq` are deleted; **no anchor is
    captured**; the password envelope is replaced by `password_upload`; the
@@ -532,7 +532,7 @@ fresh phrase and seed, exactly as a reset does; the old key authorises the
 recall and does not return (invariant #6's second sentence). Its
 conversation state was wiped at 1.1 and its peers have already moved to the
 attacker's key, so the old key would buy nothing. From the reset's client
-order (ADR-0065 section 2.3) onward the recall **is** a reset: the same
+order (ADR-0073 section 2.3) onward the recall **is** a reset: the same
 owed record, the attested directory upload, the DeviceGroup re-founding,
 the new words shown last. To every peer it is a second attested key reset
 at a higher generation, which "Phase 2 revised" already handles (R.8, "a
@@ -560,7 +560,7 @@ second reset before the first was handled").
 | Finder | a phone, not the password, app data not extracted | Sees "Was it you?" if the owner reset. `recall-refused` never; `wrong-password` at most 20 times, 5 per 15 minutes. Gets nothing. |
 | Finder | a phone, the seed extracted, no password | Can set a new password today (fact 2), then sign in, then reset. The owner's other device recalls through the anchor captured at the password change, with the password from before it. With no other device the owner has lost the account: this is the seed, and part 3 is what answers it while the owner still has a device. |
 | Attacker | a phone **and** the password | Total loss, in this scheme and in any: they are indistinguishable from the owner and can recall as well as reset. Whoever recalls first through the oldest anchor wins. |
-| Operator | the attest key or the database | Unchanged from ADR-0065 R.9. The anchors add: the operator could keep or restore an old password envelope, which is a verifier it already had. |
+| Operator | the attest key or the database | Unchanged from ADR-0073 R.9. The anchors add: the operator could keep or restore an old password envelope, which is a verifier it already had. |
 
 **The cost, plainly.** Between the reset and the moment the owner opens the
 app on an old device, the attacker is the owner toward every contact, for
@@ -614,7 +614,7 @@ can reset, which is recallable.
   row's own `identity_bundles.signature_pubkey`; else `403
   {"error":"account-key-required"}`. Every delete writes a tombstone
   `(account_id, device_id, deleted_at)` in a new table, kept 30 days, and
-  the route comes under the generation floor (closing the ADR-0065
+  the route comes under the generation floor (closing the ADR-0073
   residual, G-45's last clause).
 - An attested key change (reset, recall, rotation) deletes the account's
   tombstones with its KeyPackage rows.
@@ -668,7 +668,7 @@ launch from a small owed marker, then the local drop as today.
 | DS, push-gw, channels | Unchanged by tokens: it reads a journal until its leaf is removed there and its epoch key rotates out. |
 
 No feed of floors to storage and gif-proxy is built; the bound is the
-access lifetime, as in ADR-0065.
+access lifetime, as in ADR-0073.
 
 #### 2.5 What removal still does not do
 
@@ -705,7 +705,7 @@ designed here (see "Not built").
 - **Stage A, this ADR:** everything in the first list. Conversation leaves
   keep their bindings under the old key and keep working; peers treat the
   old key as the **proven predecessor** of the new one.
-- **Stage B, after ADR-0065 "Phase 2 revised" is built:** the leaves move,
+- **Stage B, after ADR-0073 "Phase 2 revised" is built:** the leaves move,
   by the mechanisms that design already has (remove and add in a role-table
   group, a successor for a one-to-one), with the old key cooperating where
   that makes a case repairable that a reset leaves unrepairable. Sketched
@@ -938,7 +938,7 @@ under rule 4, which is the window the 30 days cover.
 
 #### 3.6 Stage B, in outline
 
-Built on ADR-0065 R.5 to R.7 once those exist. The rotating account's
+Built on ADR-0073 R.5 to R.7 once those exist. The rotating account's
 devices each take a second device identity bound to the new key (a new
 device, as far as MLS is concerned) and are moved conversation by
 conversation; the old key's cooperation changes three of R.7's cases:
@@ -1060,7 +1060,7 @@ Error codes a client must tell apart: `device-revoked`,
   published the same ids per account. The DS, push-gw and channels learn
   nothing new. A recall and a rotation are visible to anyone who can fetch
   the bundle as a generation change, as a reset is.
-- **#6.** The text has to change again (after ADR-0065 R.9's proposal).
+- **#6.** The text has to change again (after ADR-0073 R.9's proposal).
   Proposed: "Identity rotation only via a supersession proof signed by the
   previous key, or via a server-attested key reset recorded in the KT log.
   Old keys do not come back as an account's identity. A key superseded by
@@ -1146,7 +1146,7 @@ changes (invariant #6).
 - **D10.** After a recall the account has a new identity, not the old one
   back. Recommended: accept.
 - **D11.** The root endorsement (decision 4.6) as the fix for the race in
-  ADR-0065 R.3, to be built before discovery serves the attestation.
+  ADR-0073 R.3, to be built before discovery serves the attestation.
   Recommended: accept.
 
 ## Sprint plan
@@ -1156,14 +1156,14 @@ Each sprint leaves the tree shippable. Server and core first, then web
 
 | Sprint | Scope | Closes |
 |---|---|---|
-| T1 core + server | `v3` / `r2`; `account_statement` + FFI; `identity_pubkey` and the genesis rule; floors; logout, bind-device, revoke; discovery's device gate, tombstones, delete gate and floor. DB-gated route tests; bindings and native libraries rebuilt. | The server half of "log out / remove device revokes the session"; fact 9's directory hole; the ADR-0065 delete residual. |
+| T1 core + server | `v3` / `r2`; `account_statement` + FFI; `identity_pubkey` and the genesis rule; floors; logout, bind-device, revoke; discovery's device gate, tombstones, delete gate and floor. DB-gated route tests; bindings and native libraries rebuilt. | The server half of "log out / remove device revokes the session"; fact 9's directory hole; the ADR-0073 delete residual. |
 | T2 clients | `device_id` at sign-in; the removal order and its owed record; automatic wipe on `device-revoked` and on an inactive DeviceGroup; logout; the own-account DeviceGroup filter; UX 18.1, 18.2. | Scenario 2 on all three, for an honest client and against a removed device acting through the server. |
 | T3 server | Anchors and the capture rule (including `/password/reset/finish` in a transaction); the three recall routes; the deletion refusal; scope 14. | The server half of scenario 1. |
 | T4 clients | The staged wipe and recall record; "Was it you?" and the recall form; recall as a reset from the client order on; UX 18.4. | Scenario 1 on all three. |
 | T5 core + server | `key_rotation` envelope + FFI; `rotate/{start,finish}`; the refresh upgrade; discovery's proof verification and proven-rotation arm; the DS root endorsement and attested `RootTransfer`; the channels owner route. | The server half of scenario 3, Stage A; the R.3 race. |
 | T6 clients | The rotate flow (3.2); adoption on kept devices; the proven-predecessor rule at every pin and binding check; re-keying of roots, mailbox, reach, channels, backup; pairing during the interim; UX 18.1, 18.3. | Scenario 3, Stage A. |
 | T7 walk | Two accounts, three devices: remove one and see it wipe and stay out; reset from a keyless device and recall from an old one; rotate with one device removed and message a contact both ways before and after. `docs/PRODUCT-READINESS.md` from what was seen. `lakko-security` on request. | The claims above, observed. |
-| T8 (later) | Stage B, after ADR-0065 R-S1 to R-S5. | The conversation layer of scenario 3. |
+| T8 (later) | Stage B, after ADR-0073 R-S1 to R-S5. | The conversation layer of scenario 3. |
 
 ## T1 as built (2026-10-07)
 
@@ -1359,7 +1359,7 @@ The sketches in section 1.2 are not what was built in four places that a
 client must know (items 2 to 5). Everything else below is a decision the
 text left open, or a defect of the text or of T1 found while building.
 
-**Changes to T1 and ADR-0065 that the recall needed.**
+**Changes to T1 and ADR-0073 that the recall needed.**
 
 1. **The generation is read before the device floor** in `require_session`
    and in the refresh route; T1 read the floor first (its item 4). A device
@@ -1387,7 +1387,7 @@ text left open, or a defect of the text or of T1 found while building.
    with credentials of the old generation. Before this, a sign-in in flight
    at the moment of a reset or a recall came out with a session of the NEW
    generation (a passkey sign-in with a fresh-auth grant as well). This was
-   an ADR-0065 defect; it is fatal for a recall, whose point is that the
+   an ADR-0073 defect; it is fatal for a recall, whose point is that the
    displaced party is out.
 3. **A generation fence around three bearer writes**
    (`session::begin_at_generation`: lock the account row, compare the
@@ -1592,7 +1592,7 @@ any of it (T6), and `lakko-mls` and `schemas/` are untouched.
 
 **One change here breaks a flow that is already built on the clients.** The
 DS now refuses an attested `reset` that carries no root endorsement (item
-21). The ADR-0065 key reset and the recall both end with that call, so on
+21). The ADR-0073 key reset and the recall both end with that call, so on
 all three clients they stop at the DeviceGroup re-founding until the client
 sends `root_endorsement_b64`.
 
@@ -1756,7 +1756,7 @@ decides something they left open:
     strictly above the stored one (`409`), records it, and keeps the chain,
     the registrars and the push binding. Afterwards the attestation re-roots
     nothing on either route. A plain transfer is unchanged.
-23. Serving attestations from discovery (ADR-0065 R.3) is not built; the
+23. Serving attestations from discovery (ADR-0073 R.3) is not built; the
     endorsement is what makes it safe to build.
 
 **The recall follow-ups (`services/auth/src/recall.rs`).**
@@ -1900,7 +1900,7 @@ Built on all three:
   retries and never wipes. Adopting swaps seed and phrase, keeps all local data and stores the old
   key as predecessor first. The three background filters suppress the envelope.
 - **Proven predecessor.** The ADR-0016 gate re-pins silently on a valid proof and records the old
-  key as a proven predecessor; the ADR-0065 phase-2 flag is set only by a refusal the log calls a
+  key as a proven predecessor; the ADR-0073 phase-2 flag is set only by a refusal the log calls a
   reset, so a proven rotation shows contacts nothing. The device's own conversation binding stays
   under the predecessor key, and the predecessor's mailbox is read for Welcomes.
 
@@ -2052,7 +2052,7 @@ Consequences of the rule as first built (1 decided as rule 5, 2 and 3 closed by 
 3. **People search refuses a hit whose key is a proven predecessor** of the fetched bundle's key
    (iOS; not checked on the others).
 
-**Alignment pass 2026-10-12 (see ADR-0065 R.13b).** Every add path on the three clients now filters
+**Alignment pass 2026-10-12 (see ADR-0073 R.13b).** Every add path on the three clients now filters
 another person's devices by KeyPackage binding (the expected key or its pinned proven chain). One
 consequence is open: **a person who rotated before this device ever saw them cannot be added or
 written to until their devices are re-bound to the new key**, since nothing this device holds links
@@ -2077,7 +2077,7 @@ revisited after it has been tried in use.
 - The Android re-pin line for a proven change.
 - Whether the reset's client order mints the genesis attestation after
   `reset/finish` on all three (0.1 requires it).
-- The backup's behaviour after a reset, beyond ADR-0065's own section.
+- The backup's behaviour after a reset, beyond ADR-0073's own section.
 - That OpenMLS accepts the Stage B owner sequence as described; it uses
   existing calls but was not run.
 
@@ -2093,8 +2093,8 @@ revisited after it has been tried in use.
   [ADR-0057](0057-journal-ownership.md),
   [ADR-0059](0059-channel-discover.md),
   [ADR-0060](0060-scoped-discovery.md),
-  [ADR-0064](0064-recovery-model-simplification.md),
-  [ADR-0065](0065-account-key-reset.md)
+  [ADR-0072](0072-recovery-model-simplification.md),
+  [ADR-0073](0073-account-key-reset.md)
 - [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md) sections 15
   to 18; [`docs/ux/second-device.md`](../ux/second-device.md) section 3
 - [`docs/PRODUCT-READINESS.md`](../PRODUCT-READINESS.md), the row "Log out

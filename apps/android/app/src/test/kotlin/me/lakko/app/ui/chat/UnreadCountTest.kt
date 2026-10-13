@@ -117,7 +117,7 @@ class UnreadCountTest {
         assertEquals(4, combinedUnread(6, LocalUnread(4, true)))
     }
 
-    // ---- ADR-0065 R.5: the badge across a conversation's segments ---------
+    // ---- ADR-0073 R.5: the badge across a conversation's segments ---------
 
     private fun folded(): ChatThread {
         val lineage = me.lakko.app.chat.buildLineage(listOf(me.lakko.app.chat.LineageEntry("s1", "root", 1uL)))

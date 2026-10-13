@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.5a rule 3 - the profile re-send after a key rotation is
+ * ADR-0074 section 3.5a rule 3 - the profile re-send after a key rotation is
  * owed until every conversation has it.
  */
 import { afterEach, describe, expect, it } from "vitest";

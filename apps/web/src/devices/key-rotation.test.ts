@@ -104,7 +104,7 @@ function harness(script: Script = {}) {
 
 const last = <T>(xs: T[]): T => xs[xs.length - 1] as T;
 
-describe("the rotation's order (ADR-0066 section 3.2)", () => {
+describe("the rotation's order (ADR-0074 section 3.2)", () => {
   it("runs every step once, in order, and drops the record", async () => {
     const h = harness();
     const out = await runRotation(newRotation(DEVICE, 1), h.ports, { grant: "g" });
@@ -379,7 +379,7 @@ const pending = (key: string, preparedAtMs = 1000): PendingRotation => ({
 const FOURTEEN_DAYS = 14 * 24 * 60 * 60 * 1000;
 const expired = (preparedAtMs: number, nowMs: number): boolean => nowMs - preparedAtMs > FOURTEEN_DAYS;
 
-describe("a kept device: the envelope (ADR-0066 section 3.3)", () => {
+describe("a kept device: the envelope (ADR-0074 section 3.3)", () => {
   it("is stored only from the account's own DeviceGroup, verified, and for another key", () => {
     expect(rotationIntake({ fromOwnDeviceGroup: true, verified: true, newKeyIsHeldKey: false })).toBe("store");
     expect(rotationIntake({ fromOwnDeviceGroup: false, verified: true, newKeyIsHeldKey: false })).toBe("drop");
@@ -408,7 +408,7 @@ describe("a kept device: the envelope (ADR-0066 section 3.3)", () => {
   });
 });
 
-describe("a kept device: superseded (ADR-0066 section 3.3)", () => {
+describe("a kept device: superseded (ADR-0074 section 3.3)", () => {
   it("tries the held key first, then each pending key", () => {
     expect(
       supersededStep({ heldKeyB64: "H", pending: [pending("K1"), pending("K2")], tried: [], journal: "not-read" }),
@@ -454,7 +454,7 @@ describe("a kept device: superseded (ADR-0066 section 3.3)", () => {
   });
 });
 
-// ADR-0067 section 3 (UX 19.5): "Save a recovery phrase" is this rotation
+// ADR-0075 section 3 (UX 19.5): "Save a recovery phrase" is this rotation
 // with no device to remove.
 describe("the rotation that saves a recovery phrase", () => {
   it("removes no device: the remove step is done from the start and never runs", async () => {

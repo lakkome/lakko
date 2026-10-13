@@ -540,7 +540,7 @@ private data class ExportDoc(
 )
 
 /**
- * The sentence for a `DELETE /account` the server refused. ADR-0066 section
+ * The sentence for a `DELETE /account` the server refused. ADR-0074 section
  * 1.3: while the account can still be taken back after a key reset the
  * server answers `409 recall-window-open` with the date, and the dialog says
  * until when ([me.lakko.app.auth.deleteBlockedUntilMs]); the date is the

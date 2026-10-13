@@ -182,7 +182,7 @@ const PREVIEW_ITEMS = 8;
 
 function itemKey(item: RankedItem): string {
   // The group the row lives in, not the conversation's current one: a
-  // successor's message ids restart (ADR-0065 R.5).
+  // successor's message ids restart (ADR-0073 R.5).
   return `${item.ref.source.kind}:${feedRefLogKey(item.ref)}:${item.ref.message.messageId}`;
 }
 
@@ -402,7 +402,7 @@ export default function Feed(): JSX.Element {
    *  editor's list, the empty state and the hidden list read these. */
   const allSources = createMemo((): FeedSource[] => {
     const flags = sync.flags();
-    // ADR-0065 R.5 — one source per CONVERSATION, drawn from its current
+    // ADR-0073 R.5 — one source per CONVERSATION, drawn from its current
     // group; the mute flag (like "hide from feeds" and a feed rule's lists)
     // is keyed on the conversation id, not on the group it lives in now.
     const groups = groupFeedSources(
@@ -685,7 +685,7 @@ export default function Feed(): JSX.Element {
           });
       }
       void sync
-        // ADR-0065 R.5 — the read position is the CONVERSATION's, exactly as
+        // ADR-0073 R.5 — the read position is the CONVERSATION's, exactly as
         // the chat view writes it: keyed on the conversation id, carrying the
         // segment past the first group (the 8 bytes every build writes
         // otherwise).
@@ -933,7 +933,7 @@ export default function Feed(): JSX.Element {
     try {
       result = await forwardClient.sendMessage(auth.identitySecrets(), entry.group, bytes);
     } catch (err) {
-      // ADR-0065 R.7 case 1 — a forward into a superseded one-to-one is held
+      // ADR-0073 R.7 case 1 — a forward into a superseded one-to-one is held
       // for that conversation's successor (`chat/held-send-queue.ts`); the
       // conversation opens with the message in the ordinary sending state.
       if (err instanceof HeldForSuccessor) {
@@ -1470,7 +1470,7 @@ export default function Feed(): JSX.Element {
               </button>
               {/* A channel is one-way: its posts have no reply. A row of an
                   older group of a moved conversation is read-only there, as
-                  it is in the conversation itself (ADR-0065 R.5). */}
+                  it is in the conversation itself (ADR-0073 R.5). */}
               <Show when={m().ref.source.kind === "group" && m().ref.segment === undefined}>
                 <button
                   type="button"

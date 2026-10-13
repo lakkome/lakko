@@ -43,11 +43,11 @@ No work, no waiting. A limit reached shows, in the place the error shows today:
 
 - Login, password reset, authenticator code (and the sign-in that follows a
   three-word match; the three words themselves are checked on the device
-  and reach no server limit, ADR-0064):
+  and reach no server limit, ADR-0072):
   `Too many attempts. Wait a moment, then try again.` (the existing Android
   copy, now on all three). If the server sends `Retry-After` of more than a
   minute: `Too many attempts. Try again in N minutes.`
-- (Removed 2026-10-02, ADR-0064: the recovery code by email or SMS and its
+- (Removed 2026-10-02, ADR-0072: the recovery code by email or SMS and its
   send limit no longer exist.)
 - Signing in on a new device with "Is this you?" on another device, limit
   reached: `Too many requests to your other devices. Try again in a few minutes.`
@@ -57,7 +57,7 @@ No work, no waiting. A limit reached shows, in the place the error shows today:
   wait is over an hour). The form keeps its contents.
 
 The three-words destruction cap is gone with the server-side word vault
-(ADR-0064, 2026-10-02). Three words now have a budget kept by the device: 5
+(ADR-0072, 2026-10-02). Three words now have a budget kept by the device: 5
 wrong tries, then a 15-minute pause with a countdown
 (docs/ux/identity-recovery.md section 6).
 

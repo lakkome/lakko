@@ -14,7 +14,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0068 - the handle sync, the own-username register and the rename. */
+/** ADR-0076 - the handle sync, the own-username register and the rename. */
 class UsernameChangeTest {
 
     private class MapStorage : MarkerStorage {

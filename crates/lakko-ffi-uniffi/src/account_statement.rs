@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! UniFFI surface for `lakko-attest`'s account statement (ADR-0066 section
+//! UniFFI surface for `lakko-attest`'s account statement (ADR-0074 section
 //! 0.3).
 //!
 //! Mirror of `crates/lakko-ffi-wasm/src/account_statement.rs` for iOS +
@@ -29,7 +29,7 @@ use lakko_crypto::signing::SigningKey;
 
 use crate::FfiError;
 
-/// What an account statement asks for (ADR-0066 section 0.3).
+/// What an account statement asks for (ADR-0074 section 0.3).
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccountStatementKind {
     /// Read whether a recall is open for the signing key. Body: empty.
@@ -151,7 +151,7 @@ fn opaque_bytes(field: &str, b64: &str) -> Result<Vec<u8>, FfiError> {
     })
 }
 
-/// Sign the statement `POST /account/recall/start` requires (ADR-0066 "T3 as
+/// Sign the statement `POST /account/recall/start` requires (ADR-0074 "T3 as
 /// built"): kind `RecallStart` over the anchor's `anchor_seq` (from
 /// `POST /account/recall/status`) and the OPAQUE login request, given as the
 /// same standard-base64 string the request body carries
@@ -219,7 +219,7 @@ pub fn sign_recall_statement(
 }
 
 /// Sign the statement that upgrades a kept device's session after a key
-/// rotation (ADR-0066 section 3.3): kind `SessionUpgrade` over
+/// rotation (ADR-0074 section 3.3): kind `SessionUpgrade` over
 /// `BLAKE3(refresh_token)`. Sent as `key_statement_b64` (base64url, no
 /// padding) beside `refresh_token` on `POST /auth/session/refresh`, once the
 /// device has ADOPTED the new account seed. `account_seed` is the NEW account

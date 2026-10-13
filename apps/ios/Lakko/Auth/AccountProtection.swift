@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0067 / docs/ux/identity-recovery.md section 19 — what protects an
+// ADR-0075 / docs/ux/identity-recovery.md section 19 — what protects an
 // account: a recovery email, a saved recovery phrase, or nothing.
 //
 // This file is the pure part and the per-device record:
@@ -83,7 +83,7 @@ public extension RecoveryEmailStatus {
     func needsAddingAgain(addressHeld: Bool) -> Bool { vaultMissing && !addressHeld }
 }
 
-/// ADR-0067, amended 2026-10-13 — the automatic re-seal: a device that
+/// ADR-0075, amended 2026-10-13 — the automatic re-seal: a device that
 /// holds the address puts the email vault back by itself, silently.
 public enum EmailReseal {
 
@@ -259,7 +259,7 @@ public struct ProtectStep: Equatable {
 }
 
 /// What "Restore your keys" (UX section 8: signed in, no keys on this
-/// device) offers besides another device and a passkey, pure (ADR-0067).
+/// device) offers besides another device and a passkey, pure (ADR-0075).
 public struct RestoreKeysRows: Equatable {
     /// The 12-word phrase row: hidden for an account whose phrase was never
     /// saved (nobody has words to type). Kept while the status is unknown.
@@ -314,7 +314,7 @@ public enum ProtectBanner {
     }
 }
 
-/// Whether an enrolment seals the email vault (ADR-0067 section 6): only
+/// Whether an enrolment seals the email vault (ADR-0075 section 6): only
 /// while no phrase is saved. With a saved phrase the mailed code changes the
 /// password and nothing else, and the server never gets a vault.
 public enum EnrolSealing {
@@ -375,7 +375,7 @@ public struct AccountProtectionStore {
         }
     }
 
-    // MARK: Changing the username (ADR-0068)
+    // MARK: Changing the username (ADR-0076)
 
     /// The rename this device started and has not finished.
     public func renameOwed(accountIdB64: String) -> UsernameRename.Record? {
@@ -478,7 +478,7 @@ public struct AccountProtectionStore {
     }
 }
 
-/// ADR-0067 — whether the new words of a key reset or a recall are shown:
+/// ADR-0075 — whether the new words of a key reset or a recall are shown:
 /// only to a phrase-protected account. (A rotation asks
 /// ``KeyRotationPlan/showsNewWords(savesPhrase:phraseProtected:)``.)
 public enum NewWordsRule {
@@ -486,7 +486,7 @@ public enum NewWordsRule {
 }
 
 /// The text of the publish-owed / retry screen after a key reset or a
-/// take-back (ADR-0067): an account that is not phrase-protected is told
+/// take-back (ADR-0075): an account that is not phrase-protected is told
 /// its keys are still being published, with no mention of words.
 public enum KeysChangedCopy {
     public static func publishOwedKey(showsWords: Bool, needsSignIn: Bool) -> String {

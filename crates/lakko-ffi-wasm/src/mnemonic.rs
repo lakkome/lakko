@@ -119,7 +119,7 @@ impl RecoveryMnemonic {
     }
 
     /// Extract the 16-byte BIP39 entropy. The passkey vault
-    /// (ADR-0064) seals this exact buffer, and `fromEntropy`
+    /// (ADR-0072) seals this exact buffer, and `fromEntropy`
     /// round-trips it back to the same mnemonic for the
     /// standard recovery path.
     #[wasm_bindgen(js_name = toEntropy)]

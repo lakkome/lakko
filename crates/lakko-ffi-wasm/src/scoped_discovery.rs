@@ -361,7 +361,7 @@ fn continuity_reach_seed_inner(account_id: &[u8], key_generation: u64) -> Result
 }
 
 /// The 32-byte **continuity reach seed** of an account at a key generation
-/// (ADR-0065 R.4): `BLAKE3-derive-key("lakko/reach/continuity/v1",
+/// (ADR-0073 R.4): `BLAKE3-derive-key("lakko/reach/continuity/v1",
 /// accountId(16) || keyGeneration(8, BE))`.
 ///
 /// After an account key reset the resetting device registers
@@ -1986,7 +1986,7 @@ mod tests {
         );
     }
 
-    /// The core's continuity golden (ADR-0065 R.4), reproduced through this
+    /// The core's continuity golden (ADR-0073 R.4), reproduced through this
     /// surface; the UniFFI surface pins the same literals.
     #[test]
     fn continuity_reach_seed_reproduces_the_core_golden() {

@@ -61,7 +61,7 @@ export function RequireSession(props: { children: JSX.Element }): JSX.Element {
 }
 
 /**
- * ADR-0065 (UX 15.2): while this device's keys are not the account's keys
+ * ADR-0073 (UX 15.2): while this device's keys are not the account's keys
  * any more (`auth.signedOut()`), the signed-out screen replaces every route,
  * public ones included, whatever the auth state says: the automatic wipe
  * moves the state to `anon` under it, and the screen must stay until the
@@ -112,7 +112,7 @@ export function RequireAnonymous(props: {
  *   "Not now" clears it and the decision re-runs.
  * - `save-signup-phrase`: new recovery words (the account keys were changed
  *   on this device), until acknowledged.
- * - `protect-account`: the sign-up's "Protect your account" step (ADR-0067,
+ * - `protect-account`: the sign-up's "Protect your account" step (ADR-0075,
  *   UX 19.1a), until the person chose. Clearing it re-runs the decision: on
  *   a public auth page that is `redirect-home`, which honours `?return=`;
  *   inside the app the route underneath simply renders.

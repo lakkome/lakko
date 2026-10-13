@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 --
--- ADR-0067 — a recovery email, an account without a saved phrase, and taking
+-- ADR-0075 — a recovery email, an account without a saved phrase, and taking
 -- an account back with the phrase.
 --
 -- What the server keeps about an address is `email_key`, a keyed BLAKE3 under
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS recovery_emails (
 -- Argon2id-derived from the login handle, the address and `vault_salt`),
 -- wrapped again at rest under LAKKO_VAULT_ENC_KEY like `passkey_vaults`.
 -- Released only in the answer to a verified mailed code (and authenticator
--- code). This table is the stated exception to invariant #2 of ADR-0067
+-- code). This table is the stated exception to invariant #2 of ADR-0075
 -- section 2: an operator who records the address can open the blob.
 CREATE TABLE IF NOT EXISTS email_vaults (
     account_id BINARY(16)     NOT NULL PRIMARY KEY COMMENT 'FK -> accounts.id',
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS email_tickets (
         FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- What the account's own devices are told (ADR-0067 section 9). `kind`:
+-- What the account's own devices are told (ADR-0075 section 9). `kind`:
 -- 1 password changed by email, 2 account opened by email (vault released),
 -- 3 recovery email added, 4 replaced, 5 removed, 6 recovery phrase saved.
 -- No address, no device detail. Pruned after 60 days.
@@ -91,14 +91,14 @@ CREATE TABLE IF NOT EXISTS account_notices (
         FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Whether the owner has saved a recovery phrase (ADR-0067 section 1). Set by
+-- Whether the owner has saved a recovery phrase (ADR-0075 section 1). Set by
 -- `DELETE /recovery-email/vault` and by a key rotation that says so; never
 -- cleared. An account with it set never gets an email vault.
 ALTER TABLE accounts
     ADD COLUMN phrase_saved TINYINT(1) NOT NULL DEFAULT 0
-        COMMENT 'ADR-0067: the owner saved a recovery phrase';
+        COMMENT 'ADR-0075: the owner saved a recovery phrase';
 
--- The recall's phrase arm (ADR-0067 section 8): an anchor also keeps the
+-- The recall's phrase arm (ADR-0075 section 8): an anchor also keeps the
 -- recovery envelope in force at capture, and whether the account had an email
 -- vault then. With a vault, whoever recovers by mail holds the same phrase as
 -- the owner, so the phrase proves nothing and the arm is refused.

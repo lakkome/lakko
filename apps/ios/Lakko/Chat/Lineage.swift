@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 "Phase 2 revised", R.5 - one conversation over several groups.
+// ADR-0073 "Phase 2 revised", R.5 - one conversation over several groups.
 //
 // iOS mirror of `apps/web/src/chat/lineage.ts`; the tables are the same and
 // so are the cases in `LineageTests`.

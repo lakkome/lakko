@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.3 — the BACKGROUND notification path
+ * ADR-0074 section 3.3 — the BACKGROUND notification path
  * (`public/sw-push-decrypt.js`) never renders a `key-rotation` envelope.
  * The envelope means something only in the account's own DeviceGroup, which
  * the worker never reads; in a conversation journal it is stray bytes, and

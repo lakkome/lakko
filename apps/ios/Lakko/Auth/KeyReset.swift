@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0065 "Reset account keys" — the client-side rules, free of state:
+// ADR-0073 "Reset account keys" — the client-side rules, free of state:
 //
 //   * the landing rule of section 4.2 (`KeyResetLanding`): what a device does
 //     with the identity the directory publishes, on EVERY session landing;
@@ -66,7 +66,7 @@ enum KeyResetLanding {
     /// Decide. `uploads` is whether THIS landing uploads at all: an explicit
     /// sign-in does (it re-publishes an unchanged key and makes the first
     /// publish of an account with no bundle); the silent restore does not,
-    /// as before ADR-0065. The two refusals never depend on it.
+    /// as before ADR-0073. The two refusals never depend on it.
     static func decide(
         observed: Observation,
         derivedSignaturePubkey: Data,
@@ -105,7 +105,7 @@ public enum KeysSignOutState: Equatable {
 
 // MARK: - Discovery's refusals (section 4.1)
 
-/// The typed refusals of `POST /discovery/identity` under ADR-0065.
+/// The typed refusals of `POST /discovery/identity` under ADR-0073.
 enum IdentityUploadRefusal: Equatable {
     /// `409 identity-change-needs-attestation`: a key change without a
     /// proof or an attestation. What a publish-back of old keys gets.
@@ -215,7 +215,7 @@ enum KeyResetPublish {
     }
 
     /// The client-side bound on applying a stored attestation: 30 days from
-    /// its mint (ADR-0065 section 4.2; chosen, not measured).
+    /// its mint (ADR-0073 section 4.2; chosen, not measured).
     static let maxAttestationAgeMs: Int64 = 30 * 24 * 60 * 60 * 1000
 
     /// The steps still to run, in order, for `record`. Empty when nothing

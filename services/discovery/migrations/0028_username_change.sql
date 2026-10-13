@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0068 section 1: a username can be replaced.
+-- ADR-0076 section 1: a username can be replaced.
 --
 -- A row of `usernames` is either CURRENT (`retired_at IS NULL`) or RETIRED.
 -- A retired row is the name an account held before a rename: no lookup and no
@@ -23,14 +23,14 @@ DELETE u1 FROM usernames u1
 
 ALTER TABLE usernames
     ADD COLUMN retired_at TIMESTAMP(3) NULL DEFAULT NULL
-        COMMENT 'ADR-0068: set when the account renamed away from this name',
+        COMMENT 'ADR-0076: set when the account renamed away from this name',
     ADD COLUMN current_account BINARY(16)
         AS (IF(retired_at IS NULL, account_id, NULL)) PERSISTENT
         COMMENT 'account_id of a current row, NULL of a retired one',
     ADD UNIQUE KEY uq_usernames_current_account (current_account),
     ADD INDEX idx_usernames_retired (retired_at);
 
--- When an account last renamed (ADR-0068 D2: one rename per 30 days). One
+-- When an account last renamed (ADR-0076 D2: one rename per 30 days). One
 -- row per account that ever renamed; deleted with the account.
 CREATE TABLE IF NOT EXISTS username_renames (
     account_id      BINARY(16)   NOT NULL PRIMARY KEY,

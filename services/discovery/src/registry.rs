@@ -14,7 +14,7 @@
 //! the enumeration step it follows (`/discovery/oprf`) spends an
 //! anonymous token.
 //!
-//! ## One current name per account, and renames (ADR-0068)
+//! ## One current name per account, and renames (ADR-0076)
 //!
 //! A row of `usernames` is **current** (`retired_at IS NULL`) or **retired**.
 //!
@@ -52,7 +52,7 @@ use sqlx::MySqlPool;
 use crate::AppState;
 
 /// Default minimum interval between two renames of one account, and default
-/// time a retired name stays unclaimable: 30 days (ADR-0068 D1, D2). Chosen,
+/// time a retired name stays unclaimable: 30 days (ADR-0076 D1, D2). Chosen,
 /// not measured.
 pub(crate) const DEFAULT_NAME_INTERVAL_SECS: u64 = 30 * 86_400;
 
@@ -76,7 +76,7 @@ const CODE_USERNAME_ALREADY_SET: &str = "username-already-set";
 const CODE_NO_USERNAME: &str = "no-username";
 const CODE_RENAME_TOO_SOON: &str = "rename-too-soon";
 
-/// The rename policy (ADR-0068 D1, D2).
+/// The rename policy (ADR-0076 D1, D2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NamePolicy {
     /// Minimum seconds between two renames of one account (0 = none).
@@ -269,7 +269,7 @@ pub(crate) async fn register(
 // /discovery/username/replace
 // ============================================================================
 
-/// `POST /discovery/username/replace` — rename (ADR-0068 section 1). The body
+/// `POST /discovery/username/replace` — rename (ADR-0076 section 1). The body
 /// and the answer are `register`'s: `{account_id, oprf_hash}` ->
 /// `{ok, username_certificate_b64}` for the NEW name.
 ///
@@ -492,7 +492,7 @@ pub(crate) struct LookupResponse {
 
 /// `POST /discovery/lookup` — resolve an OPRF-hashed username to its
 /// `account_id`. Returns **404 Not Found** for unknown hashes, for a retired
-/// name (ADR-0068), and for a
+/// name (ADR-0076), and for a
 /// username whose owner is not in Everyone (ADR-0060: the same status and
 /// body, so a lookup cannot tell hidden from unregistered).
 ///
@@ -571,7 +571,7 @@ mod tests {
     }
 }
 
-/// Route tests of ADR-0068 section 1, through the production router. Gated on
+/// Route tests of ADR-0076 section 1, through the production router. Gated on
 /// `LAKKO_DISCOVERY_TEST_DATABASE_URL`; each test skips without it.
 #[cfg(test)]
 mod rename_tests {

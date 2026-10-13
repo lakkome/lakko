@@ -96,7 +96,7 @@ vi.mock("./GroupNameContext", () => ({
 vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
   useDeviceGroupSync: () => ({
     flags: () => flags,
-    // ADR-0065 R.5 — no conversation here continued in a successor group, so
+    // ADR-0073 R.5 — no conversation here continued in a successor group, so
     // every group is its own conversation and its row is keyed on its id.
     lineage: () => [],
     readCursors: () => ({}),

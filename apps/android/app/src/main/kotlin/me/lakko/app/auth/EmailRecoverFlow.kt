@@ -6,7 +6,7 @@ package me.lakko.app.auth
 import me.lakko.app.l10n.UiText
 
 /**
- * ADR-0067 section 7 / `docs/ux/identity-recovery.md` section 19.3 - "Get
+ * ADR-0075 section 7 / `docs/ux/identity-recovery.md` section 19.3 - "Get
  * back in" > Email code, as a pure step machine. The view model runs the
  * requests and feeds the answers in; every decision about what the person
  * sees next is here, so a host JVM test runs the whole flow.
@@ -229,7 +229,7 @@ public class RecoveryEmailEnrolStart(
     public val expiresInSecs: Long,
 )
 
-/** The email vault's salt (ADR-0067 section 2). */
+/** The email vault's salt (ADR-0075 section 2). */
 public const val EMAIL_VAULT_SALT_LEN: Int = 16
 
 /** The sealed phrase entropy: the passkey vault's 44-byte blob shape. */

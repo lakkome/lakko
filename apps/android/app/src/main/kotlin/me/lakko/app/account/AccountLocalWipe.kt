@@ -55,7 +55,7 @@ public object AccountLocalWipe {
         runSteps(context, accountIdB64, steps)
 
     /**
-     * ADR-0066 section 1.1 - the STAGED wipe of a device whose account keys
+     * ADR-0074 section 1.1 - the STAGED wipe of a device whose account keys
      * were reset elsewhere: everything [wipeAccountLocalData] removes EXCEPT
      * the recall record ([RECALL_RECORD_STEP]), which is what lets the person
      * take the account back. The full wipe runs later, when the record goes.
@@ -123,26 +123,26 @@ public object AccountLocalWipe {
             me.lakko.app.auth.ThreeWordsBudgetStore.onDevice(ctx).clearAccount(acct)
         },
         Step("recovery-owed") { ctx, acct -> me.lakko.app.auth.RecoveryOwedStore.onDevice(ctx).clearAccount(acct) },
-        // ADR-0067: how the account is protected as last learned (flags and
+        // ADR-0075: how the account is protected as last learned (flags and
         // times, never the address), and the notice cursor with the
         // own-action markers.
         Step("account-protection") { ctx, acct ->
             me.lakko.app.auth.AccountProtectionStore.onDevice(ctx).clearAccount(acct)
         },
         Step("account-notices") { ctx, acct -> me.lakko.app.auth.AccountNoticeStore.onDevice(ctx).clearAccount(acct) },
-        // ADR-0068: a rename still owed and the stamp of the last one.
+        // ADR-0076: a rename still owed and the stamp of the last one.
         Step("username-rename") { ctx, acct -> me.lakko.app.auth.UsernameRenameStore.onDevice(ctx).clearAccount(acct) },
-        // ADR-0065: the attestation and the step markers of a reset whose
+        // ADR-0073: the attestation and the step markers of a reset whose
         // publish is still owed.
         Step("key-reset-owed") { ctx, acct -> me.lakko.app.auth.KeyResetOwedStore.onDevice(ctx).clear(acct) },
-        // ADR-0066: the "auth recorded this identity key" mark, a logout the
+        // ADR-0074: the "auth recorded this identity key" mark, a logout the
         // server was not told about, and a device removal still owed.
         Step("genesis-recorded") { ctx, acct -> me.lakko.app.auth.GenesisRecordedStore.onDevice(ctx).clear(acct) },
         Step("logout-owed") { ctx, acct -> me.lakko.app.auth.LogoutOwedStore.onDevice(ctx).clear(acct) },
         Step("device-removal-owed") { ctx, acct ->
             me.lakko.app.devices.DeviceRemovalOwedStore.onDevice(ctx).clearAccount(acct)
         },
-        // ADR-0066 section 1.1: the recall record (the old account signing
+        // ADR-0074 section 1.1: the recall record (the old account signing
         // seed an old device keeps after a reset elsewhere). The one step
         // the staged wipe leaves out ([stagedSteps]).
         Step(RECALL_RECORD_STEP) { ctx, acct -> me.lakko.app.auth.RecallRecordStore.deleteFile(ctx, acct) },
@@ -191,7 +191,7 @@ public object AccountLocalWipe {
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },
         Step("group-names") { ctx, acct -> me.lakko.app.chat.GroupNameStore.deleteAccount(ctx, acct) },
-        // ADR-0065 "Phase 2 revised" — what an accepted reset of a contact
+        // ADR-0073 "Phase 2 revised" — what an accepted reset of a contact
         // left on this device: the reset ledger, the verified bindings, the
         // successor claims, the continuity facts and the lineage mirror.
         Step("reset-ledger") { ctx, acct -> me.lakko.app.contacts.SharedPrefsResetLedgerStore(ctx).clearForOwner(acct) },
@@ -201,7 +201,7 @@ public object AccountLocalWipe {
         Step("lineage-mirror") { ctx, acct -> me.lakko.app.chat.LineageMirror.deleteAccount(ctx, acct) },
         Step("held-sends") { ctx, acct -> me.lakko.app.chat.SealedHeldSendBackend.deleteAccount(ctx, acct) },
         Step("reach-continuity") { ctx, acct -> me.lakko.app.reach.ContinuityMarkerStore.clear(ctx, acct) },
-        // ADR-0066 part 3 - a key rotation's sealed files (the prepared
+        // ADR-0074 part 3 - a key rotation's sealed files (the prepared
         // entropy and proof, pending envelopes, this account's previous
         // identities), its owed record and the kept device's notice flag.
         Step("key-rotation-files") { ctx, acct -> me.lakko.app.auth.KeyRotationFiles.deleteAll(ctx, acct) },
@@ -213,7 +213,7 @@ public object AccountLocalWipe {
             ctx.getSharedPreferences("lakko-key-rotation-notice", Context.MODE_PRIVATE)
                 .edit().remove("notice-v1:$acct").commit()
         },
-        // ADR-0066 section 3.5 - the proven steps of contacts' key histories.
+        // ADR-0074 section 3.5 - the proven steps of contacts' key histories.
         Step("proven-predecessors") { ctx, acct ->
             me.lakko.app.contacts.SharedPrefsProvenLinkStore(ctx).clearForOwner(acct)
         },
@@ -257,7 +257,7 @@ public object AccountLocalWipe {
         Step("contacts-inbox") { ctx, acct ->
             me.lakko.app.contacts.SharedPreferencesContactsInboxStore(ctx).delete(acct)
         },
-        // ADR-0066 3.5a rule 5 - the sealed list of unanswered outgoing
+        // ADR-0074 3.5a rule 5 - the sealed list of unanswered outgoing
         // requests (recipients and intro texts).
         Step("sent-contact-requests") { ctx, acct ->
             me.lakko.app.contacts.SentRequestsFiles.deleteAccount(ctx, acct)
@@ -323,7 +323,7 @@ public object AccountLocalWipe {
         Step("no-backup-files-sweep") { ctx, acct -> sweepFilesNamedBy(ctx.noBackupFilesDir, acct) },
     )
 
-    /** The name of the step that deletes the ADR-0066 recall record. */
+    /** The name of the step that deletes the ADR-0074 recall record. */
     public const val RECALL_RECORD_STEP: String = "recall-record"
 
     /** The staged wipe: the full list minus the recall record, in order. */

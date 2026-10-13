@@ -60,7 +60,7 @@
 //!    [`crate::committer_delegation::try_unwrap_committer_delegation`]
 //!    (ADR-0060 §6): a proposer's delegations for the committer that
 //!    sweeps its `Add`. Then
-//!    [`crate::group_closed::try_unwrap_group_closed`] (ADR-0065 phase 2):
+//!    [`crate::group_closed::try_unwrap_group_closed`] (ADR-0073 phase 2):
 //!    an admin closed the group and names the recreated one. Never
 //!    rendered.
 //! 9. [`crate::introduction::try_unwrap_introduction_offer`] and
@@ -284,7 +284,7 @@ pub enum IncomingEnvelope<'a> {
     /// the Welcome of a sweep that added that person.
     CommitterDelegation(CommitterDelegationEnvelope),
     /// An admin closed this group and, when it was recreated, names the
-    /// successor (ADR-0065 phase 2, `docs/ux/identity-recovery.md` §16.5).
+    /// successor (ADR-0073 phase 2, `docs/ux/identity-recovery.md` §16.5).
     /// Never a chat bubble. **The caller must not store this
     /// unconditionally:** resolve the MLS sender to the account key at
     /// receipt (C-68), accept only from the owner or an admin of the live
@@ -302,7 +302,7 @@ pub enum IncomingEnvelope<'a> {
     },
     /// The account's keys are being changed by another of its devices, and
     /// this is the new recovery-phrase entropy with the proof that the old
-    /// account key authorised it (ADR-0066 section 3.3). Never a chat
+    /// account key authorised it (ADR-0074 section 3.3). Never a chat
     /// bubble, and meaningful ONLY in the account's own DeviceGroup: a
     /// client that meets one in any other group drops it. **The caller must
     /// not adopt this on receipt:** check the proof against the account key
@@ -377,10 +377,10 @@ pub enum DispatchError {
     /// payload.
     #[error(transparent)]
     CommitterDelegation(#[from] CommitterDelegationError),
-    /// The group-closed domain (ADR-0065 phase 2) with a malformed payload.
+    /// The group-closed domain (ADR-0073 phase 2) with a malformed payload.
     #[error(transparent)]
     GroupClosed(#[from] GroupClosedError),
-    /// The key-rotation domain (ADR-0066 section 3.3) with a malformed
+    /// The key-rotation domain (ADR-0074 section 3.3) with a malformed
     /// payload.
     #[error(transparent)]
     KeyRotation(#[from] KeyRotationError),
@@ -458,14 +458,14 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if let Some(envelope) = try_unwrap_committer_delegation(plaintext)? {
         return Ok(IncomingEnvelope::CommitterDelegation(envelope));
     }
-    // 7g. Group closed — ADR-0065 phase 2.
+    // 7g. Group closed — ADR-0073 phase 2.
     if let Some(closed) = try_unwrap_group_closed(plaintext)? {
         return Ok(IncomingEnvelope::GroupClosed {
             closed_at_ms: closed.closed_at_ms,
             successor_group_id: closed.successor_group_id,
         });
     }
-    // 7h. Key rotation — ADR-0066 section 3.3.
+    // 7h. Key rotation — ADR-0074 section 3.3.
     if let Some(rotation) = try_unwrap_key_rotation(plaintext)? {
         return Ok(IncomingEnvelope::KeyRotation(rotation));
     }

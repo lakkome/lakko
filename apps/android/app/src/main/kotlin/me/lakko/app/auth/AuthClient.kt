@@ -442,7 +442,7 @@ public class AuthClient(
         password: ByteArray,
         enrolRecovery: Boolean = true,
         onProofSolved: () -> Unit = {},
-        /** ADR-0066 - this device's id for the account id the signup just
+        /** ADR-0074 - this device's id for the account id the signup just
          *  generated (the only landing that knows its account beforehand
          *  by construction); `null` lands a session that names no device. */
         deviceIdFor: ((accountId: ByteArray) -> ByteArray?)? = null,
@@ -809,7 +809,7 @@ public class AuthClient(
     }
 
     /**
-     * `POST /auth/session/refresh` (ADR-0065 section 3.2): trade the refresh
+     * `POST /auth/session/refresh` (ADR-0073 section 3.2): trade the refresh
      * credential for a new session pair. Anonymous - the credential is the
      * authorisation - and per-address limited.
      *
@@ -836,7 +836,7 @@ public class AuthClient(
     }
 
     /**
-     * Reset the account keys (ADR-0065 section 2; `POST
+     * Reset the account keys (ADR-0073 section 2; `POST
      * /account/keys/reset/{start,finish}`, bearer): one server transaction
      * that bumps the key generation, replaces the recovery credential with
      * one made from the NEW phrase [seed], deletes every passkey and device
@@ -858,7 +858,7 @@ public class AuthClient(
      *   rate-limiter-unavailable` / `key-reset-disabled`.
      */
     // -----------------------------------------------------------------
-    // ADR-0066 - logout, device binding, device removal
+    // ADR-0074 - logout, device binding, device removal
     // -----------------------------------------------------------------
 
     /**
@@ -1028,7 +1028,7 @@ public class AuthClient(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0066 part 1: taking the account back
+    // ADR-0074 part 1: taking the account back
     // -----------------------------------------------------------------
 
     /**
@@ -1043,12 +1043,12 @@ public class AuthClient(
         oldAccountSeed: ByteArray,
         handle: ByteArray? = null,
     ): RecallStatus {
-        // ADR-0067 section 8: a device with no account id names the account
+        // ADR-0075 section 8: a device with no account id names the account
         // by login handle; the statement's account field then carries the
         // first 16 bytes of the handle.
         if (handle != null) requireHandle(handle)
         val stated = handle?.copyOfRange(0, ACCOUNT_ID_LEN) ?: accountId
-        // ADR-0066 T5 item 24: a device with a wrong clock is told the
+        // ADR-0074 T5 item 24: a device with a wrong clock is told the
         // server's time (never "no anchor") and signs again at it, once.
         val res: RecallStatusResponse = sendWithStaleStatementRetry { signAtMs ->
             val kind = uniffi.lakko_ffi_uniffi.AccountStatementKind.RECALL_STATUS
@@ -1090,7 +1090,7 @@ public class AuthClient(
         newSeed: ByteArray,
         newSignaturePubkey: ByteArray,
         deviceId: ByteArray? = null,
-        /** ADR-0067 section 8: the 64-byte seed of the OLD recovery phrase.
+        /** ADR-0075 section 8: the 64-byte seed of the OLD recovery phrase.
          *  When given, the login is made against the anchored RECOVERY
          *  envelope (`proof: "phrase"`) and [oldPassword] is not used. */
         oldRecoverySeed: ByteArray? = null,
@@ -1280,7 +1280,7 @@ public class AuthClient(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0066 part 3: rotating the account keys, keeping the devices
+    // ADR-0074 part 3: rotating the account keys, keeping the devices
     // -----------------------------------------------------------------
 
     /**
@@ -1306,7 +1306,7 @@ public class AuthClient(
         newSignaturePubkey: ByteArray,
         supersessionProof: ByteArray,
         revokeDeviceIds: List<ByteArray>,
-        /** ADR-0067 section 3: this rotation is "Save a recovery phrase". */
+        /** ADR-0075 section 3: this rotation is "Save a recovery phrase". */
         phraseSaved: Boolean = false,
     ): KeyResetResult {
         requireSession(sessionToken)
@@ -1367,7 +1367,7 @@ public class AuthClient(
     }
 
     /**
-     * The kept device's session after a rotation (ADR-0066 section 3.3):
+     * The kept device's session after a rotation (ADR-0074 section 3.3):
      * `POST /auth/session/refresh` with a kind-4 statement by the NEW
      * account key over [refreshToken]. A valid credential of a lower
      * generation is exchanged for a pair at the current one naming the same
@@ -1415,7 +1415,7 @@ public class AuthClient(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0067: the recovery email
+    // ADR-0075: the recovery email
     // -----------------------------------------------------------------
 
     /** `GET /recovery-email/available` (anonymous): whether this server can
@@ -1885,7 +1885,7 @@ public class AuthClient(
     public suspend fun bindLoginHandle(
         sessionToken: String,
         handle: ByteArray,
-        /** ADR-0068: needed when the bind CHANGES the account's handle
+        /** ADR-0076: needed when the bind CHANGES the account's handle
          *  (`403 fresh-auth-required` otherwise). */
         freshGrant: String? = null,
         /** The handle the account holds now; with [recoveryEmail]. */
@@ -1923,7 +1923,7 @@ public class AuthClient(
     }
 
     /**
-     * `POST /auth/login-handle/check` (bearer, ADR-0068 section 2): whether
+     * `POST /auth/login-handle/check` (bearer, ADR-0076 section 2): whether
      * the account holds [handle], another handle, or none. An answer this
      * build does not know reads as "other": nothing is bound on a guess.
      */
@@ -2073,13 +2073,13 @@ public class AuthClient(
 
         private const val ACCOUNT_ID_LEN: Int = 16
 
-        /** ADR-0066 - a device id is its 32-byte leaf signature key. */
+        /** ADR-0074 - a device id is its 32-byte leaf signature key. */
         public const val DEVICE_ID_LEN: Int = 32
 
         /** Ed25519 identity pubkey length (ADR-0036 genesis-attest mint). */
         private const val PUBKEY_LEN: Int = 32
 
-        /** The fixed layout of the ADR-0065 key-reset attestation. */
+        /** The fixed layout of the ADR-0073 key-reset attestation. */
         public const val KEY_RESET_ATTESTATION_LEN: Int = 177
         /** A supersession proof is this many bytes (ADR-0016). */
         public const val SUPERSESSION_PROOF_LEN: Int = 145
@@ -2135,7 +2135,7 @@ public data class SignupResult(
      *  somewhere safe — losing it means losing the only way back
      *  into the account if the password is forgotten. */
     val recoveryPhrase: String? = null,
-    /** ADR-0065: the session pair (access token, refresh credential, key
+    /** ADR-0073: the session pair (access token, refresh credential, key
      *  generation). Stash in [AuthRepository.identitySecrets]. */
     val session: SessionPair,
     /** The fresh-auth proof the sign-up minted (UX section 17), opaque;
@@ -2185,7 +2185,7 @@ public data class LoginResult(
     /** Same export key the user got at signup time — deterministic
      *  for the same password. */
     val exportKey: ByteArray,
-    /** ADR-0065: the session pair. */
+    /** ADR-0073: the session pair. */
     val session: SessionPair,
     /** The fresh-auth proof the password login minted (UX section 17),
      *  opaque; `null` when the server sent none. Memory only: never stored,
@@ -2228,7 +2228,7 @@ public data class RecoverResult(
      *  device root key — the previous device key (if any) is no
      *  longer reachable from the new password. */
     val exportKey: ByteArray,
-    /** ADR-0065: the session pair for the rotated password. */
+    /** ADR-0073: the session pair for the rotated password. */
     val session: SessionPair,
 ) {
     val sessionToken: String get() = session.accessToken
@@ -2278,7 +2278,7 @@ public data class DeviceAuthorizeRedeemResult(
 }
 
 /**
- * Result of [AuthClient.resetAccountKeys] (ADR-0065): the attestation
+ * Result of [AuthClient.resetAccountKeys] (ADR-0073): the attestation
  * discovery and the Delivery Service require before they let the new
  * identity replace the old one, and the pair this device continues with.
  */

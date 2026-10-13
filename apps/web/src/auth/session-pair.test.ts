@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The session pair (ADR-0065 section 3): parsing a landing response and the
+ * The session pair (ADR-0073 section 3): parsing a landing response and the
  * token provider's timing rule.
  */
 import { describe, expect, it } from "vitest";
@@ -81,7 +81,7 @@ describe("tokenAccountSegment", () => {
   it("reads the account segment of a v2 access token and an r1 refresh credential alike", () => {
     expect(tokenAccountSegment("v2.QUNDVA.3.123.tag")).toBe("QUNDVA");
     expect(tokenAccountSegment("r1.QUNDVA.3.123.tag")).toBe("QUNDVA");
-    // The pre-ADR-0065 four-part shape reads the same.
+    // The pre-ADR-0073 four-part shape reads the same.
     expect(tokenAccountSegment("v1.QUNDVA.123.tag")).toBe("QUNDVA");
   });
 

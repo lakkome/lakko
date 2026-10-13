@@ -90,7 +90,7 @@ class SendFoundRequestTest {
         assertTrue(fake.sent.isEmpty())
     }
 
-    // --- ADR-0066 section 3.5a: a hit under a proven predecessor key --------
+    // --- ADR-0074 section 3.5a: a hit under a proven predecessor key --------
 
     @Test
     fun `a person found under a key they provably rotated away from is sent to their current keys`() = runTest {

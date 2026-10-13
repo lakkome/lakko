@@ -20,7 +20,7 @@ class Http extends Error {
 const staleOf = (err: unknown): number | null =>
   err instanceof Http ? staleServerTimeMs(err.status, err.body) : null;
 
-describe("statement-stale (ADR-0066 T5 items 17 and 24)", () => {
+describe("statement-stale (ADR-0074 T5 items 17 and 24)", () => {
   it("reads the server's time only from a 401 statement-stale with a usable time", () => {
     expect(staleServerTimeMs(401, '{"error":"statement-stale","server_time_ms":1700000000123}')).toBe(1700000000123);
     expect(staleServerTimeMs(401, '{"error":"recall-refused","server_time_ms":5}')).toBeNull();
@@ -80,7 +80,7 @@ describe("statement-stale (ADR-0066 T5 items 17 and 24)", () => {
   });
 });
 
-describe("recall/finish asked again (ADR-0066 T5 item 25)", () => {
+describe("recall/finish asked again (ADR-0074 T5 item 25)", () => {
   it("resends only when no answer arrived or the server failed", () => {
     expect(recallFinishResend({ status: null, sends: 1 })).toBe(true);
     expect(recallFinishResend({ status: 502, sends: 1 })).toBe(true);

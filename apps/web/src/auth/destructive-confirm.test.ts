@@ -67,7 +67,7 @@ describe("the forget-device confirmation", () => {
 
   it("names the ways back, which decide whether to press the button", () => {
     // The one fact that decides whether the user should press the button,
-    // pinned as a literal rather than merely referenced. ADR-0064: the phrase
+    // pinned as a literal rather than merely referenced. ADR-0072: the phrase
     // is no longer the only way back; another device and a passkey that
     // restores keys come first.
     expect(forgetDeviceConfirmation().body).toBe(

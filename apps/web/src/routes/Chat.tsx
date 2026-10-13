@@ -527,7 +527,7 @@ export default function Chat(props: { backTo?: string }): JSX.Element {
     }
   };
 
-  // ADR-0065 R.5 — the route names a CONVERSATION: the id of the lineage's
+  // ADR-0073 R.5 — the route names a CONVERSATION: the id of the lineage's
   // root, or of any of its groups (a link from before the move). What opens
   // is the conversation's current group; the view is keyed on that group, so
   // a conversation that moves to a successor remounts onto it in place.
@@ -625,7 +625,7 @@ function ChatView(props: {
   // below to seed the composer from sibling-device drafts
   // and to broadcast composer edits back out.
   const sync = useDeviceGroupSync();
-  // ADR-0065 R.5 — the CONVERSATION this group belongs to. Everything a
+  // ADR-0073 R.5 — the CONVERSATION this group belongs to. Everything a
   // person attaches to a conversation (the draft, the read position, call
   // history) is keyed on its id and never rewritten when the conversation
   // continues in a successor group; everything protocol-level keeps the
@@ -711,12 +711,12 @@ function ChatView(props: {
    *  `calls/call-log-store.ts`, so they survive a reload the way the
    *  timeline's own rows do. */
   const callRows = (): readonly CallLogEntry[] => [
-    // ADR-0065 R.5 — call history is the conversation's: the calls of its
+    // ADR-0073 R.5 — call history is the conversation's: the calls of its
     // earlier groups stay in the timeline.
     ...historySegments().flatMap((g) => callLog.of(g.groupIdB64)),
     ...callLog.of(props.entry.groupIdB64),
   ];
-  /** ADR-0065 R.5 — the stored rows of the conversation's OLDER groups,
+  /** ADR-0073 R.5 — the stored rows of the conversation's OLDER groups,
    *  under their on-screen history ids (`lineage.ts`). Display-only: never
    *  in `rows`, so never persisted into this group's log, never counted by
    *  the read position, and never the target of an op. */
@@ -1047,7 +1047,7 @@ function ChatView(props: {
     try {
       result = await chat.sendMessage(props.requireIdentity(), entry.group, bytes);
     } catch (err) {
-      // ADR-0065 R.7 case 1 — a forward INTO a superseded one-to-one is held
+      // ADR-0073 R.7 case 1 — a forward INTO a superseded one-to-one is held
       // for that conversation's successor, with its re-encrypted references
       // and its attribution; the picker reports it sent, as a typed message
       // there shows the ordinary sending state.
@@ -1131,7 +1131,7 @@ function ChatView(props: {
     if (origin === undefined) return;
     const target = forwardJumpTarget({ origin }, (id) => chats.get(id) !== undefined);
     if (target === null) return;
-    // ADR-0065 R.5 — the origin group may be an OLDER segment of a
+    // ADR-0073 R.5 — the origin group may be an OLDER segment of a
     // conversation that has since continued in a successor: the jump goes to
     // the conversation (its current group), at the row the older segment's
     // message is drawn under.
@@ -1481,7 +1481,7 @@ function ChatView(props: {
   let atHandled = false;
   createEffect(() => {
     const at = searchParams.at;
-    // The older segments' rows too: `?at=` may name one (ADR-0065 R.5).
+    // The older segments' rows too: `?at=` may name one (ADR-0073 R.5).
     const held = uniqueRows();
     if (atHandled || at === undefined) return;
     const id = Number(at);
@@ -2327,7 +2327,7 @@ function ChatView(props: {
       // ADR-0050 — a leaf this sweep removed is never re-admitted by this
       // client's scheduled check.
       recordRemovedDevices(s.account.accountId, props.entry.groupIdB64, before, after);
-      // ADR-0065 R.7 case 2 — this sweep only swapped the devices of people
+      // ADR-0073 R.7 case 2 — this sweep only swapped the devices of people
       // who stay: no `Members changed` row for it.
       suppressDeviceSwapRow(
         personsBefore,
@@ -2879,7 +2879,7 @@ function ChatView(props: {
       // an ended ONE-TO-ONE is closed from (this exit block is the group
       // layer's). The registry row goes last there, so a failure leaves the
       // chat reachable.
-      // ADR-0065 R.5 — a conversation is every group of its lineage this
+      // ADR-0073 R.5 — a conversation is every group of its lineage this
       // device holds; the open group (the head) goes last.
       const held = lineageView.resolve(props.entry.groupIdB64)?.held ?? [props.entry];
       await deleteConversation({
@@ -3168,7 +3168,7 @@ function ChatView(props: {
   });
 
   // -------------------------------------------------------------------------
-  // ADR-0065 "Phase 2 revised" — a member reset their account keys
+  // ADR-0073 "Phase 2 revised" — a member reset their account keys
   // -------------------------------------------------------------------------
   //
   // Nothing here has a surface (R.0): no flag, no line, no row. The identity
@@ -3687,7 +3687,7 @@ function ChatView(props: {
       senderKeyOfLeaf: (leaf) => personKeyOfLeafB64(leaf),
     };
     for (const e of events) {
-      // ADR-0065 R.5 / R.8 — a row from a leaf bound to a key an accepted
+      // ADR-0073 R.5 / R.8 — a row from a leaf bound to a key an accepted
       // reset retired (a removed device still holding the old keys) is
       // dropped before it is stored or shown.
       // The same rule as the background settle (`background-events.ts`): a
@@ -3861,7 +3861,7 @@ function ChatView(props: {
         });
         continue;
       }
-      // ADR-0065 R.6 — a successor claim. Judged by the claim rule under the
+      // ADR-0073 R.6 — a successor claim. Judged by the claim rule under the
       // per-group lock; never a timeline row, whatever the verdict.
       if (e.kind === "group-closed") {
         void groupClosed.receive(props.entry, e).catch((err) => {
@@ -4021,7 +4021,7 @@ function ChatView(props: {
       // for it a second time. The pre-fetch values stand only for the
       // `cursor-moved` path, which returns before reading them.
       let membersBeforePoll = memberSignatureKeys(props.entry.group);
-      // ADR-0065 R.7 case 2 — the PERSON keys, for the device-swap row.
+      // ADR-0073 R.7 case 2 — the PERSON keys, for the device-swap row.
       let personsBeforePoll: string[] | null = personKeysOrNull(props.entry.group);
       let epochBeforePoll = readEpoch();
       const result = await chat.pollMessages(
@@ -4054,7 +4054,7 @@ function ChatView(props: {
       // With the receive loop parked on a long poll, this is the COMMON outcome
       // of a user-initiated refresh racing it, not a corner case.
       if (result.outcome === "cursor-moved") return result.outcome;
-      // ADR-0065 R.7 case 1 — a re-sent message whose original this device
+      // ADR-0073 R.7 case 1 — a re-sent message whose original this device
       // already holds in an older segment is not a row here (the same rule
       // the background receive applies, `resend-receive.ts`).
       const resendAliases = loadKeyAliases();
@@ -4144,7 +4144,7 @@ function ChatView(props: {
             membersBeforePoll,
             currentMemberKeys,
           );
-          // ADR-0065 R.7 case 2 — a batch that only swapped the devices of
+          // ADR-0073 R.7 case 2 — a batch that only swapped the devices of
           // people who stay leaves no `Members changed` row.
           {
             const commit = [...result.events]
@@ -4196,7 +4196,7 @@ function ChatView(props: {
         // eslint-disable-next-line no-console
         console.warn("ADR-0045 tail sweep failed", err);
       });
-      // ADR-0065 R.6 / R.7 — the conversation's continuity pass, at the tail
+      // ADR-0073 R.6 / R.7 — the conversation's continuity pass, at the tail
       // of the open chat's own poll (the background sweep leaves this group
       // to this view). Silent; a no-op unless a reset was accepted.
       receive.continuityPass(props.entry.groupIdB64);
@@ -4371,7 +4371,7 @@ function ChatView(props: {
     forward: ForwardRef | undefined = undefined,
   ): Promise<void> {
     setRows([...withSendAck(rows(), tempId, "pending")]);
-    // ADR-0065 R.2 / R.7 case 1 — a one-to-one: the peer's identity is
+    // ADR-0073 R.2 / R.7 case 1 — a one-to-one: the peer's identity is
     // checked when the last check is old (an accepted reset re-pins and the
     // route below then holds), and a message is NEVER sent into a session
     // only removed devices can read. It is held, in the ordinary sending
@@ -4473,7 +4473,7 @@ function ChatView(props: {
     setEditingId(null);
     setError(null);
     try {
-      // ADR-0065 R.7 case 1 — in a superseded one-to-one an op is applied
+      // ADR-0073 R.7 case 1 — in a superseded one-to-one an op is applied
       // here and never sent: its target exists only in the old session.
       if (opRouteNow() === "send") {
         const envelopeBytes = await composeEditEnvelope(messageId, newText);
@@ -4592,7 +4592,7 @@ function ChatView(props: {
    *  (these signals are non-essential; the next one supersedes a
    *  dropped one). */
   async function publishEphemeral(envelopeBytes: Uint8Array): Promise<void> {
-    // ADR-0065 R.7 case 1 — a typing signal or a read receipt is not sent
+    // ADR-0073 R.7 case 1 — a typing signal or a read receipt is not sent
     // into a superseded one-to-one either (the publish would refuse it).
     if (opRouteNow() !== "send") return;
     try {
@@ -5138,7 +5138,7 @@ function ChatView(props: {
       mediaJobs.delete(job.tempId);
       setMediaUpload(job.tempId, null);
     } catch (err) {
-      // ADR-0065 R.7 case 1 — the bytes are uploaded and the session is
+      // ADR-0073 R.7 case 1 — the bytes are uploaded and the session is
       // superseded: the message is held for the successor like a typed one,
       // as its uploaded reference (the row stays in the sending state).
       if (err instanceof HeldForSuccessor && job.uploaded !== undefined) {
@@ -6016,7 +6016,7 @@ function ChatView(props: {
   onMount(() => {
     void (async (): Promise<void> => {
       await hydrateFromLog();
-      // ADR-0065 R.7 case 1 — messages held for this conversation go out if
+      // ADR-0073 R.7 case 1 — messages held for this conversation go out if
       // this view opened its successor; R.2 — opening a one-to-one checks the
       // peer's published identity.
       // After a reload they are read back from the message log first.
@@ -6154,7 +6154,7 @@ function ChatView(props: {
     readCursorTimer = setTimeout(() => {
       readCursorTimer = null;
       lastBroadcastReadId = target;
-      // ADR-0065 R.5 — the read position is the CONVERSATION's: keyed on its
+      // ADR-0073 R.5 — the read position is the CONVERSATION's: keyed on its
       // id, and (past the first group) carrying which of its groups the
       // message id belongs to. In the first group this is the 8 big-endian
       // bytes every build has always written.
@@ -6210,7 +6210,7 @@ function ChatView(props: {
     }
   });
 
-  /** ADR-0065 R.5 — fill `historyRows` from the logs of the conversation's
+  /** ADR-0073 R.5 — fill `historyRows` from the logs of the conversation's
    *  older groups. Pure display: nothing here writes anywhere. */
   function seedHistoryRows(log: NonNullable<Awaited<ReturnType<typeof loadMessageLog>>>): void {
     const segments = historySegments();
@@ -6266,7 +6266,7 @@ function ChatView(props: {
   });
 
   // -------------------------------------------------------------------------
-  // ADR-0065 R.2 / R.7 case 1 — the held send and the peer's identity check
+  // ADR-0073 R.2 / R.7 case 1 — the held send and the peer's identity check
   // -------------------------------------------------------------------------
 
   const conversationHex = (): string => hexOf(conversationIdBytes());
@@ -6449,7 +6449,7 @@ function ChatView(props: {
       const log = await loadMessageLog(accountIdB64, deviceKey);
       didHydrateFromLog = true;
       if (log === null) return;
-      // ADR-0065 R.5 — the conversation's older groups, read-only, above.
+      // ADR-0073 R.5 — the conversation's older groups, read-only, above.
       seedHistoryRows(log);
       const slot = log.groups[groupIdHexForLog()];
       if (slot === undefined) return;
@@ -6605,7 +6605,7 @@ function ChatView(props: {
     !membershipEnded() && (pinsOneToOne() || ownRole() !== "member");
   /** The stored pin an on-screen row id stands for: the row itself in this
    *  group, or `(older group, original id)` for a row of an older segment
-   *  (ADR-0065 R.5, `pin-bar.ts` `pinTargetOfRow`). */
+   *  (ADR-0073 R.5, `pin-bar.ts` `pinTargetOfRow`). */
   const pinTargetOf = (rowId: number): PinTarget | null =>
     pinTargetOfRow({
       rowId,
@@ -6673,7 +6673,7 @@ function ChatView(props: {
    *  excerpt resolved the way the reply quote resolves them (the edited
    *  text of an edited message, the one-word stand-in for a media message). */
   const pinEntries = createMemo((): PinBarEntry[] => {
-    // ADR-0065 R.5 — the pins of the conversation's older groups stay in
+    // ADR-0073 R.5 — the pins of the conversation's older groups stay in
     // the bar, each under the id its row is drawn with.
     const older = historySegments();
     const spanned = pinsAcrossSegments(
@@ -8345,7 +8345,7 @@ function ChatView(props: {
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
                 onReact={onReact}
-                // ADR-0065 R.5 — a row of an older group of the conversation
+                // ADR-0073 R.5 — a row of an older group of the conversation
                 // is read-only: no op can name it in this group's journal.
                 actionsAvailable={messageActionsAvailable() && !isHistoryRowId(rowMessageId(row()))}
                 // ...except that a pin of an older segment can be removed.
@@ -8966,7 +8966,7 @@ function membershipRetryMaySucceed(reason: string): boolean {
  * Anything else is logged and shown as the action's own `fallbackKey`: core,
  * server and browser prose never reaches the person.
  */
-/** ADR-0065 R.7 case 2 — the distinct PERSON keys of a roster (base64 account
+/** ADR-0073 R.7 case 2 — the distinct PERSON keys of a roster (base64 account
  *  keys), or `null` on a torn read, which decides nothing. */
 function personKeysOrNull(group: ActiveGroup["group"]): string[] | null {
   try {
@@ -9164,7 +9164,7 @@ function timelineRowToPersisted(
     return null;
   }
   if (row.event.kind === "group-closed") {
-    // ADR-0065 R.6 — a successor claim, consumed by the claim rule; never in
+    // ADR-0073 R.6 — a successor claim, consumed by the claim rule; never in
     // the transcript.
     return null;
   }

@@ -139,7 +139,7 @@ final class ThreeWordsTests: XCTestCase {
     // MARK: - Refused sign-in rule
 
     func testOnlyARefusedCredentialSuspendsTheRoute() {
-        // ADR-0065: the recovery credential moves with the keys in one
+        // ADR-0073: the recovery credential moves with the keys in one
         // server transaction, so a refused credential is stale, never
         // pending.
         XCTAssertEqual(ThreeWords.stalePhraseVerdict(failure: .invalidCredentials), .suspendThreeWords)

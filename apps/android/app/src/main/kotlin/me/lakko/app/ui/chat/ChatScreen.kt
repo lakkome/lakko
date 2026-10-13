@@ -350,7 +350,7 @@ public fun ChatScreen(
     // The timeline's rows come first in the lazy list, before the pending
     // media, so a timeline index is a list index.
     val jumpToMessage: (Long) -> Unit = { target ->
-        // ADR-0065 rule 7 — a quote whose target is 0 has no jump (a held
+        // ADR-0073 rule 7 — a quote whose target is 0 has no jump (a held
         // reply that went out in the successor): never matched against a
         // row that has no id yet.
         val index = if (target == me.lakko.app.chat.REPLY_NO_JUMP_TARGET) {
@@ -1439,7 +1439,7 @@ private fun MessageRow(
     onPin: () -> Unit = {},
     /** UX 4.1 — the row's word, `Pin` or `Unpin`, decided by the caller. */
     pinLabel: String = me.lakko.app.l10n.Localization.strings.value["chat.message.pin"],
-    /** ADR-0065 R.5 — the row's pin row would UNDO a pin: the one thing a
+    /** ADR-0073 R.5 — the row's pin row would UNDO a pin: the one thing a
      *  read-only row of an older segment still offers. */
     pinUndoes: Boolean = false,
     /** UX section 8 — Select was chosen on this message. */
@@ -1748,7 +1748,7 @@ internal fun Bubble(
     onPin: () -> Unit = {},
     /** UX 4.1 — the row's word, `Pin` or `Unpin`, decided by the caller. */
     pinLabel: String = me.lakko.app.l10n.Localization.strings.value["chat.message.pin"],
-    /** ADR-0065 R.5 — the row's pin row would UNDO a pin: the one thing a
+    /** ADR-0073 R.5 — the row's pin row would UNDO a pin: the one thing a
      *  read-only row of an older segment still offers. */
     pinUndoes: Boolean = false,
     /** UX section 8 — Select was chosen on this message. */
@@ -1802,7 +1802,7 @@ internal fun Bubble(
         val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly
         // ADR-0061 section 6 — a newer-version row has no content this build
         // can read, so nothing to copy, edit, quote or forward: no menu.
-        // ADR-0065 R.5 — a row of an older segment is read-only history: its
+        // ADR-0073 R.5 — a row of an older segment is read-only history: its
         // card exists only to undo a pin.
         val menuAvailable = if (msg.isHistory) {
             actionsAvailable && pinUndoes
@@ -1993,7 +1993,7 @@ internal fun Bubble(
                     bubbleBounds = bounds,
                     alignEnd = isOwn,
                     actions = if (msg.isHistory) {
-                        // ADR-0065 R.5 — a row of an older segment is
+                        // ADR-0073 R.5 — a row of an older segment is
                         // read-only: `Unpin` alone, when it is pinned.
                         historyRowActions(rowIsPinned = pinUndoes, pinLabel = pinLabel)
                     } else {

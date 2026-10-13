@@ -3,7 +3,7 @@
 
 /**
  * The three things a key rotation needs from the session's DeviceGroup handle
- * (ADR-0066 section 3.3), installed by `DeviceGroupSyncProvider` and used by
+ * (ADR-0074 section 3.3), installed by `DeviceGroupSyncProvider` and used by
  * the auth layer and the rotation runtime, which sit above it:
  *
  *   - `epoch`: the handle's current epoch (read before the removal);

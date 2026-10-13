@@ -4,7 +4,7 @@
 import Foundation
 @testable import Lakko
 
-// ADR-0065 — the session pair in the tests that predate it: an access token
+// ADR-0073 — the session pair in the tests that predate it: an access token
 // alone (no refresh credential), which the provider never refreshes and the
 // restore accepts while the token is live.
 
@@ -48,7 +48,7 @@ extension PasskeyLoginResult {
 }
 
 extension SessionPair {
-    /// A full pair for the tests of ADR-0065 itself.
+    /// A full pair for the tests of ADR-0073 itself.
     static func fixture(
         access: String = "tok-access",
         accessExpiresAtMs: Int64 = 2_000_000,

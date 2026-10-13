@@ -22,7 +22,7 @@
 //! lets a device that was offline across the change resurrect what was
 //! removed.
 //!
-//! ## The lineage register (ADR-0065 R.5)
+//! ## The lineage register (ADR-0073 R.5)
 //!
 //! `successor group id -> root conversation id`, one register per successor,
 //! folded by the same rule as every other register, so convergence needs no
@@ -35,7 +35,7 @@
 //! [`SyncedState::apply_lineage_envelope`] carry it instead, and
 //! [`SyncedState::to_bytes`] persists it with the rest.
 //!
-//! ## The recovery email register (ADR-0067, amended 2026-10-13)
+//! ## The recovery email register (ADR-0075, amended 2026-10-13)
 //!
 //! One register per account holding the normalised recovery email address,
 //! or an empty value for "none". It is an ordinary last-writer-wins register
@@ -47,7 +47,7 @@
 //! [`SyncedState::apply_recovery_email_envelope`] carry it between devices,
 //! and [`SyncedState::to_bytes`] persists it (and so the backup carries it).
 //!
-//! ## The own-username register (ADR-0068 section 3)
+//! ## The own-username register (ADR-0076 section 3)
 //!
 //! One register per account holding the account's canonical username, or an
 //! empty value for "none": the recovery-email register's shape exactly.
@@ -266,7 +266,7 @@ impl SyncedState {
     }
 
     // -----------------------------------------------------------------
-    // Conversation lineage (ADR-0065 R.5).
+    // Conversation lineage (ADR-0073 R.5).
     // -----------------------------------------------------------------
 
     /// Record that `successor_group_id` continues the conversation
@@ -402,7 +402,7 @@ impl SyncedState {
     }
 
     // -----------------------------------------------------------------
-    // Recovery email (ADR-0067, amended 2026-10-13).
+    // Recovery email (ADR-0075, amended 2026-10-13).
     // -----------------------------------------------------------------
 
     /// Write the account's recovery email register, stamped `hlc`:
@@ -491,7 +491,7 @@ impl SyncedState {
     }
 
     // -----------------------------------------------------------------
-    // Own username (ADR-0068 section 3).
+    // Own username (ADR-0076 section 3).
     // -----------------------------------------------------------------
 
     /// Write the account's own-username register, stamped `hlc`:

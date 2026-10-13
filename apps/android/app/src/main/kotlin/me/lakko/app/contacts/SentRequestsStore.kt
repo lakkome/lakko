@@ -15,7 +15,7 @@ import me.lakko.app.auth.base64Decode
 import me.lakko.app.auth.base64Encode
 
 /*
- * ADR-0066 section 3.5a rule 5 - this device's unanswered outgoing contact
+ * ADR-0074 section 3.5a rule 5 - this device's unanswered outgoing contact
  * requests, kept across a process death.
  *
  * After a rotation of the account keys each of them is sent again from the

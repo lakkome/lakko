@@ -64,7 +64,7 @@ pub(crate) async fn require_session(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
 
-    // The key generation the v2 token carries (ADR-0065) is not applied here:
+    // The key generation the v2 token carries (ADR-0073) is not applied here:
     // storage has no database to hold a floor and keeps the stateless verify,
     // so its revocation latency is the access-token TTL.
     let account_id = state

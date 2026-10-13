@@ -310,7 +310,7 @@ public enum PinnedBar {
         held: [ChatMessage]
     ) -> [PinnedEntry] {
         var holdable: Set<Int64> = []
-        // ADR-0065 R.5 — a row of an older segment is held under its history
+        // ADR-0073 R.5 — a row of an older segment is held under its history
         // id and stays in the bar (it can be opened and unpinned, never
         // pinned anew).
         for message in held where isPinnable(message) || isHeldHistoryRow(message) {

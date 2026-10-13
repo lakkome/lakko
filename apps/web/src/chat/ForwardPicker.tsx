@@ -74,7 +74,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   const profiles = useProfiles();
   const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
-  // ADR-0065 R.5 — one candidate per conversation: its current group, with
+  // ADR-0073 R.5 — one candidate per conversation: its current group, with
   // the conversation's own pin / mute / archive.
   const lineageView = useLineage();
   const auth = useAuth();

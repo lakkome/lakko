@@ -1312,7 +1312,7 @@ async fn the_owner_key_is_fixed_at_creation() {
     }
 }
 
-/// ADR-0066 section 3.5: the owning account changed its keys. The key the
+/// ADR-0074 section 3.5: the owning account changed its keys. The key the
 /// OLD seed derives hands the channel to the key the NEW seed derives; from
 /// then on the old key is nobody, the new key owns every owner route, and
 /// nothing else about the channel moved.

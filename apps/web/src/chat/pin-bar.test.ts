@@ -152,7 +152,7 @@ describe("pinBarLabel", () => {
   });
 });
 
-describe("a conversation's pins span its segments (ADR-0065 R.5)", () => {
+describe("a conversation's pins span its segments (ADR-0073 R.5)", () => {
   it("an older segment's pins stay in the bar under the id their row is drawn with", () => {
     const spanned = pinsAcrossSegments(
       [

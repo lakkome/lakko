@@ -32,7 +32,7 @@ export const ROTATE_COPY = {
   reasonStolen: (): string => t("settings.devices.remove.reason_stolen"),
   title: (): string => t("devices.rotate.title"),
   lede: (): string => t("devices.rotate.lede"),
-  /** `newWords`: whether the account gets new words to save (ADR-0067: only
+  /** `newWords`: whether the account gets new words to save (ADR-0075: only
    *  a phrase-protected account; any other is shown none, so the line is
    *  left out). */
   effects: (newWords: boolean): string[] => [
@@ -40,7 +40,7 @@ export const ROTATE_COPY = {
     ...(newWords ? [t("devices.rotate.effect_phrase")] : []),
     t("devices.rotate.effect_passkeys"),
     t("devices.rotate.effect_contacts"),
-    // ADR-0066 section 3.5a rule 5: what was granted before is spent.
+    // ADR-0074 section 3.5a rule 5: what was granted before is spent.
     t("devices.rotate.effect_links"),
   ],
   confirm: (): string => t("devices.rotate.confirm"),

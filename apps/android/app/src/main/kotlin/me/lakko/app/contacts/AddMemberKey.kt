@@ -4,7 +4,7 @@
 package me.lakko.app.contacts
 
 /*
- * ADR-0065 R.2 / ADR-0050 - adding a person to a group checks WHOSE devices
+ * ADR-0073 R.2 / ADR-0050 - adding a person to a group checks WHOSE devices
  * the directory served.
  *
  * The function that adds is told an account id (what the directory is asked
@@ -52,7 +52,7 @@ public fun <D> devicesBoundTo(devices: List<D>, acceptedKeysB64: Set<String>, bo
     devices.filter { d -> boundKeyOf(d)?.let { it in acceptedKeysB64 } == true }
 
 /*
- * ADR-0066 section 3.5 x ADR-0065 R.2 - the ONE filter every path that adds
+ * ADR-0074 section 3.5 x ADR-0073 R.2 - the ONE filter every path that adds
  * a person's devices to a group goes through: the user-facing add, a new
  * conversation, a successor build, the re-admission arm and the ADR-0050
  * membership re-request.

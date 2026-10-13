@@ -8,7 +8,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0067 - the publish-owed screen after a reset or a take-back says
+/** ADR-0075 - the publish-owed screen after a reset or a take-back says
  *  nothing about words to an account that is not phrase-protected. */
 class PublishOwedCopyTest {
 

@@ -63,7 +63,7 @@ public final class WebauthnClient {
 
     // MARK: - Registration
 
-    /// `freshGrant` is the fresh-auth grant (ADR-0065, amended 2026-10-06):
+    /// `freshGrant` is the fresh-auth grant (ADR-0073, amended 2026-10-06):
     /// both register calls answer `403 fresh-auth-required` without one.
     public func startRegistration(
         userName: String,
@@ -232,7 +232,7 @@ public final class WebauthnClient {
     /// That action grant is the proof for an account WITH a passkey: the
     /// `x-lakko-fresh-grant` header is not required then, and is sent only
     /// when a grant happens to be live. An account with NO passkey needs a
-    /// live fresh-auth grant in the header (ADR-0065, amended 2026-10-06):
+    /// live fresh-auth grant in the header (ADR-0073, amended 2026-10-06):
     /// without one the server answers `403 {"error":"fresh-auth-required"}`.
     public func deleteAccount(freshGrant: String?) async throws {
         let endpoint = "/account"
@@ -539,7 +539,7 @@ public struct AuthPublicKeyCredentialJSON: Encodable {
 }
 
 /// `POST /webauthn/auth/finish`: the account id and the session pair
-/// (ADR-0065 section 3), flattened.
+/// (ADR-0073 section 3), flattened.
 public struct AuthFinishResponse: Decodable {
     public let account_id_b64: String
     public let session_token: String
@@ -547,7 +547,7 @@ public struct AuthFinishResponse: Decodable {
     public let refresh_token: String
     public let refresh_expires_at_ms: Int64
     public let key_generation: UInt64
-    /// The fresh-auth grant of this passkey sign-in (ADR-0065, amended
+    /// The fresh-auth grant of this passkey sign-in (ADR-0073, amended
     /// 2026-10-06).
     public let fresh_grant: String?
     public let fresh_grant_expires_at_ms: Int64?
@@ -558,7 +558,7 @@ public struct AuthFinishResponse: Decodable {
 public struct PasskeyLoginResult {
     /// URL-safe base64 (no padding) of the 16-byte account id.
     public let accountIdB64: String
-    /// The session pair the finish issued (ADR-0065 section 3).
+    /// The session pair the finish issued (ADR-0073 section 3).
     public let session: SessionPair
     /// The raw id of the credential that answered.
     public let credentialId: Data

@@ -86,13 +86,13 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
             .contains { $0.lowercased() == needle }
     }
 
-    /// ADR-0065 R.8 — a key an accepted reset retired, from the App Group
+    /// ADR-0073 R.8 — a key an accepted reset retired, from the App Group
     /// mirror the APP writes (``ContinuityMirror``). READ-ONLY.
     func isSupersededSender(accountIdB64: String, senderKeyB64: String?) -> Bool {
         ContinuityMirror.isSuperseded(senderKeyB64, in: ContinuityMirror.read(accountIdB64: accountIdB64))
     }
 
-    /// ADR-0065 R.7 case 1 — the rule the app's own receive paths run
+    /// ADR-0073 R.7 case 1 — the rule the app's own receive paths run
     /// (``ResendMarker/heldResendPredicate(batch:port:)``), over what this
     /// process may READ: the message log the app wrote (the stored rows of
     /// the marker's group), the lineage mirror (which conversation a group
@@ -210,7 +210,7 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         if let name = CallPeerNameMirror.name(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
             return name
         }
-        // ADR-0065 R.5 — a group that continues a conversation is titled as
+        // ADR-0073 R.5 — a group that continues a conversation is titled as
         // the conversation when the app has not mirrored its own title yet.
         let conversation = conversationHex(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         guard conversation != groupIdHex else { return nil }
@@ -226,7 +226,7 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         ConversationMuteMirror.isMuted(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
     }
 
-    /// ADR-0065 R.5 — the conversation a group belongs to, from the App Group
+    /// ADR-0073 R.5 — the conversation a group belongs to, from the App Group
     /// lineage mirror the app writes. READ-ONLY (C-59). Absent → the group
     /// itself.
     func conversationHex(accountIdB64: String, groupIdHex: String) -> String {
@@ -291,7 +291,7 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // Proposal / ExternalJoinProposal advances state (in the THROWAWAY
         // provider only) but has no body to show.
         guard case let .application(data, _, senderAccount) = processed else { return nil }
-        // ADR-0065 R.8 — the PERSON the row came from: the account key the
+        // ADR-0073 R.8 — the PERSON the row came from: the account key the
         // core resolved the sender leaf to, at receipt (C-68). What the core
         // asks the superseded-key mirror about, for every kind of row.
         let senderKeyB64 = senderAccount?.base64EncodedString()
@@ -335,7 +335,7 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLengths,
             decodesAsGroupClosed: Self.decodesAsGroupClosed,
             groupClosedEnvelopeLens: Self.groupClosedEnvelopeLengths,
-            // ADR-0066 section 3.3 — the key-rotation envelope: a yes / no
+            // ADR-0074 section 3.3 — the key-rotation envelope: a yes / no
             // from the slim FFI, never a decode (it carries the account's
             // next seed and this process has no use for it).
             isKeyRotation: { isKeyRotationEnvelope(plaintext: $0) },
@@ -370,7 +370,7 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         )
     }
 
-    /// ADR-0065 R.7 case 1 — the re-send marker of a chat body.
+    /// ADR-0073 R.7 case 1 — the re-send marker of a chat body.
     ///
     /// The marker is two fields of the chat envelope, read by the ONE parser
     /// of that wire format, in Rust; the slim extension surface carries the
@@ -484,7 +484,7 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         return minLen...max(minLen, maxLen)
     }
 
-    /// The AUTHORITATIVE half of the ADR-0065 group-closed filter (UX 16.5):
+    /// The AUTHORITATIVE half of the ADR-0073 group-closed filter (UX 16.5):
     /// the slim FFI's `decodeGroupClosedEnvelope`. READ-ONLY: a pure decode.
     /// The NSE never closes a group (C-59) and holds no role table to gate it
     /// with; it only needs the yes/no that keeps a closed notice out of a

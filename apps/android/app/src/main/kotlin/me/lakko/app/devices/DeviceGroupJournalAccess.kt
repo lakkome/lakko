@@ -127,7 +127,7 @@ internal object DeviceGroupJournalAccess {
     }
 
     /**
-     * ADR-0065 section 5 / ADR-0066 T5 item 21 - what a founding of this
+     * ADR-0073 section 5 / ADR-0074 T5 item 21 - what a founding of this
      * account's DeviceGroup must carry on its `Reset`, because the journal's
      * chain on the DS belongs to the OLD root: the key-reset attestation and
      * the NEW account key's endorsement of [rootKey] (the reset's signer).
@@ -193,7 +193,7 @@ internal object DeviceGroupJournalAccess {
     }
 
     /**
-     * ADR-0065 section 2.3 step 4 / section 5 — the DeviceGroup after a reset
+     * ADR-0073 section 2.3 step 4 / section 5 — the DeviceGroup after a reset
      * of the account keys, on the device that reset them. The journal id is
      * unchanged (derived from the account id) but the chain on the DS belongs
      * to the OLD root, and the DeviceGroup this device holds was founded
@@ -233,7 +233,7 @@ internal object DeviceGroupJournalAccess {
                 ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the DeviceGroup access key could not be derived")
             val root = rootOfSeed(accountIdentitySeed, groupId)
                 ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the DeviceGroup root could not be derived")
-            // ADR-0066 T5 item 21 - the DS refuses the attestation without
+            // ADR-0074 T5 item 21 - the DS refuses the attestation without
             // the new account key's endorsement of the resetting root.
             val evidence = rootEvidence(accountIdentitySeed, attestationB64, keyGeneration, groupId, root.publicKey)
                 ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the root endorsement could not be signed")

@@ -19,7 +19,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0065 on the push path, with the app closed: a wake posts nothing for
+ * ADR-0073 on the push path, with the app closed: a wake posts nothing for
  * what a superseded sender posted (R.5 / R.8) and nothing for a re-sent
  * message whose original this device holds (R.7 case 1).
  *

@@ -13,7 +13,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0066 section 3.3 - a kept device: the pending envelope store, the
+ * ADR-0074 section 3.3 - a kept device: the pending envelope store, the
  * verdicts (pending / adopt / drop / superseded without a pending envelope),
  * the upgrade's answers, and this account's own predecessors.
  */

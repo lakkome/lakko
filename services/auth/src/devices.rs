@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Removing a device: `POST /account/devices/revoke` ([ADR-0066] section
+//! Removing a device: `POST /account/devices/revoke` ([ADR-0074] section
 //! 2.1).
 //!
 //! Removing a device in Settings takes it out of the DeviceGroup and the
@@ -31,7 +31,7 @@
 //! recorded at the account's first genesis mint and moved only by a key
 //! reset. An account with no recorded key yet cannot revoke by this route.
 //!
-//! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+//! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -178,7 +178,7 @@ pub(crate) async fn revoke(
 
     crate::limits::charge_name(&state.db, &state.limits, Scope::DeviceRevoke, &account_id).await?;
 
-    // Inside the generation fence (ADR-0066 "T3 as built"): the statement
+    // Inside the generation fence (ADR-0074 "T3 as built"): the statement
     // above was verified under the key that was the account's a moment ago.
     // A floor written after a recall has moved that key would be the
     // displaced party removing the owner's device.

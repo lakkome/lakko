@@ -57,7 +57,7 @@ export function contactsErrorText(
   }
   const shown = findInChain(err, (v) => (keyedErrorText(v) !== null ? v : null));
   if (shown !== null) return () => keyedErrorText(shown) ?? t(fallbackKey);
-  // ADR-0065 R.2 "no verdict": whether a changed key is an attested reset
+  // ADR-0073 R.2 "no verdict": whether a changed key is an attested reset
   // could not be established yet (the attest key or the key log was not
   // reachable). Not a refusal: the action failed like any that could not
   // reach the server, and nothing about the contact changed.

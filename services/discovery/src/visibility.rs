@@ -191,12 +191,12 @@ pub(crate) struct CertificateResponse {
 
 /// `GET /discovery/username-certificate` - the caller's certificate, signed
 /// now. Session-gated; the account comes from the token. `404` when the
-/// account has no current username (ADR-0068: never a retired one).
+/// account has no current username (ADR-0076: never a retired one).
 pub(crate) async fn get_certificate(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<AuthenticatedAccount>,
 ) -> Result<Json<CertificateResponse>, HandlerError> {
-    // The CURRENT name only (ADR-0068): an account holds at most one, and a
+    // The CURRENT name only (ADR-0076): an account holds at most one, and a
     // name it renamed away from is never certified again.
     let row: Option<(Vec<u8>,)> = sqlx::query_as(
         "SELECT oprf_hash FROM usernames WHERE account_id = ? AND retired_at IS NULL",
@@ -329,7 +329,7 @@ pub(crate) async fn put_visibility(
     let mut tx = sqlx::Connection::begin(&mut *conn)
         .await
         .map_err(db_err("begin visibility"))?;
-    // The current name only (ADR-0068): a retired row stays hidden.
+    // The current name only (ADR-0076): a retired row stays hidden.
     sqlx::query("UPDATE usernames SET is_public = ? WHERE account_id = ? AND retired_at IS NULL")
         .bind(req.public)
         .bind(account)

@@ -644,7 +644,7 @@ internal class MultiJoinerLinkCallPort(
                         reach.mintLink(linkId, expiryMs.takeIf { it != 0L })
                     },
                 )
-                // ADR-0066 section 3.5a rule 5 - the ledger id is kept with
+                // ADR-0074 section 3.5a rule 5 - the ledger id is kept with
                 // the link's key, so a rotation of the account keys can
                 // revoke the link at the ledger.
                 val linkId = mintedLinkId

@@ -5,16 +5,16 @@
 //!
 //! Four decoders run on bytes this device did not write:
 //!
-//! * `decode_lineage_envelope` (ADR-0065 R.5): a conversation-lineage
+//! * `decode_lineage_envelope` (ADR-0073 R.5): a conversation-lineage
 //!   envelope another device of the same account sent over the DeviceGroup's
 //!   opaque service-envelope carrier. Domain, version (judged before the
 //!   count), a bounded count, one-byte length prefixes checked against their
 //!   bound before any copy, strictly ascending successors, no trailing bytes.
-//! * `decode_recovery_email_envelope` (ADR-0067, amended 2026-10-13): the
+//! * `decode_recovery_email_envelope` (ADR-0075, amended 2026-10-13): the
 //!   account's recovery email register, sent the same way. Domain, version
 //!   (judged before the rest), a stamp, a one-byte length checked against
 //!   its bound before any copy, no trailing bytes, UTF-8, the address shape.
-//! * `decode_own_username_envelope` (ADR-0068 section 3): the account's own
+//! * `decode_own_username_envelope` (ADR-0076 section 3): the account's own
 //!   username register, sent the same way and laid out the same; the value
 //!   must be empty or a canonical username.
 //! * `SyncedState::from_bytes` (ADR-0058): the persisted fold, which is also

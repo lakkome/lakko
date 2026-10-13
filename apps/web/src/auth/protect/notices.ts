@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * What the account's own devices are told (ADR-0067 section 9,
+ * What the account's own devices are told (ADR-0075 section 9,
  * `docs/ux/identity-recovery.md` 19.2, 19.5 and 19.6): which of the notices
  * `GET /account/notices` returned are shown on this device, in what words,
  * and the two per-device facts behind that:

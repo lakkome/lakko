@@ -3,7 +3,7 @@
 
 /**
  * "Let this passkey restore your keys?" (docs/ux/identity-recovery.md 10.2,
- * ADR-0064 decision 6): the choice shown after a passkey is added, and from
+ * ADR-0072 decision 6): the choice shown after a passkey is added, and from
  * a passkey's row later. Used by Settings > Security > Passkeys and by the
  * passkey offer at the end of signup.
  *

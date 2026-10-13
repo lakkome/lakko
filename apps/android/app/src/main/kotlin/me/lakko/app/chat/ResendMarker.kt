@@ -4,7 +4,7 @@
 package me.lakko.app.chat
 
 /*
- * ADR-0065 R.7 case 1 - the RE-SEND MARKER.
+ * ADR-0073 R.7 case 1 - the RE-SEND MARKER.
  *
  * The founder of a successor one-to-one sends again, into it, its own
  * account's messages that reached only removed devices ([messagesToResend]).

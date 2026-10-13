@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! The recall: taking the account back from an old device after a key reset
-//! ([ADR-0066] sections 0.2 and 1; built in sprint T3, see the ADR's "T3 as
+//! ([ADR-0074] sections 0.2 and 1; built in sprint T3, see the ADR's "T3 as
 //! built").
 //!
 //! A key reset is instant, and the server cannot tell the owner who lost a
@@ -122,7 +122,7 @@
 //! replay changes no account state: it issues credentials for the standing
 //! the recall created.
 //!
-//! # The phrase arm (ADR-0067 section 8)
+//! # The phrase arm (ADR-0075 section 8)
 //!
 //! A person who holds the recovery phrase has the old seed without an old
 //! device, and may not know the old password. So an anchor also keeps the
@@ -143,7 +143,7 @@
 //! and the answer, given only to a statement that verifies under an anchor's
 //! key, carries the account id for `start` and `finish`.
 //!
-//! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+//! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -177,11 +177,11 @@ use crate::session::{now_ms, FreshGrant, SessionPair};
 use crate::webauthn::ApiError;
 use crate::AppState;
 
-/// At most this many unexpired anchors per account (ADR-0066 D4; chosen, not
+/// At most this many unexpired anchors per account (ADR-0074 D4; chosen, not
 /// measured). Past it a change captures nothing and the older anchors stand.
 pub(crate) const MAX_ANCHORS: usize = 8;
 
-/// Password attempts an anchor admits before it is destroyed (ADR-0066 D4;
+/// Password attempts an anchor admits before it is destroyed (ADR-0074 D4;
 /// chosen, not measured). One per accepted `recall/start`.
 pub(crate) const MAX_ATTEMPTS: u32 = 20;
 
@@ -309,7 +309,7 @@ pub(crate) async fn capture_anchor(
         return Ok(());
     };
 
-    // ADR-0067 section 8: the recovery envelope in force now (what the
+    // ADR-0075 section 8: the recovery envelope in force now (what the
     // phrase arm is checked against) and whether the account has an email
     // vault (with one, the phrase arm is refused).
     let recovery: Option<Vec<u8>> = sqlx::query_scalar(
@@ -359,7 +359,7 @@ pub(crate) async fn capture_anchor(
 
 /// When the account's recall window closes: the latest expiry among its
 /// unexpired anchors, or `None` when it has none. `DELETE /account` refuses
-/// while this is `Some` (ADR-0066 section 1.3).
+/// while this is `Some` (ADR-0074 section 1.3).
 ///
 /// A locking read, for the reason [`capture_anchor`] gives: the caller goes
 /// on to delete in the same transaction.
@@ -429,7 +429,7 @@ struct Anchor {
     seq: u64,
     identity_pubkey: [u8; 32],
     password_registration: Vec<u8>,
-    /// The recovery envelope in force at capture (ADR-0067 section 8).
+    /// The recovery envelope in force at capture (ADR-0075 section 8).
     recovery_registration: Option<Vec<u8>>,
     /// The account had an email vault at capture: no phrase arm.
     mail_protected: bool,
@@ -576,7 +576,7 @@ fn decode_statement(b64: &str) -> Result<Vec<u8>, ApiError> {
 }
 
 /// What a `recall-status` statement carries in its account field when the
-/// device names the account by login handle (ADR-0067 section 8): the first
+/// device names the account by login handle (ADR-0075 section 8): the first
 /// 16 bytes of the handle. The device cannot know the account id, and the
 /// handle is a BLAKE3 output, so the value collides with a real account id
 /// with probability 2^-128; the statement authorises a read only.
@@ -614,7 +614,7 @@ pub(crate) struct StatusReq {
     /// URL-safe base64 of a 138-byte account statement: kind `recall-status`,
     /// the account, an empty body, signed by the OLD identity key.
     pub(crate) statement_b64: String,
-    /// ADR-0067 section 8: the account's login handle (32 bytes, base64url
+    /// ADR-0075 section 8: the account's login handle (32 bytes, base64url
     /// without padding), sent by a device that holds the phrase and no
     /// cached account id. The statement then carries the FIRST 16 BYTES OF
     /// THE HANDLE in its account field, since the device cannot know the id;
@@ -639,7 +639,7 @@ pub(crate) struct StatusRes {
     /// URL-safe base64 of the 16-byte account id, for `start` and `finish`.
     /// What a device that named the account by handle did not have.
     pub(crate) account_id_b64: String,
-    /// Whether `start` accepts `proof: "phrase"` for this anchor (ADR-0067
+    /// Whether `start` accepts `proof: "phrase"` for this anchor (ADR-0075
     /// section 8): the anchor holds a recovery envelope and the account had
     /// no email vault when it was captured.
     pub(crate) phrase_arm: bool,
@@ -761,7 +761,7 @@ pub(crate) struct StartReq {
     /// from the 64-byte seed of the recovery phrase as it was then).
     pub(crate) login_request: String,
     /// Which anchored envelope the login is against: `"password"` (the
-    /// default) or `"phrase"` (ADR-0067 section 8).
+    /// default) or `"phrase"` (ADR-0075 section 8).
     #[serde(default)]
     pub(crate) proof: Option<String>,
     /// Standard base64 of the OPAQUE `RegistrationRequest` for the NEW
@@ -1339,7 +1339,7 @@ pub(crate) async fn finish(
     };
     if input.new_signature_pubkey == anchor.identity_pubkey {
         // The old identity authorises the recall and does not return
-        // (ADR-0066 D10, invariant #6).
+        // (ADR-0074 D10, invariant #6).
         return Err(ApiError::BadInput("new_signature_pubkey must be a new key").into());
     }
 
@@ -1424,7 +1424,7 @@ pub(crate) async fn finish(
         "DELETE FROM recall_states WHERE account_id = ?",
         "DELETE FROM totp_secrets WHERE account_id = ?",
         "DELETE FROM device_session_floors WHERE account_id = ?",
-        // ADR-0067: the displaced party may have added a recovery email of
+        // ADR-0075: the displaced party may have added a recovery email of
         // its own; a mailed code must not bring it back in. (The email vault
         // and the tickets go with `delete_superseded_state` below.)
         "DELETE FROM recovery_emails WHERE account_id = ?",

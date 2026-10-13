@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 phase 2 (UX 16.6) — the channels this device owned under account
+ * ADR-0073 phase 2 (UX 16.6) — the channels this device owned under account
  * keys that were since reset.
  *
  * A channel's owner proof key derives from the account seed and its content

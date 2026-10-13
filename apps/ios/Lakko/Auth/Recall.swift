@@ -5,7 +5,7 @@ import Foundation
 import LakkoCore
 import Security
 
-// ADR-0066 part 1 — "Was it you?" and taking the account back
+// ADR-0074 part 1 — "Was it you?" and taking the account back
 // (docs/ux/identity-recovery.md section 18.4).
 //
 // A device that learns the account's keys were reset elsewhere deletes
@@ -79,7 +79,7 @@ public struct RecallRecord: Codable, Equatable {
     public let username: String
     /// Unix milliseconds: when this device learned the keys were reset.
     public let learnedAtMs: Int64
-    /// ADR-0067 — whether the account's recovery phrase was saved, as this
+    /// ADR-0075 — whether the account's recovery phrase was saved, as this
     /// device knew it before the staged wipe removed that flag with
     /// everything else. A flag, kept so that after the account is taken
     /// back the new words are shown only to a phrase-protected account.
@@ -121,7 +121,7 @@ public struct RecallRecord: Codable, Equatable {
     }
 
     /// The device-side end of the window: 30 days after this device learned
-    /// (ADR-0066 section 1.1; the server's own window is authoritative while
+    /// (ADR-0074 section 1.1; the server's own window is authoritative while
     /// it answers).
     public static let localWindowMs: Int64 = 30 * 24 * 60 * 60 * 1000
 
@@ -217,7 +217,7 @@ public struct RecallWindow: Equatable, Sendable {
     public let changedAtMs: Int64
     /// How many password attempts are left before the server ends it.
     public let attemptsRemaining: Int
-    /// ADR-0067 section 8 — the anchor also accepts the recovery phrase as
+    /// ADR-0075 section 8 — the anchor also accepts the recovery phrase as
     /// the proof (`proof: "phrase"`): the account had a saved phrase and no
     /// email vault when the anchor was captured.
     public let phraseArm: Bool
@@ -288,7 +288,7 @@ public enum RecallAnswers {
         let code = json?["error"] as? String
         switch (status, code) {
         case (401, "wrong-password"): return .wrongPassword
-        // ADR-0066 "T5 as built" items 17 and 24 — a statement that verified
+        // ADR-0074 "T5 as built" items 17 and 24 — a statement that verified
         // but carried a wrong time. Nothing was counted and nothing is over:
         // the one retry at the server's time already ran, so this is "not
         // known", NEVER the refusal that destroys the recall record.
@@ -614,7 +614,7 @@ public enum RecallCopy {
     public static let done = "devices.recall.done"
     public static let deleteBlocked = "settings.account.delete.blocked"
     public static let back = "common.back"
-    /// ADR-0067 / UX 19.7.
+    /// ADR-0075 / UX 19.7.
     public static let usePhrase = "recall.phrase.use"
     public static let phraseChanged = "recall.phrase.changed"
     public static let phraseTakeBack = "recall.phrase.take_back"
@@ -655,7 +655,7 @@ public enum RecallCopy {
 
 struct RecallStatusRequest: Codable, Equatable {
     let statementB64: String
-    /// ADR-0067 section 8 — the account's login handle (base64url, no
+    /// ADR-0075 section 8 — the account's login handle (base64url, no
     /// padding), sent by a device that holds the phrase and no account id.
     /// The statement then carries the first 16 bytes of the handle in its
     /// account field.
@@ -698,7 +698,7 @@ struct RecallStartRequest: Codable, Equatable {
     let statementB64: String
     let loginRequest: String
     /// `"phrase"` when the login is made from the old recovery phrase's
-    /// seed (ADR-0067 section 8); absent for the password.
+    /// seed (ADR-0075 section 8); absent for the password.
     var proof: String? = nil
     let passwordRequest: String
     let recoveryRequest: String
@@ -791,7 +791,7 @@ struct RecallFinishResponse: Codable, Equatable, SessionPairCarrying {
 }
 
 /// What `POST /account/recall/status` answers a device that named the account
-/// by login handle (ADR-0067 section 8).
+/// by login handle (ADR-0075 section 8).
 public struct RecallByHandle: Equatable, Sendable {
     public let window: RecallWindow
     /// The 16-byte account id, for `start` and `finish`.
@@ -839,7 +839,7 @@ public struct RecallAttempt {
     /// The password from before the reset; empty when ``oldPhraseSeed`` is
     /// the proof.
     public let oldPassword: Data
-    /// ADR-0067 section 8 — the 64-byte seed of the recovery phrase as it
+    /// ADR-0075 section 8 — the 64-byte seed of the recovery phrase as it
     /// was before the reset: the proof instead of the old password
     /// (`proof: "phrase"`). `nil` for the password arm.
     public let oldPhraseSeed: Data?
@@ -886,7 +886,7 @@ public struct RecallOperations {
     /// `POST /account/recall/{start,finish}`. Throws ``RecallWrongPassword``
     /// when the old password did not open `start`'s answer.
     public var takeBack: (_ attempt: RecallAttempt) async throws -> RecallLanded
-    /// ADR-0067 section 8 — `POST /account/recall/status` naming the account
+    /// ADR-0075 section 8 — `POST /account/recall/status` naming the account
     /// by login handle, the statement signed by `oldEd25519Seed` (the key
     /// derived from a typed phrase). Answers the window and the account id.
     public var statusByHandle: (_ handle: Data, _ oldEd25519Seed: Data) async throws -> RecallByHandle

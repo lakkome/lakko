@@ -46,7 +46,7 @@ export interface MintedLink {
   readonly linkId: Uint8Array;
 }
 
-/** A minted link as the spend round of ADR-0066 section 3.5a rule 5 reads
+/** A minted link as the spend round of ADR-0074 section 3.5a rule 5 reads
  *  it: where it lives and when this device minted it. */
 export interface MintedLinkRow extends MintedLink {
   readonly kind: MintedLinkKind;

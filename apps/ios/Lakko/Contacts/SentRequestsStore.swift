@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0066 section 3.5a rule 5 — the device's unanswered OUTGOING contact
+// ADR-0074 section 3.5a rule 5 — the device's unanswered OUTGOING contact
 // requests, kept across a process death.
 //
 // After a rotation of the account keys each unanswered request is sent again

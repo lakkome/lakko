@@ -171,7 +171,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   // provider has run. `ownProfileTick` re-reads it after a save.
   const [ownProfileTick, setOwnProfileTick] = createSignal(0);
   const [renames, setRenames] = createSignal<Map<string, string>>(loadRenames());
-  // ADR-0065 R.2: every retired key names the same person as the contact
+  // ADR-0073 R.2: every retired key names the same person as the contact
   // row (display aliases for stored history only), so old bubbles keep the
   // person's name after the row was re-keyed.
   const [aliases, setAliases] = createSignal<Map<string, string>>(loadKeyAliases());
@@ -241,7 +241,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     }
     return certFetch;
   }
-  // ADR-0068: the name changed under this session (a rename here, or one
+  // ADR-0076: the name changed under this session (a rename here, or one
   // adopted from the own-username register): the cached certificate is the
   // OLD name's. Drop it, fetch the current one, and publish the profile
   // again. The first run (the landing) only records the name.
@@ -381,7 +381,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     if (entry === undefined) return;
     // A group this device is no longer in can never carry another message.
     if (readIsActive(entry.group) === false) return;
-    // ADR-0060 / ADR-0066 section 3.5a rule 3 - what the grants composed
+    // ADR-0060 / ADR-0074 section 3.5a rule 3 - what the grants composed
     // below carry, read BEFORE composing: recorded only once the publish
     // landed, so a conversation whose profile did not get out stays owed.
     const account = accountId();
@@ -505,7 +505,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       const account = accountId();
       if (setting === null || session === null || account === null) return;
       // The signature is recorded by `publishInto` once the publish landed
-      // (ADR-0066 section 3.5a rule 3): a conversation whose profile did not
+      // (ADR-0074 section 3.5a rule 3): a conversation whose profile did not
       // get out is due again the next time this runs.
       const due: string[] = [];
       for (const g of groups) {
@@ -524,7 +524,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     });
   });
 
-  // ADR-0066 section 3.5a rule 3 - the rotating device's `profile` step:
+  // ADR-0074 section 3.5a rule 3 - the rotating device's `profile` step:
   // send every owed profile now and answer how many are still owed.
   installProfileResend(async () => {
     const owed = owedConversations();
@@ -611,7 +611,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
           verification: "verified",
         });
       }
-      // ADR-0065 R.2: an alias (a retired key) resolves through the contact's
+      // ADR-0073 R.2: an alias (a retired key) resolves through the contact's
       // row key: its rename, and its profile when the alias key sent none.
       const canonical = aliases().get(keyB64) ?? keyB64;
       const profile = store.get(keyB64) ?? (canonical === keyB64 ? undefined : store.get(canonical));
@@ -639,7 +639,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       if (session !== null && context !== undefined && entry !== undefined) {
         let senderHex: string;
         try {
-          // ADR-0066 section 3.5a rule 2 - keyed on the PERSON: a leaf bound
+          // ADR-0074 section 3.5a rule 2 - keyed on the PERSON: a leaf bound
           // to a proven predecessor files under the account's current key
           // (and this account's own other devices read as this account).
           senderHex = resolveAccountKeyHex(journalHex(base64Decode(senderKeyB64)));

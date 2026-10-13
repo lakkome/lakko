@@ -11,7 +11,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0067 section 7 / UX 19.3 - the step machine of Get back in > Email code. */
+/** ADR-0075 section 7 / UX 19.3 - the step machine of Get back in > Email code. */
 class EmailRecoverFlowTest {
 
     private fun http(status: Int, code: String?, retryAfterSecs: Long? = null) =

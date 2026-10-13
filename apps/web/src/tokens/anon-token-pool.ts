@@ -346,7 +346,7 @@ function retryAfterOf(response: Response, body: { retry_after_secs?: number }): 
 }
 
 /** The account segment of a session token (`v2.<account>.<gen>.<exp>.<tag>`
- *  since ADR-0065; the `v1.<account>.<exp>.<tag>` shape reads the same), or
+ *  since ADR-0073; the `v1.<account>.<exp>.<tag>` shape reads the same), or
  *  the whole token when it has no such shape. Used only to tell one account
  *  from another - a refreshed token of the SAME account must not read as a
  *  new one, or every refresh would drop the held tokens; it never leaves
@@ -383,7 +383,7 @@ export class AnonTokenPool {
 
   constructor(options: AnonTokenPoolOptions = {}) {
     this.authBaseUrl = options.authBaseUrl ?? "/api/auth";
-    // ADR-0065: the issuance is a bearer route, so it goes through the
+    // ADR-0073: the issuance is a bearer route, so it goes through the
     // session-aware fetch (refresh ahead of expiry, one retry on a 401).
     this.fetchImpl = options.fetchImpl ?? ((input, init) => sessionFetch(input, init));
     this.wasmLoader = options.loadWasm ?? (loadWasm as unknown as () => Promise<AnonTokenWasm>);

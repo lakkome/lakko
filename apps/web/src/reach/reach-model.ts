@@ -107,7 +107,7 @@ export interface ReachBook {
    */
   readonly recovery: { readonly checked: Readonly<Record<string, true>> } | null;
   /**
-   * ADR-0066 section 3.5, "Reach": the account key (hex) whose mailbox
+   * ADR-0074 section 3.5, "Reach": the account key (hex) whose mailbox
    * `registered` and `open` describe. Absent on a book written before it
    * was recorded.
    */
@@ -133,7 +133,7 @@ export function reachRebind(boundKeyHex: string, registeredForKeyHex: string | u
 }
 
 /**
- * The book as the session of `boundKeyHex` holds it (ADR-0066 section 3.5,
+ * The book as the session of `boundKeyHex` holds it (ADR-0074 section 3.5,
  * "Reach"; the rule iOS's `ReachCenter.rekey` and Android's `rekeyDecision`
  * apply). A reach key and the mailbox it is registered on both derive from
  * the account seed, so after a rotation the recorded registrations describe
@@ -149,7 +149,7 @@ export function bindReachBook(book: ReachBook, boundKeyHex: string): ReachBook {
     case "stamp":
       return { ...book, registeredForKeyHex: boundKeyHex };
     case "move":
-      // ADR-0066 section 3.5a rule 5: what was granted before the rotation
+      // ADR-0074 section 3.5a rule 5: what was granted before the rotation
       // is spent. A link or an open request recorded here names a key
       // derived from the OLD seed; registering "the same" scope on the new
       // mailbox would register a key nobody holds.

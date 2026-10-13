@@ -118,7 +118,7 @@ public final class NotificationService: UNNotificationServiceExtension {
             return
         }
 
-        // ADR-0065 R.5 — the stack is the CONVERSATION, not the wake's
+        // ADR-0073 R.5 — the stack is the CONVERSATION, not the wake's
         // routing id: `g` is per group and changes when the routing secret
         // rotates, so a conversation that moved to a successor group (or
         // rotated its secret) would otherwise start a second stack. Resolved
@@ -148,7 +148,7 @@ public final class NotificationService: UNNotificationServiceExtension {
             switch outcome {
             case .preview(let preview):
                 best.body = preview.body
-                // ADR-0065 R.5 — the wake is grouped by its routing id, which
+                // ADR-0073 R.5 — the wake is grouped by its routing id, which
                 // is per GROUP; a group that continues a conversation is
                 // grouped under the conversation instead (the tag differs
                 // from the wake's group only then).
@@ -168,7 +168,7 @@ public final class NotificationService: UNNotificationServiceExtension {
         }
     }
 
-    /// ADR-0065 R.8 / R.7 case 1 — the wake brought only rows the app shows
+    /// ADR-0073 R.8 / R.7 case 1 — the wake brought only rows the app shows
     /// nothing for (a superseded sender's, a re-send of a message already
     /// held).
     ///

@@ -98,18 +98,18 @@
 //!   pin its verifying key. Unset in production: the key is generated on
 //!   first boot and persisted. Set: a loud startup warning.
 //! - `LAKKO_DISCOVERY_ATTEST_KEY` — base64 of auth's 32-byte Ed25519 attest
-//!   verifying key (ADR-0065 S3), pinned at deploy time; a key-reset
+//!   verifying key (ADR-0073 S3), pinned at deploy time; a key-reset
 //!   attestation on `POST /discovery/identity` is verified under it. Unset:
 //!   an attested upload answers 503 `key-reset-disabled` (loud startup
 //!   warning), and since no unattested key change is accepted any more, a
 //!   published key can then change only through a supersession proof.
 //!   Malformed: startup fails.
 //! - `LAKKO_DISCOVERY_RENAME_INTERVAL_SECS` — minimum seconds between two
-//!   renames of one account (ADR-0068 D2; default 2592000 = 30 days, chosen
+//!   renames of one account (ADR-0076 D2; default 2592000 = 30 days, chosen
 //!   not measured; 0 = no minimum).
 //! - `LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SECS` — seconds a name an account
 //!   renamed away from stays unclaimable before the hourly pruner frees it
-//!   (ADR-0068 D1; default 2592000 = 30 days, chosen not measured).
+//!   (ADR-0076 D1; default 2592000 = 30 days, chosen not measured).
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
 //!
 //! ## Endpoints
@@ -119,9 +119,9 @@
 //! - `GET    /version`
 //! - `POST   /discovery/oprf`      — apply server static `K` to a blinded element (token)
 //! - `POST   /discovery/register`  — bind an account's FIRST OPRF-hashed username
-//!   (`409 username-taken` / `409 username-already-set`, ADR-0068)
+//!   (`409 username-taken` / `409 username-already-set`, ADR-0076)
 //! - `POST   /discovery/username/replace` — rename: retire the current name and bind another
-//!   (ADR-0068; `409 no-username` / `username-taken`, `429 rename-too-soon`)
+//!   (ADR-0076; `409 no-username` / `username-taken`, `429 rename-too-soon`)
 //! - `POST   /discovery/lookup`    — resolve OPRF-hashed username → account_id (Everyone only, ADR-0060)
 //! - `PUT    /discovery/visibility`  — enter / leave Everyone, publish name terms (ADR-0060)
 //! - `POST   /discovery/name/lookup` — accounts in Everyone with one name term (ADR-0060)
@@ -232,13 +232,13 @@ pub(crate) struct AppState {
     /// with (`username_cert_signing_key`, or the dev override
     /// `LAKKO_DISCOVERY_USERNAME_CERT_SEED_HEX`).
     pub(crate) username_cert_key: Arc<lakko_crypto::signing::SigningKey>,
-    /// ADR-0065 S3 — the auth attest VERIFYING key pinned from
+    /// ADR-0073 S3 — the auth attest VERIFYING key pinned from
     /// `LAKKO_DISCOVERY_ATTEST_KEY`, which a key-reset attestation on an
     /// identity upload is verified under. `None`: an attested upload answers
     /// `503 key-reset-disabled`, so no published key can change without a
     /// supersession proof.
     pub(crate) key_reset_attest_key: Option<lakko_crypto::signing::VerifyingKey>,
-    /// ADR-0068 — how often an account may rename and how long a retired
+    /// ADR-0076 — how often an account may rename and how long a retired
     /// name stays unclaimable (both 30 days by default; chosen).
     pub(crate) name_policy: registry::NamePolicy,
 }
@@ -364,14 +364,14 @@ async fn main() -> Result<()> {
         );
     }
 
-    // ADR-0065 S3 — the pinned auth attest key. A malformed value refuses
+    // ADR-0073 S3 — the pinned auth attest key. A malformed value refuses
     // startup; an unset one is loud, since it leaves every key change that is
     // not a supersession proof unreachable.
     let key_reset_attest_key = key_reset::attest_key_from_lookup(|name| std::env::var(name).ok())
         .map_err(anyhow::Error::msg)
         .context("key-reset attest key")?;
     if key_reset_attest_key.is_some() {
-        tracing::info!("ADR-0065: key-reset attest key pinned; attested identity resets accepted");
+        tracing::info!("ADR-0073: key-reset attest key pinned; attested identity resets accepted");
     } else {
         tracing::warn!(
             "{} unset - an identity upload carrying a key-reset attestation answers 503 \
@@ -422,8 +422,8 @@ async fn main() -> Result<()> {
     let _group_invite_pruner = group_invite::spawn_pruner(pool.clone());
     // G-discovery-ratelimit: drop idle buckets so the
     // limiters' memory ceiling stays bounded.
-    // ADR-0066: with it, the tombstones of deleted device ids (30 days).
-    // ADR-0068: and the usernames retired longer ago than the hold.
+    // ADR-0074: with it, the tombstones of deleted device ids (30 days).
+    // ADR-0076: and the usernames retired longer ago than the hold.
     let _pruners =
         spawn_bucket_and_tombstone_pruners(&rate_limits, &pool, name_policy.retired_hold_secs);
 
@@ -468,7 +468,7 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
     // write limiter the verified account.
     Router::new()
         .route("/discovery/register", post(registry::register))
-        // ADR-0068 — rename: retire the current name, bind another.
+        // ADR-0076 — rename: retire the current name, bind another.
         .route("/discovery/username/replace", post(registry::replace))
         // ADR-0060 — enter or leave Everyone (username public flag + name
         // search terms), and fetch this account's username certificate.
@@ -489,7 +489,7 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
         )
         .route("/discovery/identity", post(identity_bundle::upload))
         .route("/discovery/keypackage", post(keypackage::upload))
-        // ADR-0050 — remove one device's KeyPackage (device removal). ADR-0066:
+        // ADR-0050 — remove one device's KeyPackage (device removal). ADR-0074:
         // under the generation floor, tombstones the id, and needs an account
         // statement to delete another device's row.
         .route(
@@ -703,8 +703,8 @@ fn build_transparency_client() -> Option<transparency_log::TransparencyClient> {
     }
 }
 
-/// Spawn the rate-limit bucket pruner, the ADR-0066 device-tombstone pruner
-/// and the ADR-0068 retired-username pruner (hourly: frees the names retired
+/// Spawn the rate-limit bucket pruner, the ADR-0074 device-tombstone pruner
+/// and the ADR-0076 retired-username pruner (hourly: frees the names retired
 /// longer ago than `retired_hold_secs`); the handles are held for the life
 /// of the process.
 fn spawn_bucket_and_tombstone_pruners(
@@ -719,7 +719,7 @@ fn spawn_bucket_and_tombstone_pruners(
     ]
 }
 
-/// ADR-0068 — read and log the rename interval and the retired-name hold.
+/// ADR-0076 — read and log the rename interval and the retired-name hold.
 fn load_name_policy() -> Result<registry::NamePolicy> {
     let policy = registry::NamePolicy::from_env().context("username rename policy")?;
     tracing::info!(

@@ -68,7 +68,7 @@ import me.lakko.app.ui.auth.rememberRemainingMs
 
 /**
  * "Was it you?" and "Take the account back"
- * (`docs/ux/identity-recovery.md` section 18.4; ADR-0066 part 1).
+ * (`docs/ux/identity-recovery.md` section 18.4; ADR-0074 part 1).
  *
  * Shown by the app root instead of the whole app while this device holds a
  * recall record: the account's keys were reset on another device and what

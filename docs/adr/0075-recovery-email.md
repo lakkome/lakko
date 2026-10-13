@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
 
-# ADR-0067: A recovery email, an account without a saved phrase, and taking an account back with the phrase
+# ADR-0075: A recovery email, an account without a saved phrase, and taking an account back with the phrase
 
 - **Status:** Accepted (2026-10-12; the maintainer decided D1 to D8 below,
   including the exception to security invariant #2, and asked for it to be
@@ -10,23 +10,26 @@
   server or through a mail relay.
 - **Date:** 2026-10-12
 - **Context:** account recovery, Part 6 (after
-  [ADR-0064](0064-recovery-model-simplification.md),
-  [ADR-0065](0065-account-key-reset.md) and
-  [ADR-0066](0066-account-takeover-resistance.md))
-- **Amends (when built):** [ADR-0064](0064-recovery-model-simplification.md)
+  [ADR-0072](0072-recovery-model-simplification.md),
+  [ADR-0073](0073-account-key-reset.md) and
+  [ADR-0074](0074-account-takeover-resistance.md))
+- **Amends (when built):** [ADR-0072](0072-recovery-model-simplification.md)
   (the phrase is no longer shown at sign-up; an email route returns),
   [ADR-0018](0018-recovery-factor-cascade.md) (the list of server factors),
-  [ADR-0066](0066-account-takeover-resistance.md) (recall gains a phrase
+  [ADR-0074](0074-account-takeover-resistance.md) (recall gains a phrase
   arm), and **security invariant #2** (one stated exception, section 2).
 - **UX spec:** [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md)
   section 19.
+
+Renumbered from 0067 on 2026-10-13: the main branch had taken 0064 to 0071 for
+other decisions. Commit messages before that date name this ADR as 0067.
 
 ## Context
 
 The recovery phrase is hard for ordinary people. Today a person who did not
 write it down, has no passkey and no authenticator cannot get back in after
 forgetting the password, and loses the account with its username after
-losing the only phone. ADR-0064 removed the email one-time code because the
+losing the only phone. ADR-0072 removed the email one-time code because the
 server sees the address when it sends a letter and a mailed code cannot
 bring keys.
 
@@ -63,7 +66,7 @@ messages come only from another device.
 | Mailed code gives | new password and the keys | new password only |
 | Keys on a new device | another device, passkey with keys, the mailed code | another device, passkey with keys, the phrase |
 | Server holds | `email_key` and an **email vault** | `email_key` only (if an email was added) |
-| After a hostile reset | ADR-0066 recall from an old device | that, or recall with the phrase from any device |
+| After a hostile reset | ADR-0074 recall from an old device | that, or recall with the phrase from any device |
 
 A third state exists: no phrase saved and no email added. Such an account
 rests on the password and the devices that hold it; the person was warned
@@ -103,7 +106,7 @@ address per account through Argon2id and, for a live database, unwrap the
 at-rest key).
 
 Proposed wording for invariant #2, for the maintainer to apply to
-`CLAUDE.md`: "Exception (ADR-0067): for an account whose owner has not saved
+`CLAUDE.md`: "Exception (ADR-0075): for an account whose owner has not saved
 a recovery phrase, the server holds the phrase entropy sealed under a key
 derived from the username and the recovery email address; the operator, who
 sees that address when sending mail, can open it. Saving a phrase ends the
@@ -112,7 +115,7 @@ exception for that account."
 ### 3. Saving a phrase ends the exception by changing the keys
 
 Deleting the vault is not enough: a copy taken earlier still opens the same
-phrase. So "Save a recovery phrase" in Settings is the ADR-0066 key
+phrase. So "Save a recovery phrase" in Settings is the ADR-0074 key
 **rotation** (a new phrase and identity, the other devices kept, contacts
 see nothing), followed by deleting the vault. The words shown are the new
 ones. From then on the account is phrase-protected. Needs the fresh-auth
@@ -172,7 +175,7 @@ nothing more.
   the phrase restore; the ticket is spent) or `{mode: "password"}`.
 - `POST /recovery-email/recover/password/{start,finish}` (password mode
   only): OPAQUE registration for `KIND_PASSWORD` under the ticket; `finish`
-  in one transaction under the account row lock captures the ADR-0066 recall
+  in one transaction under the account row lock captures the ADR-0074 recall
   anchor, replaces the password envelope, writes the account notice and
   answers the session pair. It mints no fresh-auth grant.
 
@@ -181,7 +184,7 @@ on the recovered recovery credential, which already captures the anchor.
 
 ### 8. Taking the account back with the phrase (D6)
 
-ADR-0066's recall needs an old device (for the old seed) and the old
+ADR-0074's recall needs an old device (for the old seed) and the old
 password (checked against the anchored envelope). A person who holds the
 phrase has the old seed without a device and may not know the old password.
 So:
@@ -198,7 +201,7 @@ So:
 
 This arm exists only for a phrase-protected account. In mail-protected mode
 whoever recovers by mail holds the same phrase as the owner, so the phrase
-proves nothing; there the owner has ADR-0066's device recall only.
+proves nothing; there the owner has ADR-0074's device recall only.
 
 ### 9. Telling the account's own devices
 
@@ -238,7 +241,7 @@ Argon2id derivation, parameters to be measured), on both FFI surfaces.
 - **A phrase-protected account loses the password to the mailbox**, and
   through it a key reset in two steps. TOTP, the notice, device recall and
   now phrase recall stand against it.
-- Saving a phrase depends on key rotation (ADR-0066 T5/T6), which is built
+- Saving a phrase depends on key rotation (ADR-0074 T5/T6), which is built
   and unit-tested but has never been walked.
 - No phrase and no email: a forgotten password with no passkey or
   authenticator cannot be recovered, and a lost only phone loses the
@@ -336,10 +339,10 @@ and 9, the recall phrase arm, `lettre` 0.11 for SMTP (rustls), scopes 17 to
   in its account field (the statement format was not changed).
 - Letters are English only; `lang` is accepted and ignored.
 
-**Accepted cost (maintainer, 2026-10-12).** ADR-0064 keeps the phrase on
+**Accepted cost (maintainer, 2026-10-12).** ADR-0072 keeps the phrase on
 every device of the account, wrapped under the device's hardware-backed key.
 With the phrase arm, the old seed alone recalls a phrase-protected account,
-so ADR-0066's rule that a device's stored keys without the password are not
+so ADR-0074's rule that a device's stored keys without the password are not
 enough no longer holds for these accounts. Reaching the seed needs code
 running as the app on an unlocked device (the storage cannot be decrypted
 elsewhere, and the app never shows the phrase without the password). The
@@ -373,7 +376,7 @@ One behaviour on the three clients:
   and only then `recover/open`; vault mode runs the existing phrase restore,
   password mode the ticket routes. A vault that does not open shows one line
   and returns to the list. Vault calls run off the main thread.
-- Saving a phrase is the ADR-0066 rotation with no device removed and
+- Saving a phrase is the ADR-0074 rotation with no device removed and
   `phrase_saved: true`; the words appear after the commit.
 - **New words are shown only to a phrase-protected account.** After a
   remove-and-change-keys rotation, a reset or a recall, an account without a
@@ -453,10 +456,10 @@ tag 11, envelope `lakko/sync/recovery-email/v1\0`), `services/auth`
 unit tests only. On every client a write made before the synced state has
 loaded waits in memory, so an app closed in that moment loses the address
 and asks for it again. A username change keeps the recovery email when the
-device holds the address ([ADR-0068](0068-username-change.md)).
+device holds the address ([ADR-0076](0076-username-change.md)).
 
 ## References
 
 ADR-0017, ADR-0049 (the passkey vault's blob shape), ADR-0054 (login handle,
-stand-ins, limits), ADR-0064, ADR-0065 (fresh-auth grant, key reset),
-ADR-0066 (recall anchor, rotation).
+stand-ins, limits), ADR-0072, ADR-0073 (fresh-auth grant, key reset),
+ADR-0074 (recall anchor, rotation).

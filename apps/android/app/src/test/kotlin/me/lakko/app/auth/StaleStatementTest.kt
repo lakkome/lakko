@@ -14,7 +14,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * ADR-0066 "T5 as built" items 17, 24 and 25: a stale account statement is
+ * ADR-0074 "T5 as built" items 17, 24 and 25: a stale account statement is
  * signed again at the server's time, once, and never read as a refusal; a
  * `recall/finish` whose answer was lost is asked again with the same bytes.
  */

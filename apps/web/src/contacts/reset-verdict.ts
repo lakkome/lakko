@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 "Phase 2 revised: silent continuity", R.2 - the acceptance rule
+ * ADR-0073 "Phase 2 revised: silent continuity", R.2 - the acceptance rule
  * for a contact's account-key RESET, as one pure decision.
  *
  * A reset is a key change with NO supersession proof (with one, ADR-0016's

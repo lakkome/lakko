@@ -25,8 +25,8 @@
 //!   DeviceGroup carries, one commutative, associative, idempotent
 //!   [`SyncedState`] every client consumes over the FFI, its persistence
 //!   codec, and the catch-up snapshot. The same fold holds the
-//!   conversation-lineage registers (ADR-0065), the account's recovery
-//!   email register (ADR-0067) and its own-username register (ADR-0068),
+//!   conversation-lineage registers (ADR-0073), the account's recovery
+//!   email register (ADR-0075) and its own-username register (ADR-0076),
 //!   each carried between devices by its own
 //!   DeviceGroup service envelope.
 //!
@@ -89,7 +89,7 @@ pub mod fuzz_api {
     use crate::{EditChain, EditOp, Hlc, HybridLogicalClock, SyncedState};
 
     /// Drive the four byte decoders of the synced state on arbitrary input
-    /// and check what they accept (ADR-0065 R.5, ADR-0067, ADR-0068,
+    /// and check what they accept (ADR-0073 R.5, ADR-0075, ADR-0076,
     /// ADR-0058):
     ///
     /// * [`decode_lineage_envelope`] — reached from a DeviceGroup service
@@ -130,7 +130,7 @@ pub mod fuzz_api {
             && state.lineage_envelopes() == vec![bytes.to_vec()]
     }
 
-    /// The recovery-email envelope (ADR-0067): canonical, within its bounds,
+    /// The recovery-email envelope (ADR-0075): canonical, within its bounds,
     /// it folds to exactly its own register, and a re-send is not an update.
     fn recovery_email_envelope_holds(bytes: &[u8]) -> bool {
         let Ok(register) = decode_recovery_email_envelope(bytes) else {
@@ -146,7 +146,7 @@ pub mod fuzz_api {
             && state.apply_recovery_email_envelope(bytes) == Ok(false)
     }
 
-    /// The own-username envelope (ADR-0068): the same properties.
+    /// The own-username envelope (ADR-0076): the same properties.
     fn own_username_envelope_holds(bytes: &[u8]) -> bool {
         let Ok(register) = decode_own_username_envelope(bytes) else {
             return true;

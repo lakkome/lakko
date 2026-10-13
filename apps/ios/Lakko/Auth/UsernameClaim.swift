@@ -3,7 +3,7 @@
 
 import Foundation
 
-// A guest chooses a username and a password (ADR-0067, pass A, part 2).
+// A guest chooses a username and a password (ADR-0075, pass A, part 2).
 //
 // A guest account (created by the call-link join) has no username and a
 // random password nobody knows. "Choose a username" is the sign-up claim run

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.12 / UX 16.4 - a live ONE-TO-ONE call ends when its
+ * ADR-0073 R.12 / UX 16.4 - a live ONE-TO-ONE call ends when its
  * conversation moves.
  *
  * A one-to-one call takes its keys and its signalling from the one-to-one's
@@ -47,7 +47,7 @@ export type OneToOneCallTarget =
   | { readonly kind: "unavailable" };
 
 /**
- * ADR-0065 R.12 - a one-to-one call is never STARTED in a dead session.
+ * ADR-0073 R.12 - a one-to-one call is never STARTED in a dead session.
  *
  * A call takes its keys and its signalling from the group it is dialled in.
  * In a one-to-one whose other person's reset was accepted, that group's

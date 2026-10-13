@@ -187,7 +187,7 @@ class AccountDirectoryTest {
         // Two ways to register (the second also hands back the certificate
         // the register call returned), and still no lookup.
         assertEquals(
-            // ADR-0068 added the rename; it writes, it resolves nothing.
+            // ADR-0076 added the rename; it writes, it resolves nothing.
             setOf("registerUsername", "registerUsernameWithCertificate", "replaceUsername"),
             methods.filterNot { it.contains('$') }.toSet(),
         )

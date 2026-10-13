@@ -114,7 +114,7 @@ export interface BubbleHost {
    *  bubble components stay pure renderers of what `membership-ended.ts`
    *  decided. */
   actionsAvailable: boolean;
-  /** ADR-0065 R.5 — set on a row of an OLDER segment that is pinned in a
+  /** ADR-0073 R.5 — set on a row of an OLDER segment that is pinned in a
    *  way this device may clear: its menu opens with the `Unpin` row alone
    *  (`pin-bar.ts` `historyRowOffersUnpin`), whatever `actionsAvailable`
    *  says. */
@@ -223,7 +223,7 @@ export function TimelineBubble(
       return null;
     }
     if (ev.kind === "group-closed") {
-      // ADR-0065 R.6 — a successor claim, consumed by the claim rule; never a row.
+      // ADR-0073 R.6 — a successor claim, consumed by the claim rule; never a row.
       return null;
     }
     if (ev.kind === "pin") {

@@ -262,7 +262,7 @@ function DevicesListView(props: {
   const isNew = (device: DeviceListItem): boolean =>
     !device.isSelf && addedNotice().newKeys.includes(bytesToHex(device.signaturePublicKey));
   const auth = useAuth();
-  // ADR-0066 section 2.3: removing a device is one operation with an owed
+  // ADR-0074 section 2.3: removing a device is one operation with an owed
   // record (`devices/removal.ts`); the sheet below starts it.
   const removal = useDeviceRemoval();
   type State =
@@ -280,7 +280,7 @@ function DevicesListView(props: {
   const [doneLine, setDoneLine] = createSignal(false);
   // UX 18.1: why the device is removed. Neither is chosen at first and the
   // main button waits for one. "stolen" removes the device AND changes the
-  // account keys (ADR-0066 part 3).
+  // account keys (ADR-0074 part 3).
   const rotation = useKeyRotation();
   const [reason, setReason] = createSignal<"unused" | "stolen" | null>(null);
   // The device was removed and the keys were not changed: `Try again` /
@@ -602,7 +602,7 @@ function DevicesListView(props: {
     <div class="lk-stack" style={{ gap: "8px" }}>
       <h2>{t("settings.devices.list.title")}</h2>
       <p class="lk-card-desc">{t("settings.devices.list.lede")}</p>
-      {/* ADR-0066 T1 point 15: while a key-reset publish is owed, auth and the
+      {/* ADR-0074 T1 point 15: while a key-reset publish is owed, auth and the
           directory hold different account keys; no removal runs then. */}
       <Show when={removal.blocked()}>
         <p class="form-info" role="status">{REMOVE_DEVICE_COPY.blocked()}</p>

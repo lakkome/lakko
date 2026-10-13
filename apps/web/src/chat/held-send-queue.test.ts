@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.7 case 1 - a held message as stored in the message log, and
+ * ADR-0073 R.7 case 1 - a held message as stored in the message log, and
  * the rule by which every other writer of the log leaves it alone.
  */
 import { describe, expect, it, vi } from "vitest";

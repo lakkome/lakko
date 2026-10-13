@@ -9,7 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0067 / UX 19.1 - the account's mode and what the screens draw from it. */
+/** ADR-0075 / UX 19.1 - the account's mode and what the screens draw from it. */
 class AccountProtectionTest {
 
     private class MapStorage : MarkerStorage {

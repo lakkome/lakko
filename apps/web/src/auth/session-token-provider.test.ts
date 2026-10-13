@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The session token provider (ADR-0065 section 3.3) driven with a fake
+ * The session token provider (ADR-0073 section 3.3) driven with a fake
  * refresh transport and a fake `fetch`: refresh ahead of expiry, one refresh
  * in flight, one retry after a 401, the superseded signal, a stale capture
  * substituted, an unmanaged bearer untouched.
@@ -148,7 +148,7 @@ describe("refreshOnce()", () => {
     expect(h.events).toEqual([{ kind: "superseded", accountIdB64: ACCT }]);
   });
 
-  it("ADR-0066: keeps the superseded pair for the session upgrade of a kept device, until the next install", async () => {
+  it("ADR-0074: keeps the superseded pair for the session upgrade of a kept device, until the next install", async () => {
     const h = harness();
     h.provider.install(ACCT, pair(1));
     h.refreshAnswer = () => ({ kind: "refused", status: 401, errorCode: "key-generation-superseded" });
@@ -162,7 +162,7 @@ describe("refreshOnce()", () => {
     expect(h.provider.supersededPair(ACCT)).toBeNull();
   });
 
-  it("ADR-0066: a bearer route's superseded keeps it too; any other refusal keeps nothing", async () => {
+  it("ADR-0074: a bearer route's superseded keeps it too; any other refusal keeps nothing", async () => {
     const h = harness();
     h.provider.install(ACCT, pair(1));
     h.provider.reportSuperseded();
@@ -324,7 +324,7 @@ describe("fetch()", () => {
   });
 });
 
-// ADR-0066 section 0.4: this device was removed from the account.
+// ADR-0074 section 0.4: this device was removed from the account.
 describe("device-revoked", () => {
   it("drops the pair and raises device-revoked when the refresh is refused with it", async () => {
     const h = harness();

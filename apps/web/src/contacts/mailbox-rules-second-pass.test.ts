@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.5a, the second pass: the pure decisions behind rules 1,
+ * ADR-0074 section 3.5a, the second pass: the pure decisions behind rules 1,
  * 4, 5 and 6 as the web client applies them.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

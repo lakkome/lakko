@@ -106,7 +106,7 @@ export function isOffline(err: unknown): boolean {
   return (
     err instanceof AuthNetworkError ||
     err instanceof DiscoveryNetworkError ||
-    // ADR-0065: the DeviceGroup step of a key-reset publish talks to the DS.
+    // ADR-0073: the DeviceGroup step of a key-reset publish talks to the DS.
     isDsNetworkFailure(err)
   );
 }

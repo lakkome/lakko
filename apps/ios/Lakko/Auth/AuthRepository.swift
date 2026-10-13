@@ -71,7 +71,7 @@ public final class AuthRepository: ObservableObject {
             if case .session(let account) = state, let token = identitySecrets?.sessionToken {
                 ensureLoginHandleBound(username: account.username, sessionToken: token, context: "session")
             }
-            // ADR-0066 — every state that holds a session names this device
+            // ADR-0074 — every state that holds a session names this device
             // in it, and a session with keys records the account key at auth
             // until that has succeeded once. One hook for every landing: the
             // relaunch restore, passkey, pairing, the phrase completion.
@@ -84,15 +84,15 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    /// ADR-0065 section 3.5 — this device's keys are not the account's keys
+    /// ADR-0073 section 3.5 — this device's keys are not the account's keys
     /// any more: the keys were reset on another device (the automatic wipe
     /// runs), or the published identity differs at the same generation (the
     /// wipe runs on the tap). Replaces the whole app while set; `nil`
     /// otherwise. Cleared by "Sign in" on the screen.
     @Published public private(set) var keysSignOut: KeysSignOutState?
 
-    /// Why ``keysSignOut`` is set: the keys were reset elsewhere (ADR-0065),
-    /// or this device was removed from the account (ADR-0066 section 2.3).
+    /// Why ``keysSignOut`` is set: the keys were reset elsewhere (ADR-0073),
+    /// or this device was removed from the account (ADR-0074 section 2.3).
     /// The screen's copy differs; the wipe is the same full one.
     @Published public private(set) var keysSignOutCause: DeviceSignOutCause = .keysReset
 
@@ -107,7 +107,7 @@ public final class AuthRepository: ObservableObject {
     /// screen.
     public private(set) var keysSignOutNoticeKey: String?
 
-    /// ADR-0066 section 1.1 / UX 18.4 — "Was it you?": the account's keys
+    /// ADR-0074 section 1.1 / UX 18.4 — "Was it you?": the account's keys
     /// were reset on another device, this device deleted what the account
     /// kept on it and holds a recall record. Replaces the whole app while
     /// set, at launch too (it is read back from the record). `nil` otherwise.
@@ -122,7 +122,7 @@ public final class AuthRepository: ObservableObject {
     /// only.
     @Published public private(set) var keysResetThisSession: Bool = false
 
-    /// ADR-0065 section 3.3 — the refresh credential was refused as invalid:
+    /// ADR-0073 section 3.3 — the refresh credential was refused as invalid:
     /// the device landed logged out and the sign-in screen says why. Cleared
     /// by the next sign-in attempt.
     @Published public private(set) var sessionExpiredNotice: Bool = false
@@ -139,17 +139,17 @@ public final class AuthRepository: ObservableObject {
 
     /// `true` while the account keys were reset on this device but the new
     /// keys are not published yet (the directory upload, this device's
-    /// KeyPackage or the DeviceGroup journal is still owed; ADR-0065 section
+    /// KeyPackage or the DeviceGroup journal is still owed; ADR-0073 section
     /// 2.3, UX 15.4). The phrase screen then shows an error and "Try again"
     /// instead of the words; ``retryFreshPublish()`` clears it.
     @Published public private(set) var freshPublishPending: Bool = false
 
     /// `true` when the owed publish may not run until the person signs in
     /// again: the stored attestation is older than the 30-day bound
-    /// (ADR-0065 section 4.2, UX 15.4).
+    /// (ADR-0073 section 4.2, UX 15.4).
     @Published public private(set) var freshPublishNeedsSignIn: Bool = false
 
-    /// ADR-0067 — whether the fresh identity parked on the phrase screen
+    /// ADR-0075 — whether the fresh identity parked on the phrase screen
     /// shows its words: `false` for an account that is not phrase-protected,
     /// whose only screen there is the "finishing" one while a publish is
     /// owed.
@@ -270,12 +270,12 @@ public final class AuthRepository: ObservableObject {
     /// The owed markers of a fresh identity (``RecoveryMarkers``).
     private let markers: RecoveryMarkers
 
-    /// ADR-0067 — what this device keeps about an account's protection: the
+    /// ADR-0075 — what this device keeps about an account's protection: the
     /// phrase-saved flag the three-word surfaces are gated on, the last
     /// status read. Flags only.
     let protectionStore: AccountProtectionStore
 
-    /// ADR-0067 — a session with keys landed for `accountIdB64`: the
+    /// ADR-0075 — a session with keys landed for `accountIdB64`: the
     /// composition root reads the account's protection and its notices
     /// (``AccountProtectionCenter``). `nil` in a repository nobody wired, so
     /// no request leaves it.
@@ -285,7 +285,7 @@ public final class AuthRepository: ObservableObject {
     /// root fetches the username certificate and re-publishes the profile.
     var onUsernameClaimed: (@MainActor (_ account: SessionAccount) -> Void)?
 
-    /// ADR-0068 — the account's username changed (renamed here, or a newer
+    /// ADR-0076 — the account's username changed (renamed here, or a newer
     /// name arrived from the account's other devices): the composition root
     /// replaces the cached username certificate (`certificate`, or a fetch
     /// when `nil`) and re-publishes the profile, the Everyone record and
@@ -300,11 +300,11 @@ public final class AuthRepository: ObservableObject {
     /// the composition root.
     var heldRecoveryAddress: (@MainActor () -> String?)?
 
-    /// ADR-0067 — this device changed the account's protection (it saved a
+    /// ADR-0075 — this device changed the account's protection (it saved a
     /// phrase): the composition root re-reads the status.
     var onProtectionChanged: (@MainActor () -> Void)?
 
-    /// ADR-0066 section 0.4 — this device's id for an account (its
+    /// ADR-0074 section 0.4 — this device's id for an account (its
     /// conversation leaf key), or `nil` when the device identity cannot be
     /// read or minted. Injectable for tests.
     typealias OwnDeviceId = @MainActor (_ accountIdB64: String) -> Data?
@@ -324,11 +324,11 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    /// ADR-0066 section 0.1 — the per-account "account key recorded at
+    /// ADR-0074 section 0.1 — the per-account "account key recorded at
     /// auth" mark.
     private let identityKeyMarks: IdentityKeyRecordMarks
 
-    /// ADR-0066 section 2.3 — the owed server half of Log out.
+    /// ADR-0074 section 2.3 — the owed server half of Log out.
     private let logoutOwed: LogoutOwedStoring
 
     /// A bind is running for this account (one at a time).
@@ -341,7 +341,7 @@ public final class AuthRepository: ObservableObject {
     /// again. Wired by the composition root.
     var onSessionDeviceBound: (@MainActor () -> Void)?
 
-    /// ADR-0065 section 3.3 — the one token provider every REST client's
+    /// ADR-0073 section 3.3 — the one token provider every REST client's
     /// request passes through. The repository installs the pair on every
     /// landing, clears it on sign-out, and answers its three callbacks.
     private let tokenProvider: SessionTokenProvider
@@ -365,7 +365,7 @@ public final class AuthRepository: ObservableObject {
     private let proofLoginOperation: ProofLoginOperation
 
     /// The fresh-auth proof of the last password or passkey sign-in, signup
-    /// or proof block (ADR-0065, amended 2026-10-06). In memory only: never
+    /// or proof block (ADR-0073, amended 2026-10-06). In memory only: never
     /// persisted, never logged.
     private var freshAuth = FreshAuthHolder()
 
@@ -397,7 +397,7 @@ public final class AuthRepository: ObservableObject {
     private let attestationVerifier: KeyResetAttestationVerifying
 
     /// The two publish steps of a reset that live outside this repository
-    /// (ADR-0065 section 2.3 steps 4 and 5). The composition root wires the
+    /// (ADR-0073 section 2.3 steps 4 and 5). The composition root wires the
     /// production ones (``AppServices``); a test injects recorders.
     struct KeyResetHooks {
         /// Re-publish this device's KeyPackage with a binding signed by the
@@ -406,7 +406,7 @@ public final class AuthRepository: ObservableObject {
         /// Re-found the DeviceGroup and re-root its journal with the
         /// attestation. Throws when the reset did not land.
         /// `keyGeneration` is the attestation's: the root endorsement
-        /// (ADR-0066 section 4.6) binds it.
+        /// (ADR-0074 section 4.6) binds it.
         var refoundDeviceGroup: @MainActor (
             _ accountIdBytes: Data, _ accountIdB64: String, _ attestation: Data, _ keyGeneration: UInt64
         ) async throws -> Void
@@ -439,7 +439,7 @@ public final class AuthRepository: ObservableObject {
     var keyResetHooks: KeyResetHooks
 
     /// The full forget-device wipe the signed-out screen runs by itself
-    /// (ADR-0065 section 3.5): every local store of the account, then the
+    /// (ADR-0073 section 3.5): every local store of the account, then the
     /// session ends. The composition root replaces it with
     /// ``AppServices/wipeAccountLocalData(accountIdB64:)``, which also lets
     /// the runtimes go first; the default wipes the stores and ends the
@@ -447,7 +447,7 @@ public final class AuthRepository: ObservableObject {
     /// superseded token.
     var wipeAfterKeyReset: @MainActor (_ accountIdB64: String) async -> Void
 
-    /// ADR-0066 section 1.1 — the STAGED wipe: the same deletion, except the
+    /// ADR-0074 section 1.1 — the STAGED wipe: the same deletion, except the
     /// recall record. Injectable like ``wipeAfterKeyReset``; the composition
     /// root points it at ``AppServices/stagedWipeAfterKeyReset(accountIdB64:)``.
     var stagedWipeAfterKeyReset: @MainActor (_ accountIdB64: String) async -> Void
@@ -461,7 +461,7 @@ public final class AuthRepository: ObservableObject {
     /// A take-back attempt is running.
     private var recallAttemptInFlight = false
 
-    // MARK: ADR-0066 part 3 — a rotation of the account keys, the devices kept
+    // MARK: ADR-0074 part 3 — a rotation of the account keys, the devices kept
 
     /// A kept device is fetching the account's new keys: its session was
     /// refused as of an old key generation and it has not yet adopted them
@@ -497,7 +497,7 @@ public final class AuthRepository: ObservableObject {
 
     private let sessionUpgradeOperation: SessionUpgradeOperation
 
-    /// ADR-0066 section 3.3 — read this account's DeviceGroup journal to its
+    /// ADR-0074 section 3.3 — read this account's DeviceGroup journal to its
     /// head once (``DeviceGroupSyncRepository/waitForJournalHead(timeoutMs:)``);
     /// `false` when it could not be read. Wired by the composition root; the
     /// default reads nothing.
@@ -632,7 +632,7 @@ public final class AuthRepository: ObservableObject {
         restoreKeysRotatedNotice()
     }
 
-    /// The provider's refresher and its three callbacks (ADR-0065 section
+    /// The provider's refresher and its three callbacks (ADR-0073 section
     /// 3.3). Each callback hops to the main actor and is honoured only for
     /// the account still signed in.
     private func wireTokenProvider() {
@@ -644,7 +644,7 @@ public final class AuthRepository: ObservableObject {
             Task { @MainActor in self?.sessionPairRefreshed(pair, accountIdB64: accountIdB64) }
         }
         tokenProvider.onSuperseded = { [weak self] accountIdB64 in
-            // ADR-0066 section 3.3 — a superseded generation is a rotation
+            // ADR-0074 section 3.3 — a superseded generation is a rotation
             // when this device holds (or finds) the account's new keys, and
             // only otherwise a reset.
             Task { @MainActor in self?.keysSuperseded(accountIdB64: accountIdB64, publishedSignaturePubkey: nil) }
@@ -702,7 +702,7 @@ public final class AuthRepository: ObservableObject {
             }
             identitySecrets = secrets
             state = .session(account)
-            // ADR-0065 sections 3.3 and 4.2 — the silent restore refreshes
+            // ADR-0073 sections 3.3 and 4.2 — the silent restore refreshes
             // instead of reusing the persisted access token (a reset
             // elsewhere answers `key-generation-superseded` here, at
             // launch), then checks the published identity before any
@@ -753,7 +753,7 @@ public final class AuthRepository: ObservableObject {
         )
     }
 
-    /// The refresh credential was refused as invalid (ADR-0065 section 3.3):
+    /// The refresh credential was refused as invalid (ADR-0073 section 3.3):
     /// the device goes to the sign-in screen with the session-expired line.
     /// Nothing is wiped: the keys are still this account's.
     private func handleRefreshInvalid(accountIdB64: String) {
@@ -835,7 +835,7 @@ public final class AuthRepository: ObservableObject {
         let result = try await client.signup(
             password: password, enrolRecovery: true,
             deviceIdFor: { accountId in
-                // ADR-0066 section 0.4 — signup knows the account id before
+                // ADR-0074 section 0.4 — signup knows the account id before
                 // the finish, so the first session already names this device.
                 LandingDevice.asserted(
                     accountKnownBeforeFinish: true,
@@ -1154,7 +1154,7 @@ public final class AuthRepository: ObservableObject {
 
         DevicePhrase.store(phrase, accountIdB64: accountIdB64, context: "signup-guest")
 
-        // ADR-0067 D2: the phrase is not shown at sign-up, a guest's
+        // ADR-0075 D2: the phrase is not shown at sign-up, a guest's
         // included. The device holds it; `Save a recovery phrase` in
         // Settings is where a person gets words to write down. The session
         // lands directly. Username EMPTY (unclaimed); a guest has no
@@ -1319,7 +1319,7 @@ public final class AuthRepository: ObservableObject {
         let handle = name.handle
         Task {
             do {
-                // ADR-0068 section 2 — never a blind bind: a device with a
+                // ADR-0076 section 2 — never a blind bind: a device with a
                 // stale name would revert a rename made elsewhere. Ask
                 // first; bind only when the account has no handle at all.
                 switch HandleSync.action(
@@ -1459,7 +1459,7 @@ public final class AuthRepository: ObservableObject {
     /// /vault/passkeys` with the parked session token), or `nil` when no
     /// sign-in is parked or the count could not be read. The restore prompt
     /// hides its passkey row when this is 0.
-    /// ADR-0067 — the protection of the account whose keys are being
+    /// ADR-0075 — the protection of the account whose keys are being
     /// restored (signed in, no keys here): `GET /recovery-email` with the
     /// parked session. Stored, so the phrase-saved flag is known before any
     /// route of the prompt runs (a reset shows its new words only to a
@@ -1673,7 +1673,7 @@ public final class AuthRepository: ObservableObject {
     /// while a recovery-credential replace is owed (``PhraseReveal``).
     public func devicePhrase() -> String? {
         guard case .session(let account) = state else { return nil }
-        // ADR-0067: the words are shown only once the person saved them
+        // ADR-0075: the words are shown only once the person saved them
         // (`Save a recovery phrase`); until then the device holds them unseen.
         guard protectionStore.phraseSaved(accountIdB64: account.accountIdB64) else { return nil }
         let phrase = DevicePhrase.read(accountIdB64: account.accountIdB64)
@@ -1684,7 +1684,7 @@ public final class AuthRepository: ObservableObject {
         return phrase
     }
 
-    /// ADR-0067 section 2 — the recovery phrase this device holds for the
+    /// ADR-0075 section 2 — the recovery phrase this device holds for the
     /// signed-in account, for sealing the email vault at an enrolment. Not
     /// for display: an account whose phrase was never saved keeps its words
     /// unseen (``devicePhrase()`` is the gated read). `nil` while a key
@@ -1696,7 +1696,7 @@ public final class AuthRepository: ObservableObject {
         return DevicePhrase.read(accountIdB64: account.accountIdB64)
     }
 
-    /// ADR-0067 — whether the signed-in account's recovery phrase was saved,
+    /// ADR-0075 — whether the signed-in account's recovery phrase was saved,
     /// as this device knows it. The new words of a rotation, a reset or a
     /// recall, and every link to them, are shown only then.
     public var sessionPhraseProtected: Bool {
@@ -1806,7 +1806,7 @@ public final class AuthRepository: ObservableObject {
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "replace password")
     }
 
-    // MARK: - ADR-0068: the own-username register
+    // MARK: - ADR-0076: the own-username register
 
     /// The name whose handle auth confirmed for the account, and the
     /// session it was confirmed in. In memory only: a new session asks again.
@@ -1879,7 +1879,7 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    // MARK: - ADR-0068: changing the username
+    // MARK: - ADR-0076: changing the username
 
     /// When the next username change is possible by this device's own stamp
     /// (unix ms), or `nil`. The server's `429` is the authority.
@@ -1917,7 +1917,7 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    /// Change the signed-in account's username (ADR-0068 section 4). One
+    /// Change the signed-in account's username (ADR-0076 section 4). One
     /// resumable operation; the owed record is written before the first
     /// request.
     ///
@@ -2083,7 +2083,7 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    // MARK: - A guest chooses a username (ADR-0067 pass A, part 2)
+    // MARK: - A guest chooses a username (ADR-0075 pass A, part 2)
 
     /// Whether the signed-in account chose a username here and still owes
     /// its first password.
@@ -2126,7 +2126,7 @@ public final class AuthRepository: ObservableObject {
         sessionStore.save(PersistedSession(accountIdB64: account.accountIdB64, username: bound))
         let named = SessionAccount(accountIdB64: account.accountIdB64, username: bound)
         state = .session(named)
-        // ADR-0068 — the account's other devices learn the name.
+        // ADR-0076 — the account's other devices learn the name.
         await writeOwnUsernameRegister(bound, accountIdB64: account.accountIdB64)
         onUsernameClaimed?(named)
         return bound
@@ -2455,7 +2455,7 @@ public final class AuthRepository: ObservableObject {
         // ADR-0054 S3 — the push unregister spends a token; take it from
         // the pool BEFORE the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
-        // ADR-0066 section 2.1 — the session is signed out at the server
+        // ADR-0074 section 2.1 — the session is signed out at the server
         // too, best effort: the pair is read before the provider forgets it,
         // and the local sign-out below never waits for the call.
         let endingPair = tokenProvider.current
@@ -2512,7 +2512,7 @@ public final class AuthRepository: ObservableObject {
         // ADR-0054 S3 — the push unregister below spends a token; take it
         // before the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
-        // ADR-0066 section 2.1 — Forget this device signs the session out at
+        // ADR-0074 section 2.1 — Forget this device signs the session out at
         // the server as Log out does. After a reset elsewhere or a removal
         // the provider is already empty and nothing is sent.
         let endingPair = tokenProvider.current
@@ -2701,7 +2701,7 @@ public final class AuthRepository: ObservableObject {
             accountIdentitySeed: accountIdentitySeed,
             requireFresh: false
         )
-        // ADR-0065 section 4.2 — observe the published identity BEFORE any
+        // ADR-0073 section 4.2 — observe the published identity BEFORE any
         // upload, then re-publish this device's bundle on an explicit
         // sign-in. Both run in this one task, in that order, so the
         // observation never sees this device's own upload.
@@ -2714,7 +2714,7 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    /// ADR-0065 section 4.2, on every landing that holds a cached seed:
+    /// ADR-0073 section 4.2, on every landing that holds a cached seed:
     /// fetch the account's published identity, compare it with the one this
     /// device derives and with the key generation of this device's session
     /// pair, and act on ``KeyResetLanding``'s verdict.
@@ -2751,7 +2751,7 @@ public final class AuthRepository: ObservableObject {
         // is BEHIND this device, by design, until the owed upload lands
         // (section 2.3). Comparing against it now would read this device's
         // own new keys as a mismatch; the owed publish is what runs instead.
-        // The same holds for a rotation this device made (ADR-0066 section
+        // The same holds for a rotation this device made (ADR-0074 section
         // 3.2): its directory upload is owed until it lands.
         guard !keyResetPublishOwed(accountIdB64: accountIdB64) else {
             NSLog("[auth] published-identity check skipped: this device's new keys are still being published")
@@ -2787,7 +2787,7 @@ public final class AuthRepository: ObservableObject {
         switch verdict {
         case .staleKeys:
             NSLog("[auth] the directory publishes keys of a higher generation; this device's keys are stale")
-            // ADR-0066 section 3.3 — "the published bundle carries the
+            // ADR-0074 section 3.3 — "the published bundle carries the
             // proof's new key" is how a kept device sees the commit: a
             // pending envelope for that key is adopted; with none, the
             // journal is read once, and only then is this a reset.
@@ -2842,7 +2842,7 @@ public final class AuthRepository: ObservableObject {
             && identitySecrets?.accountIdentitySeed == accountIdentitySeed
     }
 
-    // MARK: - ADR-0065 section 3.5: the keys were reset elsewhere
+    // MARK: - ADR-0073 section 3.5: the keys were reset elsewhere
 
     /// The account's keys were reset on another device: the server refused
     /// this session's generation, or the directory publishes keys of a
@@ -2851,7 +2851,7 @@ public final class AuthRepository: ObservableObject {
     /// first and calling nothing that needs the superseded token. Once per
     /// account: a second signal while the wipe runs changes nothing.
     ///
-    /// ADR-0066 section 1.1 changes WHICH wipe (``SignOutWipe``): a device
+    /// ADR-0074 section 1.1 changes WHICH wipe (``SignOutWipe``): a device
     /// that holds the account's keys runs the STAGED wipe, keeps a recall
     /// record and shows "Was it you?" (``recall``); a device that never held
     /// them keeps nothing and shows the signed-out screen as before.
@@ -2891,7 +2891,7 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    // MARK: - ADR-0066 section 2.3: this device was removed
+    // MARK: - ADR-0074 section 2.3: this device was removed
 
     /// This device was removed from the account on another device: auth
     /// answered `401 device-revoked`, or this device's own DeviceGroup turned
@@ -2913,7 +2913,7 @@ public final class AuthRepository: ObservableObject {
         keysSignOutUsername = signedInUsername(accountIdB64: accountIdB64)
         keysSignOutCause = .deviceRemoved
         keysSignOutNoticeKey = nil
-        // ADR-0066 section 2.3 — a removal changes no keys: no recall record
+        // ADR-0074 section 2.3 — a removal changes no keys: no recall record
         // is written, and one left from before goes with the full wipe.
         recallRecords.clear(accountIdB64: accountIdB64)
         keysSignOut = .removing
@@ -2932,24 +2932,24 @@ public final class AuthRepository: ObservableObject {
 
     /// The account's own DeviceGroup reports this device out of it (the
     /// sync runtime read `isActive == false`): proof of removal by a device
-    /// of the account (ADR-0066 section 2.3).
+    /// of the account (ADR-0074 section 2.3).
     public func deviceGroupReportedRemoval() {
         guard let accountIdB64 = signedInAccountIdB64 else { return }
         handleDeviceRevoked(accountIdB64: accountIdB64)
     }
 
-    // MARK: - ADR-0066 sections 0.1, 0.4: the session names a device; the account key is recorded
+    // MARK: - ADR-0074 sections 0.1, 0.4: the session names a device; the account key is recorded
 
     /// A state holding a session for `accountIdB64` was entered: name this
     /// device in the session if it is not named yet, then record the account
     /// key at auth if that never succeeded for the key this device holds.
     private func sessionLanded(accountIdB64: String) {
-        // ADR-0066 part 3 — a kept device's pending rotations age out, and
+        // ADR-0074 part 3 — a kept device's pending rotations age out, and
         // the "keys were changed" line survives a relaunch until dismissed.
         pruneKeyRotationPending(accountIdB64: accountIdB64)
         keysRotatedNotice = rotatedNotice.isOwed(accountIdB64: accountIdB64)
         if case .session = state { onProtectedSessionLanded?(accountIdB64) }
-        // ADR-0068 — a rename this device started and did not finish.
+        // ADR-0076 — a rename this device started and did not finish.
         if case .session = state,
            protectionStore.renameOwed(accountIdB64: accountIdB64) != nil, !renameResumeInFlight {
             renameResumeInFlight = true
@@ -3069,7 +3069,7 @@ public final class AuthRepository: ObservableObject {
     }
 
     /// Whether a key-reset publish is owed for the signed-in account: a
-    /// device removal must not run in that window (ADR-0066 "T1 as built"
+    /// device removal must not run in that window (ADR-0074 "T1 as built"
     /// point 15).
     public func keyResetPublishOwed(accountIdB64: String) -> Bool {
         markers.isPublishOwed(accountIdB64: accountIdB64)
@@ -3081,7 +3081,7 @@ public final class AuthRepository: ObservableObject {
         ownDeviceId(accountIdB64)
     }
 
-    // MARK: - ADR-0066 section 2.1: Log out at the server
+    // MARK: - ADR-0074 section 2.1: Log out at the server
 
     /// `POST /auth/session/logout` for the pair a Log out just dropped, best
     /// effort. An unreachable server leaves one owed record for the next
@@ -3138,7 +3138,7 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    // MARK: - ADR-0066 section 1: "Was it you?" and taking the account back
+    // MARK: - ADR-0074 section 1: "Was it you?" and taking the account back
 
     /// The recall record a superseded device keeps, or `nil` when it keeps
     /// none (``SignOutWipe``): the one already stored for the account (a
@@ -3302,7 +3302,7 @@ public final class AuthRepository: ObservableObject {
     }
 
     /// Take the account back with the password it had before the reset
-    /// (ADR-0066 section 1.2). The identity afterwards is NEW: a fresh
+    /// (ADR-0074 section 1.2). The identity afterwards is NEW: a fresh
     /// phrase and seed are generated here exactly as a reset generates them,
     /// and once `POST /account/recall/finish` answered the flow IS the key
     /// reset's (``landKeyReset(reset:seed:phrase:newPubkey:accountIdBytes:accountIdB64:username:context:)``):
@@ -3412,7 +3412,7 @@ public final class AuthRepository: ObservableObject {
         )
     }
 
-    // MARK: - ADR-0067 section 8: taking the account back with the phrase, no old device
+    // MARK: - ADR-0075 section 8: taking the account back with the phrase, no old device
 
     /// `Get back in > Recovery phrase` (UX 19.7): the words typed are not
     /// the account's phrase NOW. Ask the server whether they were its phrase
@@ -3496,7 +3496,7 @@ public final class AuthRepository: ObservableObject {
         accountRecalledThisSession = false
     }
 
-    /// Rule 4 of ADR-0065 section 4.2: the directory publishes other keys
+    /// Rule 4 of ADR-0073 section 4.2: the directory publishes other keys
     /// at the same generation. The blocking screen; the wipe runs on the
     /// tap (``signOutAfterKeysMismatch()``). Nothing is uploaded.
     private func showKeysMismatch(accountIdB64: String) {
@@ -3975,7 +3975,7 @@ public final class AuthRepository: ObservableObject {
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "totp recover")
     }
 
-    /// ADR-0067 section 7, password mode (UX 19.3 step 4, "Phrase saved"):
+    /// ADR-0075 section 7, password mode (UX 19.3 step 4, "Phrase saved"):
     /// the mailed code (and the authenticator code, when the account has
     /// one) was accepted and the account has a saved phrase, so the code
     /// changes the password and nothing else. `ticket` is the one
@@ -4112,12 +4112,12 @@ public final class AuthRepository: ObservableObject {
     /// that flow. Kept off the ``AuthState`` so it is not threaded through
     /// the router (mirror of the web `freshPhrase()` accessor).
     public func freshPhrase() -> String? {
-        // ADR-0067: an account that is not phrase-protected is shown none.
+        // ADR-0075: an account that is not phrase-protected is shown none.
         guard let pending = pendingFreshPhrase, pending.showsWords else { return nil }
         return pending.phrase
     }
 
-    /// "Reset account keys" (ADR-0065 section 2.3, UX 15.1): the
+    /// "Reset account keys" (ADR-0073 section 2.3, UX 15.1): the
     /// lost-everything fallback for a person who is signed in but has NO
     /// recovery phrase, NO other device and NO passkey that restores keys.
     ///
@@ -4203,7 +4203,7 @@ public final class AuthRepository: ObservableObject {
         let newPubkey = try Identity.fromSeed(seed: seed).signaturePublicKey()
 
         // 2. The server step: the point of no return.
-        // ADR-0066 "T1 as built" point 10: the pair a reset returns keeps the
+        // ADR-0074 "T1 as built" point 10: the pair a reset returns keeps the
         // device the bearer names, so the client-side note moves with it.
         let bearer = pending.currentSession(tokenProvider)
         let reset: KeyResetResult
@@ -4237,12 +4237,12 @@ public final class AuthRepository: ObservableObject {
         return phrase
     }
 
-    /// Steps 3 to 5 of a key reset's client order (ADR-0065 section 2.3),
+    /// Steps 3 to 5 of a key reset's client order (ADR-0073 section 2.3),
     /// after the server step answered: persist the new pair, the seed and
     /// the phrase with the owed-publish record BEFORE any further network
     /// call, park the phrase screen, then run the publish. The ONE code path
     /// for it: ``mintFreshIdentity(password:username:)`` comes here after
-    /// `POST /account/keys/reset/finish`, and a recall (ADR-0066 section
+    /// `POST /account/keys/reset/finish`, and a recall (ADR-0074 section
     /// 1.2: "from the reset's client order onward the recall IS a reset")
     /// after `POST /account/recall/finish`.
     private func landKeyReset(
@@ -4272,7 +4272,7 @@ public final class AuthRepository: ObservableObject {
         }
         // The device holds the new keys, so it holds the new phrase.
         DevicePhrase.store(phrase, accountIdB64: accountIdB64, context: "fresh-identity")
-        // ADR-0067 — the new words are shown only to a phrase-protected
+        // ADR-0075 — the new words are shown only to a phrase-protected
         // account. Any other account gets its new keys with no words on any
         // screen: the device keeps them unseen, as after sign-up.
         let showsWords = NewWordsRule.shown(
@@ -4285,7 +4285,7 @@ public final class AuthRepository: ObservableObject {
             newSignaturePubkey: newPubkey
         )
         markers.markPublishOwed(record, accountIdB64: accountIdB64)
-        // ADR-0065 R.4 — part of the reset's client order: from now until the
+        // ADR-0073 R.4 — part of the reset's client order: from now until the
         // expiry this account's reach sync keeps the continuity key registered
         // on the NEW mailbox (`ReachCenter`), so a former contact whose device
         // accepted the reset can deliver a Welcome. The marker outlives the
@@ -4298,7 +4298,7 @@ public final class AuthRepository: ObservableObject {
                 accountIdB64: accountIdB64)
         }
         keysResetThisSession = true
-        // ADR-0066 section 0.1 — auth recorded the new key inside the reset;
+        // ADR-0074 section 0.1 — auth recorded the new key inside the reset;
         // the mint for it is idempotent and moves this device's mark.
         Task { [weak self] in
             await self?.recordIdentityKeyIfNeeded(
@@ -4354,7 +4354,7 @@ public final class AuthRepository: ObservableObject {
         return freshAuth.holdsLive(accountIdB64: pending.accountIdB64, nowMs: grantNowMs())
     }
 
-    // MARK: - Fresh-auth proof (ADR-0065, amended 2026-10-06; UX 17)
+    // MARK: - Fresh-auth proof (ADR-0073, amended 2026-10-06; UX 17)
 
     /// The account a proof is obtained for: the one parked on the restore
     /// prompt, else the one signed in.
@@ -4521,7 +4521,7 @@ public final class AuthRepository: ObservableObject {
             ),
             context: context
         )
-        // ADR-0066 — the proof sign-in issued a pair that names no device;
+        // ADR-0074 — the proof sign-in issued a pair that names no device;
         // name this one again.
         sessionLanded(accountIdB64: account.accountIdB64)
     }
@@ -4555,7 +4555,7 @@ public final class AuthRepository: ObservableObject {
 
     /// Whether the signed-in device can run the local three-word check: it
     /// holds the account's recovery phrase, and the account is
-    /// phrase-protected (ADR-0067: an account whose phrase was never saved
+    /// phrase-protected (ADR-0075: an account whose phrase was never saved
     /// has no words the person could know).
     public var threeWordsCheckAvailable: Bool {
         guard case .session(let account) = state else { return false }
@@ -4766,7 +4766,7 @@ public final class AuthRepository: ObservableObject {
                         }
                     }
                 case .keyPackage:
-                    // ADR-0066 section 2.2 — a KeyPackage publish needs a
+                    // ADR-0074 section 2.2 — a KeyPackage publish needs a
                     // session naming this device; a reset run from a session
                     // that had not been bound yet binds it first.
                     await bindSessionDeviceIfNeeded(accountIdB64: accountIdB64, context: "key reset publish")
@@ -4799,7 +4799,7 @@ public final class AuthRepository: ObservableObject {
             freshPublishPending = false
         }
         freshPublishNeedsSignIn = false
-        // ADR-0067 — the new keys are published: a device that holds the
+        // ADR-0075 — the new keys are published: a device that holds the
         // recovery address can put the email vault back now.
         onProtectionChanged?()
         // Not phrase-protected: there are no words to confirm, so the
@@ -4882,7 +4882,7 @@ public final class AuthRepository: ObservableObject {
     /// (``ChatRepository/republishKeyPackage()``), once the session lands and
     /// the chat bootstrap has run.
     ///
-    /// `keyResetAttest` is the ADR-0065 attestation on the upload that
+    /// `keyResetAttest` is the ADR-0073 attestation on the upload that
     /// installs reset keys (the directory refuses an unattested key change).
     private func publishFreshIdentityBundle(
         accountId: Data,
@@ -5411,7 +5411,7 @@ public struct IdentitySecrets: Equatable {
     /// `Identity.fromSeed` site that builds the canonical identity
     /// reads THIS, not ``exportKey``.
     public let accountIdentitySeed: Data
-    /// The session pair (ADR-0065 section 3) of the most recent
+    /// The session pair (ADR-0073 section 3) of the most recent
     /// signup / login / recover / refresh. ``sessionToken`` is its access
     /// token, read by the repositories that attach a bearer; the token
     /// provider swaps in the current one on every request regardless.
@@ -5438,7 +5438,7 @@ public struct IdentitySecrets: Equatable {
 /// Result of a sign-up.
 public struct SignupOutcome: Equatable {
     /// The 12-word BIP39 recovery phrase the device generated and keeps
-    /// (``DevicePhrase``). ADR-0067 D2: it is NOT shown at sign-up; the
+    /// (``DevicePhrase``). ADR-0075 D2: it is NOT shown at sign-up; the
     /// person may save a phrase later (`Save a recovery phrase`, which
     /// gives the account new keys and new words).
     public let recoveryPhrase: String
@@ -5490,13 +5490,13 @@ struct PendingFreshPhrase {
     let session: SessionPair
     let username: String
     let phrase: String
-    /// `true` while the new keys are not published yet (ADR-0065 section
+    /// `true` while the new keys are not published yet (ADR-0073 section
     /// 2.3: the directory upload, this device's KeyPackage or the
     /// DeviceGroup journal is still owed). The phrase is not shown and the
     /// session does not land until it is `false`. Always `false` for a
     /// guest signup, which publishes at creation.
     var publishOwed: Bool = false
-    /// ADR-0067 — `false` for an account that is not phrase-protected: its
+    /// ADR-0075 — `false` for an account that is not phrase-protected: its
     /// new words are shown on no screen, and the session lands as soon as
     /// the publish did.
     var showsWords: Bool = true
@@ -5603,7 +5603,7 @@ public struct IdentityVerificationUnavailable: Error, LocalizedError {
     public var errorDescription: String? { message }
 }
 
-// MARK: - ADR-0066 part 3: a rotation of the account keys, the devices kept
+// MARK: - ADR-0074 part 3: a rotation of the account keys, the devices kept
 
 extension AuthRepository {
 
@@ -5637,7 +5637,7 @@ extension AuthRepository {
 
     // MARK: A kept device: the envelope
 
-    /// A dispatched `key-rotation` envelope (ADR-0066 section 3.3). It is
+    /// A dispatched `key-rotation` envelope (ADR-0074 section 3.3). It is
     /// meaningful ONLY in the account's own DeviceGroup; from anywhere else
     /// it is dropped. Here it is verified against the account key this
     /// device holds and stored as PENDING, keyed on the new key. Nothing
@@ -5835,7 +5835,7 @@ extension AuthRepository {
     // MARK: Both sides: the new keys replace the old ones, everything is kept
 
     /// The new seed, phrase and session pair replace the old ones on this
-    /// device (ADR-0066 section 3.2 step 6, section 3.3 "adopting"). ALL
+    /// device (ADR-0074 section 3.2 step 6, section 3.3 "adopting"). ALL
     /// local data is kept: chats, contacts, history, the device identity and
     /// its binding. The OLD seed goes to the predecessor slot FIRST: without
     /// it this device's stored binding would be re-minted under the new key
@@ -5858,7 +5858,7 @@ extension AuthRepository {
             return
         }
         try ownPredecessors.add(predecessorSeed, accountIdB64: accountIdB64)
-        // ADR-0066 section 3.5a rule 4 — the old mailbox is read for 30 days
+        // ADR-0074 section 3.5a rule 4 — the old mailbox is read for 30 days
         // from NOW (the adoption), then left. Recorded once per key.
         if let oldKey = try? Identity.fromSeed(seed: predecessorSeed).signaturePublicKey() {
             PredecessorMailbox.AdoptionStore().recordIfAbsent(
@@ -5875,7 +5875,7 @@ extension AuthRepository {
             session: session
         )
         adoptIdentitySecrets(secrets, context: context)
-        // ADR-0066 section 0.1 — auth recorded the new key inside the
+        // ADR-0074 section 0.1 — auth recorded the new key inside the
         // rotation; the mint for it is idempotent and moves this device's
         // mark.
         Task { [weak self] in
@@ -5909,7 +5909,7 @@ extension AuthRepository {
         try rotationPending.save(held + [pending], accountIdB64: accountIdB64)
     }
 
-    /// The proven-rotation upload of the rotating device (ADR-0066 section
+    /// The proven-rotation upload of the rotating device (ADR-0074 section
     /// 3.5, "Discovery"): the new bundle with the key-reset attestation (when
     /// there is one) and, when `withProof`, the supersession proof, on the
     /// new session. No genesis attestation is minted here: auth moved its
@@ -5932,7 +5932,7 @@ extension AuthRepository {
     }
 
     /// The backup, re-sealed under the phrase this device holds now and
-    /// uploaded, awaited (ADR-0066 section 3.5, "Backup").
+    /// uploaded, awaited (ADR-0074 section 3.5, "Backup").
     ///
     /// Nothing here is best-effort: it returns only when the storage tier
     /// accepted the new envelope, and throws on anything else (no session,

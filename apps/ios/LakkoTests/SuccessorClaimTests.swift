@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.6 - claim, then build: the pure rules of `SuccessorClaimRules`.
+/// ADR-0073 R.6 - claim, then build: the pure rules of `SuccessorClaimRules`.
 /// The cases are those of `apps/web/src/chat/successor-claim.test.ts`.
 final class SuccessorClaimTests: XCTestCase {
 

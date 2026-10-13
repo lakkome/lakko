@@ -3,7 +3,7 @@
 
 /**
  * IndexedDB-backed encrypted session-pair cache (Phase 1.13c; the pair
- * since ADR-0065).
+ * since ADR-0073).
  *
  * Every session landing of `lakko-svc-auth` returns a PAIR: a short-lived
  * access token (the bearer every service verifies statelessly, 15 minutes
@@ -17,7 +17,7 @@
  * ## Threat model
  *
  * The refresh credential grants what a 30-day session token granted before
- * ADR-0065: access to every bearer route for the account until it expires
+ * ADR-0073: access to every bearer route for the account until it expires
  * or the account's keys are reset (which supersedes every credential of the
  * old generation at once). It grants NO key material: the MLS keys and the
  * AccountIdentity seed live under the device key in their own stores, and
@@ -179,7 +179,7 @@ export async function getSessionPair(
       typeof decoded.g !== "string" ||
       !/^[0-9]+$/.test(decoded.g)
     ) {
-      // A row of the pre-ADR-0065 single-token shape: not a session this
+      // A row of the pre-ADR-0073 single-token shape: not a session this
       // build can resume. Dropped so the next landing writes the pair.
       void deleteSessionToken(accountIdB64);
       return null;

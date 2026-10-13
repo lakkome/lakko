@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 "Phase 2 revised", R.6 - founding a successor by CLAIM, THEN
+ * ADR-0073 "Phase 2 revised", R.6 - founding a successor by CLAIM, THEN
  * BUILD, and the receive rule for the claim, as pure decisions.
  *
  * A one-to-one whose other person reset their keys, and a group whose owner

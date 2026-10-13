@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0065 "Phase 2 revised", R.5 - one conversation over several groups, as
+// ADR-0073 "Phase 2 revised", R.5 - one conversation over several groups, as
 // the repository answers it. `Lineage.swift` is the pure model; this binds it
 // to the groups this device holds, the way `use-lineage.ts` does on web.
 //

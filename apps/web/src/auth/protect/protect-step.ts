@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The sign-up's "Protect your account" step (ADR-0067 D2 and D7,
+ * The sign-up's "Protect your account" step (ADR-0075 D2 and D7,
  * `docs/ux/identity-recovery.md` 19.1a): which rows it offers and what "Not
  * now" asks. Pure.
  */

@@ -9,7 +9,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0065 R.7 case 1 / UX 16.6 - the unshown requests from existing
+/** ADR-0073 R.7 case 1 / UX 16.6 - the unshown requests from existing
  *  contacts that wait for a verdict (mirror of the web `inbox-store` waiting
  *  cases). */
 class ContactsInboxWaitingTest {

@@ -4,7 +4,7 @@
 import Foundation
 import UserNotifications
 
-// ADR-0065 R.8 / R.7 case 1 - taking down what the extension could not
+// ADR-0073 R.8 / R.7 case 1 - taking down what the extension could not
 // withhold.
 //
 // A push whose rows the app shows nothing for (a superseded sender's, a

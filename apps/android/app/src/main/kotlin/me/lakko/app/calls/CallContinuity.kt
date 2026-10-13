@@ -4,7 +4,7 @@
 package me.lakko.app.calls
 
 /**
- * ADR-0065 R.12 / UX 16.4 - a live ONE-TO-ONE call ends when its conversation
+ * ADR-0073 R.12 / UX 16.4 - a live ONE-TO-ONE call ends when its conversation
  * moves.
  *
  * A one-to-one call takes its keys and its signalling from the one-to-one's

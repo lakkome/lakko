@@ -86,7 +86,7 @@ export interface PinApi {
   setShared(entry: ActiveGroup, messageId: number, pinned: boolean): Promise<void>;
   /** Pin or unpin one message on this device only. */
   setPersonal(groupIdB64: string, messageId: number, pinned: boolean): Promise<void>;
-  /** ADR-0065 R.5 — clear a SHARED pin of an older segment on this device
+  /** ADR-0073 R.5 — clear a SHARED pin of an older segment on this device
    *  alone (`pin-bar.ts` `pinRoute`): nothing is published. The unpin is
    *  stored with a fresh stamp, so a late re-send of the pin does not
    *  bring it back. */
@@ -138,7 +138,7 @@ export function PinProvider(props: { children: JSX.Element }): JSX.Element {
   async function liveRole(group: WasmGroup): Promise<PushRotationRole> {
     // The role table names ACCOUNT keys (ADR-0050), so the account identity
     // is what `ownRole` is asked with.
-    // ADR-0066 section 3.5: the role table names the key the leaves are bound
+    // ADR-0074 section 3.5: the role table names the key the leaves are bound
     // to, which after a proven rotation is the predecessor.
     const account = chats.conversationAccountIdentity();
     if (account !== null) return readPushRotationRole(group, account);

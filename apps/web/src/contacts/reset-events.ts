@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.2 - "a reset was accepted", as an in-process signal.
+ * ADR-0073 R.2 - "a reset was accepted", as an in-process signal.
  *
  * The identity gate (`contacts/client.ts`) accepts a reset wherever a
  * bundle is fetched; the work that follows (moving the shared conversations

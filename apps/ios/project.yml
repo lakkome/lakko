@@ -577,7 +577,7 @@ targets:
       - path: Lakko/Calls/ConversationMuteMirror.swift
         type: file
         buildPhase: sources
-      # ADR-0065 R.5 — `successor group -> conversation`, so a conversation
+      # ADR-0073 R.5 — `successor group -> conversation`, so a conversation
       # that continued in a new group keeps its mute, its caller name and its
       # notification grouping here. The lineage itself lives in the account's
       # encrypted sync blob, which C-59 forbids this process from opening.
@@ -585,7 +585,7 @@ targets:
       - path: Lakko/Chat/ConversationLineageMirror.swift
         type: file
         buildPhase: sources
-      # ADR-0065 R.8 / R.7 case 1 — what lets this extension stay silent
+      # ADR-0073 R.8 / R.7 case 1 — what lets this extension stay silent
       # where the app is: the keys accepted resets retired, the account's own
       # person key and each successor's segment index, mirrored by the app
       # and READ here; and the re-send rule itself, the same function the
@@ -698,7 +698,7 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         PRODUCT_BUNDLE_IDENTIFIER: me.lakko.dev.LakkoTests
         GENERATE_INFOPLIST_FILE: YES
-        # ADR-0065 R.13b - the bundle's principal class installs the
+        # ADR-0073 R.13b - the bundle's principal class installs the
         # suite-wide network guard (`LakkoTests/NetworkGuard.swift`) before
         # any test runs: no unit test may reach a server.
         INFOPLIST_KEY_NSPrincipalClass: LakkoTestsNetworkGuard

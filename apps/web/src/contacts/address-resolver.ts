@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Resolve before you address (ADR-0066 section 3.5a, rules 1, 2 and 4).
+ * Resolve before you address (ADR-0074 section 3.5a, rules 1, 2 and 4).
  *
  * A mailbox's address and the right to read it both derive from an account
  * key. After a PROVEN key rotation the conversation leaves that exist stay
@@ -15,7 +15,7 @@
  *
  *   - a proven predecessor resolves to the key that superseded it, through
  *     any chain, for a pinned account and for the OWN account alike;
- *   - a key change WITHOUT a proof (a reset, ADR-0065) is never resolved:
+ *   - a key change WITHOUT a proof (a reset, ADR-0073) is never resolved:
  *     the pin store keeps no proven predecessor for it, so the key names
  *     itself;
  *   - a key claimed as a predecessor by two accounts names nobody.
@@ -81,7 +81,7 @@ export function keysOfPerson(
 }
 
 /** How long a predecessor mailbox is read after adopting the new keys: the
- *  DS journal retention (ADR-0066 section 3.5a rule 4; chosen). */
+ *  DS journal retention (ADR-0074 section 3.5a rule 4; chosen). */
 export const PREDECESSOR_MAILBOX_READ_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**

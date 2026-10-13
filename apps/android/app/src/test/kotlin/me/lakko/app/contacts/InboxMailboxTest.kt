@@ -9,7 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * ADR-0066 part 3 - the account's mailbox follows its published key, and a
+ * ADR-0074 part 3 - the account's mailbox follows its published key, and a
  * mailbox's message ids are its own: the cursor kept from before a rotation
  * must not be used to read the new key's mailbox.
  */

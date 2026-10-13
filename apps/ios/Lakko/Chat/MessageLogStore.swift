@@ -82,7 +82,7 @@ public final class MessageLogStore {
     /// ADR-0041 — the authoritative copy is written into the App Group
     /// container (NSE-readable), falling back to the old location when
     /// the App Group is unavailable.
-    /// ADR-0065 R.7 case 1 — seal / open bytes under the SAME Keychain wrap
+    /// ADR-0073 R.7 case 1 — seal / open bytes under the SAME Keychain wrap
     /// key the message log uses, for the held-message queue: a held message
     /// is message plaintext and is at rest under the same protection.
     public static func sealUnderWrapKey(_ plaintext: Data) throws -> Data {

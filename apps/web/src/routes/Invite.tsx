@@ -344,7 +344,7 @@ function ConnectPanel(props: {
     setNotice(null);
     setBusy(true);
     try {
-      // ADR-0065 R.2: the link's owner may already be a contact under other
+      // ADR-0073 R.2: the link's owner may already be a contact under other
       // keys. The published identity then passes the fail-closed gate before
       // a use of the link is spent or anything is sent (an attested reset is
       // accepted there, silently); a stranger passes.
@@ -352,7 +352,7 @@ function ConnectPanel(props: {
         cap.ownerAccountId,
         cap.ownerSignaturePubkey,
       );
-      // ADR-0065 R.7 case 1 / UX 16.6 - a link from a person who is already
+      // ADR-0073 R.7 case 1 / UX 16.6 - a link from a person who is already
       // a contact (a reset loses their contacts; they may hand out a new
       // link) opens the existing contact: no request is sent and no use of
       // the link is spent. The check above ran R.2 first, so an attested

@@ -12,7 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0066 part 1 / `docs/ux/identity-recovery.md` 18.4 - every pure
+ * ADR-0074 part 1 / `docs/ux/identity-recovery.md` 18.4 - every pure
  * decision of "Was it you?" and taking the account back: which wipe a
  * refused session leads to, what the recall record holds, the screen's state
  * machine, and the meaning of every server answer. No server, no native
@@ -468,7 +468,7 @@ class RecallTest {
         assertNotNull(recallEndLine(RecallEnd.Closed))
     }
 
-    // ---- ADR-0067 section 8 / UX 19.7 --------------------------------------
+    // ---- ADR-0075 section 8 / UX 19.7 --------------------------------------
 
     @Test
     fun `the phrase is offered on the form only when the server opened that arm`() {

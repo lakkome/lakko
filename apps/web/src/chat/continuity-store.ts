@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.5 / R.7 - the two facts about a moved conversation that are
+ * ADR-0073 R.5 / R.7 - the two facts about a moved conversation that are
  * this device's alone and that nothing else records:
  *
  *   * WHEN this device learned an old group was continued elsewhere: the

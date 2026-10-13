@@ -173,7 +173,7 @@ struct NewChannelScreen: View {
                 handle: cleanHandle
             ))
             state.setKeys(channelId: id, keys: keys)
-            // ADR-0065 phase 2 (UX 16.6) — which key generation registered the
+            // ADR-0073 phase 2 (UX 16.6) — which key generation registered the
             // owner key, so a later reset on this device can say the channel
             // is orphaned.
             if let generation = state.currentKeyGeneration {

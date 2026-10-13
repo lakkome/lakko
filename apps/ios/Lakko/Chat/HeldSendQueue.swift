@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 R.7 case 1 - the DURABLE queue of held messages.
+// ADR-0073 R.7 case 1 - the DURABLE queue of held messages.
 //
 // iOS mirror of `apps/web/src/chat/held-send-queue.ts`. `HeldSend` holds the
 // rules and the in-memory store type; this is what keeps a held message

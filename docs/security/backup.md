@@ -10,7 +10,7 @@ their identity material + restore conversation context on a
 fresh device, using only:
 
 1. The 12-word BIP39 recovery phrase the user wrote down
-   at signup (24 words until ADR-0064, 2026-10-02; flag day).
+   at signup (24 words until ADR-0072, 2026-10-02; flag day).
 
 The server stores only the encrypted ciphertext + a
 per-account index. The Argon2id KEK is recoverable ONLY

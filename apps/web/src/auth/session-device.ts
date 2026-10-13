@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * A session names a device (ADR-0066 section 0.4, sprint T2).
+ * A session names a device (ADR-0074 section 0.4, sprint T2).
  *
  * The `v3` access token and the `r2` refresh credential carry a device id:
  * this device's conversation leaf signature key, the same 32 bytes that key
@@ -212,7 +212,7 @@ export function bindRefusal(status: number, errorCode: string | null): BindRefus
 }
 
 // ---------------------------------------------------------------------------
-// The recorded identity key (ADR-0066 section 0.1)
+// The recorded identity key (ADR-0074 section 0.1)
 // ---------------------------------------------------------------------------
 
 function genesisKey(accountIdB64: string): string {

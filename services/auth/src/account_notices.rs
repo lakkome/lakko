@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Telling the account's own devices what happened to it ([ADR-0067] section
+//! Telling the account's own devices what happened to it ([ADR-0075] section
 //! 9).
 //!
 //! `account_notices (id, account_id, kind, at_ms)` is a server table because
@@ -20,7 +20,7 @@
 //! The route is not gated on the recovery-email pepper: a "recovery phrase
 //! saved" notice is written on a server that sends no mail too.
 //!
-//! [ADR-0067]: ../../../docs/adr/0067-recovery-email.md
+//! [ADR-0075]: ../../../docs/adr/0075-recovery-email.md
 
 use std::time::Duration;
 
@@ -37,7 +37,7 @@ use crate::AppState;
 /// Most notices one `GET /account/notices` returns.
 pub(crate) const PAGE_LIMIT: i64 = 100;
 
-/// How long a notice is kept: 60 days (ADR-0067 section 9).
+/// How long a notice is kept: 60 days (ADR-0075 section 9).
 pub(crate) const RETENTION_MS: i64 = 60 * 86_400_000;
 
 /// How often the pruner runs.

@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0065 "Phase 2 revised", R.4 - the CONTINUITY reach key.
+// ADR-0073 "Phase 2 revised", R.4 - the CONTINUITY reach key.
 //
 // iOS mirror of `apps/web/src/reach/continuity.ts`.
 //

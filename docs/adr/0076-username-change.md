@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
 
-# ADR-0068: Choosing a username later, and changing it
+# ADR-0076: Choosing a username later, and changing it
 
 - **Status:** Accepted (2026-10-13; the maintainer asked for both to be
   built; D1 and D2 are this document's recommendations, which the
@@ -12,9 +12,12 @@
 - **Amends (when built):** [ADR-0048](0048-profile-names.md) and
   [ADR-0060](0060-scoped-discovery.md) ("usernames are immutable"),
   [ADR-0054](0054-anti-abuse-without-client-work.md) (the session's handle
-  bind), [ADR-0067](0067-recovery-email.md) (a rename keeps the recovery
+  bind), [ADR-0075](0075-recovery-email.md) (a rename keeps the recovery
   email).
 - **UX:** `docs/ux/profile-names.md` (to be extended with the two screens).
+
+Renumbered from 0068 on 2026-10-13: the main branch had taken 0064 to 0071 for
+other decisions. Commit messages before that date name this ADR as 0068.
 
 ## Context
 
@@ -134,7 +137,7 @@ end-to-end encrypted. #3 untouched.
 2. `services/discovery` (migration, replace, retired rows, pruner) and
    `services/auth` (re-key on bind, the grant on a change, the check
    route), DB-gated tests.
-3. Web, iOS, Android: the claim (already in progress with ADR-0067's
+3. Web, iOS, Android: the claim (already in progress with ADR-0075's
    follow-up), then the rename.
 
 ## As built (2026-10-13)

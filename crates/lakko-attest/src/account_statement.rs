@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Account-key statement ([ADR-0066] section 0.3).
+//! Account-key statement ([ADR-0074] section 0.3).
 //!
 //! An *account statement* is a compact, domain-separated, Ed25519-signed
 //! request by a **client** that holds the account's identity key. It is the
@@ -41,7 +41,7 @@
 //! is useless alone; kind 1 authorises a read and may be replayed inside the
 //! window.
 //!
-//! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+//! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 
 use lakko_crypto::hash;
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
@@ -108,7 +108,7 @@ pub enum AccountStatementKind {
     SessionUpgrade = 4,
     /// Open one password attempt of a recall: the OPAQUE login start against
     /// the anchored password. Body: [`recall_start_body`]. Added in sprint T3
-    /// (ADR-0066 "T3 as built"): the login start is the step that answers a
+    /// (ADR-0074 "T3 as built"): the login start is the step that answers a
     /// password guess, so it is the step that must prove the anchor key.
     RecallStart = 5,
 }
@@ -365,7 +365,7 @@ pub fn verify_account_statement(
 /// `verifying`, body) passes and only `unix_ms` lies outside the window.
 ///
 /// A service uses this to tell a device whose clock is wrong from a caller
-/// who does not hold the key (ADR-0066 "T5 as built"): to the first it may
+/// who does not hold the key (ADR-0074 "T5 as built"): to the first it may
 /// answer its own time so the device signs again, and that answer goes only
 /// to a caller whose signature verified, so a stranger learns nothing from
 /// it. A statement that is inside the window, or fails any other check,

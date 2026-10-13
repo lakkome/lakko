@@ -207,7 +207,7 @@ describe("obligation 3 — the owner's desired registrar set", () => {
 
 });
 
-describe("ADR-0065 — the attested reset of the DeviceGroup journal after a key reset", () => {
+describe("ADR-0073 — the attested reset of the DeviceGroup journal after a key reset", () => {
   /** A root signer whose reset body is the real `{"statement_b64"}` shape. */
   function rootWithWireBody(label: string) {
     const inner = fakeStatementSigner(label, new Uint8Array(32).fill(0xbb));
@@ -232,7 +232,7 @@ describe("ADR-0065 — the attested reset of the DeviceGroup journal after a key
       root_endorsement_b64: "ZW5k",
     });
     expect(() => attestedResetBody('{"other":1}', "YXR0ZXN0", "ZW5k")).toThrow(/statement_b64/);
-    // ADR-0066 4.6: an attested statement without the endorsement is never sent.
+    // ADR-0074 4.6: an attested statement without the endorsement is never sent.
     expect(() => attestedResetBody('{"statement_b64":"c3RtdA=="}', "YXR0ZXN0", "")).toThrow(/endorsement/);
   });
 
@@ -265,7 +265,7 @@ describe("ADR-0065 — the attested reset of the DeviceGroup journal after a key
   });
 });
 
-describe("ADR-0066 — the root transfers of a key rotation", () => {
+describe("ADR-0074 — the root transfers of a key rotation", () => {
   const wireBody = (label: string, key: number) => {
     const inner = fakeStatementSigner(label, new Uint8Array(32).fill(key));
     return {

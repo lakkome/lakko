@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 "Phase 2 revised", R.6 - the per-`(account, group)` CLAIM state
+// ADR-0073 "Phase 2 revised", R.6 - the per-`(account, group)` CLAIM state
 // a received `group_closed` envelope leaves on this device.
 //
 // iOS mirror of `apps/web/src/chat/group-closed-store.ts` (the state, its

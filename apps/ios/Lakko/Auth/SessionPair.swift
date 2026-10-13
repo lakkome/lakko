@@ -5,7 +5,7 @@ import Foundation
 
 /// The session pair every session-landing route of `services/auth` answers
 /// with and the whole of what `POST /auth/session/refresh` returns
-/// (ADR-0065 section 3): a short-lived **access token** (the bearer for
+/// (ADR-0073 section 3): a short-lived **access token** (the bearer for
 /// every service), a **refresh credential** only the refresh route accepts,
 /// and the **key generation** both were issued under.
 ///
@@ -24,7 +24,7 @@ public struct SessionPair: Equatable, Codable, Sendable {
     public let refreshExpiresAtMs: Int64
     /// The key generation the pair was issued under (1 = never reset).
     public let keyGeneration: UInt64
-    /// ADR-0066 section 0.4 — the device id this pair was issued for, as THIS
+    /// ADR-0074 section 0.4 — the device id this pair was issued for, as THIS
     /// CLIENT asserted it (`device_id_b64` at a landing, or
     /// `POST /auth/session/bind-device`): standard base64 of the 32-byte
     /// conversation leaf key. `nil` for a pair that names no device yet. A
@@ -48,7 +48,7 @@ public struct SessionPair: Equatable, Codable, Sendable {
     }
 
     /// A pair with no refresh credential: the access token alone, as the
-    /// pre-ADR-0065 triple carried. The provider never refreshes it; it
+    /// pre-ADR-0073 triple carried. The provider never refreshes it; it
     /// exists for fixtures and for the keys-only pairing outcome.
     public static func accessOnly(sessionToken: String, sessionExpiresAtMs: Int64) -> SessionPair {
         SessionPair(

@@ -372,7 +372,7 @@ public class ChannelsClient(
     }
 
     /**
-     * `PUT /v1/channels/:id/owner` (ADR-0066 section 3.5, "Channels") -
+     * `PUT /v1/channels/:id/owner` (ADR-0074 section 3.5, "Channels") -
      * replace the channel's owner key with [newOwnerKey] (32 raw bytes, the
      * body). [signer] is the CURRENT owner's signer: the old seed's for the
      * handover, the new seed's for the probe that asks whether it already
@@ -843,7 +843,7 @@ public class ChannelsClient(
          *  derives the key the server registered for it. Deriving it needs
          *  only the identity's seed; the signer outlives the identity call. */
         //
-        // ADR-0066 section 3.5: after a rotation of the account keys the
+        // ADR-0074 section 3.5: after a rotation of the account keys the
         // owner key is the one the CURRENT account seed derives, while the
         // identity a caller holds (the one its PublisherGroup runs on) stays
         // the conversation identity; [ChannelOwnerSuccession] maps the one

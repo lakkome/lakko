@@ -178,7 +178,7 @@ describe("the persisted round trip", () => {
   });
 });
 
-describe("forwardJumpRow: the jump into a conversation that moved (ADR-0065 R.5)", () => {
+describe("forwardJumpRow: the jump into a conversation that moved (ADR-0073 R.5)", () => {
   const args = { messageId: 12, headGroupIdB64: "S2", heldHistory: ["G", "S1"], rowId: historyRowId };
   it("the current group: the message id itself", () => {
     expect(forwardJumpRow({ ...args, originGroupIdB64: "S2" })).toBe(12);

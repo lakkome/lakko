@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0066 section 3.5a rule 5 — what was granted before a key rotation is
+// ADR-0074 section 3.5a rule 5 — what was granted before a key rotation is
 // spent.
 //
 // The rotating account's `/i/` and `/c/` links and the `reply` grants of its

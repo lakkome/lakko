@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 "Phase 2 revised", R.5 - one conversation over several groups.
+ * ADR-0073 "Phase 2 revised", R.5 - one conversation over several groups.
  *
  * A conversation that cannot be repaired in place (a one-to-one whose other
  * person reset their keys, a group whose owner did) continues in a NEW MLS

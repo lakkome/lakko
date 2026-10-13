@@ -3,7 +3,7 @@
 
 /**
  * "It was lost or stolen": remove a device AND change the account keys,
- * keeping the other devices (ADR-0066 part 3, Stage A; "T5 as built";
+ * keeping the other devices (ADR-0074 part 3, Stage A; "T5 as built";
  * `docs/ux/identity-recovery.md` sections 18.1 and 18.3).
  *
  * ONE owed operation, resumable from its record, of these steps in order:
@@ -33,7 +33,7 @@
  *                          key registered on the mailbox of the NEW key.
  *  10. `profile`           the profile envelope, with grants for the new
  *                          mailbox, re-sent to every one-to-one and group
- *                          (ADR-0066 section 3.5a rule 3). Owed until every
+ *                          (ADR-0074 section 3.5a rule 3). Owed until every
  *                          conversation has it.
  *  11. `links`             the invite links minted before the rotation,
  *                          revoked at the ledger and forgotten locally
@@ -72,7 +72,7 @@ export const ROTATION_STEPS = [
 ] as const;
 export type RotationStep = (typeof ROTATION_STEPS)[number];
 
-/** The supersession proof's validity (ADR-0066 section 3.2 step 3). */
+/** The supersession proof's validity (ADR-0074 section 3.2 step 3). */
 export const SUPERSESSION_WINDOW_SECS = 14 * 24 * 60 * 60;
 
 /** At most this many ids ride `revoke_device_ids_b64` (T5 item 11). */
@@ -84,7 +84,7 @@ export interface RotationOwed {
   /** The removed device's id (URL-safe base64, 43 chars). Empty for a
    *  rotation that removes no device ({@link RotationOwed.purpose}). */
   readonly deviceIdB64: string;
-  /** ADR-0067 section 3: "Save a recovery phrase". The same operation with
+  /** ADR-0075 section 3: "Save a recovery phrase". The same operation with
    *  no device to remove (the `remove` step is done from the start), and
    *  `phrase_saved: true` on the commit, which makes the account
    *  phrase-protected and deletes its email vault. Absent for the rotation
@@ -551,7 +551,7 @@ function sameKey(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 /**
- * ADR-0066 section 3.2: "the stolen device is out first", with the weight of
+ * ADR-0074 section 3.2: "the stolen device is out first", with the weight of
  * C-61. The `key-rotation` envelope carries the account's NEW entropy, so it
  * must be sealed at a DeviceGroup epoch the removed device never held.
  * Nothing but the sender can check this (T5 item 5), so the two steps are one
@@ -588,7 +588,7 @@ export async function sealKeyRotationAfterRemoval(
 }
 
 // ---------------------------------------------------------------------------
-// A kept device (ADR-0066 section 3.3)
+// A kept device (ADR-0074 section 3.3)
 // ---------------------------------------------------------------------------
 
 /** One verified envelope, held until the server shows its key. */
@@ -659,7 +659,7 @@ export type SupersededStep =
   | { readonly kind: "reset" };
 
 /**
- * The order on a superseded device (ADR-0066 section 3.3). `tried` are the
+ * The order on a superseded device (ADR-0074 section 3.3). `tried` are the
  * keys whose statement the server did not accept in this pass.
  */
 export function supersededStep(input: {

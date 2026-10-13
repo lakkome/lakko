@@ -10,7 +10,7 @@
  * that may still hold its data. Another account's data on this browser and
  * the genuine device settings stay.
  *
- * {@link wipeAccountLocalData} is the only list (the staged wipe of ADR-0066
+ * {@link wipeAccountLocalData} is the only list (the staged wipe of ADR-0074
  * is that list minus two named steps, never a second list). `AuthProvider.forgetDevice`
  * (which Delete account calls after the server-side deletion) releases the
  * push wake binding and this app's delivered notifications first, then calls
@@ -172,7 +172,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
   return [
     // --- the device root key first (see the module doc) -------------------
     { name: "device-key", run: () => deleteDeviceKey(accountIdB64) },
-    // ADR-0066 section 1.1: the recall record a device keeps after the
+    // ADR-0074 section 1.1: the recall record a device keeps after the
     // account's keys were reset elsewhere. Sealed under the key above, so it
     // is unreadable from here on; the row goes too. The full wipe never
     // leaves one (a removed device has nothing to take back).
@@ -186,11 +186,11 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // counter rows: a counter goes only with the key it protects, so it is
     // removed inside this step, after the log delete succeeded.
     { name: "channel-log", run: () => wipeChannelsForAccount(accountIdB64) },
-    // ADR-0065 phase 2 (UX 16.6) — which channels this device owned under
+    // ADR-0073 phase 2 (UX 16.6) — which channels this device owned under
     // keys since reset. Its own step: a plain localStorage row that must go
     // whether or not the channel log's IndexedDB delete did.
     { name: "channels-orphaned", run: () => clearOrphanedByResetForAccount(accountIdB64) },
-    // ADR-0066 section 3.5: which channels' owner key moved to the key of a
+    // ADR-0074 section 3.5: which channels' owner key moved to the key of a
     // rotated identity.
     { name: "channels-owner-moved", run: () => clearOwnerMoved(accountIdB64) },
     { name: "profiles", run: () => deleteProfileRow(accountIdB64) },
@@ -217,7 +217,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // kept under the device key for a re-send after a key rotation.
     { name: "sent-request-intros", run: () => deleteSentIntrosForAccount(accountIdB64) },
     { name: "push-routing", run: () => clearGroupRoutingForAccount(accountIdB64) },
-    // ADR-0065 R.8: the service worker's copy of the keys a reset retired.
+    // ADR-0073 R.8: the service worker's copy of the keys a reset retired.
     { name: "superseded-mirror", run: () => clearSupersededMirrorForAccount(accountIdB64) },
     {
       name: "anon-tokens",
@@ -232,7 +232,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "device-group-snapshot", run: () => deleteDeviceGroupSnapshot(accountIdB64) },
     // --- localStorage, keyed by the account --------------------------------
     { name: "contacts", run: () => clearAccountContacts(accountIdB64) },
-    // ADR-0065 R.2: the (account id -> key) bindings this device verified
+    // ADR-0073 R.2: the (account id -> key) bindings this device verified
     // itself for group members it never pinned.
     { name: "verified-bindings", run: () => clearVerifiedBindingsForAccount(accountIdB64) },
     { name: "contact-inbox", run: () => clearInboxForAccount(accountIdB64) },
@@ -243,12 +243,12 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     },
     { name: "readmission-removed", run: () => clearRemovedDevicesForAccount(accountIdB64) },
     { name: "signup-phrase-owed", run: () => clearSignupPhraseOwed(storage, accountIdB64) },
-    // ADR-0067: the "phrase-protected" flag, the no-protection banner's
+    // ADR-0075: the "phrase-protected" flag, the no-protection banner's
     // dismissal, the owed "Protect your account" step, and what this device
     // saw and did of the account's notices.
     { name: "protection-facts", run: () => clearProtectionFacts(storage, accountIdB64) },
     { name: "account-notices", run: () => clearNoticeStores(storage, accountIdB64) },
-    // The local three-word guess budget and the ADR-0065 "publish owed"
+    // The local three-word guess budget and the ADR-0073 "publish owed"
     // record (a reset whose attestation was not yet carried to the directory
     // and the device list).
     { name: "three-words-budget", run: () => clearBudget(storage, accountIdB64) },
@@ -260,7 +260,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       name: "key-reset-owed",
       run: () => clearKeyResetOwed(storage, accountIdB64),
     },
-    // ADR-0066: the id of the device identity wiped above (the next setup
+    // ADR-0074: the id of the device identity wiped above (the next setup
     // mints a NEW device key; the old id is tombstoned in the directory once
     // its row was deleted), the "account key recorded at auth" mark, the
     // logout still owed to the server, and the device removals this device
@@ -269,14 +269,14 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "genesis-recorded", run: () => clearGenesisRecorded(storage, accountIdB64) },
     { name: "logout-owed", run: () => clearLogoutOwed(storage, accountIdB64) },
     { name: "device-removals-owed", run: () => clearRemovals(storage, accountIdB64) },
-    // ADR-0066 part 3: a key rotation this device was finishing, the "keys
+    // ADR-0074 part 3: a key rotation this device was finishing, the "keys
     // were changed on another device" line, and the sealed row holding the
     // predecessor seeds, the pending envelopes and a prepared rotation.
     { name: "key-rotation-owed", run: () => clearRotation(storage, accountIdB64) },
     { name: "key-rotation-notice", run: () => clearRotatedNotice(storage, accountIdB64) },
     { name: "key-rotation-state", run: () => deleteKeyRotationState(accountIdB64) },
     // What a kept device still owes after adopting rotated keys (its own
-    // links and requests, ADR-0066 section 3.5a rule 5).
+    // links and requests, ADR-0074 section 3.5a rule 5).
     { name: "rotation-spend-owed", run: () => clearSpendOwed(accountIdB64, storage) },
     {
       name: "predecessor-mailbox-cursor",
@@ -292,14 +292,14 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "committer-beacons", run: () => clearBeaconObservationsForAccount(accountIdB64) },
     { name: "last-observed-owner", run: () => clearLastObservedOwnerForAccount(accountIdB64) },
     { name: "leave-requested", run: () => clearLeaveRequestedForAccount(accountIdB64) },
-    // ADR-0065 R.4 / R.5: this account's own continuity-key marker, and the
+    // ADR-0073 R.4 / R.5: this account's own continuity-key marker, and the
     // "a lineage register is not confirmed sent" marker.
     {
       name: "reset-continuity-marker",
       run: () => clearContinuityMarker(localStorage, accountIdB64),
     },
     { name: "lineage-unsent", run: () => removeLocal(`lakko.lineage.unsent.v1.${accountIdB64}`) },
-    // ADR-0067: the "recovery-email register is not confirmed sent" marker
+    // ADR-0075: the "recovery-email register is not confirmed sent" marker
     // (the address itself is in the synced state, deleted with it), and the
     // "first password owed" marker of a guest that chose a username.
     {
@@ -307,14 +307,14 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       run: () => removeLocal(`lakko.recovery-email.unsent.v1.${accountIdB64}`),
     },
     { name: "first-password-owed", run: () => clearFirstPasswordOwed(storage, accountIdB64) },
-    // ADR-0068: the "own-username register is not confirmed sent" marker,
+    // ADR-0076: the "own-username register is not confirmed sent" marker,
     // and an unfinished rename with the stamp of the last one.
     {
       name: "own-username-unsent",
       run: () => removeLocal(`lakko.own-username.unsent.v1.${accountIdB64}`),
     },
     { name: "username-change", run: () => clearRenameStores(storage, accountIdB64) },
-    // ADR-0065 R.5 / R.7: when a conversation moved, and that a re-send ran.
+    // ADR-0073 R.5 / R.7: when a conversation moved, and that a re-send ran.
     { name: "reset-continuity-state", run: () => clearContinuityStateForAccount(accountIdB64) },
     // The per-account conversation-kind map of builds before ADR-0062 (the
     // kind now lives in the group); nothing writes it any more.
@@ -355,7 +355,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
 }
 
 /**
- * What the STAGED wipe keeps (ADR-0066 section 1.1, UX 18.4): the recall
+ * What the STAGED wipe keeps (ADR-0074 section 1.1, UX 18.4): the recall
  * record, and the device root key it is sealed under. Everything else the
  * full wipe deletes, the staged wipe deletes.
  */

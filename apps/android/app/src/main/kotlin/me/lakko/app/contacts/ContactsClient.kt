@@ -124,7 +124,7 @@ public class ContactsClient(
         TransparencyClient.forOptionalConfig()
     },
     /**
-     * ADR-0066 section 3.5 - told once the gate re-pinned an account to a
+     * ADR-0074 section 3.5 - told once the gate re-pinned an account to a
      * key a supersession proof authorised: `(accountIdB64, oldKeyB64,
      * newKeyB64)`, standard base64. The old key is then that account's
      * proven predecessor ([ProvenPredecessors]). Never called for a change
@@ -132,7 +132,7 @@ public class ContactsClient(
      */
     private val onProvenRotation: (String, String, String) -> Unit = { _, _, _ -> },
     /**
-     * ADR-0066 section 3.5a rule 1 - the account key whose mailbox is
+     * ADR-0074 section 3.5a rule 1 - the account key whose mailbox is
      * addressed for a person known by the given key: the key its PROVEN
      * steps lead to, else the key itself (an unproven change is never
      * followed). Production wires
@@ -141,33 +141,33 @@ public class ContactsClient(
      */
     private val mailboxKeyOf: (ByteArray) -> ByteArray = { it },
     /**
-     * ADR-0065 R.2 - the signed-in account the reset ledger and the verified
+     * ADR-0073 R.2 - the signed-in account the reset ledger and the verified
      * bindings below belong to (standard base64). Empty without a session
      * (tests): the in-memory defaults then hold one anonymous namespace.
      */
     private val ownerAccountIdB64: String = "",
-    /** ADR-0065 R.2 - the accepted generation, the retired keys and the
+    /** ADR-0073 R.2 - the accepted generation, the retired keys and the
      *  reset's `signed_at`, per peer account ([ResetLedgerRow]). */
     private val resetLedger: ResetLedgerStore = InMemoryResetLedgerStore(),
-    /** ADR-0065 R.2 - what this device verified for accounts it never
+    /** ADR-0073 R.2 - what this device verified for accounts it never
      *  pinned ([VerifiedBinding]). */
     private val verifiedBindings: VerifiedBindingStore = InMemoryVerifiedBindingStore(),
-    /** ADR-0066 section 3.5 - the proven predecessors of an account's pinned
+    /** ADR-0074 section 3.5 - the proven predecessors of an account's pinned
      *  key: an accepted reset retires them with it. */
     private val provenPredecessorsOf: (accountIdB64: String, pinnedKeyB64: String) -> List<String> = { _, _ -> emptyList() },
     /**
-     * ADR-0065 R.2 - told once a reset was ACCEPTED and the re-pin written.
+     * ADR-0073 R.2 - told once a reset was ACCEPTED and the re-pin written.
      * The default is the process-wide seam ([ResetEvents]), where the
      * contacts repository re-keys the contact row and tells the chat layer.
      * Never called for a refusal or for no verdict.
      */
     private val onResetAccepted: (event: ResetAccepted) -> Unit = ResetEvents::notifyResetAccepted,
-    /** ADR-0065 R.2 step 1 - the bundle's attestation under the trusted
+    /** ADR-0073 R.2 step 1 - the bundle's attestation under the trusted
      *  attest key. The default runs `verifyKeyResetAttestation` under
      *  [DeviceAttestKey] (the build-time pin, else the JWKS key); a test
      *  injects the answer, since the host JVM loads no native library. */
     private val resetAttestCheck: (suspend (accountId: ByteArray, servedPubkey: ByteArray, attestationB64: String?) -> AttestCheck)? = null,
-    /** ADR-0065 R.2 step 3 - the VERIFIED key-log answer for the served key.
+    /** ADR-0073 R.2 step 3 - the VERIFIED key-log answer for the served key.
      *  The default runs [verifyIdentityInLog]; a test injects the answer. */
     private val resetLogCheck: (suspend (accountId: ByteArray, servedPubkey: ByteArray) -> LogCheck)? = null,
 ) : AutoCloseable {
@@ -227,7 +227,7 @@ public class ContactsClient(
             throw ContactsError.wrap(e)
         } ?: throw ContactsError.noIdentityBundle(recipientAccountId)
 
-        // G-4 (ADR-0016) rule #2, ADR-0065 R.2 and the additive KT-log layer:
+        // G-4 (ADR-0016) rule #2, ADR-0073 R.2 and the additive KT-log layer:
         // the bundle's AccountIdentity key against what this device holds,
         // BEFORE its keys seal a ContactRequest ([gateIdentity]).
         gateIdentity(recipientAccountId, bundle)
@@ -297,7 +297,7 @@ public class ContactsClient(
     }
 
     /**
-     * ADR-0065 R.2 - fetch an account's published identity and run the
+     * ADR-0073 R.2 - fetch an account's published identity and run the
      * fail-closed check ([gateIdentity]). One of the rule's triggers: the
      * scheduled per-chat device check, opening a one-to-one, a send whose
      * last check is old. Returns the served bundle's signature key on a clean
@@ -333,7 +333,7 @@ public class ContactsClient(
      *
      *   1. the supersession / pin gate ([verifyBundleAccountKey], ADR-0016):
      *      the primary, fail-closed trust;
-     *   2. ADR-0065 R.2: a CHANGED key with NO supersession proof is asked
+     *   2. ADR-0073 R.2: a CHANGED key with NO supersession proof is asked
      *      whether it is an attested reset ([judgeReset]). Accepted: the
      *      re-pin is written and the call proceeds as for any trusted key,
      *      with nothing shown. Refused: the gate's own refusal, with the
@@ -395,7 +395,7 @@ public class ContactsClient(
     }
 
     /**
-     * ADR-0065 R.2 - gather the rule's inputs for a proof-less key change
+     * ADR-0073 R.2 - gather the rule's inputs for a proof-less key change
      * and act on the verdict ([resetVerdict]). On `Accepted` the re-pin and
      * the ledger row are written and [onResetAccepted] is told; nothing is
      * shown anywhere. Never throws.
@@ -570,7 +570,7 @@ public class ContactsClient(
             null
         }
 
-    /** ADR-0065 R.2: the generation this device last accepted for an account
+    /** ADR-0073 R.2: the generation this device last accepted for an account
      *  (0 when it never recorded one). */
     public fun acceptedGenerationOf(accountIdB64: String): Long =
         resetLedger.load(ownerAccountIdB64, accountIdB64)?.acceptedKeyGeneration ?: 0L
@@ -660,7 +660,7 @@ public class ContactsClient(
          *  capability, or a grant found through search). */
         reach: DsReachAuth? = null,
     ): SendResult {
-        // ADR-0066 section 3.5a rule 1 - resolve before addressing. A bundle
+        // ADR-0074 section 3.5a rule 1 - resolve before addressing. A bundle
         // carried by a link or a search result may name a key its owner has
         // since rotated away BY PROOF. The request then goes to the CURRENT
         // key's mailbox, sealed to the current X25519 key, which only the
@@ -717,7 +717,7 @@ public class ContactsClient(
     }
 
     /**
-     * ADR-0066 section 3.5a rule 5 - whether the directory PROVES [newKey]
+     * ADR-0074 section 3.5a rule 5 - whether the directory PROVES [newKey]
      * the successor of [oldKey] for [accountId]: its bundle serves exactly
      * [newKey] with a supersession proof that verifies as signed by
      * [oldKey] over that key. A read: nothing is pinned and no step is
@@ -742,7 +742,7 @@ public class ContactsClient(
 
     /**
      * A contact request to the account known by id alone: its CURRENT keys
-     * come from [resolveVerifiedBundle]. ADR-0066 section 3.5a rule 5 uses
+     * come from [resolveVerifiedBundle]. ADR-0074 section 3.5a rule 5 uses
      * it to send an unanswered request again from a rotated account key;
      * [mintReply] and [reachFor] are as in [sendContactRequest].
      */
@@ -777,7 +777,7 @@ public class ContactsClient(
     }
 
     /**
-     * ADR-0016 rule 2 / ADR-0065 R.2 - the gate for keys handed to this
+     * ADR-0016 rule 2 / ADR-0073 R.2 - the gate for keys handed to this
      * client instead of fetched through it ([contactRequestGate]). Call it
      * BEFORE anything is spent or sent.
      *
@@ -864,7 +864,7 @@ public class ContactsClient(
     internal fun verifyBundleAccountKey(
         accountId: ByteArray,
         bundle: IdentityFetchResponse,
-        /** ADR-0065 R.2: the roster's account key of a member this device
+        /** ADR-0073 R.2: the roster's account key of a member this device
          *  never pinned ([checkPeerIdentity]). Ignored when a pin exists. */
         heldKeyB64: String? = null,
     ) {
@@ -1032,10 +1032,10 @@ public class ContactsClient(
             verifiedBindings.drop(ownerAccountIdB64, accountIdB64)
             recordGenerationBaseline(accountIdB64, existingGeneration ?: bundle.key_generation)
         }
-        // ADR-0066 section 3.5 - a PROVEN rotation: the key pinned until
+        // ADR-0074 section 3.5 - a PROVEN rotation: the key pinned until
         // now stays the binding of the conversation leaves that exist, as
         // the same person. Nothing is flagged, closed, evicted or shown
-        // (the ADR-0065 phase-2 "keys reset" state is entered only by a
+        // (the ADR-0073 phase-2 "keys reset" state is entered only by a
         // refusal of this gate, which did not happen here).
         try {
             onProvenRotation(accountIdB64, existing.pinnedSignaturePubkeyB64, fetchedPubkeyB64)
@@ -1301,7 +1301,7 @@ public class ContactsClient(
         replyGrant: FfiReachGrant?,
         reach: DsReachAuth?,
     ): PublishedRequest {
-        // ADR-0066 3.5a rule 1 - resolve before addressing. A request is
+        // ADR-0074 3.5a rule 1 - resolve before addressing. A request is
         // SEALED to the X25519 key published with [recipientSignaturePubkey],
         // and a mailbox is read with the identity it belongs to, so a
         // request can only go to the mailbox of the key it is sealed for.
@@ -1400,7 +1400,7 @@ public class ContactsClient(
          *  ack into their closed mailbox. */
         reach: DsReachAuth? = null,
     ): PublishedAck {
-        // ADR-0066 3.5a rule 1 - the requester's CURRENT mailbox: an ack is
+        // ADR-0074 3.5a rule 1 - the requester's CURRENT mailbox: an ack is
         // signed, not sealed, so it follows a proven rotation of their keys.
         val senderMailbox =
             IdentityPseudonym.fromIdentity(mailboxKeyOf(originalRequest.fromPubkey)).use { it.asBytes() }
@@ -1942,7 +1942,7 @@ public class SupersessionRefused(
 }
 
 /**
- * ADR-0065 R.2 - the identity check of an account could not be decided yet:
+ * ADR-0073 R.2 - the identity check of an account could not be decided yet:
  * the attest key or the key log could not be reached, or nothing is
  * established for a roster key under a claimed account id. Nothing was
  * written and nothing is shown; the caller asks again at the next trigger.
@@ -2013,7 +2013,7 @@ internal fun readProofExpiresAtSecs(proofBytes: ByteArray): Long {
 }
 
 /**
- * ADR-0066 section 3.5a rule 1, for what is SEALED to a key: whether the
+ * ADR-0074 section 3.5a rule 1, for what is SEALED to a key: whether the
  * key a contact request is about to be sealed for ([recipientKey]) is no
  * longer the one the account is addressed by ([addressedKey], the resolver's
  * answer). Pure.

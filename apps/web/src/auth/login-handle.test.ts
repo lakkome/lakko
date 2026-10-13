@@ -205,7 +205,7 @@ describe("recover by name: no lookup before the session, the id from the finish,
     // of a typed name against the account that session is for: the ADR-0056
     // post-redeem name check of a join-by-name device restore (ordering
     // pinned in device-restore-name-check.test.ts), and the passkey sign-in
-    // on a device with no cached account (ADR-0064 decision 6), where the
+    // on a device with no cached account (ADR-0072 decision 6), where the
     // assertion carries only the account id and a typed name is kept only
     // when it resolves to that account (`usernameNamingAccount`, called
     // after `installSessionToken`).

@@ -488,7 +488,7 @@ final class UsernameDirectoryTests: XCTestCase {
         XCTAssertNil(repo.identitySecrets)
     }
 
-    // The sign-in decision about the published identity is ADR-0065's
+    // The sign-in decision about the published identity is ADR-0073's
     // `KeyResetLanding`, pinned in `KeyResetTests`.
 }
 

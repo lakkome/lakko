@@ -25,7 +25,7 @@ enum FeedRanking {
     static func conversations(_ sources: [FeedSource]) -> [FeedConversation] {
         sources.map { s in
             FeedConversation(
-                // ADR-0065 R.5 — a rule names CONVERSATIONS, so a moved one
+                // ADR-0073 R.5 — a rule names CONVERSATIONS, so a moved one
                 // keeps its place in an include / exclude list.
                 id: Data(feedHex: s.key) ?? Data(s.key.utf8),
                 kind: s.kind == .channel ? .channel : .group,

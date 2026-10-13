@@ -258,7 +258,7 @@ mod tests {
     //
     // The handlers don't touch the DB (only
     // `load_or_init_call_signing_key` does, and that runs
-    // at bootstrap), but since ADR-0065 the bearer
+    // at bootstrap), but since ADR-0073 the bearer
     // middleware reads the account's key generation, so
     // every test that presents a bearer runs against the
     // test database (`LAKKO_AUTH_TEST_DATABASE_URL`, skipped

@@ -170,7 +170,7 @@ public final class ContactsViewModel: ObservableObject {
             } catch let refused as SupersessionRefused {
                 // The peer's AccountIdentity key changed and the change is
                 // neither a proven rotation (ADR-0016) nor an attested reset
-                // (ADR-0065 R.2, accepted silently before this point is ever
+                // (ADR-0073 R.2, accepted silently before this point is ever
                 // reached): the fail-closed refusal, with the copy the
                 // verdict names.
                 sending = false

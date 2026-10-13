@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.5 ("DS") - after a key rotation, every journal this
+ * ADR-0074 section 3.5 ("DS") - after a key rotation, every journal this
  * account roots moves from the root derived from the OLD seed to the root
  * derived from the new one. For a conversation group the account owns this is
  * exactly an ownership handover to oneself: the old root signs a

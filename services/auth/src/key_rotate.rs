@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Rotate the account keys and keep the other devices:
-//! `POST /account/keys/rotate/{start,finish}` ([ADR-0066] section 3.4,
+//! `POST /account/keys/rotate/{start,finish}` ([ADR-0074] section 3.4,
 //! Stage A; built in sprint T5, see the ADR's "T5 as built").
 //!
 //! The interface calls it "Remove this device and change your account keys".
@@ -20,7 +20,7 @@
 //! A reset ([`crate::key_reset`]) needs a session and the password or a
 //! passkey. So does a rotation, **and it also needs the old identity key**:
 //! the supersession proof is verified here against the key auth recorded for
-//! the account (`accounts.identity_pubkey`, ADR-0066 section 0.1). Someone
+//! the account (`accounts.identity_pubkey`, ADR-0074 section 0.1). Someone
 //! who learned the password can reset (which the owner can take back, see
 //! [`crate::recall`]); they cannot rotate, because they cannot sign with a
 //! key they do not hold. No recorded key, a proof that does not verify, a
@@ -66,7 +66,7 @@
 //!   again from a device that holds the NEW phrase, which seals the new
 //!   entropy. The server cannot re-seal a vault itself (it never sees the
 //!   entropy or the PRF output, invariant #2), so there is nothing to keep.
-//! - **Deleted: the email vault** (ADR-0067 section 3), for the same reason:
+//! - **Deleted: the email vault** (ADR-0075 section 3), for the same reason:
 //!   it seals the old phrase. With `phrase_saved: true` in `finish` the
 //!   rotation is "Save a recovery phrase": the account is marked
 //!   phrase-protected in the same transaction (it never gets an email vault
@@ -97,7 +97,7 @@
 //! transaction. A caller without the grant or without the account key spends
 //! none of the owner's budget.
 //!
-//! [ADR-0066]: ../../../docs/adr/0066-account-takeover-resistance.md
+//! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
 
 use axum::extract::State;
 use axum::response::Json;
@@ -119,7 +119,7 @@ use crate::session::{DeviceId, FLOOR_REASON_REMOVED};
 use crate::webauthn::{ApiError, AuthenticatedAccount, AuthenticatedDevice};
 use crate::AppState;
 
-/// At most this many device ids ride in one `finish` (ADR-0066 section 3.4;
+/// At most this many device ids ride in one `finish` (ADR-0074 section 3.4;
 /// chosen). A rotation removes the one stolen device; the list exists for a
 /// removal that raced the commit.
 pub(crate) const MAX_REVOKE_DEVICE_IDS: usize = 8;
@@ -146,7 +146,7 @@ pub(crate) struct RotateFinishReq {
     /// transaction. Absent or empty: none.
     #[serde(default)]
     pub(crate) revoke_device_ids_b64: Vec<String>,
-    /// ADR-0067 section 3: this rotation is "Save a recovery phrase". The
+    /// ADR-0075 section 3: this rotation is "Save a recovery phrase". The
     /// person is shown the NEW phrase's words once it commits; the account
     /// is marked phrase-protected and its devices are told. Absent: false.
     #[serde(default)]
@@ -347,7 +347,7 @@ pub(crate) async fn finish(
         return Err(ApiError::AccountKeyRequired.into());
     }
 
-    // 2. The recall anchor (ADR-0066 section 0.2), before anything changes.
+    // 2. The recall anchor (ADR-0074 section 0.2), before anything changes.
     crate::recall::capture_anchor(
         &mut tx,
         &account_id,
@@ -415,7 +415,7 @@ pub(crate) async fn finish(
             .map_err(ApiError::Db)?;
     }
 
-    //    ADR-0067 section 3: "Save a recovery phrase". The vault of the old
+    //    ADR-0075 section 3: "Save a recovery phrase". The vault of the old
     //    phrase is gone (above); from here the account is phrase-protected.
     if payload.phrase_saved {
         crate::account_notices::mark_phrase_saved(&mut tx, &account_id, now)

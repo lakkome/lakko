@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * What a `401` means (ADR-0065 sections 3.2, 3.3 and 3.5).
+ * What a `401` means (ADR-0073 sections 3.2, 3.3 and 3.5).
  *
  * Three services can refuse a bearer, and the refresh route can refuse the
  * refresh credential, with one of two JSON codes or with no body at all:
@@ -10,11 +10,11 @@
  *   - `key-generation-superseded` (auth's bearer middleware, the refresh
  *     route, discovery's two identity writes): the account's keys were reset
  *     on another device. This device is signed out and runs the staged
- *     wipe, keeping only the recall record (ADR-0066 section 1.1; a device
+ *     wipe, keeping only the recall record (ADR-0074 section 1.1; a device
  *     that never held the keys keeps nothing); nothing is retried and
  *     nothing is published first.
  *   - `device-revoked` (auth's bearer middleware and the refresh route,
- *     ADR-0066 section 0.4; the server reads the key generation FIRST, so
+ *     ADR-0074 section 0.4; the server reads the key generation FIRST, so
  *     only a credential of the current generation is ever told this):
  *     this device was removed from the account on another device. It is
  *     signed out and wipes everything by itself, with no recall record;
@@ -81,7 +81,7 @@ export function bearerRefusal(input: {
 }): BearerRefusal {
   if (input.status !== 401) return "pass";
   // The two codes never arrive together and neither outranks the other
-  // here: the server reads the generation before the device floor (ADR-0066
+  // here: the server reads the generation before the device floor (ADR-0074
   // "T3 as built", item 1), so a credential of an older generation is always
   // told `key-generation-superseded` (the staged wipe and the recall record)
   // and only one of the current generation `device-revoked` (the full wipe,

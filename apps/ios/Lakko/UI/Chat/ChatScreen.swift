@@ -883,7 +883,7 @@ public struct ChatScreen: View {
     /// timeline this device holds; otherwise do nothing and say nothing ("a
     /// quote is not a promise that the original exists").
     private func jumpToQuoted(_ messageId: Int64) {
-        // ADR-0065 R.7 case 1 — a reply flushed into a successor group
+        // ADR-0073 R.7 case 1 — a reply flushed into a successor group
         // carries target 0: the quote is drawn, and there is nowhere to jump
         // (an unsent row also has id 0 and is not what was quoted).
         guard messageId != HeldSend.replyNoJumpTarget else { return }
@@ -2072,12 +2072,12 @@ struct MessageRow: View {
             && message.direction != .system
             && !message.deleted
             && !message.text.isEmpty
-            // ADR-0065 R.5 — a row of an older group of the conversation is
+            // ADR-0073 R.5 — a row of an older group of the conversation is
             // read-only: its menu offers nothing but Unpin (below).
             && !isHistoryRow
     }
 
-    /// ADR-0065 R.5 — whether this row belongs to an older segment of the
+    /// ADR-0073 R.5 — whether this row belongs to an older segment of the
     /// conversation.
     private var isHistoryRow: Bool { LineageRules.isHistoryRowId(message.messageId) }
 
@@ -2088,7 +2088,7 @@ struct MessageRow: View {
             hasText: canCopy,
             // Section 4.1 — on any message whose send is complete and that
             // is not deleted, which is the set Forward is offered on.
-            // ADR-0065 R.5 — ...and on a pinned row of an older segment,
+            // ADR-0073 R.5 — ...and on a pinned row of an older segment,
             // which offers Unpin alone (the view model decides).
             pin: (canForward || isHistoryRow) ? pinState : .unavailable,
             canSelect: canSelect)

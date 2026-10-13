@@ -169,7 +169,7 @@ export class ReachSession {
       loadReachRow(accountIdB64, "book"),
       loadReachRow(accountIdB64, "grants"),
     ]);
-    // ADR-0066 section 3.5, "Reach" - the registrations the book records
+    // ADR-0074 section 3.5, "Reach" - the registrations the book records
     // were made on the mailbox of the key it was bound to. Under another key
     // of this account (a rotation) they describe the mailbox that was left:
     // forgotten here, so the first sync registers everything on the new one.
@@ -245,7 +245,7 @@ export class ReachSession {
   }
 
   /**
-   * ADR-0066 section 3.5a - every own predecessor key this device holds
+   * ADR-0074 section 3.5a - every own predecessor key this device holds
    * (the conversation key first, then the keys held between two rotations),
    * each with a copy of its Ed25519 seed. A proposer names the committer's
    * account key as IT knows it: the key the role table carries, or any key
@@ -320,7 +320,7 @@ export class ReachSession {
    * profiles already sent).
    */
   profileGrantSignature(groupId: Uint8Array, oneToOne: boolean): string {
-    // ADR-0066 section 3.5a rule 3 - the account key the grants are derived
+    // ADR-0074 section 3.5a rule 3 - the account key the grants are derived
     // under is part of what was published: after a rotation every version is
     // unchanged and every grant is another key, so every conversation needs
     // the profile again. A prefix of the PUBLIC key; no key material.
@@ -629,7 +629,7 @@ export class ReachSession {
       publicKeyHex: this.publicKeyHex(w.cls, w.scopeHex, w.version),
       expiresAtMs: w.expiresAtMs,
     }));
-    // ADR-0065 R.4 - after a reset of THIS account, the continuity key stays
+    // ADR-0073 R.4 - after a reset of THIS account, the continuity key stays
     // registered on the new mailbox until its expiry, so a peer that accepted
     // the reset can deliver a Welcome. Derived from public values; removed by
     // the diff once it is no longer wanted.
@@ -914,7 +914,7 @@ export async function onContactRemoved(accountKey: Uint8Array): Promise<void> {
   const session = reachSession();
   if (session === null) return;
   try {
-    // ADR-0066 section 3.5a rule 2 - under every key the person has had.
+    // ADR-0074 section 3.5a rule 2 - under every key the person has had.
     const keys = personKeysHex(journalHex(accountKey));
     await session.updateReceivedGrants((g) => keys.reduce((acc, hex) => dropContactGrant(acc, hex), g));
     await session.rotateOnContactRemoved();

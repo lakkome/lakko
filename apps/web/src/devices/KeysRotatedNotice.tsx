@@ -40,7 +40,7 @@ export function KeysRotatedNotice(): JSX.Element {
         {/* Polite: announced once when it appears, never takes focus. */}
         <div class="lk-alert accent" role="status" aria-live="polite">
           <div class="lk-fill">{t("devices.rotated.notice")}</div>
-          {/* ADR-0067: only a phrase-protected account has words to show. */}
+          {/* ADR-0075: only a phrase-protected account has words to show. */}
           <Show when={wordsShown()}>
             <button
               type="button"

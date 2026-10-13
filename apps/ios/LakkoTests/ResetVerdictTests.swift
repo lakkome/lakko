@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.2 — the acceptance rule for a contact's attested key reset, the
+/// ADR-0073 R.2 — the acceptance rule for a contact's attested key reset, the
 /// verified binding of a member this device never pinned, the re-pin and the
 /// contact row after it. The cases are the tables of
 /// `apps/web/src/contacts/reset-verdict.test.ts` and

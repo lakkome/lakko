@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Finish the device removals this device still owes (ADR-0066 section 2.3).
+ * Finish the device removals this device still owes (ADR-0074 section 2.3).
  *
  * A removal whose device was signed out at the server but whose later steps
  * (the directory row, the DeviceGroup, the chats) did not all get an answer

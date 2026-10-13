@@ -4689,7 +4689,7 @@
     },
     "devices.signed_out.title": {
       "text": "Your account keys were reset",
-      "comment": "Title of the full-screen state shown on a device whose account keys were reset on another device (ADR-0065, UX identity-recovery 15.2).",
+      "comment": "Title of the full-screen state shown on a device whose account keys were reset on another device (ADR-0073, UX identity-recovery 15.2).",
       "security_critical": true
     },
     "discover.card.a11y": {
@@ -7400,7 +7400,7 @@
     },
     "restore_identity.reset.lede": {
       "text": "This gives the account new keys and a new 12-word recovery phrase. Only do this if you have lost your recovery phrase, every other device and every passkey that restores keys.",
-      "comment": "First paragraph of the warning before resetting the account keys (ADR-0065, UX identity-recovery 15.1).",
+      "comment": "First paragraph of the warning before resetting the account keys (ADR-0073, UX identity-recovery 15.1).",
       "security_critical": true
     },
     "restore_identity.reset.password_help": {

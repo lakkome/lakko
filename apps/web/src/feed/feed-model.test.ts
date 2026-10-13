@@ -226,7 +226,7 @@ describe("channels", () => {
   });
 });
 
-describe("the feed's sources are conversations, not groups (ADR-0065 R.5)", () => {
+describe("the feed's sources are conversations, not groups (ADR-0073 R.5)", () => {
   const conv = (conversationHex: string, headHex: string) => ({
     conversationHex,
     headHex,
@@ -265,7 +265,7 @@ describe("the feed's sources are conversations, not groups (ADR-0065 R.5)", () =
   });
 });
 
-describe("an older group of a moved conversation feeds the same source (ADR-0065 R.5 / R.7 case 3)", () => {
+describe("an older group of a moved conversation feeds the same source (ADR-0073 R.5 / R.7 case 3)", () => {
   const ROOT = "11".repeat(32);
   const MIDDLE = "22".repeat(32);
   const HEAD = "33".repeat(32);

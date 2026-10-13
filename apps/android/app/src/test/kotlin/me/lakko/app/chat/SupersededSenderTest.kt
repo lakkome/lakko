@@ -11,7 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0065 R.5 / R.8 - nothing from a superseded sender acts
+ * ADR-0073 R.5 / R.8 - nothing from a superseded sender acts
  * ([supersededActDropped], [senderActOf], [withoutSupersededActs]): the rule
  * the foreground poll applies to every batch before any sink sees it.
  */

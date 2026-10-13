@@ -56,7 +56,7 @@ final class RecordingPublishURLProtocol: URLProtocol {
     }
 }
 
-/// ADR-0065 "Phase 2 revised" — the repository wiring of R.5 (one
+/// ADR-0073 "Phase 2 revised" — the repository wiring of R.5 (one
 /// conversation over several groups), R.6 (the claim receive rule) and R.7
 /// case 1 (nothing goes into a dead one-to-one; a message is held and
 /// flushed into the successor), over real MLS groups and a stubbed DS.

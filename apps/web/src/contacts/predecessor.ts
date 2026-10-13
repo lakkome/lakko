@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The proven-predecessor rule (ADR-0066 section 3.5, "Peers"): who is the
+ * The proven-predecessor rule (ADR-0074 section 3.5, "Peers"): who is the
  * same person across a key rotation.
  *
  * An account whose published key changed WITH a valid supersession proof (the
@@ -18,7 +18,7 @@
  *   - a device binding is accepted under the pinned key OR a proven
  *     predecessor of it.
  *
- * A key change WITHOUT a proof (a reset, ADR-0065) never gets this
+ * A key change WITHOUT a proof (a reset, ADR-0073) never gets this
  * treatment: the old key of a reset is a superseded key, and a later reset
  * of an account makes every predecessor it had, proven or not, superseded.
  * The same rule holds for the account's OWN old key on its own devices.

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Slim `lakko-contacts` key-rotation surface — the CLASSIFY half only
-//! (ADR-0041 Phase 2, for the ADR-0066 key-rotation envelope).
+//! (ADR-0041 Phase 2, for the ADR-0074 key-rotation envelope).
 //!
 //! ## Why the NSE needs this at all
 //!
@@ -44,7 +44,7 @@
 use lakko_contacts::key_rotation::{decode_key_rotation, KEY_ROTATION_ENVELOPE_LEN};
 
 /// `true` when `plaintext` is a well-formed key-rotation envelope
-/// (ADR-0066 section 3.3). The NSE suppresses it: no notification, no
+/// (ADR-0074 section 3.3). The NSE suppresses it: no notification, no
 /// preview, nothing stored.
 ///
 /// Returns no field of the envelope. See the module docs for why.

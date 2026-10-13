@@ -128,7 +128,7 @@ public enum DeviceGroupDsAccess {
         }
     }
 
-    /// ADR-0065 section 5 — after a key reset, found the account's DeviceGroup
+    /// ADR-0073 section 5 — after a key reset, found the account's DeviceGroup
     /// afresh under the NEW device binding and re-root its journal on the DS
     /// with the key-reset attestation.
     ///
@@ -147,7 +147,7 @@ public enum DeviceGroupDsAccess {
     /// conversation groups do), so there is nothing to re-bind here.
     ///
     /// `keyGeneration` is the generation the attestation carries: the root
-    /// endorsement the DS requires beside it (ADR-0066 section 4.6) binds it.
+    /// endorsement the DS requires beside it (ADR-0074 section 4.6) binds it.
     ///
     /// Throws ``DsStatementError`` (`.keyResetDisabled` when the DS has no
     /// pinned key, `.conflict` when another root holds the journal) or the
@@ -189,7 +189,7 @@ public enum DeviceGroupDsAccess {
             epoch: signer.epoch(),
             epochKey: signer.verifyingKey(),
             attestation: attestation,
-            // ADR-0066 section 4.6 — the endorsement by the NEW account key
+            // ADR-0074 section 4.6 — the endorsement by the NEW account key
             // (the seed this device stored before the publish started).
             endorse: { rootKey in
                 let accountSeed = try AccountIdentitySeedStore.getAccountIdentitySeed(
@@ -204,7 +204,7 @@ public enum DeviceGroupDsAccess {
         marks.clear(journalIdHex: hex)
     }
 
-    /// ADR-0066 section 3.5, "DS" / "T5 as built" item 22 — after a ROTATION
+    /// ADR-0074 section 3.5, "DS" / "T5 as built" item 22 — after a ROTATION
     /// of the account keys, hand the DeviceGroup journal's root from the old
     /// seed's root to the new seed's: `PUT /ds/group/{hex}/root`, a
     /// `RootTransfer` signed by the OLD root naming the new root, carrying
@@ -252,7 +252,7 @@ public enum DeviceGroupDsAccess {
         } catch let refusal as DsStatementError where refusal == .conflict || refusal == .unauthorized {
             switch try await JournalOwnership.probeRoot(root: newRoot, journalId: journalId, ds: ds) {
             case .root:
-                NSLog("ADR-0066: the DeviceGroup journal root transfer had already landed")
+                NSLog("ADR-0074: the DeviceGroup journal root transfer had already landed")
             case .notRoot:
                 throw refusal
             }
@@ -297,7 +297,7 @@ public enum DeviceGroupDsAccess {
 }
 
 /// The body of the DeviceGroup journal's root transfer after a rotation
-/// (ADR-0066 "T5 as built" items 21 and 22), built purely: the `RootTransfer`
+/// (ADR-0074 "T5 as built" items 21 and 22), built purely: the `RootTransfer`
 /// statement by the OLD root, with the attestation and the endorsement of the
 /// NEW root key added when an attestation is in hand, and neither otherwise.
 enum RootRotationRequest {

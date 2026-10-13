@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 "Phase 2 revised", R.6 — the session-wide SUCCESSOR-CLAIM
+ * ADR-0073 "Phase 2 revised", R.6 — the session-wide SUCCESSOR-CLAIM
  * runtime.
  *
  * Owns, for the signed-in account:

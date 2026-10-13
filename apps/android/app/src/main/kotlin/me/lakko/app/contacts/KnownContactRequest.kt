@@ -4,7 +4,7 @@
 package me.lakko.app.contacts
 
 /*
- * ADR-0065 R.7 case 1 / UX 16.6 - a contact request (or an `/i/` link) from
+ * ADR-0073 R.7 case 1 / UX 16.6 - a contact request (or an `/i/` link) from
  * an account that is ALREADY a contact.
  *
  * A person who reset their keys lost their contacts and may find the other

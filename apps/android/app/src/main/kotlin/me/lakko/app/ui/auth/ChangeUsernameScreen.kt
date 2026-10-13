@@ -48,7 +48,7 @@ private fun renameDate(atMs: Long): String {
 }
 
 /**
- * Change username (ADR-0068). The warning lines, the proof block of 17.1
+ * Change username (ADR-0076). The warning lines, the proof block of 17.1
  * when no fresh grant is live, the username field with the sign-up's live
  * validation, and `Change`. The rename itself is one resumable operation in
  * the repository ([AuthRepository.changeUsername]); this screen shows its

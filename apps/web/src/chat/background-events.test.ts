@@ -192,7 +192,7 @@ describe("planBackgroundEvents", () => {
   });
 });
 
-describe("nothing from a superseded sender acts (ADR-0065 R.8)", () => {
+describe("nothing from a superseded sender acts (ADR-0073 R.8)", () => {
   const retired = (k: string): boolean => k === "k";
   const everything = [
     chat,

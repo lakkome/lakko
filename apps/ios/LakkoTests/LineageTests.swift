@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.5 - one conversation over several groups (`Lineage.swift`).
+/// ADR-0073 R.5 - one conversation over several groups (`Lineage.swift`).
 /// The cases are those of `apps/web/src/chat/lineage.test.ts`, plus the
 /// `historyRowOrigin` cases of `chat/pin-older-segment.test.ts`.
 final class LineageTests: XCTestCase {

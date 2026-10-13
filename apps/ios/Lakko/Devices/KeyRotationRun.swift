@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0066 section 3.2 — the ROTATING device: Settings > Devices > Remove >
+// ADR-0074 section 3.2 — the ROTATING device: Settings > Devices > Remove >
 // "It was lost or stolen" (docs/ux/identity-recovery.md section 18.1). Remove
 // the lost device AND change the account keys, keeping the other devices.
 //
@@ -75,16 +75,16 @@ public struct KeyRotationRecord: Codable, Equatable {
     public var journalsDone = false
     public var channelsDone = false
     public var reachDone = false
-    /// ADR-0066 section 3.5a rule 3 — the profile re-send. Optional so a
+    /// ADR-0074 section 3.5a rule 3 — the profile re-send. Optional so a
     /// record written before the step existed still decodes (as owed).
     public var profileDone: Bool?
-    /// ADR-0066 section 3.5a rule 5 — the links revoked and the unanswered
+    /// ADR-0074 section 3.5a rule 5 — the links revoked and the unanswered
     /// contact requests re-sent. Optional for the same reason.
     public var grantsDone: Bool?
     public var backupDone = false
     /// The person saw and confirmed the new words.
     public var phraseAcknowledged = false
-    /// ADR-0067 section 3 — this rotation is "Save a recovery phrase": no
+    /// ADR-0075 section 3 — this rotation is "Save a recovery phrase": no
     /// device is removed (``targetDeviceIdB64`` is empty) and the commit
     /// marks the account phrase-protected. Optional so an older record
     /// still decodes.
@@ -354,12 +354,12 @@ public enum KeyRotationPlan {
         /// The proof ran out before the commit.
         case freshAuthRequired
         /// The keys were changed on an account that is not phrase-protected
-        /// (ADR-0067): no words are shown anywhere. What is still owed is
+        /// (ADR-0075): no words are shown anywhere. What is still owed is
         /// finished in the background.
         case rotatedNoWords
     }
 
-    /// ADR-0067 — whether a rotation shows its new words: the save-phrase
+    /// ADR-0075 — whether a rotation shows its new words: the save-phrase
     /// flow always (that is what it is for), any other rotation only on a
     /// phrase-protected account. An account that never saved a phrase has
     /// words nobody is meant to see.
@@ -409,7 +409,7 @@ public struct KeyRotationStore {
 
 // MARK: - The envelope-after-removal seam
 
-/// ADR-0066 section 3.2, "the stolen device is out first": the `key-rotation`
+/// ADR-0074 section 3.2, "the stolen device is out first": the `key-rotation`
 /// envelope carries the account's NEW seed, so it must be sealed at a
 /// DeviceGroup epoch the removed device never held. Nothing else can check
 /// this: not the crate, not any server. It is the SENDER's obligation, and
@@ -608,7 +608,7 @@ public final class KeyRotationRunner: ObservableObject {
         /// its unanswered contact requests from the new key. Throws while
         /// anything is still owed.
         public var spendOldGrants: @MainActor () async throws -> Void = {}
-        /// ADR-0067 section 3 — the commit of "Save a recovery phrase":
+        /// ADR-0075 section 3 — the commit of "Save a recovery phrase":
         /// `rotate/finish` with `phrase_saved: true` and no device revoked.
         public var commitSavingPhrase: (
             _ token: String, _ grant: String, _ material: KeyRotationMaterial, _ proof: Data
@@ -619,7 +619,7 @@ public final class KeyRotationRunner: ObservableObject {
         /// account is phrase-protected from here (the local flag, and the
         /// marker that keeps this device from being told about its own act).
         public var phraseWasSaved: @MainActor (_ accountIdB64: String) -> Void = { _ in }
-        /// Whether the account is phrase-protected (ADR-0067): only then are
+        /// Whether the account is phrase-protected (ADR-0075): only then are
         /// the new words of a device rotation shown.
         public var phraseProtected: @MainActor (_ accountIdB64: String) -> Bool = { _ in true }
         public var resealBackup: @MainActor () async throws -> Void
@@ -872,7 +872,7 @@ public final class KeyRotationRunner: ObservableObject {
         return await finishOwed(record, session: adopted)
     }
 
-    /// "Save a recovery phrase" (ADR-0067 section 3, UX 19.5): the same
+    /// "Save a recovery phrase" (ADR-0075 section 3, UX 19.5): the same
     /// rotation with no device removed, committed with `phrase_saved: true`.
     /// The account gets new keys and new words; the other devices are kept
     /// and adopt them; the email vault of the old phrase is deleted by the
@@ -1284,7 +1284,7 @@ extension KeyRotationRunner.Ports {
     }
 }
 
-/// The backup step of a rotation (ADR-0066 section 3.5, "Backup"): the
+/// The backup step of a rotation (ADR-0074 section 3.5, "Backup"): the
 /// decision of whether there is anything that may be uploaded, apart from the
 /// upload itself so a test can run it.
 enum KeyRotationBackup {
@@ -1349,7 +1349,7 @@ enum KeyRotationChannels {
         let generation = keyGeneration ?? secrets.session.keyGeneration
         OwnedChannelGenerations.record(
             channelIds: owned, generation: generation, accountIdB64: accountIdB64)
-        NSLog("ADR-0066: channel owner handover: %d owned, %d not owner, %d owed",
+        NSLog("ADR-0074: channel owner handover: %d owned, %d not owner, %d owed",
               owned.count, outcomes.filter { $0 == .notOwner }.count,
               outcomes.filter { $0 == .retry }.count)
         NotificationCenter.default.post(name: .lakkoAccountKeysRotated, object: nil)

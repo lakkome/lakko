@@ -602,7 +602,7 @@ pub enum FfiError {
     L10n(String),
 
     // ------------------------------------------------------------------
-    // The local three-word check and the ADR-0064 passkey vault — appended,
+    // The local three-word check and the ADR-0072 passkey vault — appended,
     // for the ordinal reason above.
     // ------------------------------------------------------------------
     /// The local three-word check was handed malformed input. The message
@@ -626,10 +626,10 @@ pub enum FfiError {
     PasskeyVault(String),
 
     // ------------------------------------------------------------------
-    // ADR-0065 key-reset attestation — appended, for the ordinal reason
+    // ADR-0073 key-reset attestation — appended, for the ordinal reason
     // above.
     // ------------------------------------------------------------------
-    /// A key-reset attestation (ADR-0065) failed hard: a bad verifying key,
+    /// A key-reset attestation (ADR-0073) failed hard: a bad verifying key,
     /// a wrong-length account id or pubkey, a malformed / wrong-length /
     /// wrong-version blob, a signature that does not verify, or an
     /// `account_ref` / journal / pubkey mismatch. Fail closed.
@@ -637,16 +637,16 @@ pub enum FfiError {
     KeyResetAttestation(String),
 
     /// A key-reset attestation verified *authentically* but its `signed_at`
-    /// is outside the client's freshness window (ADR-0065 section 4.2).
+    /// is outside the client's freshness window (ADR-0073 section 4.2).
     /// Distinct from [`FfiError::KeyResetAttestation`] so a client applying a
     /// weeks-old reset asks for a fresh sign-in rather than refusing.
     #[error("key-reset attestation is stale (signed_at outside the freshness window)")]
     KeyResetAttestationStale,
 
     // ------------------------------------------------------------------
-    // ADR-0066 account statement — appended, for the ordinal reason above.
+    // ADR-0074 account statement — appended, for the ordinal reason above.
     // ------------------------------------------------------------------
-    /// An account statement (ADR-0066 section 0.3) could not be signed: the
+    /// An account statement (ADR-0074 section 0.3) could not be signed: the
     /// account seed, the account id or the device id has the wrong length.
     /// The message is `"<code>: <reason>"` with the stable codes
     /// `bad-seed-length`, `bad-account-id-length`, `bad-device-id-length`.
@@ -654,10 +654,10 @@ pub enum FfiError {
     AccountStatement(String),
 
     // ------------------------------------------------------------------
-    // ADR-0066 key rotation — appended, for the ordinal reason above.
+    // ADR-0074 key rotation — appended, for the ordinal reason above.
     // ------------------------------------------------------------------
     /// A key-rotation envelope, or a root endorsement, was refused
-    /// (ADR-0066 part 3). The message is `"<code>: <reason>"` with the
+    /// (ADR-0074 part 3). The message is `"<code>: <reason>"` with the
     /// stable codes `wrongDomain`, `truncated`, `unknownVersion`,
     /// `badLength` (the envelope's wire shape), `bad-entropy-length`,
     /// `bad-proof-length`, `bad-key-length`, `bad-seed-length`,
@@ -667,7 +667,7 @@ pub enum FfiError {
     KeyRotation(String),
 
     // ------------------------------------------------------------------
-    // ADR-0067 email vault and recovery address — appended, for the
+    // ADR-0075 email vault and recovery address — appended, for the
     // ordinal reason above.
     // ------------------------------------------------------------------
     /// The email vault did not open under this login handle, address and

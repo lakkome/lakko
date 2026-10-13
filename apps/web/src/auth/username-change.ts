@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Changing a username (ADR-0068): what the screen shows, the too-soon rule,
+ * Changing a username (ADR-0076): what the screen shows, the too-soon rule,
  * the one resumable operation with its rollback, and the small owed record
  * that lets a crash between steps be finished or rolled back.
  *

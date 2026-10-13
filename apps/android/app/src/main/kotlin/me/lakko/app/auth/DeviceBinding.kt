@@ -8,7 +8,7 @@ import kotlinx.coroutines.CancellationException
 import uniffi.lakko_ffi_uniffi.Identity
 
 /*
- * ADR-0066 section 0.4 — credentials name a device.
+ * ADR-0074 section 0.4 — credentials name a device.
  *
  * A session's two credentials carry a 32-byte device id: this device's
  * conversation leaf signature key, which is also the id of its discovery
@@ -150,7 +150,7 @@ public fun interface DeviceIdSource {
  *
  * A wipe ([me.lakko.app.account.AccountLocalWipe]) deletes the seed, so a
  * device that is set up again mints a NEW id; that is what lets it publish
- * after its own directory row was deleted and tombstoned (ADR-0066 "T1 as
+ * after its own directory row was deleted and tombstoned (ADR-0074 "T1 as
  * built" point 21).
  */
 public class OnDeviceIdSource(private val context: Context) : DeviceIdSource {

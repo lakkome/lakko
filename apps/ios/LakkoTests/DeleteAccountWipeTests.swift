@@ -93,7 +93,7 @@ final class DeleteAccountWipeTests: XCTestCase {
         XCTAssertTrue(proof.layout.showsBlock)
     }
 
-    /// ADR-0066 section 1.3 — while the account can still be taken back
+    /// ADR-0074 section 1.3 — while the account can still be taken back
     /// after a key reset it cannot be deleted: `409 recall-window-open` shows
     /// the blocked line with the date, and nothing is wiped.
     func testA409RecallWindowOpenShowsTheBlockedLineAndWipesNothing() async throws {
@@ -269,7 +269,7 @@ final class DeleteAccountWipeTests: XCTestCase {
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
-        /// ADR-0066: every session landing names the device and records the
+        /// ADR-0074: every session landing names the device and records the
         /// account key at auth, in the background. Those two are not what
         /// these tests count.
         private static let landingPaths: Set<String> = ["/auth/session/bind-device", "/auth/genesis/attest"]

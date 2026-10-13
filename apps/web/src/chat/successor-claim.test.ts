@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-/** ADR-0065 R.6 - claim, then build: the pure rules of `successor-claim.ts`. */
+/** ADR-0073 R.6 - claim, then build: the pure rules of `successor-claim.ts`. */
 import { describe, expect, it } from "vitest";
 
 import {

@@ -50,7 +50,7 @@ public object SessionIdentities {
             if (stored != null) {
                 try {
                     val rebuilt = Identity.fromSeedWithBinding(seed, stored)
-                    // ADR-0065 section 2.3 step 5 — a binding is signed by the
+                    // ADR-0073 section 2.3 step 5 — a binding is signed by the
                     // account key, so after a reset of the account keys the
                     // stored one still verifies (the old key signed it) but
                     // names an account key that is no longer the account's.

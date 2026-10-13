@@ -106,7 +106,7 @@ public final class ReachCenter: ObservableObject {
     private var syncTask: Task<Void, Never>?
     private var syncAgain = false
 
-    /// ADR-0066 section 3.5a — who an account key is NOW: the proven
+    /// ADR-0074 section 3.5a — who an account key is NOW: the proven
     /// predecessors of the people this account knows and this account's own
     /// old keys. Every mailbox this type derives from an account key, and
     /// every grant lookup, goes through it. Reloaded on activation, on a
@@ -166,7 +166,7 @@ public final class ReachCenter: ObservableObject {
         }
     }
 
-    // MARK: - Resolve before addressing (ADR-0066 section 3.5a rule 1)
+    // MARK: - Resolve before addressing (ADR-0074 section 3.5a rule 1)
 
     /// The current account key of the person `accountKey` belongs to: itself
     /// unless it was superseded BY PROOF (this account's own old keys
@@ -276,7 +276,7 @@ public final class ReachCenter: ObservableObject {
         grantRevision &+= 1
     }
 
-    /// ADR-0066 section 3.5, "DS" / "Reach" — the account's keys were
+    /// ADR-0074 section 3.5, "DS" / "Reach" — the account's keys were
     /// rotated: every reach key and the mailbox derive from the account
     /// seed, so they move to the new one. The setting, the version counters
     /// and the grants this account HOLDS for other people are kept (they are
@@ -403,7 +403,7 @@ public final class ReachCenter: ObservableObject {
             guard let pk = try? Self.publicKey(accountSeed: seed, spec: spec) else { continue }
             desired.append((pk, spec.expiresAtMs))
         }
-        // ADR-0065 R.4 — after a reset of THIS account, the continuity key
+        // ADR-0073 R.4 — after a reset of THIS account, the continuity key
         // stays registered on the new mailbox until its expiry, so a peer
         // that accepted the reset can deliver a Welcome. Derived from public
         // values; removed by the diff once it is no longer wanted.
@@ -845,7 +845,7 @@ public final class ReachCenter: ObservableObject {
         persist()
     }
 
-    // MARK: - Spent by a key rotation (ADR-0066 section 3.5a rule 5)
+    // MARK: - Spent by a key rotation (ADR-0074 section 3.5a rule 5)
 
     /// The link scopes that were live when the account's keys were rotated.
     public var spentLinks: [LinkReach] { record.spentLinks ?? [] }
@@ -898,7 +898,7 @@ public final class ReachCenter: ObservableObject {
         guard isActive,
               ReachRules.keeps(grant, carrier: carrier, senderResolved: fromAccountKeyB64 != nil),
               let receivedUnder = fromAccountKeyB64 else { return false }
-        // ADR-0066 section 3.5a rule 2 — filed for the PERSON: a grant that
+        // ADR-0074 section 3.5a rule 2 — filed for the PERSON: a grant that
         // arrived from a leaf still bound to a proven predecessor key belongs
         // to the account's current key.
         let key = Data(base64Encoded: receivedUnder)
@@ -968,7 +968,7 @@ public final class ReachCenter: ObservableObject {
     /// the best grant held for them. `nil` when nothing is held — the write
     /// then goes unsigned, which only an Everyone mailbox stores.
     ///
-    /// ADR-0066 section 3.5a — `accountKey` is resolved first: a proven
+    /// ADR-0074 section 3.5a — `accountKey` is resolved first: a proven
     /// predecessor (this account's own old key included) is the person's
     /// current key, and the write goes to ``mailbox(forAccountKey:)``.
     public func writeAuth(toAccountKey accountKey: Data, groupIdHex: String? = nil) -> DsMailboxWriteAuth? {
@@ -985,7 +985,7 @@ public final class ReachCenter: ObservableObject {
     /// The pin store the continuity key is resolved from. Injectable for tests.
     var continuityPins: () -> [String: PeerPinStore.AccountPubkeyPin] = { PeerPinStore().allPins() }
 
-    /// ADR-0065 R.4 — the continuity key of an account whose reset this
+    /// ADR-0073 R.4 — the continuity key of an account whose reset this
     /// device ACCEPTED, as a way to sign a Welcome to its new mailbox: tried
     /// after every grant the person itself issued (once the new identity is
     /// in a conversation its own grants are used and this key is not), and
@@ -1085,7 +1085,7 @@ public final class ReachCenter: ObservableObject {
     /// envelope for the account whose mailbox it is that names this account,
     /// signed with this account's own seed (the key the delegation names).
     ///
-    /// ADR-0066 section 3.5a — a proposer that has not observed this
+    /// ADR-0074 section 3.5a — a proposer that has not observed this
     /// account's own rotation names the OLD account key: the delegation is
     /// then found under that key and the write signed with its seed
     /// (``ReachRules/delegationSigner(ownKeys:header:)``).
@@ -1110,7 +1110,7 @@ public final class ReachCenter: ObservableObject {
     public func composeDelegations(
         addedAccountKey: Data, candidateAccountKeys: [Data], groupIdHex: String?
     ) -> Data? {
-        // ADR-0066 section 3.5a rule 1 — the delegation is for the added
+        // ADR-0074 section 3.5a rule 1 — the delegation is for the added
         // person's CURRENT mailbox, so the envelope names their current key
         // (the core refuses an envelope whose delegations name another
         // mailbox than its key's); each committer candidate is named by its

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Email-vault worker: runs one seal or open (64 MiB Argon2id, ADR-0067
+ * Email-vault worker: runs one seal or open (64 MiB Argon2id, ADR-0075
  * section 2) off the main thread. Companion to `./email-vault.ts`, which
  * owns the worker's lifetime and the main-thread fallback.
  *

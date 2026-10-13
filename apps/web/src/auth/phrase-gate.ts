@@ -5,7 +5,7 @@
  * What a route guard renders, decided in one place: the steps that come
  * before any route. New recovery words (after the account keys were changed
  * on this device) are shown and acknowledged first; then the sign-up's
- * "Protect your account" step (ADR-0067, `docs/ux/identity-recovery.md`
+ * "Protect your account" step (ADR-0075, `docs/ux/identity-recovery.md`
  * 19.1a); then the new-password step.
  *
  * ## Why the guards own these steps
@@ -18,7 +18,7 @@
  * it is owed, so it is reached from `/signup`, from a protected route the
  * user navigates to with the back button, and after a reload.
  *
- * ADR-0067 D2: the recovery phrase is NOT shown at sign-up. The phrase
+ * ADR-0075 D2: the recovery phrase is NOT shown at sign-up. The phrase
  * screen (`save-signup-phrase`, named before that decision) is for new words
  * only: a key reset, taking the account back, a key rotation, "Save a
  * recovery phrase".
@@ -53,7 +53,7 @@ export type GuardView =
   /** New recovery words (the account keys were changed on this device),
    *  not yet acknowledged. */
   | "save-signup-phrase"
-  /** ADR-0067 (UX 19.1a): the sign-up's "Protect your account" step. */
+  /** ADR-0075 (UX 19.1a): the sign-up's "Protect your account" step. */
   | "protect-account"
   /** docs/ux/identity-recovery.md 7.1 — a forgot-password route succeeded
    *  on a device that holds the keys: choose a new password, or "Not now". */

@@ -198,7 +198,7 @@ class AccountLocalWipeTest {
         assertTrue(fileLeftovers().any { it.startsWith("lakko-message-logs/") })
     }
 
-    // ---- ADR-0066 section 1.1: the staged wipe -----------------------------
+    // ---- ADR-0074 section 1.1: the staged wipe -----------------------------
 
     @Test
     fun `the staged wipe is the full wipe minus the recall record, step for step`() {
@@ -251,7 +251,7 @@ class AccountLocalWipeTest {
 
     @Test
     fun `the predecessor seeds and the sent requests go only by their own steps`() {
-        // ADR-0066: both files are named in hex, which the backstop sweep
+        // ADR-0074: both files are named in hex, which the backstop sweep
         // does not match; the walk names each when its step is left out.
         val hex = me.lakko.app.auth.KeyRotationFiles.hexOf(a)
         val predecessors = me.lakko.app.auth.KeyRotationFiles.DIR + "/" + hex +
@@ -340,7 +340,7 @@ class AccountLocalWipeTest {
             suspend(acct)
             save(acct, me.lakko.app.auth.ThreeWordsBudget(misses = 2))
         }
-        // ADR-0065: a reset whose publish is still owed.
+        // ADR-0073: a reset whose publish is still owed.
         me.lakko.app.auth.KeyResetOwedStore.onDevice(context).save(
             acct,
             me.lakko.app.auth.KeyResetOwed(
@@ -350,7 +350,7 @@ class AccountLocalWipeTest {
                 newSignaturePubkeyB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(32)),
             ),
         )
-        // ADR-0065 "Phase 2 revised": the reset ledger, a verified binding, a
+        // ADR-0073 "Phase 2 revised": the reset ledger, a verified binding, a
         // successor claim, the continuity facts, the lineage mirror; and an
         // orphaned channel.
         me.lakko.app.contacts.SharedPrefsResetLedgerStore(context).save(
@@ -405,16 +405,16 @@ class AccountLocalWipeTest {
             // The played marks (the process-wide MediaPrefs is not used here:
             // a singleton made by another test would hold another app dir).
             "lakko-media-played/${MediaPrefs.playedFileName(acct)}",
-            // ADR-0066: the recall record (sealed under the Keystore wrap
+            // ADR-0074: the recall record (sealed under the Keystore wrap
             // key on a device; opaque bytes on disk, named by the id in hex).
             recallRecordPath(raw),
-            // ADR-0066: this account's earlier identities (the predecessor
+            // ADR-0074: this account's earlier identities (the predecessor
             // SEEDS a rotation, or a pairing state bundle, left) and the
             // sealed list of unanswered outgoing contact requests.
             me.lakko.app.auth.KeyRotationFiles.DIR + "/" + me.lakko.app.auth.KeyRotationFiles.hexOf(acct) +
                 me.lakko.app.auth.KeyRotationFiles.PREDECESSOR_SUFFIX,
             me.lakko.app.contacts.SentRequestsFiles.DIR + "/" + me.lakko.app.contacts.SentRequestsFiles.nameOf(acct),
-            // ADR-0065 R.6: the successor claim states (they hold a prepared
+            // ADR-0073 R.6: the successor claim states (they hold a prepared
             // Welcome, so they are sealed under the Keystore wrap key).
             "lakko-feed/" + me.lakko.app.chat.SealedSuccessorClaimBackend.DIR + "/$safe.bin",
         )) {

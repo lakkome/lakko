@@ -17,7 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0066 section 2.3 — removing another device as one operation: the
+ * ADR-0074 section 2.3 — removing another device as one operation: the
  * order of the steps, the owed record and its retries, what each refusal
  * means, and what the sheet shows. Fake ports; no server, no native core.
  */

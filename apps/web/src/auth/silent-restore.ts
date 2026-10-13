@@ -27,7 +27,7 @@
  * third, half-signed-in outcome: a `session` state without secrets is exactly
  * the loop being removed.
  *
- * ADR-0065: the piece that must be live is the REFRESH credential, not the
+ * ADR-0073: the piece that must be live is the REFRESH credential, not the
  * access token. An access token is fifteen minutes long and is expected to be
  * dead on most reloads; the restore refreshes with the credential first
  * (`AuthContext.restoreSessionOnLoad`), and offline it opens on local data
@@ -62,7 +62,7 @@ export interface StoredSecretsProbe {
   /** The AccountIdentity seed decrypted under the device key. `false` when
    *  absent or undecryptable — the two are handled identically. */
   readonly identitySeedPresent: boolean;
-  /** ADR-0066 section 2.3: a logout on this device has not reached the
+  /** ADR-0074 section 2.3: a logout on this device has not reached the
    *  server yet (`logout-owed.ts`). The stored pair is then only what the
    *  retry signs out with, never a session to restore. Absent = `false`. */
   readonly logoutOwed?: boolean;

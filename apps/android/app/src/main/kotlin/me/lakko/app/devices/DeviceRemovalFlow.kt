@@ -26,7 +26,7 @@ import uniffi.lakko_ffi_uniffi.accountStatementHeaderName
 import uniffi.lakko_ffi_uniffi.signDeviceRevokeStatement
 
 /*
- * ADR-0066 section 2.3 — removing ANOTHER device, as one operation.
+ * ADR-0074 section 2.3 — removing ANOTHER device, as one operation.
  *
  * The order, from one owed record that is retried at every landing until
  * each step has an answer:

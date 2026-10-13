@@ -25,7 +25,7 @@ export const REMOVED_DEVICE_COPY = {
 } as const;
 
 /** The copy of the signed-out screen after a key reset on another device
- *  (docs/ux/identity-recovery.md section 15.2, ADR-0065). The two body
+ *  (docs/ux/identity-recovery.md section 15.2, ADR-0073). The two body
  *  lines that name the account are rendered with `tRich` from their keys
  *  (`devices.signed_out.body_removing` / `body_removed`). */
 export const SIGNED_OUT_COPY = {

@@ -229,7 +229,7 @@ public final class PasskeysViewModel: ObservableObject {
         isBusy = true
         message = nil
         defer { isBusy = false }
-        // The fresh-auth proof first (ADR-0065, amended 2026-10-06): both
+        // The fresh-auth proof first (ADR-0073, amended 2026-10-06): both
         // register calls carry it. With none live the block is on screen
         // and its password is checked now; a failure stays in the block.
         guard await addProof.ensure(), let freshGrant = authRepository.liveFreshGrant() else {
@@ -407,7 +407,7 @@ public final class PasskeysViewModel: ObservableObject {
                 authRepository.dropFreshAuth()
                 proof.proofExpired()
             } else if let untilMs = RecallWindowOpen.untilMs(of: error) {
-                // ADR-0066 section 1.3 — the account's keys were reset (or
+                // ADR-0074 section 1.3 — the account's keys were reset (or
                 // its password changed with the phrase) recently: it cannot
                 // be deleted while it can still be taken back. Nothing was
                 // deleted; the dialog says until when.

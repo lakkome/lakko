@@ -168,7 +168,7 @@ public data class ProcessedRow(
      *  leaf to at receipt (C-68), or `null` when it did not resolve. What
      *  the superseded-sender rule and the re-send marker read. */
     val senderAccountB64: String? = null,
-    /** ADR-0065 R.7 case 1 — the re-send marker a chat body carried. */
+    /** ADR-0073 R.7 case 1 — the re-send marker a chat body carried. */
     val resendOrigin: me.lakko.app.chat.ResendOrigin? = null,
 )
 
@@ -218,7 +218,7 @@ public interface ThrowawayGroup : AutoCloseable {
     public fun dsSigner(): me.lakko.app.ds.DsJournalSigner? = null
 
     /**
-     * ADR-0065 R.5 / R.8 — the roster, the kind and the owner of the
+     * ADR-0073 R.5 / R.8 — the roster, the kind and the owner of the
      * throwaway group as the rows processed so far left it. Reads of the
      * in-memory group; nothing is written (C-59). `null` when they cannot be
      * read: the rule then drops only what needs no such fact.
@@ -292,7 +292,7 @@ public interface PushDecryptDeps {
     public fun isMuted(accountIdB64: String, groupHex: String): Boolean = false
 
     /**
-     * ADR-0065 R.5 — is the group the OLD segment of a one-to-one whose
+     * ADR-0073 R.5 — is the group the OLD segment of a one-to-one whose
      * conversation moved to a successor (the other person reset their account
      * keys and the reset was accepted)? Its only other senders are removed
      * devices: a wake for it fetches nothing, rings for nothing and shows
@@ -305,22 +305,22 @@ public interface PushDecryptDeps {
     public fun isClosedOneToOne(accountIdB64: String, groupHex: String): Boolean = false
 
     /**
-     * ADR-0065 R.5 / R.8 — the account keys accepted resets RETIRED, from
+     * ADR-0073 R.5 / R.8 — the account keys accepted resets RETIRED, from
      * the reset ledger the identity gate writes. A READ. Defaulted to empty,
      * and a store that fails to open answers empty: nothing is dropped on an
      * unreadable ledger.
      */
     public fun supersededKeys(accountIdB64: String): Set<String> = emptySet()
 
-    /** ADR-0065 R.5 — whether the conversation [groupHex] was a segment of
+    /** ADR-0073 R.5 — whether the conversation [groupHex] was a segment of
      *  has moved to a successor (the continuity facts). A READ. */
     public fun conversationMoved(accountIdB64: String, groupHex: String): Boolean = false
 
-    /** ADR-0065 R.5 — the lineage registers, from their plain mirror. A READ. */
+    /** ADR-0073 R.5 — the lineage registers, from their plain mirror. A READ. */
     public fun lineage(accountIdB64: String): List<me.lakko.app.chat.LineageEntry> = emptyList()
 
     /**
-     * ADR-0065 R.7 case 1 — the row `(group, message id)` of the app's own
+     * ADR-0073 R.7 case 1 — the row `(group, message id)` of the app's own
      * stored message log, as the re-send marker needs it, or `null` when the
      * app holds no such row. A READ of the log the start cursor is already
      * read from; this path never writes it.
@@ -329,7 +329,7 @@ public interface PushDecryptDeps {
 }
 
 /**
- * ADR-0065 R.5 / R.8 and R.7 case 1 — whether a processed row of a wake is
+ * ADR-0073 R.5 / R.8 and R.7 case 1 — whether a processed row of a wake is
  * NOT acted on: nothing is shown for it and it rings for nothing.
  *
  * | row                                                              | answer |
@@ -521,7 +521,7 @@ public suspend fun decryptPushWake(
         realGroupHex = groupHex
     }
 
-    // 2a. ADR-0065 R.5 — the old segment of a moved one-to-one. Decided
+    // 2a. ADR-0073 R.5 — the old segment of a moved one-to-one. Decided
     //     BEFORE the seed is read or the journal fetched: nothing that arrives
     //     in it is shown, and a call offered from keys that are no longer the
     //     contact's never rings.
@@ -587,7 +587,7 @@ public suspend fun decryptPushWake(
         // of a finished call, and ringing for a call whose End is three rows
         // later leaves a phone the user has to silence by hand.
         val callSignals = ArrayList<me.lakko.app.calls.CallRingSignal>()
-        // ADR-0065 — what the two silent rules read, each store opened at
+        // ADR-0073 — what the two silent rules read, each store opened at
         // most once per wake and only when a row asks. All READS (C-59); a
         // store that does not open drops nothing.
         val superseded = try {
@@ -669,7 +669,7 @@ public suspend fun decryptPushWake(
             preview = latest,
             ring = calls.ring,
             cancelledCallIds = calls.cancelled,
-            // ADR-0065 — the wake carried only what is not acted on (a row
+            // ADR-0073 — the wake carried only what is not acted on (a row
             // of a retired key, or a re-send this device holds the original
             // of): nothing is posted for it, not even the generic banner.
             suppressed = wakePostsNothing(latest != null, calls.ring != null, suppressedRows),
@@ -761,7 +761,7 @@ private fun isLowerHex(s: String): Boolean {
 }
 
 /**
- * ADR-0065 R.5 — the conversation a woken group belongs to, for everything a
+ * ADR-0073 R.5 — the conversation a woken group belongs to, for everything a
  * notification takes from the CONVERSATION rather than from the MLS group:
  * its mute, its grouping key and what a tap opens under. A successor group
  * resolves to the root of its lineage; any other group is its own

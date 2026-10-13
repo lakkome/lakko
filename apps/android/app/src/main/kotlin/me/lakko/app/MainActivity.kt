@@ -232,17 +232,17 @@ class MainActivity : ComponentActivity() {
         // gets cleared.
         val deviceGroupSync = me.lakko.app.devices.sync
             .DeviceGroupSyncRepository(applicationContext)
-        // ADR-0065 R.5 — a conversation that continues in a new group keeps
+        // ADR-0073 R.5 — a conversation that continues in a new group keeps
         // its row through the lineage register of the synced state.
         chatRepository.lineageRecorder = { successor, root -> deviceGroupSync.recordLineage(successor, root) }
-        // ADR-0067 (amended 2026-10-13) - the account's devices keep the
+        // ADR-0075 (amended 2026-10-13) - the account's devices keep the
         // recovery address in one register of the synced state.
         authRepository.recoveryAddressPort = object : me.lakko.app.auth.RecoveryAddressPort {
             override fun state(): me.lakko.app.auth.RecoveryAddressState = deviceGroupSync.recoveryEmail.value
 
             override suspend fun write(address: String?): Boolean = deviceGroupSync.setRecoveryEmail(address)
         }
-        // ADR-0068 - and the account's username in another.
+        // ADR-0076 - and the account's username in another.
         authRepository.ownUsernamePort = object : me.lakko.app.auth.OwnUsernamePort {
             override fun state(): me.lakko.app.auth.OwnUsernameState = deviceGroupSync.ownUsername.value
 
@@ -593,7 +593,7 @@ private fun AppRoot(
 ) {
     val state by authRepository.state.collectAsStateWithLifecycle()
 
-    // ADR-0065 section 3.5 / 4.2 (docs/ux/identity-recovery.md 15.2) — this
+    // ADR-0073 section 3.5 / 4.2 (docs/ux/identity-recovery.md 15.2) — this
     // device's keys are not the account's keys any more: the account was
     // reset on another device, or the directory serves other keys. The
     // signed-out screen replaces the whole app in EVERY auth state, at launch
@@ -613,7 +613,7 @@ private fun AppRoot(
             authRepository.wipeAfterKeyReset()
         }
         LaunchedEffect(keysReset.kind, keysReset.phase) {
-            // A known reset, and a removal by another device (ADR-0066):
+            // A known reset, and a removal by another device (ADR-0074):
             // the wipe runs by itself. Only the mismatch waits for the tap.
             if (keysReset.kind != me.lakko.app.auth.KeyResetSignOut.Kind.Mismatch &&
                 keysReset.phase == me.lakko.app.auth.KeyResetSignOut.Phase.Removing
@@ -636,7 +636,7 @@ private fun AppRoot(
         return
     }
 
-    // ADR-0066 part 1 (docs/ux/identity-recovery.md 18.4) - this device holds
+    // ADR-0074 part 1 (docs/ux/identity-recovery.md 18.4) - this device holds
     // a recall record: the account's keys were reset elsewhere and what the
     // account kept here is already deleted. "Was it you?" replaces the whole
     // app, in every auth state and at launch (the state is rebuilt from the
@@ -732,7 +732,7 @@ private fun AppRoot(
         is AuthState.Session -> {
             // A fresh identity's phrase that was never confirmed, brought
             // back after a restart, is shown before the app. (Sign-up shows
-            // no phrase: ADR-0067 D2.)
+            // no phrase: ADR-0075 D2.)
             val owedPhrase by authRepository.signupPhrase.collectAsState()
             val phraseToSave = owedPhrase
             if (phraseToSave != null) {
@@ -753,7 +753,7 @@ private fun AppRoot(
                 InsetRoot { me.lakko.app.ui.auth.NewPasswordPrompt(repository = authRepository) }
                 return
             }
-            // ADR-0065: a changed published identity is the signed-out screen
+            // ADR-0073: a changed published identity is the signed-out screen
             // above or nothing; the dismissible security banner is gone.
             // ADR-0038 S4 — the "update available" notice. Shown only when the
             // verified manifest resolves to an actionable update.
@@ -811,7 +811,7 @@ private fun AppRoot(
     }
 
     val sessionAccount = (state as? AuthState.Session)?.account
-    // ADR-0067 - the register changed or became readable: a parked write is
+    // ADR-0075 - the register changed or became readable: a parked write is
     // flushed, Settings is told, the automatic re-seal is evaluated.
     LaunchedEffect(authRepository, deviceGroupSync) {
         deviceGroupSync.recoveryEmail.collect {
@@ -823,7 +823,7 @@ private fun AppRoot(
             }
         }
     }
-    // ADR-0068 - the own-username register changed or became readable.
+    // ADR-0076 - the own-username register changed or became readable.
     LaunchedEffect(authRepository, deviceGroupSync, sessionAccount?.accountIdB64) {
         deviceGroupSync.ownUsername.collect {
             try {
@@ -835,7 +835,7 @@ private fun AppRoot(
         }
     }
     if (sessionAccount != null) {
-        // ADR-0067 / UX 19.1a - "Protect your account", the one step after
+        // ADR-0075 / UX 19.1a - "Protect your account", the one step after
         // sign-up. Drawn ABOVE the session root, which keeps running
         // underneath: "Save a recovery phrase" changes the account keys and
         // needs the device list the session root opens.
@@ -909,7 +909,7 @@ private fun AppRoot(
             identity = {
                 authRepository.identitySecrets.value?.let { secrets ->
                     me.lakko.app.calls.CallInviteIdentity(
-                        // ADR-0066 Stage A: a call founded for a link is an MLS
+                        // ADR-0074 Stage A: a call founded for a link is an MLS
                         // group; its owner key is the conversation identity's.
                         accountIdentitySeed = me.lakko.app.auth.conversationAccountSeedOf(appContext, me.lakko.app.auth.base64Encode(secrets.accountId), secrets.accountIdentitySeed),
                         accountId = secrets.accountId,
@@ -976,11 +976,11 @@ private fun SaveFreshPhraseRoot(
     username: String,
 ) {
     val phrase = repository.freshPhrase() ?: ""
-    // ADR-0065: while the new keys of the reset are not published to the
+    // ADR-0073: while the new keys of the reset are not published to the
     // directory and the device list the words are held back and the screen
     // offers "Try again" (or a sign-in, for a reset older than 30 days).
     val publishOwed by repository.freshPublishOwed.collectAsState()
-    // ADR-0067 - new words are shown only to a phrase-protected account. For
+    // ADR-0075 - new words are shown only to a phrase-protected account. For
     // the others the reset or the recall lands without a phrase step once
     // its publish is done (while it is owed, the retry screen stays).
     if (publishOwed == null && !repository.showsNewWordsHere()) {
@@ -1090,7 +1090,7 @@ private fun SessionRoot(
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             deviceGroupSync.bootstrap(secrets)
         }
-        // ADR-0066 section 2.3 — a device removal that still owes steps (the
+        // ADR-0074 section 2.3 — a device removal that still owes steps (the
         // directory row, the device list, a chat that had not answered) is
         // retried at every landing until each step has an answer.
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -1103,7 +1103,7 @@ private fun SessionRoot(
                 android.util.Log.w("lakko-auth", "owed device removal not resumed: ${cause.javaClass.simpleName}")
             }
         }
-        // ADR-0066 part 3 - a key rotation that passed its commit finishes
+        // ADR-0074 part 3 - a key rotation that passed its commit finishes
         // its publishing steps by itself at every landing.
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
@@ -1117,10 +1117,10 @@ private fun SessionRoot(
         }
     }
 
-    // ADR-0066 section 0.4 — a session that was bound to this device after
+    // ADR-0074 section 0.4 — a session that was bound to this device after
     // it was installed could not publish this device's KeyPackage before the
     // bind (`403 device-mismatch`): publish it now.
-    // ADR-0066 part 3 - a `key-rotation` envelope read from the account's
+    // ADR-0074 part 3 - a `key-rotation` envelope read from the account's
     // own DeviceGroup goes to the auth side (verified, stored as pending).
     DisposableEffect(authRepository) {
         me.lakko.app.devices.sync.DeviceGroupSyncRepository.keyRotationSink = { envelope ->
@@ -1228,7 +1228,7 @@ private fun SessionRoot(
         try {
             channelsState.bind(
                 accountIdB64 = me.lakko.app.auth.base64Encode(secrets.accountId),
-                // ADR-0066 Stage A: a channel's PublisherGroup is an MLS
+                // ADR-0074 Stage A: a channel's PublisherGroup is an MLS
                 // group founded under the account identity; after a rotation
                 // it stays under the predecessor (no leaf is moved).
                 accountIdentitySeed = me.lakko.app.auth.conversationAccountSeedOf(chatRepository.context, me.lakko.app.auth.base64Encode(secrets.accountId), secrets.accountIdentitySeed),
@@ -1602,7 +1602,7 @@ private fun SessionRoot(
         authRepository.forgetDevice()
     }
 
-    // ADR-0066 section 2.3 / docs/ux/identity-recovery.md 18.2 — another
+    // ADR-0074 section 2.3 / docs/ux/identity-recovery.md 18.2 — another
     // device removed this one, and this device read its own removal from the
     // account's DeviceGroup (the group turned inactive): proof of removal by
     // a device of the account. The app root replaces the whole app with the
@@ -2043,7 +2043,7 @@ private fun SessionRoot(
                         },
                     )
                 }
-                // ADR-0067 / UX 19.2 - Settings > Account > Recovery email.
+                // ADR-0075 / UX 19.2 - Settings > Account > Recovery email.
                 composable(Routes.RECOVERY_EMAIL) {
                     me.lakko.app.ui.auth.RecoveryEmailScreen(
                         repository = authRepository,
@@ -2052,7 +2052,7 @@ private fun SessionRoot(
                         onChooseUsername = { navController.navigate(Routes.CHOOSE_USERNAME) },
                     )
                 }
-                // ADR-0068 - change the username.
+                // ADR-0076 - change the username.
                 composable(Routes.CHANGE_USERNAME) {
                     me.lakko.app.ui.auth.ChangeUsernameScreen(
                         repository = authRepository,
@@ -2086,7 +2086,7 @@ private fun SessionRoot(
                         onBack = { navController.popBackStack() },
                     )
                 }
-                // ADR-0067 / UX 19.5 - Settings > Account > Recovery phrase.
+                // ADR-0075 / UX 19.5 - Settings > Account > Recovery phrase.
                 composable(Routes.SAVE_PHRASE) {
                     me.lakko.app.ui.auth.SaveRecoveryPhraseScreen(
                         repository = authRepository,
@@ -2165,7 +2165,7 @@ private fun SessionRoot(
 
                 composable(Routes.CHAT) { entry ->
                     val routeGroupIdHex = entry.arguments?.getString("groupIdHex") ?: return@composable
-                    // ADR-0065 R.5 — the route may name ANY segment of a
+                    // ADR-0073 R.5 — the route may name ANY segment of a
                     // conversation (the list's conversation id, an older
                     // group a notification or a forward names, the group
                     // this screen was opened on before the conversation

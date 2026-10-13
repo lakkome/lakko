@@ -9,7 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0065 section 3: the pure rules around the session pair. */
+/** ADR-0073 section 3: the pure rules around the session pair. */
 class SessionPairTest {
 
     @Test
@@ -67,7 +67,7 @@ class SessionPairTest {
         assertEquals(base64UrlEncodeNoPad(ByteArray(32)), UNBOUND_DEVICE_SEGMENT)
     }
 
-    // ---- ADR-0066: removed, logged out, reset: three answers, three screens ----
+    // ---- ADR-0074: removed, logged out, reset: three answers, three screens ----
 
     @Test
     fun `device-revoked, superseded and refresh-invalid are three different refusals`() {

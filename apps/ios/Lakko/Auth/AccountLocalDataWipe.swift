@@ -66,7 +66,7 @@ enum AccountLocalDataWipe {
 
     /// What a wipe may leave in place.
     enum Kept: Hashable {
-        /// ADR-0066 section 1.1 — the STAGED wipe a device runs when the
+        /// ADR-0074 section 1.1 — the STAGED wipe a device runs when the
         /// account's keys were reset elsewhere: everything goes except the
         /// recall record (``RecallRecord``), which is what lets the person
         /// take the account back from this device. Every other caller wipes
@@ -129,14 +129,14 @@ enum AccountLocalDataWipe {
         step("recovery-phrase") { try PhraseStore().deletePhrase(accountIdB64: accountIdB64) }
         step("three-words-budget") { ThreeWordsBudgetStore().clearAll(accountIdB64: accountIdB64) }
         step("recovery-markers") { RecoveryMarkers().clear(accountIdB64: accountIdB64) }
-        // ADR-0067 — the protection flags, the notice cursor and the "I did
+        // ADR-0075 — the protection flags, the notice cursor and the "I did
         // this" markers.
         step("account-protection") { AccountProtectionStore().clear(accountIdB64: accountIdB64) }
-        // ADR-0066 — the "account key recorded at auth" mark and the owed
+        // ADR-0074 — the "account key recorded at auth" mark and the owed
         // device removals belong to the account's data on this device.
         step("identity-key-record") { IdentityKeyRecordMarks().clear(accountIdB64: accountIdB64) }
         step("device-removal-owed") { DeviceRemovalStore().clear(accountIdB64: accountIdB64) }
-        // ADR-0066 part 3 — the owed key rotation, the pending rotation
+        // ADR-0074 part 3 — the owed key rotation, the pending rotation
         // envelopes of a kept device, the account's own predecessor seed and
         // the "keys were changed" line.
         step("key-rotation-owed") { KeyRotationStore().clear(accountIdB64: accountIdB64) }
@@ -148,7 +148,7 @@ enum AccountLocalDataWipe {
             PredecessorMailbox.CursorStore().clear(accountIdB64: accountIdB64)
             PredecessorMailbox.AdoptionStore().clear(accountIdB64: accountIdB64)
         }
-        // ADR-0066 section 1.1 — the recall record: the one step the staged
+        // ADR-0074 section 1.1 — the recall record: the one step the staged
         // wipe skips.
         if !keeping.contains(.recallRecord) {
             step(recallRecordStepName) {
@@ -229,7 +229,7 @@ enum AccountLocalDataWipe {
         // 5. Contacts and profiles.
         step("verified-bindings") { VerifiedBindingStore.clear(ownerAccountIdB64: accountIdB64) }
         step("reset-continuity") { Continuity.clearMarker(accountIdB64: accountIdB64) }
-        // ADR-0065 R.5-R.7 — the successor-claim state, the continuity
+        // ADR-0073 R.5-R.7 — the successor-claim state, the continuity
         // bookkeeping, the held messages and the unsent-lineage marker.
         step("lineage-mirror") { ConversationLineageMirror.clear(accountIdB64: accountIdB64) }
         step("continuity-mirror") { ContinuityMirror.clear(accountIdB64: accountIdB64) }
@@ -250,9 +250,9 @@ enum AccountLocalDataWipe {
         }
         step("profiles") { ProfileDirectory.shared.forget(accountIdB64: accountIdB64) }
         step("contacts-inbox") { ContactsInboxStore().clear(accountIdB64: accountIdB64) }
-        // ADR-0065 R.3 — the requests kept waiting for an identity verdict.
+        // ADR-0073 R.3 — the requests kept waiting for an identity verdict.
         step("contacts-inbox-waiting") { KnownRequestWaitingStore().clear(accountIdB64: accountIdB64) }
-        // ADR-0066 section 3.5a rule 5 — the unanswered outgoing requests
+        // ADR-0074 section 3.5a rule 5 — the unanswered outgoing requests
         // (recipients and the intro text), a Keychain item.
         step("contacts-sent-requests") { KeychainSentRequestsStore().clear(accountIdB64: accountIdB64) }
         step("accepted-contacts") { AcceptedContactsStore.clear(accountIdB64: accountIdB64) }

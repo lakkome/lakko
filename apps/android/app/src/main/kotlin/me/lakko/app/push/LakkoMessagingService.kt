@@ -133,7 +133,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             Log.i(TAG, "wake dropped: not addressed to the signed-in account")
             return
         }
-        // ADR-0065 R.5 — a wake for the old segment of a moved one-to-one posts
+        // ADR-0073 R.5 — a wake for the old segment of a moved one-to-one posts
         // nothing at all, in the FOREGROUND too. The background pass below
         // already answers this, but a foregrounded app runs no background
         // pass and would fall through to the generic banner until the push
@@ -169,7 +169,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             } else {
                 null
             }
-        // ADR-0065 phase 2 / UX 16.4 — a wake for a closed one-to-one posts
+        // ADR-0073 phase 2 / UX 16.4 — a wake for a closed one-to-one posts
         // nothing at all: no banner, no ring.
         if (outcome?.suppressed == true) {
             Log.i(TAG, "wake dropped: the conversation moved")
@@ -283,7 +283,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             }
         }
 
-        // ADR-0065 R.5 — a successor group's banner belongs to its
+        // ADR-0073 R.5 — a successor group's banner belongs to its
         // conversation: same stack, same id (a new banner replaces the
         // conversation's), one row. Read from the lineage mirror; nothing is
         // written.
@@ -411,7 +411,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
 }
 
 /**
- * ADR-0065 R.5 — does this wake name the old segment of a moved one-to-one?
+ * ADR-0073 R.5 — does this wake name the old segment of a moved one-to-one?
  *
  * The wake's `g` is the opaque `push_gid` (ADR-0042); it is resolved to the
  * real group through the same local route index the tap deep link uses

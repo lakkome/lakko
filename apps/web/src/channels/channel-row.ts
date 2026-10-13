@@ -27,7 +27,7 @@ export interface ChannelRowInput {
   readonly subscriberCount: number | null;
   /** The server stamp of the newest cached post, if any. */
   readonly lastPostMs: number | null;
-  /** ADR-0065 phase 2 (UX 16.6): this device owned the channel under
+  /** ADR-0073 phase 2 (UX 16.6): this device owned the channel under
    *  account keys that were since reset, so it can no longer post to it.
    *  The second line is the reset's own sentence. Absent = `false`. */
   readonly orphanedByKeyReset?: boolean | undefined;

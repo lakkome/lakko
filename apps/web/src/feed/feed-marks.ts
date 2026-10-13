@@ -94,7 +94,7 @@ export function withoutHidden<T extends { readonly idHex: string; readonly conve
 ): T[] {
   if (hidden.length === 0) return [...sources];
   const set = new Set(hidden);
-  // Hidden by the CONVERSATION id (ADR-0065 R.5): a conversation hidden
+  // Hidden by the CONVERSATION id (ADR-0073 R.5): a conversation hidden
   // before it moved to a successor group stays hidden after.
   return sources.filter((s) => !set.has(s.conversationHex ?? s.idHex));
 }

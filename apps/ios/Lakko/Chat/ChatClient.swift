@@ -126,7 +126,7 @@ public final class ChatClient {
         guard !plaintext.isEmpty else {
             throw ChatError.argument("plaintext must be non-empty")
         }
-        // ADR-0065 R.7 case 1 — before anything is sealed: nothing goes into
+        // ADR-0073 R.7 case 1 — before anything is sealed: nothing goes into
         // a one-to-one whose other person's reset this device accepted,
         // except the successor claim.
         try await refuseDeadSession(group: group, isSuccessorClaim: intoSupersededSession)
@@ -264,7 +264,7 @@ public final class ChatClient {
         guard !controlBytes.isEmpty else {
             throw ChatError.argument("controlBytes must be non-empty")
         }
-        // ADR-0065 R.7 case 1 — a control broadcast is a publish too.
+        // ADR-0073 R.7 case 1 — a control broadcast is a publish too.
         try await refuseDeadSession(group: group, isSuccessorClaim: false)
 
         let wireBytes: Data
@@ -419,7 +419,7 @@ public final class ChatClient {
     /// `groupIdHex` names the journal the batch came off. It is REQUIRED
     /// because the own-echo filter below is per journal: a DS id identifies a
     /// row only together with the group whose journal assigned it.
-    /// ADR-0065 R.7 case 1 — the re-send marker an application row carries,
+    /// ADR-0073 R.7 case 1 — the re-send marker an application row carries,
     /// when it is a chat body carrying both halves of one. Read off the same
     /// authenticated plaintext the event is built from.
     static func resendOrigin(of processed: ProcessedMessage) -> ResendMarker.Origin? {
@@ -431,7 +431,7 @@ public final class ChatClient {
         return ResendMarker.Origin(groupIdB64: groupIdB64, messageId: messageId)
     }
 
-    /// ADR-0065 R.8 — the PERSON an application row came from: the MLS
+    /// ADR-0073 R.8 — the PERSON an application row came from: the MLS
     /// sender leaf resolved to an account key against the roster of the epoch
     /// the row decrypted at (C-68), for EVERY application payload: a chat
     /// row, an op, a control or service envelope, call signaling. `nil` for
@@ -657,7 +657,7 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
-            // ADR-0065 R.6 — sniff for a group-closed envelope (a successor claim)
+            // ADR-0073 R.6 — sniff for a group-closed envelope (a successor claim)
             // before the chat parser, the group-name arm's twin: the same
             // lossy-UTF-8 fallback would otherwise render it as a bubble
             // reading `lakko/group-closed/v1` plus binary. Never a timeline
@@ -1067,7 +1067,7 @@ public final class ChatClient {
     /// `"lakko/group-name/v1"`). Decides nothing on its own.
     private static let groupNameEnvelopeFirstByte: UInt8 = 0x6C
 
-    /// ADR-0065 phase 2 — the group-closed notice carried by this application
+    /// ADR-0073 phase 2 — the group-closed notice carried by this application
     /// plaintext, or `nil` when it is not a well-formed group-closed envelope.
     /// The first-byte peek keeps an FFI call off the chat path;
     /// `decodeGroupClosedEnvelope` is the whole verdict (domain, version, the
@@ -1342,7 +1342,7 @@ public enum IncomingChatEvent: Equatable {
         senderLeaf: UInt32?,
         createdAt: String
     )
-    /// ADR-0065 R.6 — a `group_closed` envelope: a successor CLAIM naming
+    /// ADR-0073 R.6 — a `group_closed` envelope: a successor CLAIM naming
     /// the group a conversation continues in. Never a timeline bubble and
     /// never anything a person sees. The receive rule of R.6 (the receiver
     /// has itself accepted a reset, the sender is eligible, the first such
@@ -1567,13 +1567,13 @@ public struct PollMessagesResult: Equatable {
     /// The caller must not advance the journal cursor past such a batch until
     /// the provider snapshot has durably landed — see `Chat/DurableCursor.swift`.
     public let touchedMlsState: Bool
-    /// ADR-0065 R.7 case 1 — the re-send marker of each chat row of this
+    /// ADR-0073 R.7 case 1 — the re-send marker of each chat row of this
     /// batch that carries one, by DS message id: the ORIGINAL group and
     /// message id a founder's re-send names (`ResendMarker.swift`). Never
     /// drawn; the repository uses it to show a message this device already
     /// holds in an older segment once.
     public let resendOrigins: [Int64: ResendMarker.Origin]
-    /// ADR-0065 R.8 — the application sender of each event, in the order of
+    /// ADR-0073 R.8 — the application sender of each event, in the order of
     /// ``events`` (`ChatClient.applicationSender`): the account key an
     /// application row came from, `nil` for an MLS handshake row. Empty when
     /// the producer resolved none (then nothing is dropped by sender).
@@ -1596,7 +1596,7 @@ public struct PollMessagesResult: Equatable {
     }
 }
 
-// MARK: - ADR-0065 R.7 case 1: the dead-session publish guard
+// MARK: - ADR-0073 R.7 case 1: the dead-session publish guard
 
 extension ChatClient {
     /// Whether a publish into `group` is refused as into a dead session.

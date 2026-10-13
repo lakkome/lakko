@@ -27,7 +27,7 @@ import android.content.Context
  * before this client joined is invisible to it, and the device would be
  * re-admitted — recorded in the ADR as the arm's known limit.
  *
- * For the OWN account that limit is closed (ADR-0066 section 2.3): a device of
+ * For the OWN account that limit is closed (ADR-0074 section 2.3): a device of
  * this account is admitted only while the account's DeviceGroup roster lists
  * it. A removed device is not in that roster, whatever it publishes.
  *
@@ -43,7 +43,7 @@ public object DeviceReadmission {
     public class DirectoryDevice(
         public val deviceKey: String,
         public val keyPackage: ByteArray,
-        /** ADR-0066 (a device paired after a key rotation): `false` when the
+        /** ADR-0074 (a device paired after a key rotation): `false` when the
          *  listed KeyPackage of an OWN device is bound to another account key
          *  than this account's conversation key ([ownKeyPackageUsable]). The
          *  row still counts as listed (its leaf is not retired); it is not
@@ -67,7 +67,7 @@ public object DeviceReadmission {
         accounts: List<AccountDevices>,
         removed: Set<String>,
         /**
-         * ADR-0066 section 2.3 — the device keys in THIS account's
+         * ADR-0074 section 2.3 — the device keys in THIS account's
          * DeviceGroup roster, or `null` when the roster could not be read.
          * A device of the own account is admitted only when it is in it: the
          * DeviceGroup is the account's own, MLS-authenticated record of its
@@ -115,7 +115,7 @@ public object DeviceReadmission {
         ownDeviceRoster != null && deviceKey in ownDeviceRoster
 
     /**
-     * ADR-0066 - whether a KeyPackage an OWN device published may be used to
+     * ADR-0074 - whether a KeyPackage an OWN device published may be used to
      * admit it to a conversation: its device binding must name the account
      * key this account's conversation leaves are bound to ([conversationKey],
      * the earliest own predecessor after a rotation). A device paired after a
@@ -128,7 +128,7 @@ public object DeviceReadmission {
     public fun ownKeyPackageUsable(boundAccountKey: ByteArray?, conversationKey: ByteArray?): Boolean =
         boundAccountKey == null || conversationKey == null || boundAccountKey.contentEquals(conversationKey)
 
-    // ---- ADR-0065 R.2: the wider lookup ----------------------------------
+    // ---- ADR-0073 R.2: the wider lookup ----------------------------------
 
     /** A roster person this device can look up in the directory. */
     public data class LookupCandidate(
@@ -142,7 +142,7 @@ public object DeviceReadmission {
     public data class LookupContact(val signaturePubkeyB64: String, val accountIdB64: String?)
 
     /**
-     * ADR-0065 R.2 "Triggers" — every roster account whose account id this
+     * ADR-0073 R.2 "Triggers" — every roster account whose account id this
      * device knows, not only its accepted contacts: a contact row (found by
      * its current key, or by a key an accepted reset retired for the account
      * the row names), else the profile store (the profile envelope carries

@@ -28,13 +28,13 @@ enum FreshAuthSurface: Equatable {
     case addDeviceScan
     case addPasskey
     case changePassword
-    /// Settings > Devices > Remove (ADR-0066 section 2.3, UX 18.1).
+    /// Settings > Devices > Remove (ADR-0074 section 2.3, UX 18.1).
     case removeDevice
-    /// ADR-0067 / UX 19.2 — adding, replacing or removing the recovery email.
+    /// ADR-0075 / UX 19.2 — adding, replacing or removing the recovery email.
     case recoveryEmail
-    /// ADR-0067 / UX 19.5 — `Save a recovery phrase`.
+    /// ADR-0075 / UX 19.5 — `Save a recovery phrase`.
     case savePhrase
-    /// ADR-0068 — changing the username.
+    /// ADR-0076 — changing the username.
     case changeUsername
 
     /// The helper under the field, naming the action.

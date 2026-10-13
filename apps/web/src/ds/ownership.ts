@@ -331,7 +331,7 @@ export async function claimOrReset(
 }
 
 /**
- * ADR-0065 section 5 - the attested reset of the account's DeviceGroup
+ * ADR-0073 section 5 - the attested reset of the account's DeviceGroup
  * journal after a key reset. The journal id is unchanged (it is derived from
  * the account id) but its root belongs to the OLD seed, so the new root is a
  * stranger to it: `PUT .../reset` carries, beside the Reset statement the
@@ -354,7 +354,7 @@ export async function resetWithAttestation(
   epoch: bigint,
   epochKey: Uint8Array,
   keyResetAttestB64: string,
-  /** ADR-0066 section 4.6 (T5 item 21) - the 64-byte signature by the
+  /** ADR-0074 section 4.6 (T5 item 21) - the 64-byte signature by the
    *  attested NEW account key over `(journal, generation, root.publicKey())`,
    *  STANDARD base64. The DS refuses an attested reset without it (the
    *  uniform 401), so a served attestation is useless to anyone but the new
@@ -399,7 +399,7 @@ export function attestedResetBody(
 }
 
 /**
- * ADR-0066 section 3.5 (T5 item 22) - the attested root TRANSFER of the
+ * ADR-0074 section 3.5 (T5 item 22) - the attested root TRANSFER of the
  * account's DeviceGroup journal after a key rotation: the OLD root signs a
  * `RootTransfer` naming the root derived from the new seed, and the body
  * carries the attestation and the endorsement of that NEW root. The chain,

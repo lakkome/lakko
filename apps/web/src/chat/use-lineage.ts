@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.5 - the conversation lineage as the views read it.
+ * ADR-0073 R.5 - the conversation lineage as the views read it.
  *
  * `lineage.ts` is the pure model; this binds it to the synced state's
  * registers (`DeviceGroupSyncContext`) and the chat registry

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.2 / ADR-0066 section 3.5 - every path that adds an account's
+ * ADR-0073 R.2 / ADR-0074 section 3.5 - every path that adds an account's
  * devices to a group goes through ONE filter (`add-member-key.ts`, applied
  * by `ContactsClient.devicesOfAccount`): the user-facing add, a new chat and
  * a successor build (`prepareGroupWith`), the ADR-0050 re-admission arm

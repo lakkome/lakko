@@ -21,7 +21,7 @@ export function closeUsernameClaim(): void {
   setOpen(false);
 }
 
-// ADR-0068: the "Change username" screen, the same way.
+// ADR-0076: the "Change username" screen, the same way.
 const [changeOpen, setChangeOpen] = createSignal(false);
 
 export const usernameChangeOpen = changeOpen;

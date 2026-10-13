@@ -3,8 +3,8 @@
 
 /**
  * "This device was removed" (docs/ux/identity-recovery.md section 18.2,
- * ADR-0066) and, in the same shape, "Your account keys were reset"
- * (section 15.2, ADR-0065).
+ * ADR-0074) and, in the same shape, "Your account keys were reset"
+ * (section 15.2, ADR-0073).
  *
  * Replaces the whole signed-in app: no chat list behind it, no dismiss, no
  * retry. Variants:

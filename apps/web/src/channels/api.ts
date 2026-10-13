@@ -216,7 +216,7 @@ async function ownerSigner(
   channelIdHex: string,
 ): Promise<ChannelOwnerSigner> {
   const wasm = await loadWasm();
-  // ADR-0066 section 3.5: once a channel's owner key was handed over to the
+  // ADR-0074 section 3.5: once a channel's owner key was handed over to the
   // key of the account's NEW identity, owner requests are signed by it. The
   // identity passed in is the one whose MLS provider holds the
   // PublisherGroup (the conversation identity), which after a rotation is
@@ -236,7 +236,7 @@ export function installMovedOwnerIdentity(
 }
 
 /**
- * ADR-0066 section 3.5 / "T5 as built" item 26 - `PUT /v1/channels/{id}/owner`:
+ * ADR-0074 section 3.5 / "T5 as built" item 26 - `PUT /v1/channels/{id}/owner`:
  * the body is the NEW owner key (32 raw bytes, the new identity's
  * `ChannelOwnerSigner.verifyingKey()`), the owner proof is by the OLD
  * identity's signer. Returns the HTTP status (`204` done; `409 owner-changed`

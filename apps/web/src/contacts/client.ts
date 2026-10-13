@@ -580,7 +580,7 @@ export class SupersessionRefused extends Error {
    *   * `null`  — everything else: `unconfirmed`.
    *
    * Never `true`: a change that IS an attested reset is accepted silently
-   * (ADR-0065 R.2) and never reaches a refusal. The type keeps `boolean`
+   * (ADR-0073 R.2) and never reaches a refusal. The type keeps `boolean`
    * for the persisted log marker's shape.
    */
   public loggedReset: boolean | null = null;
@@ -596,7 +596,7 @@ export class SupersessionRefused extends Error {
 }
 
 /**
- * ADR-0065 R.2 "no verdict" — a contact's published key differs from the
+ * ADR-0073 R.2 "no verdict" — a contact's published key differs from the
  * one this device holds, no proof came with it, and whether the change is
  * an attested reset could not be established YET (the attest key or the key
  * log could not be reached). Nothing was changed and nothing is recorded;
@@ -617,7 +617,7 @@ export class IdentityCheckInconclusive extends Error {
 export type ContactIdentityCheck =
   /** The published key is what this device trusts: the pin, a key just
    *  TOFU-pinned, a proven successor, or an attested reset just accepted
-   *  (ADR-0065 R.2). */
+   *  (ADR-0073 R.2). */
   | "current"
   /** The account publishes no identity bundle. */
   | "absent";
@@ -897,7 +897,7 @@ function sweepPortsFor(
       // sweep is skipped (its devices share one mailbox and one Welcome).
       publishMailbox: async (leafKey, bytes) => {
         const accountKey = accountKeyOfLeaf(rosterOf(group), leafKey);
-        // ADR-0066 section 3.5a rule 1 - the leaf's binding may name a proven
+        // ADR-0074 section 3.5a rule 1 - the leaf's binding may name a proven
         // predecessor: the Welcome goes to the person's CURRENT mailbox, and
         // two leaves of one person bound under different keys share it.
         const accountHex = journalHex(resolveAccountKey(accountKey));
@@ -911,7 +911,7 @@ function sweepPortsFor(
         // arrival.
         let id: number;
         try {
-          // ADR-0066 section 3.5a rule 6 - a refusal re-checks the address
+          // ADR-0074 section 3.5a rule 6 - a refusal re-checks the address
           // once; the mailbox is the one resolved for that attempt.
           id = await writeWelcome(
             accountKey,
@@ -1243,11 +1243,11 @@ export class ContactsClient {
     try {
       const list = await this.discovery.fetchKeyPackages(secrets.accountId);
       if (list === null) return [];
-      // ADR-0066 section 2.3 — only the devices the account's DeviceGroup
+      // ADR-0074 section 2.3 — only the devices the account's DeviceGroup
       // holds: a removed device that publishes itself again is not put into
       // a new conversation. With no roster loaded none is added here.
       const roster = ownDeviceRoster(base64Encode(secrets.accountId));
-      // ADR-0066 (a device paired after a key rotation) — and only from a
+      // ADR-0074 (a device paired after a key rotation) — and only from a
       // KeyPackage bound to the account key this device's leaves are bound
       // to; a device that published before the pairing state bundle reached
       // it is added by the re-admission arm once it has published again.
@@ -1611,7 +1611,7 @@ export class ContactsClient {
           // Welcome -> the new member's mailbox (NOT this device's group
           // journal), so no echo re-arm — the committer never re-fetches it.
           const secondBytes = base64Decode(entry.secondArtifactB64);
-          // ADR-0066 section 3.5a rule 1 - the entry recorded the mailbox as
+          // ADR-0074 section 3.5a rule 1 - the entry recorded the mailbox as
           // it was derived then; the account may have rotated (with a proof)
           // since, so it is derived again from the account key when the
           // entry carries one.
@@ -1679,7 +1679,7 @@ export class ContactsClient {
   private async verifyBundleAccountKey(
     accountId: Uint8Array,
     bundle: IdentityFetchResponse,
-    /** ADR-0065 R.2: the key this device HOLDS for the account when it
+    /** ADR-0073 R.2: the key this device HOLDS for the account when it
      *  never pinned it (a roster's account key for that account id). */
     heldKeyB64?: string,
   ): Promise<void> {
@@ -1694,7 +1694,7 @@ export class ContactsClient {
     try {
       await this.verifySupersessionGate(accountId, bundle, heldKeyB64);
     } catch (err) {
-      // ADR-0065 R.2 — a CHANGED key with NO supersession proof is asked
+      // ADR-0073 R.2 — a CHANGED key with NO supersession proof is asked
       // whether it is an attested reset. Accepted: the re-pin is written and
       // the call proceeds as for any trusted key, with nothing shown.
       // Refused: the gate's own refusal, with the copy the verdict names.
@@ -1743,7 +1743,7 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0065 R.2 — fetch an account's published identity and run the
+   * ADR-0073 R.2 — fetch an account's published identity and run the
    * fail-closed check. One of the rule's triggers: the scheduled per-chat
    * device check, opening a one-to-one, a send whose last check is old.
    *
@@ -1796,7 +1796,7 @@ export class ContactsClient {
     const recipientKeyB64 = base64Encode(recipientSignaturePubkey);
     if (contactRequestGate(readPin(accountIdB64), recipientKeyB64) === "send") return;
     await this.checkContactIdentity(accountId);
-    // ADR-0066 section 3.5a rule 1 - a key that is a PROVEN predecessor of
+    // ADR-0074 section 3.5a rule 1 - a key that is a PROVEN predecessor of
     // the pin is the same person: the send re-fetches and seals to the
     // current keys (`currentRequestTarget`). Any other key is refused.
     const pinnedNow = readPin(accountIdB64);
@@ -1813,7 +1813,7 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0066 section 3.5a rule 1 - the keys a contact request to a bundle in
+   * ADR-0074 section 3.5a rule 1 - the keys a contact request to a bundle in
    * hand actually goes out to.
    *
    * A bundle carried by a link or a search result may name a key its owner
@@ -1869,7 +1869,7 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0066 section 3.5a rule 6 - re-check the address of the person
+   * ADR-0074 section 3.5a rule 6 - re-check the address of the person
    * `accountKey` names after a refused write: fetch their identity bundle
    * and run it through the fail-closed gate, which records a proven
    * predecessor (so the next resolution addresses the current mailbox).
@@ -1901,7 +1901,7 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0066 section 3.5a rule 5 - send an unanswered contact request AGAIN
+   * ADR-0074 section 3.5a rule 5 - send an unanswered contact request AGAIN
    * after this account's keys were rotated: a fresh request from the new
    * key, with a new `reply` grant, sealed to the recipient's published keys
    * (fetched through the fail-closed gate). It carries the profile and the
@@ -1934,7 +1934,7 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0066 section 3.5a rule 5 - one pending contact request per person.
+   * ADR-0074 section 3.5a rule 5 - one pending contact request per person.
    *
    * A person whose account keys were rotated re-sends their unanswered
    * request from the new key. Given a request just received and the pending
@@ -1990,7 +1990,7 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0065 R.2 — gather the rule's inputs for a proof-less key change and
+   * ADR-0073 R.2 — gather the rule's inputs for a proof-less key change and
    * act on the verdict (`reset-verdict.ts`). On `accepted` the re-pin is
    * written and the listeners that move the shared conversations are told;
    * nothing is shown anywhere. Never throws.
@@ -2148,7 +2148,7 @@ export class ContactsClient {
   private async verifySupersessionGate(
     accountId: Uint8Array,
     bundle: IdentityFetchResponse,
-    /** ADR-0065 R.2: with no pin, the key a roster names for this account
+    /** ADR-0073 R.2: with no pin, the key a roster names for this account
      *  id is what the device HOLDS: a fetched key that differs from it is a
      *  change, not a first observation. */
     heldKeyB64?: string,
@@ -2300,7 +2300,7 @@ export class ContactsClient {
     // verified proof bytes (the verifier confirmed the signature
     // over exactly these fields, so the parse is on trusted data).
     const proofExpiresAt = readProofExpiresAtSecs(proofBytes);
-    // ADR-0066 section 3.5: the proof verified under the pinned key for
+    // ADR-0074 section 3.5: the proof verified under the pinned key for
     // exactly this key, so the replaced key is a PROVEN predecessor: the
     // leaves bound to it stay the same person. Nothing is flagged, closed or
     // evicted, and nothing is shown. An attestation beside the proof (the
@@ -2525,7 +2525,7 @@ export class ContactsClient {
     // proof and re-pins. Throws `SupersessionRefused` (fail-closed)
     // on a changed key with no valid proof — the UI surfaces an
     // OOB re-verify prompt. We never blind-TOFU a changed key.
-    // ADR-0065 R.2: a proof-less change that is an attested reset is
+    // ADR-0073 R.2: a proof-less change that is an attested reset is
     // accepted inside the gate, silently.
     await this.verifyBundleAccountKey(recipientAccountId, bundle);
     const recipientSignaturePub = base64Decode(bundle.signature_pubkey);
@@ -2587,11 +2587,11 @@ export class ContactsClient {
     introMessage: Uint8Array,
     options?: ContactRequestOptions,
   ): Promise<SendResult> {
-    // ADR-0065 R.2: no identity fetch runs on this path, so a key that is
+    // ADR-0073 R.2: no identity fetch runs on this path, so a key that is
     // not the stored pin sends the published identity through the gate
     // first (a stranger has no pin and passes).
     await this.refuseContactRequestToUnverifiedKeys(recipientAccountId, recipientSignaturePubkey);
-    // ADR-0066 section 3.5a rule 1 - a key that is a proven predecessor is
+    // ADR-0074 section 3.5a rule 1 - a key that is a proven predecessor is
     // replaced by the account's current keys, fetched through the gate.
     const target = await this.currentRequestTarget(
       recipientAccountId,
@@ -2648,7 +2648,7 @@ export class ContactsClient {
     // design. This is the routing address for cold contact
     // requests (see ADR-0005 §13.7).
     //
-    // ADR-0066 section 3.5a rule 1 - resolved first. A request is sealed to
+    // ADR-0074 section 3.5a rule 1 - resolved first. A request is sealed to
     // the X25519 key the caller supplied, which belongs to the key it
     // supplied: when that key is a PROVEN predecessor of an account this
     // device has pinned at a newer key, the bundle (or the link) is stale
@@ -2728,7 +2728,7 @@ export class ContactsClient {
     // ContactRequest from a Welcome (1.16e3). ADR-0060: signed with the
     // grant that lets us reach the recipient (a link's, or a kept one).
     const envelope = wrapEnvelope(KIND_CONTACT_REQUEST, wireBytes);
-    // ADR-0066 section 3.5a rule 6 - a refused write re-checks the address
+    // ADR-0074 section 3.5a rule 6 - a refused write re-checks the address
     // once. The request is SEALED to the key in hand, so the re-check may
     // only change which GRANT is offered: should the key turn out to be
     // superseded, the write is not moved to another mailbox (the plan's
@@ -2795,7 +2795,7 @@ export class ContactsClient {
 
     // Sender's mailbox = `IdentityPseudonym.fromIdentity(sender_pubkey)`.
     // The original request's `fromPubkey` is the routing handle.
-    // ADR-0066 section 3.5a rule 1 - resolved: an ack never goes to the
+    // ADR-0074 section 3.5a rule 1 - resolved: an ack never goes to the
     // mailbox of a key a proven rotation superseded.
     const acceptedAtMs = BigInt(Date.now());
 
@@ -2869,7 +2869,7 @@ export class ContactsClient {
     // ADR-0060 section 6 — one inbound mailbox per person: a Welcome goes to
     // the added leaf's ACCOUNT mailbox, signed with the key that lets us
     // reach that account.
-    // ADR-0066 section 3.5a rule 1 - the CURRENT mailbox of that account
+    // ADR-0074 section 3.5a rule 1 - the CURRENT mailbox of that account
     // (the leaf may be bound to a proven predecessor; own account included).
     // Rule 6: a refused write re-checks the address once and is retried.
     const envelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
@@ -2880,7 +2880,7 @@ export class ContactsClient {
         {
           ...(options.groupId === undefined ? {} : { scope: options.groupId }),
           explicit: options.explicitGrantB64 ?? null,
-          // ADR-0065 R.4: `allowMember` marks a Welcome, which signs with the
+          // ADR-0073 R.4: `allowMember` marks a Welcome, which signs with the
           // continuity key for the new identity of an accepted reset.
           allowMember: true,
         },
@@ -3004,7 +3004,7 @@ export class ContactsClient {
     waitSecs = 0,
     signal?: AbortSignal,
     options: {
-      /** ADR-0066 section 3.5a rules 4 and 5 - a PREDECESSOR mailbox
+      /** ADR-0074 section 3.5a rules 4 and 5 - a PREDECESSOR mailbox
        *  delivers Welcomes only: a request or an ack found there is neither
        *  opened nor acted on (the cursor still advances). */
       readonly welcomesOnly?: boolean;
@@ -3166,7 +3166,7 @@ export class ContactsClient {
   ): Promise<PreparedGroup> {
     const wasm = await loadWasm();
 
-    // 0. ADR-0065 R.2: starting a chat is an identity fetch that runs the
+    // 0. ADR-0073 R.2: starting a chat is an identity fetch that runs the
     //    fail-closed check. An attested reset is accepted here, silently;
     //    an unproven change is refused before a KeyPackage is fetched.
     await this.checkContactIdentity(recipientAccountId);
@@ -3182,7 +3182,7 @@ export class ContactsClient {
     if (recipientDevices === null || recipientDevices.length === 0) {
       throw ContactsError.noIdentityBundle(recipientAccountId);
     }
-    // ADR-0065 R.2 - the same filter as every other add path: only a device
+    // ADR-0073 R.2 - the same filter as every other add path: only a device
     // bound to the expected key or a proven predecessor of it (with no
     // expected key: to a key this device trusts for the account after the
     // gate above), and never to a key a reset retired, founds the
@@ -3278,7 +3278,7 @@ export class ContactsClient {
       if (seen.has(accountHex)) continue;
       seen.add(accountHex);
       // By the device list this call fetched, not by a caller's key: after
-      // an accepted reset (ADR-0065 R.2) a caller may still hold the old one.
+      // an accepted reset (ADR-0073 R.2) a caller may still hold the old one.
       targets.push({
         accountKey,
         isRecipient: recipientDevices.some((d) => d.keyPackage === dev.keyPackage),
@@ -3296,7 +3296,7 @@ export class ContactsClient {
    * write per added ACCOUNT, to its account mailbox (ADR-0060 section 6).
    * The recipient's is written with `replyGrantB64` when this answers their
    * contact request; a Welcome to the new identity of an accepted reset is
-   * signed with the continuity key (ADR-0065 R.4). Idempotent on the wire: a
+   * signed with the continuity key (ADR-0073 R.4). Idempotent on the wire: a
    * second delivery is a duplicate the recipient's join ignores.
    */
   async deliverPreparedWelcomes(
@@ -3426,7 +3426,7 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0065 R.2 / ADR-0066 section 3.5 - THE filter every path that adds an
+   * ADR-0073 R.2 / ADR-0074 section 3.5 - THE filter every path that adds an
    * account's devices to a group goes through (`add-member-key.ts`): the
    * user-facing add, a new chat and a successor build, the ADR-0050
    * re-admission arm and the membership re-request. Call it AFTER the
@@ -3526,7 +3526,7 @@ export class ContactsClient {
     recipientAccountId: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
   ): Promise<MembershipOutcome> {
-    // 0. ADR-0065 R.2: adding someone is an identity fetch that runs the
+    // 0. ADR-0073 R.2: adding someone is an identity fetch that runs the
     //    fail-closed check (the directory serves the CURRENT identity's
     //    KeyPackages). This is also what the automatic re-request of an
     //    older add rides.
@@ -3542,7 +3542,7 @@ export class ContactsClient {
     if (devices === null || devices.length === 0) {
       throw ContactsError.noIdentityBundle(recipientAccountId);
     }
-    // ADR-0065 R.2 - the directory is not trusted to say whose devices these
+    // ADR-0073 R.2 - the directory is not trusted to say whose devices these
     // are. Only a device whose signed binding names the EXPECTED account key
     // (or a key of its pinned proven chain; never a key a reset retired) is
     // added; anything else is refused here, for every caller
@@ -3661,7 +3661,7 @@ export class ContactsClient {
   ): Promise<void> {
     const session = reachSession();
     if (session === null) return;
-    // ADR-0066 section 3.5a rules 1 and 2 - the grant held for the PERSON
+    // ADR-0074 section 3.5a rules 1 and 2 - the grant held for the PERSON
     // (under any key they have had), for their CURRENT mailbox.
     const held = bestGrantForPerson(
       session.receivedGrants(),
@@ -3824,7 +3824,7 @@ export class ContactsClient {
       // sealed to THIS leaf's KeyPackage but addressed to the ACCOUNT mailbox
       // the leaf's binding names — one inbound mailbox per person.
       welcomeAccountKey = await accountKeyOfKeyPackage(keyPackageBytes);
-      // ADR-0066 section 3.5a rule 1 - resolved to the CURRENT mailbox.
+      // ADR-0074 section 3.5a rule 1 - resolved to the CURRENT mailbox.
       welcomePseudonym = await accountMailboxOf(welcomeAccountKey);
       welcomeEnvelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
       // ADR-0053 contract point 3 — register N+1 before anything durable says
@@ -3859,7 +3859,7 @@ export class ContactsClient {
 
     // 7. Publish artifact 2 — the Welcome to the new member's stranger inbox
     //    (the SAME bytes stored in the outbox entry).
-    //    Rule 6 of ADR-0066 section 3.5a: a refusal re-checks the address
+    //    Rule 6 of ADR-0074 section 3.5a: a refusal re-checks the address
     //    once; the outbox entry above re-derives the mailbox on a replay.
     let welcomePublish;
     try {
@@ -3976,7 +3976,7 @@ export class ContactsClient {
     const wasm = await loadWasm();
     const deviceKey = wasm.keyPackageSignatureKey(keyPackage);
     if (leafIndexOfSignatureKey(group, deviceKey) !== null) return null;
-    // ADR-0066 section 2.3 — a device of THIS account is admitted only when
+    // ADR-0074 section 2.3 — a device of THIS account is admitted only when
     // the account's DeviceGroup holds it. Every caller that admits an own
     // device names the account, so the test is made here once.
     if (
@@ -3990,7 +3990,7 @@ export class ContactsClient {
       return null;
     }
     const myIdentity = await this.resolveIdentity(identity);
-    // ADR-0066 (a device paired after a key rotation) — a device of THIS
+    // ADR-0074 (a device paired after a key rotation) — a device of THIS
     // account whose KeyPackage is bound to another account key than the one
     // this device's own leaves are bound to (it minted its binding before
     // the pairing state bundle reached it) is not admitted: to every gate of
@@ -4007,7 +4007,7 @@ export class ContactsClient {
       console.warn("own device bound under another of the account's keys; not admitted to the chat");
       return null;
     }
-    // ADR-0065 R.2 - a device of ANOTHER account goes through the same
+    // ADR-0073 R.2 - a device of ANOTHER account goes through the same
     // filter as every add path: its binding must name a key this device
     // trusts for that account id (never a key a reset retired). The
     // directory listing a device under an id proves nothing by itself.
@@ -4052,7 +4052,7 @@ export class ContactsClient {
     accountId: Uint8Array,
     deviceKey: Uint8Array,
   ): Promise<MembershipOutcome | null> {
-    // ADR-0065 R.2 - the re-request runs the identity gate first, like every
+    // ADR-0073 R.2 - the re-request runs the identity gate first, like every
     // add: a proven rotation is recorded (a verified binding becomes a pin
     // with its chain) before the device's binding is judged in
     // `admitDeviceToGroup`. Only for an account this device already trusts a

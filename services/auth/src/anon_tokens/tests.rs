@@ -93,7 +93,7 @@ fn bearer(secret: &lakko_auth_token::TokenSecret, account: [u8; 16]) -> String {
     format!("Bearer {token}")
 }
 
-/// Since ADR-0065 the bearer middleware reads the account's key generation,
+/// Since ADR-0073 the bearer middleware reads the account's key generation,
 /// so a bearer only passes for an account that exists: create the row.
 async fn insert_account(pool: &MySqlPool, account: [u8; 16]) {
     sqlx::query("INSERT INTO accounts (id) VALUES (?)")

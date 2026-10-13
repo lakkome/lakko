@@ -7,7 +7,7 @@ import java.io.File
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0067 - every catalog key the recovery-email screens and rules use
+/** ADR-0075 - every catalog key the recovery-email screens and rules use
  *  exists in the compiled catalog (no string was added by this client). */
 class RecoveryEmailCatalogTest {
 

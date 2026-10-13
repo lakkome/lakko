@@ -56,16 +56,16 @@ public final class ContactsClient {
     /// and the check is a no-op (fail-open). Injectable for tests.
     private let transparencyVerify: TransparencyVerify
 
-    /// ADR-0066 section 3.5 — the proven-predecessor map. A key change the
+    /// ADR-0074 section 3.5 — the proven-predecessor map. A key change the
     /// gate accepted BY PROOF records the old key as the proven predecessor
     /// of the new one (the same person; nothing is shown); a change reported
     /// as a reset drops the person's predecessors.
     private let predecessors: ProvenPredecessorStore
-    /// ADR-0065 R.2 — the verified bindings of accounts this device never
+    /// ADR-0073 R.2 — the verified bindings of accounts this device never
     /// pinned (`VerifiedBinding.swift`): what a group member's roster key is
     /// judged from.
     private let bindings: VerifiedBindingStore
-    /// ADR-0065 R.2 — the trusted attest key a key-reset attestation is
+    /// ADR-0073 R.2 — the trusted attest key a key-reset attestation is
     /// verified under: the build-time pin when set, else the cached JWKS key.
     /// A throw is "no key": no verdict, never a refusal. Injectable for tests.
     private let attestKey: () async throws -> Data
@@ -131,7 +131,7 @@ public final class ContactsClient {
         // here keeps gate 1 untouched.
         let accountIdB64 = base64Encode(accountId)
         let oldPin = pinStore.readPin(accountIdB64: accountIdB64)
-        // ADR-0065 R.2 — with no pin, the held key is the verified binding;
+        // ADR-0073 R.2 — with no pin, the held key is the verified binding;
         // read before gate 1, which drops it when it re-pins.
         let oldBinding = oldPin == nil ? bindings.read(accountIdB64: accountIdB64) : nil
 
@@ -140,7 +140,7 @@ public final class ContactsClient {
         do {
             try verifySupersessionGate(accountId: accountId, bundle: bundle, heldKeyB64: heldKeyB64)
         } catch var refused as SupersessionRefused {
-            // ADR-0065 R.2 — a CHANGED key with NO supersession proof is asked
+            // ADR-0073 R.2 — a CHANGED key with NO supersession proof is asked
             // whether it is an attested reset. Accepted: the re-pin is written
             // and the call proceeds as for any trusted key, with nothing
             // shown. Refused: the gate's own refusal, with the copy the
@@ -173,14 +173,14 @@ public final class ContactsClient {
             }
         }
 
-        // ADR-0066 section 3.5 — gate 1 passed. When the published key
+        // ADR-0074 section 3.5 — gate 1 passed. When the published key
         // differs from the pin taken BEFORE it ran, the gate accepted the
         // change by a verified supersession proof (its only accepting branch
         // for a changed key) and re-pinned: a PROVEN ROTATION, with or
         // without a key-reset attestation beside it. The old key becomes the
         // account's proven predecessor: the leaves bound to it stay the same
         // person. Nothing is shown and nothing is repaired: a proven
-        // rotation is not a reset and never enters the ADR-0065 R.2 path.
+        // rotation is not a reset and never enters the ADR-0073 R.2 path.
         if let pin = oldPin, pin.pinnedSignaturePubkeyB64 != bundle.signaturePubkey {
             predecessors.record(
                 oldKeyB64: pin.pinnedSignaturePubkeyB64,
@@ -222,7 +222,7 @@ public final class ContactsClient {
         )
     }
 
-    /// ADR-0065 R.2 — gather the rule's inputs for a proof-less key change
+    /// ADR-0073 R.2 — gather the rule's inputs for a proof-less key change
     /// and act on the verdict (`ResetVerdict.swift`). On `accepted` the
     /// re-pin is written and the listeners that re-key the contact and move
     /// the shared conversations are told; nothing is shown anywhere. Never
@@ -251,7 +251,7 @@ public final class ContactsClient {
             attest: attest,
             log: log))
         guard case .accepted(let keyGeneration, let signedAtMs) = verdict else { return verdict }
-        // ADR-0066 section 3.5 — a reset supersedes every key the account
+        // ADR-0074 section 3.5 — a reset supersedes every key the account
         // held before it, the proven predecessors of the held key included.
         let retiredPredecessors = predecessors.load().predecessors(of: heldKeyB64)
         let written = pinStore.acceptReset(
@@ -321,7 +321,7 @@ public final class ContactsClient {
         return result.status == .confirmed && result.isReset == false ? false : nil
     }
 
-    /// ADR-0065 R.2 — fetch an account's published identity and run the
+    /// ADR-0073 R.2 — fetch an account's published identity and run the
     /// fail-closed check. One of the rule's triggers: the scheduled per-chat
     /// device check, opening a one-to-one, a send whose last check is old.
     ///
@@ -434,7 +434,7 @@ public final class ContactsClient {
         guard let existing = held else {
             // Case 1 — first-ever observation. TOFU-pin and proceed. The
             // bundle's generation is recorded as the accepted-generation
-            // baseline (ADR-0065 R.2).
+            // baseline (ADR-0073 R.2).
             pinStore.setPin(
                 accountIdB64: accountIdB64,
                 pinnedSignaturePubkeyB64: fetchedPubkeyB64,
@@ -842,14 +842,14 @@ public final class ContactsClient {
         return (sig, x)
     }
 
-    /// ADR-0066 section 3.5a rule 1 — who a recipient's key is now, from the
+    /// ADR-0074 section 3.5a rule 1 — who a recipient's key is now, from the
     /// proven-predecessor map this client's gate writes. (This account's own
     /// keys are never the recipient of a request or an ack.)
     func mailboxResolver() -> AccountKeyResolver {
         AccountKeyResolver(proven: predecessors.load())
     }
 
-    /// ADR-0066 section 3.5a rule 5 — for each pair of keys a requester's
+    /// ADR-0074 section 3.5a rule 5 — for each pair of keys a requester's
     /// account id was seen under, learn whether the old key handed over to
     /// the new one BY PROOF, and record it when it did. The identity bundle
     /// goes through the fail-closed gate first (a pinned account's proven
@@ -968,7 +968,7 @@ public final class ContactsClient {
         introMessage: Data,
         reach: ContactRequestReach = .none
     ) async throws -> SendResult {
-        // ADR-0066 section 3.5a rule 1 — resolve before addressing. A bundle
+        // ADR-0074 section 3.5a rule 1 — resolve before addressing. A bundle
         // carried by a link or a search result may name a key its owner has
         // since rotated away BY PROOF: the request then goes to the current
         // key's mailbox, sealed to the current X25519 key, which only the
@@ -1117,7 +1117,7 @@ public final class ContactsClient {
     ) async throws -> PublishedAck {
         let senderMailbox: Data
         do {
-            // ADR-0066 section 3.5a rule 1 — the requester may have rotated
+            // ADR-0074 section 3.5a rule 1 — the requester may have rotated
             // its keys by proof since it asked: the ack goes to the mailbox
             // of its current key.
             senderMailbox = try IdentityPseudonym
@@ -1563,7 +1563,7 @@ extension ContactsError: LocalizedError {
 ///
 /// `reason` discriminates the failure mode for diagnostics — the UX
 /// is the same OOB-reverify prompt regardless.
-/// ADR-0065 R.2 — the published identity of an account could not be judged
+/// ADR-0073 R.2 — the published identity of an account could not be judged
 /// yet: a key change with no proof whose attestation or log answer is not
 /// available (no attest key, the log unreachable), or a group member's
 /// roster key that nothing establishes under the claimed account id. Nothing

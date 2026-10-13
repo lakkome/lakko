@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.5 - the views of a conversation that spans several groups
+/// ADR-0073 R.5 - the views of a conversation that spans several groups
 /// (`LineageViews.swift`). The cases are the lineage ones of
 /// `apps/web/src/chat/pin-bar.test.ts`, `chat/pin-older-segment.test.ts`,
 /// `chat/forward.test.ts`, `chat/delete-chat.test.ts` and

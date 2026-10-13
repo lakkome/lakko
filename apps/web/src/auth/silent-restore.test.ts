@@ -5,7 +5,7 @@
  * The reload restore decision (`silent-restore.ts`): which state each
  * combination of stored secrets lands in. The load-bearing property is that
  * there is no half state — a restore needs every piece, and anything less is
- * `anon`. Since ADR-0065 the piece that must be live is the refresh
+ * `anon`. Since ADR-0073 the piece that must be live is the refresh
  * credential: an expired access token beside a live credential restores.
  */
 import { describe, expect, it } from "vitest";

@@ -145,7 +145,7 @@ public fun DevicesScreen(
                 .padding(padding)
                 .verticalScroll(rememberScrollState()),
         ) {
-            // UX 15.3 (ADR-0065) - on the device that reset the account keys,
+            // UX 15.3 (ADR-0073) - on the device that reset the account keys,
             // one dismissible note for the rest of the session: the other
             // devices were signed out and removed, add them again from here.
             val resetThisSession by authRepository.resetThisSession.collectAsStateWithLifecycle()
@@ -875,7 +875,7 @@ private fun DevicesList(
     val scope = rememberCoroutineScope()
     var state: DevicesListUi by remember { mutableStateOf(DevicesListUi.Loading) }
     var confirming: Pair<DeviceRemoval.DeviceListItem, String>? by remember { mutableStateOf(null) }
-    // ADR-0066 - the devices already signed out at auth whose removal is
+    // ADR-0074 - the devices already signed out at auth whose removal is
     // still finishing: their rows read `Removing...` and carry no control.
     var pending: Set<String> by remember { mutableStateOf(emptySet()) }
     // Of those, the ones whose owed step waits on the person's passkey:
@@ -1061,7 +1061,7 @@ private fun DevicesList(
         }
     }
 
-    // ADR-0066 part 3 - the new recovery phrase after "remove and change
+    // ADR-0074 part 3 - the new recovery phrase after "remove and change
     // keys" (withheld while the publish is owed), then the done line.
     rotatedPhrase?.let { withheld ->
         RotatedPhraseScreen(
@@ -1082,7 +1082,7 @@ private fun DevicesList(
             chatRepository = chatRepository,
             onRotated = { withheld ->
                 confirming = null
-                // ADR-0067 - new words are shown only to a phrase-protected
+                // ADR-0075 - new words are shown only to a phrase-protected
                 // account; otherwise the change is done as far as the person
                 // is concerned.
                 if (authRepository.showsNewWordsHere()) {
@@ -1109,7 +1109,7 @@ private fun DevicesList(
 }
 
 /**
- * `Remove this device?` (`docs/ux/identity-recovery.md` section 18.1; ADR-0066
+ * `Remove this device?` (`docs/ux/identity-recovery.md` section 18.1; ADR-0074
  * section 2.3): the app's own modal, with the proof block. The main button
  * runs the whole removal as one operation ([DeviceRemovalRunner]): the proof,
  * the sign-out at auth, the directory row, the device list, the chats.
@@ -1119,7 +1119,7 @@ private fun DevicesList(
  *
  * The radio pair of 18.1 chooses between the plain removal and "It was lost
  * or stolen": remove AND change the account keys, keeping the other devices
- * ([me.lakko.app.devices.KeyRotationRunner], ADR-0066 part 3).
+ * ([me.lakko.app.devices.KeyRotationRunner], ADR-0074 part 3).
  */
 @Composable
 private fun RemoveDeviceSheet(
@@ -1439,7 +1439,7 @@ internal fun RotatedPhraseScreen(
     chatRepository: me.lakko.app.chat.ChatRepository?,
     initiallyWithheld: Boolean,
     onClosed: () -> Unit,
-    /** ADR-0067 / UX 19.5 - "Save a recovery phrase" shows the same screen
+    /** ADR-0075 / UX 19.5 - "Save a recovery phrase" shows the same screen
      *  with its own words around the grid. */
     title: String = t(me.lakko.app.devices.RotationCopy.PHRASE_TITLE),
     lead: String = t("devices.rotate.effect_phrase") + "\n\n" + t("devices.rotate.effect_devices"),

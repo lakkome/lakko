@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.7 case 1 - the ONE queue of held messages for the tab, and its
+ * ADR-0073 R.7 case 1 - the ONE queue of held messages for the tab, and its
  * mirror in the message log.
  *
  * `held-send.ts` holds the rules and the in-memory store type. This module

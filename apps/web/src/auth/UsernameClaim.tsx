@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * "Choose a username" (ADR-0067 pass A, part 2): a guest account, created by
+ * "Choose a username" (ADR-0075 pass A, part 2): a guest account, created by
  * the call-link join, gets a username and its first password on one screen.
  *
  * Order: the name is validated here; `auth.claimGuestUsername` binds the

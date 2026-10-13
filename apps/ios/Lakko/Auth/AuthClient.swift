@@ -185,7 +185,7 @@ public final class AuthClient {
     /// recovery phrase) to the fresh device over the E2EE pairing channel; it never
     /// travels in plaintext past this response.
     ///
-    /// `freshGrant` is the fresh-auth grant (ADR-0065, amended 2026-10-06):
+    /// `freshGrant` is the fresh-auth grant (ADR-0073, amended 2026-10-06):
     /// without a valid one the server answers `403 fresh-auth-required` and
     /// mints nothing.
     public func deviceAuthorizeStart(sessionToken: String, freshGrant: String) async throws -> String {
@@ -406,7 +406,7 @@ public final class AuthClient {
     /// than 600 s between the two) restarts the whole signup once from the
     /// start.
     ///
-    /// ADR-0066 section 0.4: `deviceIdFor` is asked, with the account id this
+    /// ADR-0074 section 0.4: `deviceIdFor` is asked, with the account id this
     /// signup generated, for the id of this device (its conversation leaf
     /// key); the finish asserts it, so the session names the device from the
     /// first token. `nil`, or a `nil` answer, lands an unbound session.
@@ -548,7 +548,7 @@ public final class AuthClient {
     /// 401 — by design, indistinguishable from "unknown account" (a handle
     /// nobody holds runs the same path on a stand-in account).
     ///
-    /// ADR-0066 section 0.4: `deviceId` is asserted at the finish when the
+    /// ADR-0074 section 0.4: `deviceId` is asserted at the finish when the
     /// caller knows the account before it (the proof login of a signed-in
     /// account); `nil` lands an unbound session the caller binds afterwards.
     public func login(
@@ -747,10 +747,10 @@ public final class AuthClient {
         )
     }
 
-    // MARK: - Session refresh + the key reset (ADR-0065)
+    // MARK: - Session refresh + the key reset (ADR-0073)
 
     /// `POST /auth/session/refresh` — trade the refresh credential for a new
-    /// session pair (ADR-0065 section 3.2). Anonymous: the credential is the
+    /// session pair (ADR-0073 section 3.2). Anonymous: the credential is the
     /// authorisation. Per-address limited.
     ///
     /// Throws ``AuthClientError/http(status:endpoint:body:)`` with status
@@ -769,10 +769,10 @@ public final class AuthClient {
         return resp.sessionPair
     }
 
-    // MARK: - ADR-0066: the session names a device
+    // MARK: - ADR-0074: the session names a device
 
     /// `POST /auth/session/bind-device` (bearer) — name the device a session
-    /// that landed without one belongs to (ADR-0066 "T1 as built" points 8
+    /// that landed without one belongs to (ADR-0074 "T1 as built" points 8
     /// and 9). `refreshToken` is the refresh credential of the same session.
     /// The returned pair names the device; the caller drops the pair it
     /// replaced.
@@ -801,7 +801,7 @@ public final class AuthClient {
     }
 
     /// `POST /auth/session/logout` (bearer, no body) -> `204`: sign this
-    /// device's session out at the server (ADR-0066 section 2.1). Afterwards
+    /// device's session out at the server (ADR-0074 section 2.1). Afterwards
     /// its bearer gets a plain `401` and its refresh `401 refresh-invalid`.
     public func logoutSession(sessionToken: String) async throws {
         guard !sessionToken.isEmpty else {
@@ -815,7 +815,7 @@ public final class AuthClient {
     }
 
     /// `POST /account/devices/revoke` (bearer) -> `204`: sign ANOTHER device
-    /// of the account out at the server (ADR-0066 section 2.1). `statement`
+    /// of the account out at the server (ADR-0074 section 2.1). `statement`
     /// is the 138-byte `device-revoke` account statement over `deviceId`,
     /// signed right before this call (valid 120 s).
     ///
@@ -867,7 +867,7 @@ public final class AuthClient {
         try await post(endpoint: "/account/keys/reset/finish", body: request, bearer: sessionToken)
     }
 
-    /// Reset the signed-in account's keys (ADR-0065 section 2): register a
+    /// Reset the signed-in account's keys (ADR-0073 section 2): register a
     /// recovery credential made from `seed`, the 64-byte BIP39 seed of the
     /// NEW phrase, and bind `newSignaturePubkey`, the NEW AccountIdentity
     /// key, to the account at the next key generation:
@@ -942,9 +942,9 @@ public final class AuthClient {
         return KeyResetResult(attestation: attestation, session: finish.sessionPair)
     }
 
-    // MARK: - ADR-0066 part 3: rotating the account keys, the devices kept
+    // MARK: - ADR-0074 part 3: rotating the account keys, the devices kept
 
-    /// Rotate the signed-in account's keys (ADR-0066 section 3.4):
+    /// Rotate the signed-in account's keys (ADR-0074 section 3.4):
     ///
     /// ```text
     ///   POST /account/keys/rotate/start   { fresh_grant, recovery_request }  -> { recovery_response }
@@ -1018,7 +1018,7 @@ public final class AuthClient {
         return KeyResetResult(attestation: attestation, session: finish.sessionPair)
     }
 
-    /// The session upgrade of a KEPT device (ADR-0066 section 3.3): exchange
+    /// The session upgrade of a KEPT device (ADR-0074 section 3.3): exchange
     /// `refreshToken`, a credential of the generation before a rotation, for
     /// a pair at the current generation naming the same device, by showing
     /// that this device holds the NEW account key (`newAccountEd25519Seed`).
@@ -1054,7 +1054,7 @@ public final class AuthClient {
         return response.sessionPair
     }
 
-    // MARK: - ADR-0066 part 1: taking the account back after a reset
+    // MARK: - ADR-0074 part 1: taking the account back after a reset
 
     /// `POST /account/recall/status` (anonymous) — whether the account can
     /// still be taken back with the key `record` holds, until when, when the
@@ -1067,7 +1067,7 @@ public final class AuthClient {
         guard let accountId = record.accountId, record.oldSeed.count == RecallRecord.seedLength else {
             throw AuthClientError.argument("the recall record is malformed")
         }
-        // ADR-0066 "T5 as built" item 24 — a device with a wrong clock is
+        // ADR-0074 "T5 as built" item 24 — a device with a wrong clock is
         // told the server's time (only its key's holder is) and signs again.
         let response: RecallStatusResponse = try await StatementStale.retrying { serverTimeMs in
             let statement = try serverTimeMs.map {
@@ -1084,7 +1084,7 @@ public final class AuthClient {
     }
 
     /// `POST /account/recall/status` for a device that holds the recovery
-    /// phrase and no account id (ADR-0067 section 8): the account is named
+    /// phrase and no account id (ADR-0075 section 8): the account is named
     /// by `handle`, and the statement, signed by the key derived from the
     /// typed phrase, carries the first 16 bytes of the handle where the
     /// account id goes. The answer carries the account id.
@@ -1117,7 +1117,7 @@ public final class AuthClient {
         return RecallByHandle(window: response.window, accountId: accountId)
     }
 
-    /// Take the account back (ADR-0066 section 1.2, "T3 as built"):
+    /// Take the account back (ADR-0074 section 1.2, "T3 as built"):
     ///
     /// ```text
     ///   client: OPAQUE login start (old password), OPAQUE registration
@@ -1139,7 +1139,7 @@ public final class AuthClient {
               attempt.record.oldSeed.count == RecallRecord.seedLength else {
             throw AuthClientError.argument("the recall record is malformed")
         }
-        // ADR-0067 section 8 — the proof is the old password, or the seed of
+        // ADR-0075 section 8 — the proof is the old password, or the seed of
         // the recovery phrase as it was before the reset.
         let loginSecret = attempt.oldPhraseSeed ?? attempt.oldPassword
         guard !loginSecret.isEmpty, !attempt.newPassword.isEmpty else {
@@ -1356,7 +1356,7 @@ public final class AuthClient {
         )
     }
 
-    /// `PUT /auth/login-handle` that CHANGES the account's handle (ADR-0068
+    /// `PUT /auth/login-handle` that CHANGES the account's handle (ADR-0076
     /// section 2): needs the fresh-auth grant and names the handle held now.
     /// With `recoveryEmail` the server re-keys the stored recovery email to
     /// the new handle (and replaces the vault when one is sent) in the same
@@ -1603,7 +1603,7 @@ public struct SignupResult: Equatable {
     /// somewhere safe — losing it means losing the only way back
     /// into the account if the password is forgotten.
     public let recoveryPhrase: String?
-    /// The session pair the auth service issued (ADR-0065 section 3).
+    /// The session pair the auth service issued (ADR-0073 section 3).
     public let session: SessionPair
     /// The fresh-auth grant the signup finish minted. Kept in memory only
     /// by the caller.
@@ -1638,9 +1638,9 @@ public struct LoginResult: Equatable {
     /// Same export key the user got at signup time — deterministic
     /// for the same password.
     public let exportKey: Data
-    /// The session pair the auth service issued (ADR-0065 section 3).
+    /// The session pair the auth service issued (ADR-0073 section 3).
     public let session: SessionPair
-    /// The reset grant the password login minted (ADR-0065, amended
+    /// The reset grant the password login minted (ADR-0073, amended
     /// 2026-10-04). Kept in memory only by the caller.
     public let freshGrant: FreshAuthGrant?
 
@@ -1740,7 +1740,7 @@ public struct TotpRecoverResult: Equatable {
 }
 
 /// Result of ``AuthClient/resetAccountKeys(sessionToken:freshGrant:seed:newSignaturePubkey:)``
-/// (ADR-0065 section 2).
+/// (ADR-0073 section 2).
 public struct KeyResetResult: Equatable {
     /// The 177-byte `KeyResetAttestation`, verified by the client against the
     /// pinned attest key before it is carried to discovery and the DS.

@@ -132,7 +132,7 @@ describe("what the worker refuses to read as muted", () => {
   });
 });
 
-describe("a successor group is its conversation (ADR-0065 R.5)", () => {
+describe("a successor group is its conversation (ADR-0073 R.5)", () => {
   const SUCCESSOR_HEX = "ef".repeat(32);
 
   /** The app's row: the conversation `GROUP_HEX` muted (or not), and

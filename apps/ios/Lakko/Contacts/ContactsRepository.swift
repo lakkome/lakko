@@ -62,7 +62,7 @@ public final class ContactsRepository: ObservableObject {
                     accountIdB64: accountIdB64
                 )
             }
-            // ADR-0066 section 3.5a rule 5 — the unanswered outgoing requests
+            // ADR-0074 section 3.5a rule 5 — the unanswered outgoing requests
             // survive a process death (a re-send after a key rotation needs
             // the recipient and the intro). Not while the bound account's
             // rows are being loaded: a Keychain that could not be read must
@@ -274,7 +274,7 @@ public final class ContactsRepository: ObservableObject {
         }
         let client = clientFactory()
         let bundle = try await client.resolveVerifiedBundle(accountId: accountId)
-        // ADR-0066 section 3.5a — the search may have found the person under
+        // ADR-0074 section 3.5a — the search may have found the person under
         // a key they have since rotated away BY PROOF (the gate above just
         // recorded it): the same person. An unproven mismatch is refused.
         ReachCenter.shared.reloadKeyResolver()
@@ -302,7 +302,7 @@ public final class ContactsRepository: ObservableObject {
         return result
     }
 
-    /// A contact request against a bundle in hand, with rule 6 of ADR-0066
+    /// A contact request against a bundle in hand, with rule 6 of ADR-0074
     /// section 3.5a: when the recipient's mailbox refuses the write, their
     /// identity bundle is fetched through the fail-closed gate once, and when
     /// that PROVED the key in hand a predecessor the request is sealed again
@@ -360,7 +360,7 @@ public final class ContactsRepository: ObservableObject {
                 try await factory().resolveVerifiedBundle(accountId: accountId).signaturePubkey
             },
             reachCheck: { accountKey, seed in
-                // ADR-0066 section 3.5a rule 1 — resolved before addressing.
+                // ADR-0074 section 3.5a rule 1 — resolved before addressing.
                 let current = await MainActor.run { ReachCenter.shared.currentAccountKey(of: accountKey) }
                 let mailbox = try IdentityPseudonym.fromIdentity(pubkey: current).asBytes()
                 return try await DsClient().reachCheck(pseudonym: mailbox, reachSeed: seed)
@@ -370,7 +370,7 @@ public final class ContactsRepository: ObservableObject {
                     certificate: cert, lookupKey: lookupKey, accountId: accountId)
             })
             .with(currentKey: { key in
-                // ADR-0066 section 3.5a — read after the gated fetch, from
+                // ADR-0074 section 3.5a — read after the gated fetch, from
                 // the store the gate writes (the resolver reloads from it).
                 await MainActor.run {
                     ReachCenter.shared.reloadKeyResolver()
@@ -488,7 +488,7 @@ public final class ContactsRepository: ObservableObject {
                 // ADR-0053 — the account mailbox is named by the account key.
                 mailboxSigner: dsMailboxSigner(identity: identity)
             )
-            // ADR-0065 R.3 — the requests that were waiting, unshown, for an
+            // ADR-0073 R.3 — the requests that were waiting, unshown, for an
             // identity verdict are judged again first; one whose sender is no
             // longer an established contact is an ordinary request.
             var newPending: [IncomingContactRequest] = await retryWaitingKnownRequests(client: client)
@@ -511,7 +511,7 @@ public final class ContactsRepository: ObservableObject {
                         ProfileDirectory.shared.acceptReceived(
                             profile, signatureKeyB64: base64Encode(req.fromPubkey))
                     }
-                    // ADR-0065 R.3 — a request from an account that is ALREADY
+                    // ADR-0073 R.3 — a request from an account that is ALREADY
                     // an established contact (it reset its keys and is writing
                     // from the new ones) is never a request row: it is
                     // answered silently, dropped, or kept waiting for a
@@ -610,7 +610,7 @@ public final class ContactsRepository: ObservableObject {
             // landed during the awaits above): a request already pending, or
             // from a sender already accepted, is not re-added.
             //
-            // ADR-0066 section 3.5a rule 5 — one request per person: a
+            // ADR-0074 section 3.5a rule 5 — one request per person: a
             // request from the key that superseded a pending request's key BY
             // PROOF replaces that row, silently.
             await client.proveRequesterRotations(
@@ -637,7 +637,7 @@ public final class ContactsRepository: ObservableObject {
                 refreshing: false,
                 lastError: welcomeJoinFailure ?? carriedJoinFailure
             )
-            // ADR-0066 section 3.5a rule 4 — after a rotation the account
+            // ADR-0074 section 3.5a rule 4 — after a rotation the account
             // moved to the new mailbox at once; a sender that has not seen
             // the proven change yet still writes to the old one, which is
             // READ (never written to, nothing registered there) for 30 days
@@ -664,7 +664,7 @@ public final class ContactsRepository: ObservableObject {
     /// When the predecessor mailboxes were last read (unix ms), per process.
     private var lastPredecessorPollMs: Int64 = 0
 
-    /// ADR-0066 section 3.5a rule 4 — read the mailbox of each of this
+    /// ADR-0074 section 3.5a rule 4 — read the mailbox of each of this
     /// account's own PREDECESSOR keys, for the Welcomes of people who have
     /// not yet seen the new key (a contact request or an ack found there is
     /// not acted on, rule 5). Each key of the chain has its own cursor and
@@ -888,7 +888,7 @@ public final class ContactsRepository: ObservableObject {
         }
     }
 
-    // MARK: - ADR-0065 phase 2 — a contact reset their account keys (UX 16)
+    // MARK: - ADR-0073 phase 2 — a contact reset their account keys (UX 16)
 
     /// The accepted contact whose account id is `accountIdB64`, or `nil`.
     /// The lookup every reset path uses: the record must be found by the
@@ -897,7 +897,7 @@ public final class ContactsRepository: ObservableObject {
         state.accepted.first { $0.accountIdB64 == accountIdB64 }
     }
 
-    /// ADR-0065 R.2 "the re-pin" — the gate accepted a reset of this account:
+    /// ADR-0073 R.2 "the re-pin" — the gate accepted a reset of this account:
     /// re-key the contact row to the new key, keeping the rename, the account
     /// id, the chat link and the row id, and appending the key it held to
     /// the display aliases. A second row already under the new key (a contact
@@ -907,7 +907,7 @@ public final class ContactsRepository: ObservableObject {
     /// Does nothing for an account this device has no contact row for (a
     /// group member it never pinned): the pin store holds the superseded
     /// keys, which is what the chat layer reads.
-    // MARK: - ADR-0065 R.3: a request from an account that is already a contact
+    // MARK: - ADR-0073 R.3: a request from an account that is already a contact
 
     /// The contact an account id is ESTABLISHED as here, or `nil`. "Already
     /// a contact" is the pin (its current key or a proven predecessor) or a
@@ -1050,7 +1050,7 @@ public final class ContactsRepository: ObservableObject {
         }
         let client = clientFactory()
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
-        // ADR-0066 section 3.5a rule 6 — a refused ack re-checks the
+        // ADR-0074 section 3.5a rule 6 — a refused ack re-checks the
         // requester's address once (the client derives the mailbox from the
         // same proven-predecessor store the re-check writes).
         return try await RefusedMailboxWrite.write(
@@ -1255,7 +1255,7 @@ public final class ContactsRepository: ObservableObject {
         return result
     }
 
-    // MARK: - Spent by a key rotation (ADR-0066 section 3.5a rule 5)
+    // MARK: - Spent by a key rotation (ADR-0074 section 3.5a rule 5)
 
     /// The account's keys moved: every link this session generated names the
     /// old mailbox. They leave the list at once, so the UI never offers a
@@ -1270,7 +1270,7 @@ public final class ContactsRepository: ObservableObject {
     /// session-start retry both come through here).
     private var spendingGrants = false
 
-    /// ADR-0066 section 3.5a rule 5 — what this account granted before its
+    /// ADR-0074 section 3.5a rule 5 — what this account granted before its
     /// keys were rotated is spent:
     ///
     ///   * its own `/i/` and `/c/` links are revoked at their ledger, signed
@@ -1406,7 +1406,7 @@ public final class ContactsRepository: ObservableObject {
                 predecessorSeeds: authRepository.ownPredecessorSeeds(
                     accountIdB64: base64Encode(secrets.accountId)))
         } catch {
-            NSLog("ADR-0066 3.5a: links or requests granted before the key rotation are still owed")
+            NSLog("ADR-0074 3.5a: links or requests granted before the key rotation are still owed")
         }
     }
 
@@ -1564,7 +1564,7 @@ public final class ContactsRepository: ObservableObject {
             return .failed(message: "the link's keys are not the ones trusted for this account")
         }
 
-        // ADR-0065 R.7 case 1 / UX 16.6 — a link from a person who is already
+        // ADR-0073 R.7 case 1 / UX 16.6 — a link from a person who is already
         // a contact (a reset loses their contacts; they may hand out a new
         // link) OPENS that contact: no request is sent, no use of the link
         // is spent and no result screen is shown in between. The
@@ -1707,7 +1707,7 @@ public enum AcceptInviteResult: Equatable {
         groupIdHex: String?
     )
     case alreadyAccepted
-    /// ADR-0065 R.7 case 1 / UX 16.6 — the link is from a person who is
+    /// ADR-0073 R.7 case 1 / UX 16.6 — the link is from a person who is
     /// already an established contact: nothing was sent and no use of the
     /// link was spent. The landing OPENS that contact (the route's key is the
     /// contact's request id) and shows no result of its own.
@@ -1823,7 +1823,7 @@ public struct AcceptedContact: Equatable, Codable {
     /// optional — a contact persisted before this field existed decodes
     /// with `displayName == nil`, preserving the old fingerprint display.
     public var displayName: String?
-    /// ADR-0065 R.2 "the re-pin" — the account keys this contact held before
+    /// ADR-0073 R.2 "the re-pin" — the account keys this contact held before
     /// each reset this device accepted (base64, oldest first). DISPLAY
     /// aliases for stored history only: a previous key is never accepted for
     /// new traffic, a new pin, a role or a send. `nil` for a contact that
@@ -1904,7 +1904,7 @@ public struct SentContactRequest: Equatable, Codable {
     public let messageId: Int64
     public let createdAt: String
     /// The intro the person wrote, kept so a re-send after a key rotation
-    /// carries it (ADR-0066 section 3.5a rule 5). Empty when none.
+    /// carries it (ADR-0074 section 3.5a rule 5). Empty when none.
     public let intro: String
 
     public init(
@@ -1963,7 +1963,7 @@ public struct GeneratedInvite: Equatable {
     }
 }
 
-/// ADR-0066 Stage A — the mailbox of an account's own predecessor key: how
+/// ADR-0074 Stage A — the mailbox of an account's own predecessor key: how
 /// often it is read, and the cursor it is read from.
 enum PredecessorMailbox {
 
@@ -2007,7 +2007,7 @@ enum PredecessorMailbox {
     }
 }
 
-// MARK: - ADR-0065 R.2 — the contact row after an accepted reset
+// MARK: - ADR-0073 R.2 — the contact row after an accepted reset
 
 /// The pure half of ``ContactsRepository/applyAcceptedReset(_:)``.
 public enum ContactRekey {

@@ -3,7 +3,7 @@
 
 /**
  * "Save a recovery phrase" (docs/ux/identity-recovery.md section 19.5,
- * ADR-0067 section 3). It is the ADR-0066 key rotation with no device
+ * ADR-0075 section 3). It is the ADR-0074 key rotation with no device
  * removed and `phrase_saved: true` on its commit: the account gets new keys
  * and a new phrase, every device stays signed in, the server deletes the
  * email vault and the account is phrase-protected from then on.

@@ -3,7 +3,7 @@
 
 //! Key-rotation envelope — the device that changes the account keys hands
 //! the new recovery-phrase entropy to the account's other devices
-//! ([ADR-0066](../../../docs/adr/0066-account-takeover-resistance.md)
+//! ([ADR-0074](../../../docs/adr/0074-account-takeover-resistance.md)
 //! section 3.3; `docs/ux/identity-recovery.md` §18.1 and §18.3).
 //!
 //! ## Why this exists
@@ -22,7 +22,7 @@
 //!
 //! * `new_entropy` — the 16 bytes of BIP39 entropy of the NEW recovery
 //!   phrase. The phrase, the 64-byte seed and the account identity all
-//!   derive from it (ADR-0017, ADR-0064).
+//!   derive from it (ADR-0017, ADR-0072).
 //! * `supersession_proof` — the 145-byte proof of
 //!   `lakko_transparency::supersession`, signed by the OLD account identity
 //!   key over the new one. Carried opaque here (this crate does not depend on
@@ -50,7 +50,7 @@
 //!    not trust, see that commit win the journal, and only then compose and
 //!    send this envelope at the new epoch. An envelope sealed at an epoch the
 //!    stolen device still holds hands the thief the new account. This is an
-//!    ordering rule of the weight of C-61 (ADR-0066 section 3.2), and like
+//!    ordering rule of the weight of C-61 (ADR-0074 section 3.2), and like
 //!    C-61 it deserves a test on every client that asserts the epoch of the
 //!    emitted message, not the order of two calls.
 //! 2. **It is sent only in the DeviceGroup.** The DeviceGroup's members are
@@ -59,7 +59,7 @@
 //!    devices are members.
 //!
 //! What is NOT relied on: any key derived from the old account seed (the
-//! thief holds it — ADR-0066 "Alternatives rejected"), and the server.
+//! thief holds it — ADR-0074 "Alternatives rejected"), and the server.
 //!
 //! ## What the envelope does NOT establish
 //!
@@ -131,7 +131,7 @@ pub const KEY_ROTATION_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/key-rotation/v1\x00";
 /// accepted value.
 pub const KEY_ROTATION_VERSION_V1: u8 = 0x01;
 
-/// Length of the BIP39 entropy of a 12-word recovery phrase (ADR-0064).
+/// Length of the BIP39 entropy of a 12-word recovery phrase (ADR-0072).
 pub const KEY_ROTATION_ENTROPY_LEN: usize = 16;
 
 /// Length of a supersession proof (`lakko_transparency::SUPERSESSION_PROOF_LEN`,
@@ -147,7 +147,7 @@ pub const KEY_ROTATION_ENVELOPE_LEN: usize = KEY_ROTATION_ENVELOPE_DOMAIN_V1.len
 
 /// How long a kept device holds a pending envelope whose key has not become
 /// the account's before it drops it: 14 days, the validity the rotating
-/// device gives the supersession proof (ADR-0066 section 3.3). Chosen, not
+/// device gives the supersession proof (ADR-0074 section 3.3). Chosen, not
 /// measured.
 pub const KEY_ROTATION_PENDING_MAX_AGE_MS: u64 = 14 * 24 * 60 * 60 * 1000;
 

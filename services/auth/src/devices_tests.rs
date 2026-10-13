@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Route tests for ADR-0066 sprint T1: per-device session revocation
+//! Route tests for ADR-0074 sprint T1: per-device session revocation
 //! (`/auth/session/logout`, `/auth/session/bind-device`,
 //! `/account/devices/revoke`, the floor check in `require_session` and in the
 //! refresh route) and the recorded identity key (`/auth/genesis/attest`).

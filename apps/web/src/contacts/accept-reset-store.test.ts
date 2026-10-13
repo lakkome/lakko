@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.2 "The re-pin" - what an accepted reset writes into the
+ * ADR-0073 R.2 "The re-pin" - what an accepted reset writes into the
  * contacts store (`local-store.ts` `acceptReset`), and what it leaves out:
  * no state on the contact, nothing that reads as "reset".
  */

@@ -403,7 +403,7 @@ final class FeedViewModel: ObservableObject {
                     kind: .group,
                     idHex: thread.groupIdHex,
                     title: chatList.title(groupIdHex: thread.groupIdHex),
-                    // ADR-0065 R.5 — mute, "hide from feeds" and a rule's
+                    // ADR-0073 R.5 — mute, "hide from feeds" and a rule's
                     // lists belong to the CONVERSATION.
                     muted: flags[thread.conversationIdHex]?.muted == true,
                     audience: chatRepository.memberCount(groupIdHex: thread.groupIdHex) ?? 0,
@@ -671,7 +671,7 @@ final class FeedViewModel: ObservableObject {
     }
 
     /// How far the cross-device read position reaches into `groupIdHex`'s
-    /// own message ids. ADR-0065 R.5 — the position is keyed on the
+    /// own message ids. ADR-0073 R.5 — the position is keyed on the
     /// conversation and carries a segment past the first one.
     private func cursorThrough(_ groupIdHex: String) -> Int64? {
         let conversation = chatRepository.conversationIdHex(ofGroup: groupIdHex)

@@ -5,7 +5,7 @@ import SwiftUI
 
 /// The phrase screen of ``AuthState/saveFreshPhrase(_:)``: after "Reset
 /// account keys" and after taking the account back (not after a sign-up:
-/// ADR-0067 D2, a guest's included). It shows the new 12 words, asks
+/// ADR-0075 D2, a guest's included). It shows the new 12 words, asks
 /// for three of them back, then lands the session.
 ///
 /// One state comes before the words after a reset (UX 15.4): the account

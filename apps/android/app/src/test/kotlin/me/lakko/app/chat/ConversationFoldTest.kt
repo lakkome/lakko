@@ -11,7 +11,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0065 R.5 - one thread per conversation, the stores read through any
+/** ADR-0073 R.5 - one thread per conversation, the stores read through any
  *  segment, and the read position across segments. */
 class ConversationFoldTest {
     private val lineage = buildLineage(

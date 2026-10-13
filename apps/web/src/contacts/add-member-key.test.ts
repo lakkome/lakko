@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-/** ADR-0065 R.2 - `add-member-key.ts`. */
+/** ADR-0073 R.2 - `add-member-key.ts`. */
 import { describe, expect, it } from "vitest";
 
 import { acceptableBoundKeys, devicesBoundTo, trustedBoundKeys } from "./add-member-key";

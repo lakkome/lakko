@@ -130,7 +130,7 @@ final class KeyPackageRepublisher {
     }
 }
 
-/// What discovery refused a KeyPackage publish with (ADR-0066 section 2.2).
+/// What discovery refused a KeyPackage publish with (ADR-0074 section 2.2).
 enum KeyPackagePublishRefusal: Equatable {
     /// `403 device-mismatch`: the body's device id is not the session's (a
     /// session that names no device yet, or another one).

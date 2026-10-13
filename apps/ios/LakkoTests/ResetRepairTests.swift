@@ -5,7 +5,7 @@ import LakkoCore
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.4 / R.7 — the repair decisions, the wider re-admission lookup,
+/// ADR-0073 R.4 / R.7 — the repair decisions, the wider re-admission lookup,
 /// the add-member key check and the continuity key. The cases are the tables
 /// of `apps/web/src/chat/reset-repair.test.ts`, `device-readmission.test.ts`,
 /// `contacts/add-member-key.test.ts` and `reach/continuity.test.ts`.

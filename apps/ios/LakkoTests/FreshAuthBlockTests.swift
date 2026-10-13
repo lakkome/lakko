@@ -188,7 +188,7 @@ final class FreshAuthBlockTests: XCTestCase {
             keys.append(surface.wrongPasswordKey)
             keys.append(contentsOf: [surface.helpKey, surface.cancelledKey].compactMap { $0 })
         }
-        // ADR-0067 — the recovery-email and save-phrase surfaces: their own
+        // ADR-0075 — the recovery-email and save-phrase surfaces: their own
         // helpers, no "cancelled" line.
         for surface in [FreshAuthSurface.recoveryEmail, .savePhrase] {
             keys.append(surface.wrongPasswordKey)

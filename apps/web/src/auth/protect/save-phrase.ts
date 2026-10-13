@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * "Save a recovery phrase" (ADR-0067 section 3, UX 19.5): what one run of
+ * "Save a recovery phrase" (ADR-0075 section 3, UX 19.5): what one run of
  * the key rotation that saves a phrase means for the surface. Pure.
  *
  * The words are shown only when the change has gone through. Until the

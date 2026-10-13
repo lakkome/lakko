@@ -11,7 +11,7 @@ import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 
 /*
- * ADR-0065 R.2 - the VERIFIED BINDING of an account this device never
+ * ADR-0073 R.2 - the VERIFIED BINDING of an account this device never
  * pinned, and the one rule that decides what a group member's roster key is
  * worth against the directory.
  *

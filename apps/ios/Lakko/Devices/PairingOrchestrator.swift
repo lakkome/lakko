@@ -40,7 +40,7 @@ public enum PairingOrchestrator {
     /// kept a copy of `phraseEntropy` (the refusal paths keep none).
     public final class JoinRecoveryOutcome {
         public private(set) var phraseEntropy: Data
-        /// The session pair the grant redeem issued (ADR-0065 section 3);
+        /// The session pair the grant redeem issued (ADR-0073 section 3);
         /// `nil` when the redeem failed (keys-only outcome).
         public let session: SessionPair?
         /// ADR-0056 — the raw 16-byte account id the redeemed grant belongs

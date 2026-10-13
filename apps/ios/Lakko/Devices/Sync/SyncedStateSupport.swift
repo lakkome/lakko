@@ -92,7 +92,7 @@ public enum SyncedStateMerge {
     /// stamp, through the core's own merge (`SyncedState::merge_from`). The
     /// fold is idempotent and commutative, so this is a true merge.
     ///
-    /// EVERY register, the conversation lineage included (ADR-0065 R.5).
+    /// EVERY register, the conversation lineage included (ADR-0073 R.5).
     /// This used to go through the growth re-send's snapshot parts, which
     /// deliberately leave the lineage out (it travels in its own envelope):
     /// a backup carried the lineage and a restore dropped it, so a restored

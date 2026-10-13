@@ -197,7 +197,7 @@ export async function claimUsername<T>(args: {
       // eslint-disable-next-line no-console
       console.warn("login handle release after a failed claim failed", releaseErr);
     }
-    // ADR-0068: the 409 bodies are JSON. `username-taken` is the name;
+    // ADR-0076: the 409 bodies are JSON. `username-taken` is the name;
     // `username-already-set` is this account already having one, which is
     // not "taken" and is rethrown as it is.
     if (err instanceof DiscoveryHttpError && isUsernameTaken(err.status, err.errorCode)) {

@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
 
-# ADR-0065: Reset account keys: a server-attested key generation that signs out and removes every other device
+# ADR-0073: Reset account keys: a server-attested key generation that signs out and removes every other device
 
 - **Status:** Proposed (2026-10-03). **Phase 1 built on 2026-10-03** on the
   server (`services/auth`, `services/discovery`, `services/ds`), both FFI
@@ -35,7 +35,7 @@
 - **Date:** 2026-10-03
 - **Context:** account recovery, Part 4 (after [ADR-0017](0017-phrase-seeded-identity.md),
   [ADR-0018](0018-recovery-factor-cascade.md), [ADR-0049](0049-identity-recovery-word-vault.md),
-  [ADR-0064](0064-recovery-model-simplification.md))
+  [ADR-0072](0072-recovery-model-simplification.md))
 - **Amends:** [ADR-0014](0014-webauthn-action-binding.md) (a passkey deletion
   without an action grant), [ADR-0017](0017-phrase-seeded-identity.md)
   (`mintFreshIdentity` becomes server-attested, atomic on the server, and
@@ -44,7 +44,7 @@
   for the reset case; the Devices list), [ADR-0053](0053-ds-journal-authorisation.md)
   (the DS verifies one auth-signed artefact), [ADR-0057](0057-journal-ownership.md)
   (a second way to replace a journal root; the "same root re-claims" rule no
-  longer holds after a key reset), [ADR-0064](0064-recovery-model-simplification.md)
+  longer holds after a key reset), [ADR-0072](0072-recovery-model-simplification.md)
   (decision 9's routes fold into the reset; open question 7 answered for the
   reset case). [ADR-0037](0037-backup-head-rollback-commitment.md) is
   examined and **not** amended (the backup-head section). Supersedes none of them.
@@ -52,8 +52,8 @@
   section 15 (added with this ADR) and section 16 (phase 2, added 2026-10-03,
   rewritten 2026-10-04 as the silent model).
 
-Number check: `ls docs/adr` on 2026-10-03 in this worktree showed 0064 as
-the highest file, so 0065 is free here. Other branches were not checked.
+Renumbered from 0065 on 2026-10-13: the main branch had taken 0064 to 0071 for
+other decisions. Commit messages before that date name this ADR as 0065.
 
 ## Context
 
@@ -64,7 +64,7 @@ The interface calls it **Reset account keys**; the code calls it
 that holds no keys, when no route to the keys is left: the person mints a
 new recovery phrase, derives a new `AccountIdentity` from it, and publishes
 the new identity bundle without a supersession proof. ADR-0017 calls this
-"the single sanctioned publish-without-proof"; ADR-0064 decision 9 added the
+"the single sanctioned publish-without-proof"; ADR-0072 decision 9 added the
 recovery-credential replace after it.
 
 ### The maintainer's decisions (2026-10-03)
@@ -171,7 +171,7 @@ re-verified line by line where a decision below rests on it; lines marked
     no later migration alters it, `grep identity_version
     services/auth/migrations` finds only 0001). `identity_version` is read
     by the account export (`webauthn.rs:423-467`) and never bumped.
-12. The recovery-credential replace of ADR-0064 decision 9:
+12. The recovery-credential replace of ADR-0072 decision 9:
     `/recovery/credential/{start,finish}` (`main.rs:570-577`, handlers
     `opaque.rs:1448-1540`), charged to `limits::Scope::RecoveryReplace = 12`
     (`services/auth/src/limits.rs:166`, default `Window::new(10, 3600)`
@@ -295,12 +295,12 @@ evicting the old identity's leaves from conversation groups is phase 2.
 #### 2. The reset operation: `POST /account/keys/reset/{start,finish}` (bearer)
 
 Two round trips, because replacing the recovery credential is an OPAQUE
-registration (ADR-0064 decision 9) and that is two messages. The existing
+registration (ADR-0072 decision 9) and that is two messages. The existing
 `/recovery/credential/{start,finish}` routes are **folded in**: `reset/start`
 is byte-for-byte `recovery/credential/start` (stateless, charged to the same
 counter), and `reset/finish` is `recovery/credential/finish` plus everything
 below in the same transaction. The standalone pair is deleted: after this
-ADR the only reason to replace the recovery credential is a reset. (ADR-0064
+ADR the only reason to replace the recovery credential is a reset. (ADR-0072
 decision 9 is amended accordingly; its retry state, "recovery credential
 owed", disappears, because the credential and the generation move in one
 transaction and the thing that can still be owed afterwards is the publish,
@@ -329,7 +329,7 @@ section 2.3.)
   4. `DELETE FROM device_grants WHERE account_id = ?` and `DELETE FROM
      device_requests WHERE account_id = ?`: a grant minted by an old device
      before the reset must not land a fresh device in a session that then
-     fails the published-identity check with the old entropy (ADR-0064
+     fails the published-identity check with the old entropy (ADR-0072
      decision 8); cutting it at the server is cleaner than letting it fail
      closed on the client;
   5. mint the attestation (section 2.2) over `(account_id, g,
@@ -353,7 +353,7 @@ section 2.3.)
   not per generation).
 - **No ADR-0014 action grant**, even when the account has a passkey. The
   route exists for the lost-everything path, where the passkey may be gone
-  too (ADR-0064 decision 9's reasoning); and a grant would be asked of a
+  too (ADR-0072 decision 9's reasoning); and a grant would be asked of a
   session that, before this ADR, could already mint a fresh identity. **The
   residual, stated:** a stolen session can reset the account keys, which it
   could already do with `mintFreshIdentity`, and now also strips every
@@ -430,7 +430,7 @@ already threads (`identity_bundle.rs:311-335`).
 ##### 2.3 The client order
 
 Today the bundle is published first so that a failure changes nothing
-locally (ADR-0064 decision 9). With an attested publish the server reset
+locally (ADR-0072 decision 9). With an attested publish the server reset
 must come first, and the point of no return moves to `reset/finish`:
 
 1. Generate the phrase and the seed; derive the new identity.
@@ -439,7 +439,7 @@ must come first, and the point of no return moves to `reset/finish`:
    attestation and the new tokens. **Persist immediately**, before any
    further network call: the new seed and phrase under the device key, the
    new tokens, the attestation, and a `publish-owed` marker (the successor
-   of ADR-0064's `recovery-credential-owed`).
+   of ADR-0072's `recovery-credential-owed`).
 3. `POST /discovery/identity` with the new bundle, the genesis `leaf_auth`
    and genesis attestation as today, **plus** `key_reset_attest`
    (section 4). On success clear `publish-owed`.
@@ -614,7 +614,7 @@ route of auth or discovery:
    secrets: everything `wipeAccountLocalData` and its native twins wipe.
 3. After the wipe the screen shows one button, **Sign in**, which goes to
    the anonymous sign-in screen. Signing in again lands the device as a
-   device with no keys (ADR-0064's "Restore your keys" prompt), where
+   device with no keys (ADR-0072's "Restore your keys" prompt), where
    another device of generation `g` can hand it the new keys.
 
 The same screen is also what a device shows when its own landing finds its
@@ -1768,7 +1768,7 @@ Android 3553 on the host JVM, four runs, the `.so` still not rebuilt); nothing w
 
 **Still different, and gaps:**
 
-- **A person whose account rotated (ADR-0066) before this device ever saw them cannot be added or
+- **A person whose account rotated (ADR-0074) before this device ever saw them cannot be added or
   written to** until their devices are re-bound to the new key: the directory serves the new key,
   the devices are bound to the old one, and no pin or verified binding links them. A supersession
   proof at first sight is not accepted (anyone can sign "X -> new key" with their own X, so a
@@ -1835,7 +1835,7 @@ not reproduced; a shuffled run found and fixed one order dependency
 
 The restoring device after a reset holds the **new** phrase; a backup blob
 sealed under the old phrase's KEK fails to open (`argon2id_kek(phrase,
-salt)`, ADR-0064 fact 3), which the restore gate reports as an unopenable
+salt)`, ADR-0072 fact 3), which the restore gate reports as an unopenable
 backup, not as a rollback. The per-account `backup_version` counter is
 monotone across resets and needs no generation. During the access-TTL window
 the old device can re-put a blob it already holds (section 3.4): the new
@@ -2003,7 +2003,7 @@ accepted; their bodies are left as they are.
   accepted and re-pinned automatically (R.2), as a proof of account
   continuity, not of key continuity. A dated note is at the top of that
   file.
-- **ADR-0064:** decision 9's routes fold into the reset; "recovery
+- **ADR-0072:** decision 9's routes fold into the reset; "recovery
   credential owed" becomes "publish owed"; open question 7 is answered for
   the reset case (a reset revokes every other session; a plain credential
   replace no longer exists on its own).
@@ -2020,7 +2020,7 @@ accepted; their bodies are left as they are.
 | S6 web | `SessionTokenProvider` (3.3); the reset flow in the new order with `publish-owed`; the landing rule (4.2) with the banner and heal deleted; the signed-out screen and automatic wipe (3.5); the DS attested reset in `ds/ownership.ts` and the founder; the KeyPackage binding re-derivation check (2.3 step 5); the UX of section 15. `tsc` + vitest. **Built 2026-10-03** (`apps/web/src/auth/{session-token-provider,session-401,landing-rule,key-reset-owed,wipe-account}.ts` + `AuthContext.tsx`; `tsc` + vitest 3914 + `vite build` observed by the coordinator; not walked in a browser against a server). See "What the build changed / found". |
 | S7 iOS, S8 Android | The same model (the same-class rule: one pass, all three). `xcodebuild test`, `:app:testDebugUnitTest`. **Built 2026-10-03** (iOS `apps/ios/Lakko/Auth/{SessionTokenProvider,KeyReset,SessionPair}.swift`, `LakkoTests` 2613 on a simulator with the core rebuilt; Android `apps/android/.../auth/{SessionTokenProvider,SessionPair,KeyReset}.kt` + `transport/SessionBearerEngine.kt`, 2997 host unit tests with the native core not loaded and the `.so` not rebuilt); the token provider is a transport-seam interceptor on both, see "What the build changed / found". Not run on a device. |
 | S9 walk | Two devices per client: reset on A, B shows the signed-out screen within the access TTL and wipes; B signs in again and restores from A; A's Devices list shows A alone; the old phrase is refused and the new one accepted; `docs/PRODUCT-READINESS.md` updated from what was seen. **Open:** nothing was walked live on any device or against a server on 2026-10-03. |
-| S10 docs and security | The amendment notes in ADR-0014 / 0017 / 0050 / 0053 / 0057 / 0064; `CLAUDE.md` ADR row and module-map rows (`lakko-attest`, `lakko-auth-token`, `auth`, `discovery`, `ds`); `docs/security/invariant-index.md` (a new C-entry for "a key change at the directory is attested or proven"); `known-gaps.md` (the phase-2 gap, minted); a `lakko-security` pass on request. **Docs reconciled 2026-10-03:** the `CLAUDE.md` rows (0065 added; 0014 / 0017 / 0057 / 0064 and the five module-map rows amended), `docs/security/auth-flow.md`, `threat-model.md`, C-71 in `calls.md` + the index, G-44 (phase 2) and G-45 (the stolen-session reset) in `known-gaps.md`, `docs/PRODUCT-READINESS.md`, UX section 15. The dated notes at the top of the amended ADR files are still to be written; the `lakko-security` pass has not run. |
+| S10 docs and security | The amendment notes in ADR-0014 / 0017 / 0050 / 0053 / 0057 / 0072; `CLAUDE.md` ADR row and module-map rows (`lakko-attest`, `lakko-auth-token`, `auth`, `discovery`, `ds`); `docs/security/invariant-index.md` (a new C-entry for "a key change at the directory is attested or proven"); `known-gaps.md` (the phase-2 gap, minted); a `lakko-security` pass on request. **Docs reconciled 2026-10-03:** the `CLAUDE.md` rows (0065 added; 0014 / 0017 / 0057 / 0064 and the five module-map rows amended), `docs/security/auth-flow.md`, `threat-model.md`, C-71 in `calls.md` + the index, G-44 (phase 2) and G-45 (the stolen-session reset) in `known-gaps.md`, `docs/PRODUCT-READINESS.md`, UX section 15. The dated notes at the top of the amended ADR files are still to be written; the `lakko-security` pass has not run. |
 | Phase 2 | **Built 2026-10-04** on web, iOS and Android without the `lakko-mls` owner-slot exception (open question 6 decided: Recreate group only); the `group-closed` envelope in `lakko-contacts` + both FFI surfaces + the NSE decode arm; UX section 16; the 46 catalog keys with machine translations. See "Phase 2 as built". |
 
 ## Amended 2026-10-04: password-fresh reset grant
@@ -2372,7 +2372,7 @@ the ones the client reports recorded.
   answers the same flattened pair; a password reset does NOT bump the
   generation.
 - **The `/recovery/credential/{start,finish}` routes are deleted** (no
-  handler, no route, no mention left in `services/auth/src`); ADR-0064
+  handler, no route, no mention left in `services/auth/src`); ADR-0072
   decision 9's replace exists only inside `reset/finish`.
 - **Discovery's error vocabulary** is richer than section 4.1 named: `400
   key-reset-attestation-invalid` (bad signature, another account's
@@ -2526,7 +2526,7 @@ against the test stack (open question 4).
   them (phase 2, in code since 2026-10-04, not walked), and keep them in a
   group the old identity owned, which can only be recreated; owned channels
   are orphaned by a reset; a weeks-old `publish-owed` reset asks for a sign-in.
-- **Neutral:** `identity_version` finally means something; ADR-0064's
+- **Neutral:** `identity_version` finally means something; ADR-0072's
   "recovery credential owed" state is replaced by "publish owed";
   ADR-0016's supersession machinery stays dormant and its acceptance gate
   unchanged.
@@ -2540,7 +2540,7 @@ against the test stack (open question 4).
   [ADR-0042](0042-push-opaque-group-routing-id.md), [ADR-0045](0045-remote-commit-epoch-fork.md),
   [ADR-0050](0050-per-device-conversation-leaves.md), [ADR-0053](0053-ds-journal-authorisation.md),
   [ADR-0054](0054-anti-abuse-without-client-work.md), [ADR-0057](0057-journal-ownership.md),
-  [ADR-0062](0062-conversation-kind.md), [ADR-0064](0064-recovery-model-simplification.md)
+  [ADR-0062](0062-conversation-kind.md), [ADR-0072](0072-recovery-model-simplification.md)
 - `crates/lakko-auth-token/src/lib.rs`, `crates/lakko-attest/src/{lib,genesis,backup_head}.rs`,
   `crates/lakko-mls/src/{device_group,device_binding}.rs`,
   `crates/lakko-ds-proof/src/statement.rs`

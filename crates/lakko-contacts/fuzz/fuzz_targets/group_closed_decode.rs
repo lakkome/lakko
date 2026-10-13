@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target — `decode_group_closed` (ADR-0065 phase 2,
+//! Fuzz target — `decode_group_closed` (ADR-0073 phase 2,
 //! `docs/ux/identity-recovery.md` §16.5).
 //!
 //! A group-closed envelope arrives as an MLS application message on a group

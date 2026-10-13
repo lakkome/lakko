@@ -98,7 +98,7 @@ final class PhraseSeededIdentityTests: XCTestCase {
         XCTAssertNotEqual(a, b)
     }
 
-    /// ADR-0064 decision 3: a phrase is exactly 12 words. The retired
+    /// ADR-0072 decision 3: a phrase is exactly 12 words. The retired
     /// 24-word shape and a 12-word phrase with a bad checksum are both
     /// refused by the core, so no screen can accept either.
     func testOnlyAValidTwelveWordPhraseIsAccepted() {

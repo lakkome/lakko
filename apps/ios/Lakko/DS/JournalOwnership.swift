@@ -46,7 +46,7 @@ public enum DsStatementError: Error, Equatable, LocalizedError {
     /// `503 push-binding-disabled` — the DS has no binding pepper.
     case pushBindingDisabled
     /// `503 key-reset-disabled` — the DS has no pinned attest key, so an
-    /// attested reset (ADR-0065) cannot be verified there.
+    /// attested reset (ADR-0073) cannot be verified there.
     case keyResetDisabled
     /// Any other status.
     case http(status: Int, body: String)
@@ -592,7 +592,7 @@ public enum JournalOwnership {
         }
     }
 
-    /// ADR-0065 section 5 — re-root the account's DeviceGroup journal after
+    /// ADR-0073 section 5 — re-root the account's DeviceGroup journal after
     /// a key reset: the `reset` statement signed by the NEW root (derived
     /// from the new account seed), carrying the key-reset attestation the
     /// DS verifies under its pinned attest key. The DS replaces the root,
@@ -604,7 +604,7 @@ public enum JournalOwnership {
     /// new root); a probe that answers `401` is a real conflict and is
     /// thrown. `503 key-reset-disabled` and every other refusal are thrown.
     ///
-    /// ADR-0066 section 4.6 ("T5 as built" item 21): the DS hears an attested
+    /// ADR-0074 section 4.6 ("T5 as built" item 21): the DS hears an attested
     /// reset only with a ROOT ENDORSEMENT beside the attestation, a signature
     /// by the attested NEW account key over the journal, the generation and
     /// the key that becomes the root (`root.publicKey()`). `endorse` signs it
@@ -626,7 +626,7 @@ public enum JournalOwnership {
         } catch DsStatementError.conflict {
             switch try await probeRoot(root: root, journalId: journalId, ds: ds) {
             case .root:
-                NSLog("ADR-0065: the DeviceGroup journal reset had already landed")
+                NSLog("ADR-0073: the DeviceGroup journal reset had already landed")
             case .notRoot:
                 throw DsStatementError.conflict
             }
@@ -661,7 +661,7 @@ public enum JournalOwnership {
     }
 }
 
-// MARK: - The attested reset body (ADR-0065, ADR-0066 section 4.6)
+// MARK: - The attested reset body (ADR-0073, ADR-0074 section 4.6)
 
 /// `PUT /ds/group/{hex}/reset` (after a reset or a recall) and
 /// `PUT /ds/group/{hex}/root` (after a rotation) with
@@ -695,7 +695,7 @@ enum AttestedResetBody {
     }
 }
 
-/// The root endorsement of ADR-0066 section 4.6: the account's NEW identity
+/// The root endorsement of ADR-0074 section 4.6: the account's NEW identity
 /// key says which key becomes the root of the account's DeviceGroup journal,
 /// at which generation. The DS verifies it with the key inside the
 /// attestation it is already checking, so a served attestation is useless to

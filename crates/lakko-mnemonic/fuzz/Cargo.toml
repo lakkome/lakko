@@ -21,7 +21,7 @@ lakko-mnemonic = { path = ".." }
 # `Mnemonic::from_phrase` / `from_entropy` are the BIP39 recovery parsers.
 # `from_phrase` parses a user-typed / device-relayed recovery phrase;
 # `from_entropy` rebuilds the phrase from the entropy a passkey-vault blob
-# opens to (ADR-0064), which whoever stored the blob chose. Any panic / overflow in these
+# opens to (ADR-0072), which whoever stored the blob chose. Any panic / overflow in these
 # parsers is a vulnerability.
 [[bin]]
 name = "mnemonic_parse"
@@ -30,7 +30,7 @@ test = false
 doc = false
 bench = false
 
-# The email-vault open path (ADR-0067): the sealed blob is served by the
+# The email-vault open path (ADR-0075): the sealed blob is served by the
 # server in the answer to a mailed code, so its bytes are attacker-chosen.
 # Opened under a fixed stretched key (no Argon2id per input); the same bytes
 # also drive the recovery-address rule and its idempotence.

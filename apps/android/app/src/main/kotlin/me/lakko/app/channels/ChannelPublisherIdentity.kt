@@ -102,7 +102,7 @@ public class ChannelPublisherIdentity(
     public suspend fun bind(
         accountIdB64: String,
         accountIdentitySeed: ByteArray,
-        /** ADR-0066 section 3.5 - the account's CURRENT phrase seed when the
+        /** ADR-0074 section 3.5 - the account's CURRENT phrase seed when the
          *  caller knows it. After a rotation it differs from
          *  [accountIdentitySeed] (the conversation identity's): OWNER
          *  requests are then signed by the key the current seed derives,

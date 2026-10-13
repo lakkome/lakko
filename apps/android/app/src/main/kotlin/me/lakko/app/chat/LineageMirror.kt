@@ -9,7 +9,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 /*
- * ADR-0065 R.5 - a plain-preferences mirror of the lineage registers
+ * ADR-0073 R.5 - a plain-preferences mirror of the lineage registers
  * (`successor group -> root conversation`) of the ADR-0058 synced state.
  *
  * The synced state itself is sealed under the device key and owned by the

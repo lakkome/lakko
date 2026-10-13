@@ -11,7 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0066 section 3.5 x ADR-0065 R.2 - the one filter every path that adds
+ * ADR-0074 section 3.5 x ADR-0073 R.2 - the one filter every path that adds
  * a person's devices goes through ([gateHeldKeyForAdd], [addFilterKeys]).
  *
  * The gate itself and the KeyPackage binding read are native; what is run

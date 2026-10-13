@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Whether one account key is the PROVEN successor of another (ADR-0066
+ * Whether one account key is the PROVEN successor of another (ADR-0074
  * section 3.5a): the same person, across a key rotation the old key signed.
  *
  * Two sources, either suffices:

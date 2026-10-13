@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.7 case 1 - the publish guard: nothing is sealed or sent into a
+ * ADR-0073 R.7 case 1 - the publish guard: nothing is sealed or sent into a
  * superseded one-to-one, by any `ChatClient`, except the successor claim.
  *
  * The refusal happens BEFORE the identity is resolved and before anything

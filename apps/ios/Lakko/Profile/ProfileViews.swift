@@ -149,7 +149,7 @@ struct ProfileSettingsScreen: View {
 
     /// "Choose a username", for an account without one (a guest).
     private let onChooseUsername: (() -> Void)?
-    /// "Change username" (ADR-0068), beside the name of an account that
+    /// "Change username" (ADR-0076), beside the name of an account that
     /// has one.
     private let onChangeUsername: (() -> Void)?
 

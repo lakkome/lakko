@@ -218,7 +218,7 @@ internal fun buildBackgroundDecryptDeps(
         // like everything else here (C-59), and the one store on this
         // interface that is NOT about decrypting: a wake decides whether to
         // interrupt, and a muted chat never rings.
-        // ADR-0065 R.5 — mute is a fact of the CONVERSATION: a successor
+        // ADR-0073 R.5 — mute is a fact of the CONVERSATION: a successor
         // group is muted exactly when its conversation is. The lineage is
         // read from its plain mirror (a READ, C-59).
         override fun isMuted(accountIdB64: String, groupHex: String): Boolean =
@@ -231,14 +231,14 @@ internal fun buildBackgroundDecryptDeps(
                 ),
             )
 
-        // ADR-0065 R.5 — the continuity facts are plain preferences (group
+        // ADR-0073 R.5 — the continuity facts are plain preferences (group
         // ids and stamps, no key material), so the background pass can read
         // them. A READ (C-59).
         override fun isClosedOneToOne(accountIdB64: String, groupHex: String): Boolean =
             groupHex.lowercase() in
                 me.lakko.app.chat.SharedPrefsContinuityBackend(appContext).load(accountIdB64).movedOneToOne
 
-        // ADR-0065 R.5 / R.8 — the reset ledger is plain preferences (public
+        // ADR-0073 R.5 / R.8 — the reset ledger is plain preferences (public
         // account keys and generations), written by the identity gate. A
         // READ (C-59).
         override fun supersededKeys(accountIdB64: String): Set<String> =
@@ -261,7 +261,7 @@ internal fun buildBackgroundDecryptDeps(
         override fun lineage(accountIdB64: String): List<me.lakko.app.chat.LineageEntry> =
             me.lakko.app.chat.LineageMirror.load(appContext, accountIdB64)
 
-        // ADR-0065 R.7 case 1 — the app's own stored message log, the same
+        // ADR-0073 R.7 case 1 — the app's own stored message log, the same
         // file [startCursor] reads. Opened at most once per wake and only
         // when a row carries a re-send marker; never written from here.
         private var heldLog: Pair<String, me.lakko.app.chat.MessageLogPayload?>? = null
@@ -376,7 +376,7 @@ private class RealThrowawayGroup(
     private fun senderAccountOf(app: ProcessedMessage.Application): String? =
         app.senderAccount?.let { java.util.Base64.getEncoder().encodeToString(it) }
 
-    // ADR-0065 R.5 / R.8 — reads of the throwaway group, nothing written.
+    // ADR-0073 R.5 / R.8 — reads of the throwaway group, nothing written.
     override fun facts(): WakeGroupFacts? =
         try {
             val roster = group.members()

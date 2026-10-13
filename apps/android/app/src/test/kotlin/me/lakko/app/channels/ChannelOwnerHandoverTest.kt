@@ -11,7 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0066 section 3.5, "Channels" - the owner-key handover of a rotation:
+ * ADR-0074 section 3.5, "Channels" - the owner-key handover of a rotation:
  * what each answer of `PUT /v1/channels/{id}/owner` means, that a channel
  * without a verdict keeps the step owed, and which identity owner requests
  * are derived from afterwards. Fakes only; no server, no native core.

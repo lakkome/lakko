@@ -19,7 +19,7 @@
  * saved. Whether the device's identity is stale is decided by the
  * published-identity checks, not by a failed sign-in.
  *
- * Since ADR-0065 a reset moves the recovery credential and the key
+ * Since ADR-0073 a reset moves the recovery credential and the key
  * generation in one server transaction, so a phrase this device minted is
  * the account's credential the moment the reset answered: there is no
  * "credential owed" exception any more (what can still be owed afterwards

@@ -670,12 +670,12 @@ final class MultiJoinerCall {
             // place here — drop.
             break
         case .groupClosed:
-            // ADR-0065 phase 2 — a group-closed notice rides the GROUP JOURNAL
+            // ADR-0073 phase 2 — a group-closed notice rides the GROUP JOURNAL
             // (judged in `ChatRepository.receiveGroupClosed`), never the
             // SFU signal-relay. Out of place here — drop.
             break
         case .keyRotation:
-            // ADR-0066 section 3.3 — the account's key-rotation envelope is
+            // ADR-0074 section 3.3 — the account's key-rotation envelope is
             // meaningful ONLY in the account's own DeviceGroup. Anywhere else
             // it is dropped, never opened and never rendered.
             break

@@ -107,7 +107,7 @@ import type {
  *  app code uses one URL across environments. */
 export const DEFAULT_BASE_URL = "/api/auth";
 
-/** The fixed length of the ADR-0065 key-reset attestation. */
+/** The fixed length of the ADR-0073 key-reset attestation. */
 export const KEY_RESET_ATTESTATION_LEN = 177;
 
 /** Result of `AuthClient.signup`. `exportKey` is the OPAQUE export
@@ -126,7 +126,7 @@ export interface SignupResult {
    *  somewhere safe — losing it means losing the only way back
    *  into the account if the password is forgotten. */
   recoveryPhrase?: string;
-  /** ADR-0065: the session pair (access token, refresh credential, key
+  /** ADR-0073: the session pair (access token, refresh credential, key
    *  generation) the landing installs. */
   session: SessionPair;
   /** The fresh-auth grant the signup finish minted (the password was typed
@@ -152,9 +152,9 @@ export interface LoginResult {
   /** Same export key the user got at signup time — deterministic
    *  for the same password. */
   exportKey: Uint8Array;
-  /** ADR-0065: the session pair the landing installs. */
+  /** ADR-0073: the session pair the landing installs. */
   session: SessionPair;
-  /** ADR-0065 (amended 2026-10-06): the fresh-auth grant the password
+  /** ADR-0073 (amended 2026-10-06): the fresh-auth grant the password
    *  login minted, or `null` when the response carried none. Memory only. */
   freshGrant: FreshGrant | null;
 }
@@ -166,7 +166,7 @@ export interface DeviceAuthorizeRedeemResult {
   /** Raw 16-byte account id. On the device-grant redeem this is where a
    *  fresh device first learns it (ADR-0056). */
   accountId: Uint8Array;
-  /** ADR-0065: the session pair the landing installs. */
+  /** ADR-0073: the session pair the landing installs. */
   session: SessionPair;
 }
 
@@ -188,7 +188,7 @@ export interface TotpRecoverResult {
   /** Raw 16-byte account id. On the device-grant redeem this is where a
    *  fresh device first learns it (ADR-0056). */
   accountId: Uint8Array;
-  /** ADR-0065: the session pair the landing installs. */
+  /** ADR-0073: the session pair the landing installs. */
   session: SessionPair;
 }
 
@@ -200,12 +200,12 @@ export interface RecoverResult {
    *  derive a fresh device root key — the previous device key
    *  (if any) is no longer reachable from the new password. */
   exportKey: Uint8Array;
-  /** ADR-0065: a fresh session pair for the rotated password (same key
+  /** ADR-0073: a fresh session pair for the rotated password (same key
    *  generation: a password reset does not bump it). */
   session: SessionPair;
 }
 
-/** Result of `AuthClient.resetAccountKeys` (ADR-0065 section 2). */
+/** Result of `AuthClient.resetAccountKeys` (ADR-0073 section 2). */
 export interface KeyResetResult {
   /** The raw 177-byte key-reset attestation (decoded from the server's
    *  URL-safe base64). Carried to discovery and to the DS. */
@@ -249,7 +249,7 @@ export const ACCOUNT_STATEMENT_KIND_SESSION_UPGRADE = 4;
 export const ACCOUNT_STATEMENT_KIND_RECALL_START = 5;
 
 /** A `recall/finish` request built and signed, kept until it is answered
- *  (ADR-0066 T5 item 25). */
+ *  (ADR-0074 T5 item 25). */
 export interface RecallPendingFinish {
   /** The request as last sent (or to be sent). Resent byte for byte. */
   request: RecallFinishRequest;
@@ -748,7 +748,7 @@ export class AuthClient {
   async login(
     handle: string,
     password: Uint8Array,
-    /** ADR-0066 section 0.4: this device's id, when it is already known
+    /** ADR-0074 section 0.4: this device's id, when it is already known
      *  for the account being signed in to (`session-device.ts`). */
     deviceIdB64?: string,
   ): Promise<LoginResult> {
@@ -844,7 +844,7 @@ export class AuthClient {
 
   /**
    * `POST /auth/session/refresh` — trade the refresh credential for a new
-   * pair (ADR-0065 section 3.2). Anonymous: the credential is the
+   * pair (ADR-0073 section 3.2). Anonymous: the credential is the
    * authorisation, sent in the body, never as a bearer. Answers the pair, or
    * `AuthHttpError` 401 with `errorCode` `key-generation-superseded` (the
    * keys were reset elsewhere) or `refresh-invalid` (bad, expired or
@@ -863,7 +863,7 @@ export class AuthClient {
 
   /**
    * `POST /auth/session/bind-device` — replace a session that names no
-   * device with one naming `deviceIdB64` (ADR-0066 section 0.4, T1 points 8
+   * device with one naming `deviceIdB64` (ADR-0074 section 0.4, T1 points 8
    * and 9). Bearer; the body carries the refresh credential of the same
    * session, since the route issues a new 30-day one. Idempotent for a
    * session that already names this device (a fresh pair).
@@ -891,7 +891,7 @@ export class AuthClient {
 
   /**
    * `POST /auth/session/logout` — sign this device's session out at the
-   * server (ADR-0066 section 2.1): afterwards its bearer gets a plain `401`
+   * server (ADR-0074 section 2.1): afterwards its bearer gets a plain `401`
    * and its refresh credential `401 refresh-invalid`. Bearer, no body,
    * `204`. Sent with the token exactly as given (no refresh, no retry): a
    * logout that fails is retried from the owed marker, not here.
@@ -919,7 +919,7 @@ export class AuthClient {
 
   /**
    * `POST /account/devices/revoke` — sign another device of the account out
-   * and mark it removed (ADR-0066 section 2.1): from then on auth answers
+   * and mark it removed (ADR-0074 section 2.1): from then on auth answers
    * its bearer and its refresh with `401 device-revoked`, and it wipes
    * itself. Bearer. `204`.
    *
@@ -974,7 +974,7 @@ export class AuthClient {
   }
 
   /**
-   * Reset the signed-in account's keys (ADR-0065 section 2): `seed` is the
+   * Reset the signed-in account's keys (ADR-0073 section 2): `seed` is the
    * 64-byte BIP39 seed of the NEW recovery phrase, `newSignaturePubkey` the
    * 32-byte Ed25519 key of the identity derived from it.
    *
@@ -1052,7 +1052,7 @@ export class AuthClient {
   }
 
   /**
-   * Rotate the signed-in account's keys, keeping the other devices (ADR-0066
+   * Rotate the signed-in account's keys, keeping the other devices (ADR-0074
    * section 3.4, "T5 as built" items 6-13):
    *
    * ```text
@@ -1080,7 +1080,7 @@ export class AuthClient {
     readonly proof: Uint8Array;
     /** Devices whose removal raced the commit (at most 8). */
     readonly revokeDeviceIds: readonly Uint8Array[];
-    /** ADR-0067 section 3: the person is saving a recovery phrase; the
+    /** ADR-0075 section 3: the person is saving a recovery phrase; the
      *  account becomes phrase-protected with this rotation. */
     readonly phraseSaved?: boolean;
   }): Promise<KeyResetResult> {
@@ -1129,7 +1129,7 @@ export class AuthClient {
   }
 
   /**
-   * `POST /auth/session/refresh` with a `key_statement_b64` (ADR-0066 section
+   * `POST /auth/session/refresh` with a `key_statement_b64` (ADR-0074 section
    * 3.3, "T5 as built" items 15-17): a refresh credential of a LOWER
    * generation is exchanged for a pair at the current one when the kind-4
    * account statement over it verifies under the account's recorded key.
@@ -1158,7 +1158,7 @@ export class AuthClient {
   }
 
   /**
-   * `POST /account/recall/status` (ADR-0066 part 1): whether the account
+   * `POST /account/recall/status` (ADR-0074 part 1): whether the account
    * can be taken back from this device, and until when. Anonymous;
    * `statement` is the `recall-status` account statement signed by the OLD
    * account key. Returns the parsed JSON body as it arrived
@@ -1167,7 +1167,7 @@ export class AuthClient {
    */
   async recallStatus(
     sign: (signAtMs: number | null) => Uint8Array,
-    /** ADR-0067 section 8: name the account by login handle (base64url, no
+    /** ADR-0075 section 8: name the account by login handle (base64url, no
      *  pad). The statement `sign` returns must then carry the first 16
      *  bytes of the handle in its account field. */
     handle?: string,
@@ -1185,7 +1185,7 @@ export class AuthClient {
   }
 
   /**
-   * Take the account back from a device of before the reset (ADR-0066
+   * Take the account back from a device of before the reset (ADR-0074
    * part 1, "T3 as built"):
    *
    * ```text
@@ -1235,7 +1235,7 @@ export class AuthClient {
    * OPAQUE finishes, and the finish request built and signed but NOT sent.
    * The caller keeps the returned value (and the phrase it generated) until
    * {@link recallFinish} has answered: a finish whose answer was lost is
-   * asked again with the same request (ADR-0066 T5 item 25).
+   * asked again with the same request (ADR-0074 T5 item 25).
    *
    * A `statement-stale` answer to start is re-signed at the server's time
    * and sent once more (item 24); nothing was counted for it.
@@ -1245,7 +1245,7 @@ export class AuthClient {
     readonly oldAccountSeed: Uint8Array;
     readonly anchorSeq: number;
     readonly oldPassword: Uint8Array;
-    /** ADR-0067 section 8, the phrase arm: the 64-byte seed of the recovery
+    /** ADR-0075 section 8, the phrase arm: the 64-byte seed of the recovery
      *  phrase as it was before the reset. When given, the login is made from
      *  it against the anchored recovery envelope and `oldPassword` is not
      *  used. */
@@ -1498,12 +1498,12 @@ export class AuthClient {
   // -----------------------------------------------------------------
 
   // -----------------------------------------------------------------
-  // The passkey vault — ADR-0064 decision 6
+  // The passkey vault — ADR-0072 decision 6
   // -----------------------------------------------------------------
 
   /** `PUT /vault/passkey` — store the phrase entropy sealed under one of
    *  this account's passkeys, so that passkey can restore the keys on a new
-   *  device (ADR-0064 decision 6; opt-in per passkey). Bearer-authenticated. */
+   *  device (ADR-0072 decision 6; opt-in per passkey). Bearer-authenticated. */
   async passkeyVaultPut(
     sessionToken: string,
     credentialId: Uint8Array,
@@ -1706,7 +1706,7 @@ export class AuthClient {
   async bindLoginHandle(
     sessionToken: string,
     handle: string,
-    /** ADR-0068, a bind that CHANGES the handle (a rename, or its
+    /** ADR-0076, a bind that CHANGES the handle (a rename, or its
      *  rollback): the fresh-auth grant, the handle held now, and the
      *  recovery email to re-key (omitted: the server drops it). */
     change?: {
@@ -1746,7 +1746,7 @@ export class AuthClient {
     );
   }
 
-  /** `POST /auth/login-handle/check` (ADR-0068): whether `handle` is the
+  /** `POST /auth/login-handle/check` (ADR-0076): whether `handle` is the
    *  one this account holds (`same`), the account holds another (`other`),
    *  or it holds none (`none`). */
   async checkLoginHandle(sessionToken: string, handle: string): Promise<"same" | "other" | "none"> {
@@ -1837,7 +1837,7 @@ export class AuthClient {
     let response: Response;
     try {
       // Through the session-aware fetch: a bearer the provider manages is
-      // refreshed ahead of expiry and retried once on a 401 (ADR-0065
+      // refreshed ahead of expiry and retried once on a 401 (ADR-0073
       // section 3.3); an anonymous request passes through untouched.
       response = await sessionFetch(url, {
         method: "POST",
@@ -1889,7 +1889,7 @@ function optionalBytes(b64: string | null | undefined): Uint8Array | null {
 /** A login handle on the wire: base64url without padding of 32 bytes. */
 const HANDLE_WIRE = /^[A-Za-z0-9_-]{43}$/;
 
-/** The optional `device_id_b64` field of a landing request (ADR-0066
+/** The optional `device_id_b64` field of a landing request (ADR-0074
  *  section 0.4): present only when the caller knows this device's id. */
 function deviceField(deviceIdB64: string | undefined): { device_id_b64?: string } {
   return deviceIdB64 === undefined ? {} : { device_id_b64: deviceIdB64 };

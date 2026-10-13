@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! wasm-bindgen surface for `lakko_mnemonic::vault` (ADR-0064 decision 6):
+//! wasm-bindgen surface for `lakko_mnemonic::vault` (ADR-0072 decision 6):
 //! the passkey vault.
 //!
 //! `passkeyVaultSeal` / `passkeyVaultOpen` seal and open the phrase entropy
@@ -18,7 +18,7 @@ fn vault_err(e: vault::VaultError) -> JsError {
 }
 
 /// Seal a mnemonic's entropy under a passkey's 32-byte PRF output
-/// (ADR-0064 decision 6). The result is the opaque blob `PUT /vault/passkey`
+/// (ADR-0072 decision 6). The result is the opaque blob `PUT /vault/passkey`
 /// stores.
 ///
 /// # Errors

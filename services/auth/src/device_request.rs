@@ -50,7 +50,7 @@
 //!    the outcome.
 //! 7. **`DELETE /device/requests/{id}`** — bearer. Decline ("It is not me").
 //!
-//! **A session is not enough to let a device in** (ADR-0065, amended
+//! **A session is not enough to let a device in** (ADR-0073, amended
 //! 2026-10-06). Routes 3 and 6 carry `fresh_grant` in their JSON body: the
 //! `k1` grant a password or passkey sign-in returned, live and at the
 //! account's current key generation. Without one both answer `403
@@ -738,7 +738,7 @@ mod device_request_e2e_tests {
     }
 
     /// The two gated routes (`.../pake`, `.../result`) need a fresh-auth
-    /// grant (ADR-0065, amended 2026-10-06). These tests are about the relay,
+    /// grant (ADR-0073, amended 2026-10-06). These tests are about the relay,
     /// so the helper plays a device whose person signed in just now: it mints
     /// a grant for the bearer's account at the bearer's generation and adds
     /// it to the body, unless the body already names one. The refusals are

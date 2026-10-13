@@ -9,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0065 phase 2 / UX 16.6 — the channels a key reset orphaned on the
+ * ADR-0073 phase 2 / UX 16.6 — the channels a key reset orphaned on the
  * device that reset the keys: which ones the record reads off the publisher
  * store, and that their keys are never re-opened.
  */

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The key rotation wired to the app (ADR-0066 part 3, Stage A).
+ * The key rotation wired to the app (ADR-0074 part 3, Stage A).
  *
  * `devices/key-rotation.ts` decides; this module supplies its ports: the
  * removal operation (`removal-runtime.ts`), the auth layer's half
@@ -78,7 +78,7 @@ export interface KeyRotationRuntime {
   readonly activeStep: Accessor<RotationStep | null>;
   /** Start the rotation that removes `targetKey`, or continue the record. */
   rotate(targetKey: Uint8Array, grant: string | null, attestation?: Uint8Array | null): Promise<RotateResult>;
-  /** ADR-0067 section 3, "Save a recovery phrase": change the account keys
+  /** ADR-0075 section 3, "Save a recovery phrase": change the account keys
    *  with every device kept and make the account phrase-protected. Starts
    *  the operation or continues its record. The new words are shown once it
    *  is complete. */
@@ -201,7 +201,7 @@ export function useKeyRotation(): KeyRotationRuntime {
           return "done";
         }
         case "profile":
-          // ADR-0066 section 3.5a rule 3 - the grants for the new mailbox,
+          // ADR-0074 section 3.5a rule 3 - the grants for the new mailbox,
           // to every one-to-one and group. Owed until all of them landed.
           return resendProfileAfterRotation();
         case "links":

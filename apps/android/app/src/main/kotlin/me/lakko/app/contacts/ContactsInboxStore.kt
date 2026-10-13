@@ -49,7 +49,7 @@ public interface ContactsInboxStore {
     public fun savePending(accountIdB64: String, pending: List<IncomingContactRequest>)
 
     /**
-     * ADR-0065 R.7 case 1 / UX 16.6 — persist the requests from EXISTING
+     * ADR-0073 R.7 case 1 / UX 16.6 — persist the requests from EXISTING
      * contacts that have no verdict yet ([withWaitingRequest]). They are
      * never shown; the mailbox cursor has moved past them, so this is the
      * only place they survive a process death. The default keeps nothing (a
@@ -206,7 +206,7 @@ public data class FetchedRequestsMerge(
  * is not a request). Order is preserved: existing rows first, then the kept
  * fetched rows in arrival order.
  *
- * ADR-0066 section 3.5a rule 5 - one request per person across a PROVEN
+ * ADR-0074 section 3.5a rule 5 - one request per person across a PROVEN
  * rotation of their account keys ([supersedes]: the first key is the proven
  * successor of the second). A fetched request from the successor of a
  * pending row's key REPLACES that row in place, silently (the old request's
@@ -262,7 +262,7 @@ public fun mergeFetchedRequests(
 }
 
 /**
- * ADR-0066 section 3.5a rule 5 - the fetched requests that may be a
+ * ADR-0074 section 3.5a rule 5 - the fetched requests that may be a
  * person's request sent again from a rotated key: one whose CLAIMED account
  * id is that of a pending row under ANOTHER key. Each pair
  * `(fetched key, pending key)` is put to a proof before anything is
@@ -422,7 +422,7 @@ internal fun decodePendingRequests(raw: String): List<IncomingContactRequest>? =
     }
 
 // =============================================================================
-// ADR-0066 part 3 - which mailbox the inbox cursor belongs to
+// ADR-0074 part 3 - which mailbox the inbox cursor belongs to
 // =============================================================================
 
 /**

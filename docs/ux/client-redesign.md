@@ -80,7 +80,7 @@ recovery behind More options), recovery methods as rows, and the restore
 prompt on the tokens. Both native agents found and fixed the same defect:
 the phrase screen after sign-up was unreachable because the session state
 replaced the anonymous root first. Three-word recovery has no native client
-flow, so the row is web-only. (Amended 2026-10-02 by ADR-0064: the phrase
+flow, so the row is web-only. (Amended 2026-10-02 by ADR-0072: the phrase
 is 12 words in a 3 x 4 / 4 x 3 grid numbered row by row, social recovery
 and the email / phone code are removed, and three words are checked on the
 device; see 5.6 and docs/ux/identity-recovery.md.) Screenshots: iOS Welcome on a spare simulator
@@ -404,7 +404,7 @@ differences are the title, the compose action and the row title rule.
   opens the pairing flow (show QR or scan QR, and the another-device prompt
   of docs/ux/identity-recovery.md). The five-way segmented control is
   removed; TOTP enrolment moves under Recovery. (Contact enrolment, the
-  email / phone code, was removed by ADR-0064 on 2026-10-02.)
+  email / phone code, was removed by ADR-0072 on 2026-10-02.)
 
 ### 5.6 Auth
 
@@ -423,7 +423,7 @@ differences are the title, the compose action and the row title rule.
   one"), Passkey, Recovery phrase (12 words). "Signs you in on this device":
   Three words from your phrase (shown only on a device that still holds the
   account's phrase and keys; the device checks them itself), Authenticator
-  code. There is no email or phone row and no social recovery (ADR-0064,
+  code. There is no email or phone row and no social recovery (ADR-0072,
   2026-10-02). The full flow, the "Restore your keys" prompt and "Choose a
   new password" are in docs/ux/identity-recovery.md.
 - Copy rule for every auth error: say what to do next, not what failed

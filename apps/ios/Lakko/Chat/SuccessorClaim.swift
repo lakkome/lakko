@@ -3,7 +3,7 @@
 
 import Foundation
 
-// ADR-0065 "Phase 2 revised", R.6 - founding a successor by CLAIM, THEN
+// ADR-0073 "Phase 2 revised", R.6 - founding a successor by CLAIM, THEN
 // BUILD, and the receive rule for the claim, as pure decisions.
 //
 // iOS mirror of `apps/web/src/chat/successor-claim.ts`; the tables are the

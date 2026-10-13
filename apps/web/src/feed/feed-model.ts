@@ -27,7 +27,7 @@ export interface FeedSource {
   /** The log key: the message-log key of a group, the 32-char hex id of a
    *  channel. */
   readonly idHex: string;
-  /** ADR-0065 R.5 — the CONVERSATION a group source belongs to (the hex of
+  /** ADR-0073 R.5 — the CONVERSATION a group source belongs to (the hex of
    *  its lineage root), when that differs from `idHex`: a conversation that
    *  continued in a successor group is still ONE source, drawn from its
    *  current group (`idHex`) and named, muted, hidden and listed in feed
@@ -37,7 +37,7 @@ export interface FeedSource {
   /** The route segment that opens it: base64url of a group id
    *  (`/groups/<slug>`), the hex id of a channel (`/channels/<id>`). */
   readonly slug: string;
-  /** ADR-0065 R.5 / R.7 case 3 — the log keys of the conversation's OLDER
+  /** ADR-0073 R.5 / R.7 case 3 — the log keys of the conversation's OLDER
    *  groups this device holds, oldest first. Members who have not been
    *  added to the successor yet keep writing in the old group, and its
    *  journal is still read for a while (`lineage.ts` `oldSegmentPolled`):
@@ -83,7 +83,7 @@ export interface FeedCandidateRef {
   readonly source: FeedSource;
   readonly message: PersistedMessage;
   /** Set when the row lives in an OLDER group of the conversation, not in
-   *  `source.idHex` (ADR-0065 R.5). Such a row is read-only, as it is in the
+   *  `source.idHex` (ADR-0073 R.5). Such a row is read-only, as it is in the
    *  conversation itself: it can be opened, seen, copied and forwarded, and
    *  cannot be replied to. */
   readonly segment?: FeedOlderSegment;
@@ -180,7 +180,7 @@ function addChannelPosts(
 /**
  * The key of everything a PERSON attaches to a feed source: the mute flag,
  * "hide from feeds", a feed rule's include / exclude lists. The conversation
- * id, never the group a moved conversation currently lives in (ADR-0065 R.5),
+ * id, never the group a moved conversation currently lives in (ADR-0073 R.5),
  * so none of it is lost or duplicated when the conversation moves.
  */
 export function feedSourceKey(source: Pick<FeedSource, "idHex" | "conversationHex">): string {

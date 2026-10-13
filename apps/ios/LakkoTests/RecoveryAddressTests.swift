@@ -5,7 +5,7 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-// ADR-0067, amended 2026-10-13 — the account's devices keep the recovery
+// ADR-0075, amended 2026-10-13 — the account's devices keep the recovery
 // address and put the email vault back by themselves; and a guest chooses a
 // username and its first password. Scripted ports only: nothing here
 // reaches a server.

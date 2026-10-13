@@ -35,7 +35,7 @@
 //!   Phase 1.5b session-token issuance + verification. **Required**
 //!   at startup; missing / short secrets fail-fast.
 //! - `LAKKO_SESSION_TOKEN_TTL_SECS` — access-token validity window in
-//!   seconds (default 900, ADR-0065 section 3.1; chosen, not measured). It
+//!   seconds (default 900, ADR-0073 section 3.1; chosen, not measured). It
 //!   is the revocation latency at every verifier but auth after a key reset.
 //! - `LAKKO_REFRESH_TOKEN_TTL_DAYS` — refresh-credential validity window in
 //!   days (default 30); slides on every `POST /auth/session/refresh`.
@@ -75,7 +75,7 @@
 //!   recovery, and `/auth/login-handle`) answers 503 `login-by-name-disabled`, logged as a
 //!   warning at startup. Losing it unbinds every handle.
 //! - `LAKKO_AUTH_EMAIL_PEPPER` — 64 hex characters keying the stored
-//!   recovery-email value (ADR-0067). Optional; unset (or without
+//!   recovery-email value (ADR-0075). Optional; unset (or without
 //!   `LAKKO_VAULT_ENC_KEY` / `LAKKO_AUTH_HANDLE_PEPPER`) = the enrol, remove
 //!   and recover routes answer 503 `recovery-email-disabled` and
 //!   `GET /recovery-email/available` answers `{"available": false}`. Losing
@@ -109,7 +109,7 @@
 //! - `POST /password/reset/start`    — replace password via mnemonic, step 1 (Phase 1.16c3c3a)
 //! - `POST /password/reset/finish`   — replace password via mnemonic, step 2 (Phase 1.16c3c3a)
 //! - `POST /webauthn/register/start` — passkey enrolment, step 1 (Phase 2a2a, bearer-auth
-//!   AND `fresh_grant` in the body, else `403 fresh-auth-required`; ADR-0065, 2026-10-06)
+//!   AND `fresh_grant` in the body, else `403 fresh-auth-required`; ADR-0073, 2026-10-06)
 //! - `POST /webauthn/register/finish`— passkey enrolment, step 2 (Phase 2a2a, bearer-auth
 //!   AND `fresh_grant` in the body, the same gate)
 //! - `GET  /webauthn/credentials`    — list this account's passkeys (Phase 2a2a, bearer-auth)
@@ -123,18 +123,18 @@
 //! - `PUT  /auth/login-handle`       — bind the caller's login handle (ADR-0054 S5, bearer-auth;
 //!   `429 handle-bind-limited` per account, per address, and within the minimum interval
 //!   between handle changes)
-//!   Since ADR-0068 a bind that CHANGES the handle needs `fresh_grant` in the body (`403
+//!   Since ADR-0076 a bind that CHANGES the handle needs `fresh_grant` in the body (`403
 //!   fresh-auth-required`), and with `previous_handle` + `recovery_email {address,
 //!   vault_salt?, sealed_entropy?}` it moves the recovery email to the new handle instead of
 //!   dropping it (`403 address-mismatch`, `409 handle-mismatch`).
 //! - `POST /auth/login-handle/check` — `{state: "same" | "other" | "none"}` for the handle a
-//!   device holds against its account's bound one (ADR-0068, bearer-auth)
+//!   device holds against its account's bound one (ADR-0076, bearer-auth)
 //! - `DELETE /auth/login-handle`     — remove it (ADR-0054 S5, bearer-auth)
 //! - `POST /auth/session/refresh`    — renew the session pair with a refresh credential
-//!   (ADR-0065 section 3.2, anonymous, per-address limited)
+//!   (ADR-0073 section 3.2, anonymous, per-address limited)
 //! - `POST /account/keys/reset/start` / `/finish` — reset the account keys: bump the key
 //!   generation, replace the recovery credential, delete passkeys / vaults / grants /
-//!   requests, mint the key-reset attestation, issue a fresh pair (ADR-0065 section 2,
+//!   requests, mint the key-reset attestation, issue a fresh pair (ADR-0073 section 2,
 //!   bearer-auth AND a `fresh_grant` from a password or passkey sign-in made just
 //!   now, else `403 fresh-auth-required`; amended 2026-10-04 and 2026-10-06, when
 //!   `DELETE /account` (header `x-lakko-fresh-grant`, for an account without a passkey;
@@ -142,18 +142,18 @@
 //!   and `POST /device/requests/{id}/{pake,result}` (body `fresh_grant`) gained the
 //!   same gate)
 //! - `POST /auth/session/logout`     — raise the session floor of the caller's own device, so
-//!   its access token and refresh credentials stop at auth at once (ADR-0066 section 2.1,
+//!   its access token and refresh credentials stop at auth at once (ADR-0074 section 2.1,
 //!   bearer-auth, no body)
 //! - `POST /auth/session/bind-device` — exchange a pair that names no device for one naming
-//!   the caller's (ADR-0066 section 0.4, bearer-auth, body `device_id_b64` + `refresh_token`)
+//!   the caller's (ADR-0074 section 0.4, bearer-auth, body `device_id_b64` + `refresh_token`)
 //! - `POST /account/devices/revoke`  — remove another device: raise its session floor so its
-//!   credentials answer `401 device-revoked` (ADR-0066 section 2.1, bearer-auth AND a
+//!   credentials answer `401 device-revoked` (ADR-0074 section 2.1, bearer-auth AND a
 //!   `fresh_grant` AND a `statement_b64` signed by the account's recorded identity key, else
 //!   `403 fresh-auth-required` / `403 account-key-required`)
 //! - `GET  /recovery-email/available` — whether this server can mail a recovery code
-//!   (ADR-0067, anonymous) -> `{available}`
+//!   (ADR-0075, anonymous) -> `{available}`
 //! - `POST /recovery-email/enrol/start` / `/finish` — add or replace the account's recovery
-//!   email with a mailed code (ADR-0067 section 6, bearer-auth; the start also needs a
+//!   email with a mailed code (ADR-0075 section 6, bearer-auth; the start also needs a
 //!   `fresh_grant` and the account's own bound `handle`; the finish optionally stores the
 //!   44-byte email vault)
 //! - `GET  /recovery-email`          — `{available, enabled, vault, phrase_saved, totp}` for the
@@ -161,15 +161,15 @@
 //! - `DELETE /recovery-email`        — remove the recovery email and the vault (bearer-auth +
 //!   `fresh_grant`)
 //! - `PUT  /recovery-email/vault`    — store an email vault where the account has none, for the
-//!   address it already confirmed (ADR-0067 amended 2026-10-13; bearer-auth, NO fresh-auth
+//!   address it already confirmed (ADR-0075 amended 2026-10-13; bearer-auth, NO fresh-auth
 //!   grant; body `handle`, `address`, `vault_salt`, `sealed_entropy`; `403 address-mismatch`,
 //!   `409 no-recovery-email` / `phrase-saved` / `vault-exists`)
 //! - `DELETE /recovery-email/vault`  — the account becomes phrase-protected: delete the vault,
 //!   mark the account, write the notice (bearer-auth + `fresh_grant`)
 //! - `GET  /account/notices?after=`  — what happened to the account, for its own devices
-//!   (ADR-0067 section 9, bearer-auth; kept 60 days)
+//!   (ADR-0075 section 9, bearer-auth; kept 60 days)
 //! - `POST /recovery-email/recover/start` — mail a code if the handle and address belong
-//!   together; one answer for a match and a miss (ADR-0067 section 7, anonymous)
+//!   together; one answer for a match and a miss (ADR-0075 section 7, anonymous)
 //! - `POST /recovery-email/recover/verify` — the code -> `{ticket, totp_required}` or the
 //!   uniform `401 code-refused` (anonymous)
 //! - `POST /recovery-email/recover/totp` — the authenticator code, when the account has one
@@ -180,14 +180,14 @@
 //!   the ticket (password mode): captures the recall anchor, replaces the envelope, lands a
 //!   session pair and mints NO fresh-auth grant (anonymous)
 //!
-//! Since ADR-0067 the recall (`POST /account/recall/{status,start,finish}`) also has a phrase
+//! Since ADR-0075 the recall (`POST /account/recall/{status,start,finish}`) also has a phrase
 //! arm: `status` takes an optional `handle` and answers `account_id_b64` and `phrase_arm`,
 //! and `start` takes `proof: "phrase"` (a login against the anchored RECOVERY envelope),
 //! refused for an account that had an email vault when the anchor was captured. A key
 //! rotation (`/account/keys/rotate/finish`) takes `phrase_saved: true` for "Save a recovery
 //! phrase".
 //!
-//! Since ADR-0066 every session-landing route also takes an optional `device_id_b64` (the
+//! Since ADR-0074 every session-landing route also takes an optional `device_id_b64` (the
 //! device the pair names), and `POST /auth/genesis/attest` records the account's identity
 //! key on its first call and attests only that key afterwards (`409 identity-key-mismatch`).
 
@@ -248,16 +248,16 @@ use lakko_auth_token::TokenSecret;
 /// Default bind address if `LAKKO_BIND` is not set.
 const DEFAULT_BIND: &str = "127.0.0.1:8081";
 
-/// Default access-token TTL — 15 minutes (ADR-0065 section 3.1; chosen, not
+/// Default access-token TTL — 15 minutes (ADR-0073 section 3.1; chosen, not
 /// measured: a first value to measure the test stack's auth load against).
 /// Override via `LAKKO_SESSION_TOKEN_TTL_SECS`.
 const DEFAULT_SESSION_TOKEN_TTL_SECS: u64 = 900;
 
 /// Default refresh-credential TTL — 30 days, the session lifetime before
-/// ADR-0065. Override via `LAKKO_REFRESH_TOKEN_TTL_DAYS`.
+/// ADR-0073. Override via `LAKKO_REFRESH_TOKEN_TTL_DAYS`.
 const DEFAULT_REFRESH_TOKEN_TTL_DAYS: u64 = 30;
 
-/// Default fresh-auth-grant TTL — 10 minutes (ADR-0065, amended 2026-10-04
+/// Default fresh-auth-grant TTL — 10 minutes (ADR-0073, amended 2026-10-04
 /// and 2026-10-06). Chosen, not measured: long enough to read the warning,
 /// write down a new 12-word phrase and confirm after signing in with the
 /// password or a passkey, or to walk to another device and type its code,
@@ -333,7 +333,7 @@ pub(crate) struct AppState {
     /// `None` when unset, in which case the three `/totp/*` routes
     /// return 503 — loud refusal, no silent fallback.
     pub(crate) totp_enc_key: Option<Arc<[u8; 32]>>,
-    /// ADR-0064 — the key that wraps the passkey blobs at rest (`LAKKO_VAULT_ENC_KEY`). `None` disables the
+    /// ADR-0072 — the key that wraps the passkey blobs at rest (`LAKKO_VAULT_ENC_KEY`). `None` disables the
     /// `/vault/passkey*` routes (503).
     pub(crate) vault_enc_key: Option<Arc<[u8; 32]>>,
     /// ADR-0033 — call-admission anti-spam throttle config. Loaded from the
@@ -362,7 +362,7 @@ pub(crate) struct AppState {
     /// per-address token buckets (in memory) that replaced proof of work on
     /// every route except `/signup/start`.
     pub(crate) limits: Arc<limits::Limits>,
-    /// ADR-0067 — the recovery email: the pepper keying `email_key` (and the
+    /// ADR-0075 — the recovery email: the pepper keying `email_key` (and the
     /// subkeys derived from it) and the mail sender. `None` when
     /// `LAKKO_AUTH_EMAIL_PEPPER` is unset: the enrol, remove and recover
     /// routes answer 503 `recovery-email-disabled`. The feature also needs
@@ -501,7 +501,7 @@ async fn main() -> Result<()> {
         tracing::info!("totp endpoints disabled (LAKKO_TOTP_ENC_KEY not set)");
     }
 
-    // ADR-0064 — the passkey-vault at-rest wrapping key. Loud-fail on a
+    // ADR-0072 — the passkey-vault at-rest wrapping key. Loud-fail on a
     // malformed value; soft-disable when unset (the /vault/passkey* routes
     // then return 503).
     let vault_enc_key = passkey_vault::load_vault_enc_key().context("load LAKKO_VAULT_ENC_KEY")?;
@@ -560,7 +560,7 @@ async fn main() -> Result<()> {
     );
     limits.log_startup();
 
-    // ADR-0067 — the recovery email: its pepper and its mail sender. Loud-fail
+    // ADR-0075 — the recovery email: its pepper and its mail sender. Loud-fail
     // on a malformed pepper or SMTP setting; dormant (with a warning) when the
     // pepper is unset.
     let recovery_email = recovery_email::load().context("load the recovery-email config")?;
@@ -598,9 +598,9 @@ async fn main() -> Result<()> {
     let _limits_pruner = limits::spawn_pruner(pool.clone(), limits);
     let _webauthn_pruner = webauthn::spawn_state_pruner(pool.clone());
     let _floor_pruner = session::spawn_floor_pruner(pool.clone(), refresh_token_ttl_ms);
-    // ADR-0066 section 0.2 — expired recall anchors and stale recall states.
+    // ADR-0074 section 0.2 — expired recall anchors and stale recall states.
     let _recall_pruner = recall::spawn_pruner(pool.clone());
-    // ADR-0067 — expired mailed-code challenges and tickets; notices past
+    // ADR-0075 — expired mailed-code challenges and tickets; notices past
     // their 60 days.
     let _email_pruner = recovery_email::spawn_pruner(pool.clone());
     let _notice_pruner = account_notices::spawn_pruner(pool.clone());
@@ -657,7 +657,7 @@ fn build_app(state: AppState) -> Router {
             delete(webauthn::delete_credential),
         )
         // A3 (GDPR erasure) — delete the whole account (FK cascade purges all
-        // auth state). Bearer-auth + ONE fresh proof (ADR-0065, amended
+        // auth state). Bearer-auth + ONE fresh proof (ADR-0073, amended
         // 2026-10-06): the ADR-0014 passkey action grant when the account has
         // a passkey, else a fresh-auth grant in the `x-lakko-fresh-grant`
         // header (the discovery + storage tiers are purged by the client via
@@ -678,7 +678,7 @@ fn build_app(state: AppState) -> Router {
             post(webauthn_action::action_finish),
         )
         // ADR-0018 factor (a) — mint a single-use device grant. Bearer-auth
-        // + a fresh-auth grant in the body (ADR-0065, amended 2026-10-06):
+        // + a fresh-auth grant in the body (ADR-0073, amended 2026-10-06):
         // the caller is the ALREADY-authenticated existing device, whose
         // person signed in with the password or a passkey just now,
         // authorizing a fresh device. Per-account + per-address limited. The
@@ -692,7 +692,7 @@ fn build_app(state: AppState) -> Router {
         // The matching `/totp/recover` is anonymous (public router).
         .route("/totp/enroll/start", post(totp::enroll_start))
         .route("/totp/enroll/finish", post(totp::enroll_finish))
-        // ADR-0064 decision 6 — the phrase entropy sealed under a passkey's
+        // ADR-0072 decision 6 — the phrase entropy sealed under a passkey's
         // PRF output; opaque per-credential blobs only the account reads,
         // stores, lists and removes.
         .route(
@@ -705,7 +705,7 @@ fn build_app(state: AppState) -> Router {
         // signed-in device's side of a camera-less add-device confirmation:
         // see the open request, post its SPAKE2 message once, record the
         // outcome once, or decline. Answering and recording the outcome
-        // need a fresh-auth grant in the body (ADR-0065, amended 2026-10-06);
+        // need a fresh-auth grant in the body (ADR-0073, amended 2026-10-06);
         // seeing the request and declining it need the session only.
         .route("/device/requests", get(device_request::list))
         .route(
@@ -730,11 +730,11 @@ fn build_app(state: AppState) -> Router {
                 .route_layer(ip(limits::Category::HandleBind))
                 .delete(login_handle::delete),
         )
-        // ADR-0068 section 2 — how the handle a device holds relates to the
+        // ADR-0076 section 2 — how the handle a device holds relates to the
         // one its account is bound to; the session sync binds only on
         // `none`. Counted per account inside.
         .route("/auth/login-handle/check", post(login_handle::check_handle))
-        // ADR-0065 — reset the account keys: one transaction that bumps the
+        // ADR-0073 — reset the account keys: one transaction that bumps the
         // key generation (signing every other device out), replaces the
         // recovery credential (the OPAQUE registration made from the new
         // phrase's seed), deletes the passkeys, vaults, grants and requests,
@@ -744,7 +744,7 @@ fn build_app(state: AppState) -> Router {
         // where the passkey may be gone too.
         .route("/account/keys/reset/start", post(key_reset::start))
         .route("/account/keys/reset/finish", post(key_reset::finish))
-        // ADR-0066 section 3.4 — rotate the account keys and keep the other
+        // ADR-0074 section 3.4 — rotate the account keys and keep the other
         // devices. Bearer + fresh-auth grant + a supersession proof by the
         // identity key auth has recorded: someone who holds only the
         // password can reset (recallable) but cannot rotate. One
@@ -753,14 +753,14 @@ fn build_app(state: AppState) -> Router {
         // floor the devices removed with it, mint the attestation.
         .route("/account/keys/rotate/start", post(key_rotate::start))
         .route("/account/keys/rotate/finish", post(key_rotate::finish))
-        // ADR-0066 sprint T1 — per-device revocation. `logout` raises the
+        // ADR-0074 sprint T1 — per-device revocation. `logout` raises the
         // session floor of the caller's own device (no grant: signing out
         // must always work); `bind-device` replaces a pair that names no
         // device with one that names the caller's; `devices/revoke` removes
         // ANOTHER device and needs a fresh-auth grant AND a statement signed
         // by the account's identity key, so the password alone cannot wipe
         // the owner's devices.
-        // ADR-0067 sections 6 and 9 — the recovery email of the session's
+        // ADR-0075 sections 6 and 9 — the recovery email of the session's
         // account: add or replace it (a mailed code; the start needs a
         // fresh-auth grant and sends the letter, so it is also limited per
         // address), remove it, read its state, mark the account
@@ -921,14 +921,14 @@ fn build_app(state: AppState) -> Router {
         )
         .route("/device/request/status", post(device_request::status))
         .route("/device/request/payload", post(device_request::payload))
-        // ADR-0065 section 3.2 — renew the session pair. ANONYMOUS: the
+        // ADR-0073 section 3.2 — renew the session pair. ANONYMOUS: the
         // refresh credential is the authorisation. Per-address limited; the
         // generation check inside is what signs a reset-away device out.
         .route(
             "/auth/session/refresh",
             post(session::refresh).route_layer(ip(limits::Category::Attempt)),
         )
-        // ADR-0066 section 1.2 — the recall: an old device takes the account
+        // ADR-0074 section 1.2 — the recall: an old device takes the account
         // back after a key reset. ANONYMOUS (its session was superseded by
         // the reset): every request carries an account statement signed by
         // the identity key the account had before the change, checked first,
@@ -947,7 +947,7 @@ fn build_app(state: AppState) -> Router {
             "/account/recall/finish",
             post(recall::finish).route_layer(ip(limits::Category::Attempt)),
         )
-        // ADR-0067 section 7 — getting back in with a mailed code. ANONYMOUS.
+        // ADR-0075 section 7 — getting back in with a mailed code. ANONYMOUS.
         // `start` answers the same whatever was typed and is the route that
         // can send a letter (its own address bucket, and the per-handle
         // letter counter inside); the rest are guessing routes behind the

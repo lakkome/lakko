@@ -438,7 +438,7 @@ public class RecoverViewModel(
                     )
                 }
             } catch (err: AuthHttpError) {
-                // ADR-0067 section 8 / UX 19.7 - the words are not the
+                // ADR-0075 section 8 / UX 19.7 - the words are not the
                 // current account's. Were they its phrase before a reset in
                 // the last month? Asked by login handle with a statement
                 // signed by the key the typed phrase derives.
@@ -514,7 +514,7 @@ public class RecoverViewModel(
         }
     }
 
-    // ---- email code (ADR-0067 section 7, UX 19.3) -------------------------
+    // ---- email code (ADR-0075 section 7, UX 19.3) -------------------------
 
     public fun onEmailAddressChange(value: String) {
         mutableState.update { it.copy(emailAddress = value, email = it.email.copy(error = null)) }
@@ -949,7 +949,7 @@ public data class RecoverUiState(
     val wordsRevision: Int = 0,
     /** Passkeys are switched off on this server: the form offers the list. */
     val passkeyUnavailable: Boolean = false,
-    /** ADR-0067 - the email-code flow's step and its line. */
+    /** ADR-0075 - the email-code flow's step and its line. */
     val email: me.lakko.app.auth.EmailRecoverState = me.lakko.app.auth.EmailRecoverState(),
     /** The address as typed. Memory only: never saved, never pre-filled. */
     val emailAddress: String = "",

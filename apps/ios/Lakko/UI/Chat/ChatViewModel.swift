@@ -27,11 +27,11 @@ public final class ChatViewModel: ObservableObject {
     // MARK: - Constructor inputs
 
     /// The group this screen sends into and polls: the conversation's
-    /// CURRENT group (ADR-0065 R.5, the head). It changes, without the screen
+    /// CURRENT group (ADR-0073 R.5, the head). It changes, without the screen
     /// being rebuilt, when the conversation continues in a successor group
     /// (``followHead(_:)``).
     @Published public private(set) var groupIdHex: String
-    /// ADR-0065 R.5 — the conversation this screen shows: the key of the
+    /// ADR-0073 R.5 — the conversation this screen shows: the key of the
     /// draft, the read position and every other person-facing store. Never
     /// changes for the life of the model.
     public let conversationIdHex: String
@@ -2081,7 +2081,7 @@ public final class ChatViewModel: ObservableObject {
     /// schedules a fresh `ReadCursor` payload only when the
     /// newest visible row's id exceeds this value.
     private var lastBroadcastReadId: Int64 = -1
-    /// ADR-0065 R.5 — the last read position broadcast, in timeline order.
+    /// ADR-0073 R.5 — the last read position broadcast, in timeline order.
     private var lastBroadcastReadPosition: LineageRules.TimelinePosition?
     private var readCursorWork: DispatchWorkItem?
 
@@ -2105,7 +2105,7 @@ public final class ChatViewModel: ObservableObject {
         // Resolve groupIdBytes lazily — the ChatRepository
         // exposes the per-thread record's groupId; we hex-
         // decode the `groupIdHex` we already carry.
-        // ADR-0065 R.5 — the draft and the read position belong to the
+        // ADR-0073 R.5 — the draft and the read position belong to the
         // CONVERSATION, so they follow it into a successor group.
         groupIdBytes = Self.hexToBytes(conversationIdHex)
         guard let groupIdBytes = groupIdBytes else { return }
@@ -2162,7 +2162,7 @@ public final class ChatViewModel: ObservableObject {
         for m in messages where m.messageId > 0 {
             if m.messageId > highest { highest = m.messageId }
         }
-        // ADR-0065 R.5 — a successor's message ids restart, so the position
+        // ADR-0073 R.5 — a successor's message ids restart, so the position
         // is `(segment, message id)` and "past the last broadcast" is judged
         // in that order.
         let segment = repository.segmentIndex(ofGroup: groupIdHex)
@@ -2233,7 +2233,7 @@ public final class ChatViewModel: ObservableObject {
         return bytes
     }
 
-    /// ADR-0065 R.5 — the conversation moved to another group while this
+    /// ADR-0073 R.5 — the conversation moved to another group while this
     /// screen was up (a successor became the head): the same screen, the
     /// same history above, now sending into the new group. Nothing is shown
     /// for it.
@@ -2635,7 +2635,7 @@ public final class ChatViewModel: ObservableObject {
     /// not the message. `nil` means do nothing and say nothing (section 5: an
     /// explanation would confirm the conversation exists).
     func forwardOriginJump(of forward: ForwardRef) -> (groupIdHex: String, messageId: Int64)? {
-        // ADR-0065 R.5 — the origin names a GROUP; the conversation it
+        // ADR-0073 R.5 — the origin names a GROUP; the conversation it
         // belongs to may have moved on, so the row is looked up under the id
         // it is drawn under now (its own id in the head, a history id in an
         // older segment this device holds).
@@ -2680,7 +2680,7 @@ public final class ChatViewModel: ObservableObject {
     /// stores and the timeline; ``ChatRepository/pinRevision`` and `messages`
     /// drive the re-render.
     var pinnedEntries: [PinnedEntry] {
-        // ADR-0065 R.5 — the pins of every segment this device holds, each
+        // ADR-0073 R.5 — the pins of every segment this device holds, each
         // under the id its row is drawn under.
         let spanned = repository.pinsAcrossSegments(headGroupIdHex: groupIdHex)
         return PinnedBar.entries(shared: spanned.shared, personal: spanned.personal, held: messages)
@@ -2758,7 +2758,7 @@ public final class ChatViewModel: ObservableObject {
     /// (a row that has not landed, a tombstone, or a dead membership).
     func pinMenuState(for message: ChatMessage) -> PinMenuState {
         if LineageRules.isHistoryRowId(message.messageId) {
-            // ADR-0065 R.5 — a row of an older segment offers Unpin alone,
+            // ADR-0073 R.5 — a row of an older segment offers Unpin alone,
             // and only when it is pinned.
             let state = pinState(ofRow: message.messageId)
             let row = PinSheet.menuState(
@@ -2804,7 +2804,7 @@ public final class ChatViewModel: ObservableObject {
         let pinned = choice == .pinForMe || choice == .pinForEveryone
         let scope: LineageViews.PinScope =
             (choice == .pinForMe || choice == .unpinForMe) ? .personal : .shared
-        // ADR-0065 R.5 — a pin of an older segment can be removed and
+        // ADR-0073 R.5 — a pin of an older segment can be removed and
         // nothing else: a personal unpin writes under the older group, a
         // shared unpin there is recorded on this device alone.
         switch LineageViews.pinRoute(older: stored.older, pinned: pinned, scope: scope) {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The recovery email address rule (ADR-0067 section 4), written once.
+//! The recovery email address rule (ADR-0075 section 4), written once.
 //!
 //! [`normalize_recovery_email`] is the one definition of what a recovery
 //! address is and how it is spelled before anything is derived from it. The

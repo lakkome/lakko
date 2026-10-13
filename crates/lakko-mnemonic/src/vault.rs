@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! The two vaults that carry the recovery phrase's entropy: the passkey
-//! vault (ADR-0064 decision 6) and the email vault (ADR-0067 section 2).
+//! vault (ADR-0072 decision 6) and the email vault (ADR-0075 section 2).
 //!
 //! ## Passkey vault
 //!
@@ -38,11 +38,11 @@
 //! [`Argon2Params::INTERACTIVE`](lakko_crypto::kdf::Argon2Params::INTERACTIVE)
 //! (64 MiB, 3 passes, 4 lanes), the set the backup KEK uses. It was chosen
 //! for the backup and is reused here; it has **not** been measured for this
-//! use on the three client platforms (ADR-0067 sprint 1 leaves that
+//! use on the three client platforms (ADR-0075 sprint 1 leaves that
 //! measurement open). The parameters are not carried in the blob, so
 //! changing them is a format change.
 //!
-//! **What this protects against, and what it does not** (ADR-0067 section
+//! **What this protects against, and what it does not** (ADR-0075 section
 //! 2): the input to Argon2id is a username-derived handle and an email
 //! address, neither of which is a secret from the server operator, who sees
 //! the address whenever it sends a letter. The stretch only slows someone
@@ -107,7 +107,7 @@ pub enum VaultError {
 }
 
 /// Seal the mnemonic's entropy under a 32-byte secret a passkey's WebAuthn
-/// PRF extension produced (ADR-0049 section 3, ADR-0064 decision 6). The PRF output is stable
+/// PRF extension produced (ADR-0049 section 3, ADR-0072 decision 6). The PRF output is stable
 /// per credential and follows a synced passkey to a new device, so the
 /// sealed blob, stored opaque server-side, lets that passkey carry the
 /// identity. HKDF domain-separates the seal key from the PRF output.
@@ -226,7 +226,7 @@ fn open_under_seal_key(seal_key: &[u8; 32], sealed: &[u8]) -> Result<Mnemonic, E
 }
 
 /// Seal the mnemonic's entropy under the account's login handle and
-/// recovery email address (ADR-0067 section 2). `vault_salt` is the 16
+/// recovery email address (ADR-0075 section 2). `vault_salt` is the 16
 /// bytes `POST /recovery-email/enrol/start` answered. The result is the
 /// 44-byte blob the server stores for a mail-protected account.
 ///
@@ -332,7 +332,7 @@ mod tests {
         ));
     }
 
-    // ---- email vault (ADR-0067) -------------------------------------
+    // ---- email vault (ADR-0075) -------------------------------------
 
     const HANDLE: [u8; LOGIN_HANDLE_LEN] = [0x11; LOGIN_HANDLE_LEN];
     const SALT: [u8; EMAIL_VAULT_SALT_LEN] = [0x22; EMAIL_VAULT_SALT_LEN];

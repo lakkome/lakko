@@ -142,7 +142,7 @@ public fun canSelectMessage(
 
 /** [canSelectMessage] read off a row. */
 public fun canSelectMessage(message: ChatMessage): Boolean =
-    // ADR-0065 R.5 — a row of an older segment is read-only history.
+    // ADR-0073 R.5 — a row of an older segment is read-only history.
     !message.isHistory && canSelectMessage(
         direction = message.direction,
         deleted = message.deleted,

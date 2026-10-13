@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-// ADR-0065 "Phase 2 revised" - the repository half of silent continuity:
+// ADR-0073 "Phase 2 revised" - the repository half of silent continuity:
 //
 //   * R.6: the receive rule for a successor claim (`group_closed`) and the
 //     claim store;
@@ -322,7 +322,7 @@ extension ChatRepository {
         let step = await ContinuityRuntime.continueConversation(
             port: port, oldGroupIdB64: base64Encode(record.groupId))
         if step != .nothing && step != .adopted {
-            NSLog("ADR-0065 continuity: \(step)")
+            NSLog("ADR-0073 continuity: \(step)")
         }
     }
 
@@ -931,7 +931,7 @@ extension ChatRepository {
                 } catch {
                     // Not sent: this one and everything after it stay held,
                     // in order.
-                    NSLog("ADR-0065 held send: a held message was not sent yet")
+                    NSLog("ADR-0073 held send: a held message was not sent yet")
                     break
                 }
             }
@@ -1115,7 +1115,7 @@ final class RepositoryContinuityPort: ContinuityPort {
         } catch {
             // Not resolvable or not reachable now: they keep writing in the
             // old group and the completeness re-check tries again.
-            NSLog("ADR-0065 continuity: a member was not added to the successor yet")
+            NSLog("ADR-0073 continuity: a member was not added to the successor yet")
             return false
         }
     }
@@ -1139,7 +1139,7 @@ final class RepositoryContinuityPort: ContinuityPort {
             await repository.sweepIfCommitter(groupIdHex: successorHex)
         } catch {
             // A pending role change refuses a second one; the next pass tries.
-            NSLog("ADR-0065 continuity: an admin was not restored yet")
+            NSLog("ADR-0073 continuity: an admin was not restored yet")
         }
     }
 
@@ -1153,7 +1153,7 @@ final class RepositoryContinuityPort: ContinuityPort {
             await repository.sweepIfCommitter(groupIdHex: successorHex)
         } catch {
             // Already pending, or a role change is in the way: the next pass.
-            NSLog("ADR-0065 continuity: the owner was not restored yet")
+            NSLog("ADR-0073 continuity: the owner was not restored yet")
         }
     }
 

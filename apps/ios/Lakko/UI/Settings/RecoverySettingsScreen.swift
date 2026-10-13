@@ -84,7 +84,7 @@ struct RecoverySettingsScreen: View {
         return DevicePhrase.isStored(accountIdB64: account.accountIdB64)
     }
 
-    /// ADR-0067 — whether the account's recovery phrase was saved. The
+    /// ADR-0075 — whether the account's recovery phrase was saved. The
     /// phrase row and the three-word row exist only then: an account that
     /// never saved a phrase has no words the person could know.
     private var phraseProtected: Bool {

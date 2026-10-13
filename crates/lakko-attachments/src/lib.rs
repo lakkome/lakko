@@ -150,7 +150,7 @@ pub const MAX_FORWARDED_FROM_BYTES: usize = 255;
 /// dropped as a whole (an id that is not one points nowhere).
 pub const MAX_FORWARD_ORIGIN_GROUP_BYTES: usize = 128;
 
-/// ADR-0065 — the longest original conversation id a re-send marker may
+/// ADR-0073 — the longest original conversation id a re-send marker may
 /// carry, in bytes of its base64 form: the same bound as a forward's origin
 /// group, since both name a group id. Over it, the marker is dropped as a
 /// whole on parse and not carried on compose.
@@ -1031,7 +1031,7 @@ pub struct Envelope {
         deserialize_with = "lenient"
     )]
     pub forward_origin_message: Option<i64>,
-    /// ADR-0065 — on a message RE-SENT into a successor one-to-one, the
+    /// ADR-0073 — on a message RE-SENT into a successor one-to-one, the
     /// conversation the original was sent in, as the base64 of its group id.
     /// A device of the re-sender that already holds the original in the old
     /// segment's history uses it to show the message once. It is not a
@@ -1046,7 +1046,7 @@ pub struct Envelope {
         deserialize_with = "lenient"
     )]
     pub resend_origin_group: Option<String>,
-    /// ADR-0065 — the DS `messageId` of the original inside
+    /// ADR-0073 — the DS `messageId` of the original inside
     /// [`Self::resend_origin_group`].
     #[serde(
         default,
@@ -1214,7 +1214,7 @@ pub struct Forward {
     pub origin: Option<ForwardOrigin>,
 }
 
-/// ADR-0065 — the marker on a message re-sent into a successor one-to-one:
+/// ADR-0073 — the marker on a message re-sent into a successor one-to-one:
 /// which message of which earlier conversation this is a second copy of.
 /// It exists so the re-sender's own other devices, which already hold the
 /// original, show it once. Unlike [`ForwardOrigin`] it is never rendered and
@@ -1246,7 +1246,7 @@ pub enum MessageBody {
         /// ADR-0052 — the attribution of a forwarded message, if any. Like
         /// `reply`, on the `Chat` classification only.
         forward: Option<Forward>,
-        /// ADR-0065 — the re-send marker, if any: this message is a second
+        /// ADR-0073 — the re-send marker, if any: this message is a second
         /// copy of one sent earlier in another conversation. Like `reply`,
         /// on the `Chat` classification only.
         resend: Option<ResendOrigin>,
@@ -1442,7 +1442,7 @@ pub fn compose_forward(
 
 /// Encode a chat message with every optional part it may carry beside its
 /// text and attachments: a reply (ADR-0052), a forward attribution
-/// (ADR-0052) and a re-send marker (ADR-0065). [`compose`],
+/// (ADR-0052) and a re-send marker (ADR-0073). [`compose`],
 /// [`compose_reply`] and [`compose_forward`] are this function with one part
 /// set; a message RE-SENT into a successor conversation uses it directly so
 /// it keeps the original's attachments, quote and forward attribution while
@@ -1757,7 +1757,7 @@ pub mod fuzz_api {
         matches!(parse_body(&recomposed), MessageBody::Chat { forward: Some(again), .. } if again == forward)
     }
 
-    /// ADR-0065 property oracle for a re-send marker over attacker-controlled
+    /// ADR-0073 property oracle for a re-send marker over attacker-controlled
     /// bytes: a marker that survives [`parse_body`] is whole and its group id
     /// is non-empty and within its bound, and the bound is idempotent:
     /// re-composing the parsed chat with the marker (beside whatever reply

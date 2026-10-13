@@ -12,7 +12,7 @@ import {
   type KeyPackageReaders,
 } from "./own-conversation-key";
 
-describe("ownKeyPackageUsable (ADR-0066, the sender rule)", () => {
+describe("ownKeyPackageUsable (ADR-0074, the sender rule)", () => {
   it("admits an own device bound to the key this device's leaves are bound to", () => {
     expect(
       ownKeyPackageUsable({ ownAccount: true, boundKeyB64: "old", conversationKeyB64: "old" }),
@@ -89,7 +89,7 @@ describe("ownDeviceKeyPackageUsable (over the wasm readers)", () => {
   });
 });
 
-describe("bindingVerdict (ADR-0066, the receiver rule)", () => {
+describe("bindingVerdict (ADR-0074, the receiver rule)", () => {
   const base = { currentKeyB64: "new", predecessorKeysB64: ["old"] as readonly string[] };
 
   it("mints when there is no usable binding", () => {

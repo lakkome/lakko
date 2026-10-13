@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 "Phase 2 revised", R.4 - the CONTINUITY reach key.
+ * ADR-0073 "Phase 2 revised", R.4 - the CONTINUITY reach key.
  *
  * A reset changes every reach key and the mailbox pseudonym (they derive
  * from the account seed), and the new identity knows none of its former

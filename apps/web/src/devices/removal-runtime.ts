@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The removal operation wired to the app (ADR-0066 section 2.3).
+ * The removal operation wired to the app (ADR-0074 section 2.3).
  *
  * `devices/removal.ts` decides; this module supplies its ports from the
  * session (the bearer, the account key that signs the statement), the

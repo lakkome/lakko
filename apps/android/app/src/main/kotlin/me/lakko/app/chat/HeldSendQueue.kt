@@ -9,7 +9,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 /*
- * ADR-0065 R.7 case 1 - the DURABLE half of the held send.
+ * ADR-0073 R.7 case 1 - the DURABLE half of the held send.
  *
  * A message written into a one-to-one whose other person's reset this device
  * accepted is held and goes out when the conversation's successor exists

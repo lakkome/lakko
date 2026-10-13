@@ -16,7 +16,7 @@
  * recovery row's construction: both devices derive the same key, the DS
  * stores ciphertext.
  *
- * ADR-0066 (v2): the bundle also carries the account's OWN predecessor seeds
+ * ADR-0074 (v2): the bundle also carries the account's OWN predecessor seeds
  * and each contact's proven predecessor keys, so a device paired AFTER a
  * rotation of the account keys holds what a kept device that adopted holds:
  * its conversation leaves are bound to the same account key as the sending
@@ -76,11 +76,11 @@ export interface CarriedPin {
   readonly pinnedSignaturePubkeyB64: string;
   readonly rotationMarker: number;
   /** The contact's proven predecessors as the sending device holds them:
-   *  standard-base64 32-byte signature keys, oldest first (ADR-0066). */
+   *  standard-base64 32-byte signature keys, oldest first (ADR-0074). */
   readonly provenPredecessorsB64: readonly string[];
 }
 
-/** One earlier account key of the OWN account (ADR-0066 Stage A). */
+/** One earlier account key of the OWN account (ADR-0074 Stage A). */
 export interface CarriedOwnPredecessor {
   /** Standard base64 of the 64-byte account phrase seed of that key. Key
    *  material: never logged, stored only under the device key. */
@@ -264,7 +264,7 @@ export function applyStateBundle(
       // A pin the setter refuses (a lower marker than one already held) is
       // not ours to force.
     }
-    // ADR-0066: the contact's proven predecessors, as the sending device
+    // ADR-0074: the contact's proven predecessors, as the sending device
     // holds them. Recorded only beside the very key they were proven for;
     // a pin this device holds under another key keeps its own chain.
     try {
@@ -282,7 +282,7 @@ export function applyStateBundle(
   return { contacts, pins };
 }
 
-// ---- the own predecessors (ADR-0066, a device paired after a rotation) -----
+// ---- the own predecessors (ADR-0074, a device paired after a rotation) -----
 
 /**
  * The predecessor seeds a device holds after a bundle arrived: the carried

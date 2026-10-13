@@ -542,7 +542,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * consulted it.
    */
   const sync = useDeviceGroupSync();
-  // ADR-0065 R.5 — mute is the CONVERSATION's, whichever of its groups a
+  // ADR-0073 R.5 — mute is the CONVERSATION's, whichever of its groups a
   // call arrives in.
   const lineageView = useLineage();
 
@@ -1147,7 +1147,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   async function dial(askedGroupIdB64: string, withVideo: boolean): Promise<void> {
     if (currentOccupant() !== null) return;
     if (groupEntry(askedGroupIdB64) === undefined) return;
-    // ADR-0065 R.12 — never signal into a dead session: the call is placed
+    // ADR-0073 R.12 — never signal into a dead session: the call is placed
     // in the conversation's successor when this device holds one, and
     // otherwise does not start (the caller shows its ordinary
     // could-not-start state; no copy of its own).
@@ -1214,7 +1214,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     await activeCall?.hangUp("hungUp");
   }
 
-  // ADR-0065 R.12 / UX 16.4 — a live one-to-one call ends when its
+  // ADR-0073 R.12 / UX 16.4 — a live one-to-one call ends when its
   // conversation moves: once the other person's reset is accepted the media
   // is going to a removed device. It ends as a call ends when the other side
   // drops; nothing is said (R.0). The decision is `call-continuity.ts`.
@@ -2268,7 +2268,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         label: CALL_INVITE_LABEL,
       });
       url = minted.url;
-      // ADR-0066 section 3.5a rule 5: the ledger id and the link id, kept
+      // ADR-0074 section 3.5a rule 5: the ledger id and the link id, kept
       // under the device key, are what revokes this link if the account's
       // keys are rotated later. Best effort; the link works either way.
       void rememberMintedLink(

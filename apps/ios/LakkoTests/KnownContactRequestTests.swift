@@ -4,7 +4,7 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0065 R.7 case 1 / UX 16.6 - a request from an account that is already
+/// ADR-0073 R.7 case 1 / UX 16.6 - a request from an account that is already
 /// a contact. The cases are those of
 /// `apps/web/src/contacts/known-contact-request.test.ts`; `RequestTarget` has
 /// no web test, so its table is pinned row by row here.

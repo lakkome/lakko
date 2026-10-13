@@ -29,7 +29,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
 
     /// The routes of the prompt.
     public enum Method: String, Hashable, CaseIterable {
-        /// ADR-0067 — a code sent to the recovery email, while the server
+        /// ADR-0075 — a code sent to the recovery email, while the server
         /// holds the email vault: the same flow as in **Get back in**.
         case email
         case device

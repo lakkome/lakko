@@ -19,7 +19,7 @@ import kotlinx.coroutines.CancellationException
  * it is missing. So an account created on Android could not be verified by
  * anyone, including its owner's second device.
  *
- * ## No publish-back (ADR-0065 section 4.2)
+ * ## No publish-back (ADR-0073 section 4.2)
  *
  * On every landing that holds a cached seed — a sign-in, a recover, the
  * silent restore — the directory is read BEFORE anything is uploaded, and
@@ -118,7 +118,7 @@ internal fun identityPublicationFor(landing: IdentityLanding): IdentityPublicati
     }
 
 /** The public keys the directory currently serves for the account, and the
- *  key generation they belong to (ADR-0065). */
+ *  key generation they belong to (ADR-0073). */
 internal class PublishedIdentityKeys(
     val signaturePubkey: ByteArray,
     val x25519Pubkey: ByteArray,
@@ -138,7 +138,7 @@ internal sealed interface LandingVerdict {
      *  blocking screen; the wipe on tap. */
     data object KeyMismatch : LandingVerdict
     /**
-     * ADR-0066 section 3.3 - the directory still serves a key this device
+     * ADR-0074 section 3.3 - the directory still serves a key this device
      * holds as its OWN proven predecessor, at a LOWER generation than this
      * device's session: this device adopted a rotation whose directory
      * upload (the rotating device's, with the proof and the attestation)
@@ -147,7 +147,7 @@ internal sealed interface LandingVerdict {
     data object OwnPredecessorPublished : LandingVerdict
 }
 
-/** The pure rule of ADR-0065 section 4.2, over a readable directory answer. */
+/** The pure rule of ADR-0073 section 4.2, over a readable directory answer. */
 internal fun landingVerdict(
     published: PublishedIdentityKeys?,
     ownSignaturePubkey: ByteArray,
@@ -178,7 +178,7 @@ internal interface IdentityPublicationPorts {
     val ownKeyGeneration: Long
 
     /** The keys of this account's own previous identities on this device
-     *  (ADR-0066 section 3.3); empty when it never rotated. */
+     *  (ADR-0074 section 3.3); empty when it never rotated. */
     val ownPredecessors: List<ByteArray> get() = emptyList()
 
     /** `GET /discovery/identity/{account}`; `null` on 404, throws otherwise. */

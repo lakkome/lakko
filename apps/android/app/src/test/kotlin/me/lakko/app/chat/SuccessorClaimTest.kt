@@ -9,7 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0065 R.6 - claim-then-build, row by row (mirror of the web
+/** ADR-0073 R.6 - claim-then-build, row by row (mirror of the web
  *  `successor-claim` and `group-closed-store` tables). */
 class SuccessorClaimTest {
     private val superseded = setOf("old")

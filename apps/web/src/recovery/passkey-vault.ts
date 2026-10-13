@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * A passkey that restores keys (ADR-0064 decision 6).
+ * A passkey that restores keys (ADR-0072 decision 6).
  *
  * A passkey signs the person in; with the WebAuthn PRF extension it can also
  * carry the account's keys. The PRF output for a fixed salt is a stable

@@ -209,7 +209,7 @@ public object DeviceKeyStore {
     /**
      * Seal [plaintext] with the Keystore-resident wrap key (AES-256-GCM,
      * `iv(12) | ciphertext+tag`). For the small per-device secrets that get
-     * the device root key's protection without being one (the ADR-0066
+     * the device root key's protection without being one (the ADR-0074
      * recall record). The key never leaves the Keystore.
      */
     internal fun sealWithDeviceKey(plaintext: ByteArray): ByteArray {

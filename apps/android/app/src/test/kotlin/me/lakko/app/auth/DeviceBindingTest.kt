@@ -10,7 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0066 section 0.4 — what a landing sends as its device, and what is
+ * ADR-0074 section 0.4 — what a landing sends as its device, and what is
  * done about the device a landed session names. Pure rules; no server and
  * no native core.
  */

@@ -3,7 +3,7 @@
 
 /**
  * Adding or replacing the recovery email (docs/ux/identity-recovery.md
- * section 19.2, ADR-0067 section 6): the address, then the six-digit code,
+ * section 19.2, ADR-0075 section 6): the address, then the six-digit code,
  * on one surface. Used by Settings > Account and by the sign-up's "Protect
  * your account" step.
  *

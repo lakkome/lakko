@@ -12,7 +12,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0065 section 2.3: the reset's step sequencing, outcomes, age rule and
+/** ADR-0073 section 2.3: the reset's step sequencing, outcomes, age rule and
  *  the persisted debt. */
 class KeyResetTest {
 

@@ -3,7 +3,7 @@
 
 /**
  * "Protect your account" (docs/ux/identity-recovery.md section 19.1a,
- * ADR-0067 D2 and D7): the one step after sign-up. The recovery phrase is
+ * ADR-0075 D2 and D7): the one step after sign-up. The recovery phrase is
  * not shown at sign-up any more; the person adds an email, saves a recovery
  * phrase, or continues without either after the app's own confirmation.
  *

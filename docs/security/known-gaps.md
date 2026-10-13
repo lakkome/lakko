@@ -4437,9 +4437,9 @@ server. What remains open is the reads: posts, envelopes and the epoch stay read
 
 ## Account key reset
 
-### G-44: After a key reset the old identity's leaves stay in every conversation group until peers evict them, and the old devices keep decrypting group traffic - **NARROWED 2026-10-04 (ADR-0065 phase 2 built in code on all three clients, not walked live); OPEN for a group the old identity owned, a group with no role table, and a group where no admin is the person's contact** (minted 2026-10-03)
+### G-44: After a key reset the old identity's leaves stay in every conversation group until peers evict them, and the old devices keep decrypting group traffic - **NARROWED 2026-10-04 (ADR-0073 phase 2 built in code on all three clients, not walked live); OPEN for a group the old identity owned, a group with no role table, and a group where no admin is the person's contact** (minted 2026-10-03)
 
-**What the code does.** [ADR-0065](../adr/0065-account-key-reset.md) phase 1
+**What the code does.** [ADR-0073](../adr/0073-account-key-reset.md) phase 1
 (built 2026-10-03, unit-tested, not walked live) makes a reset true of the
 server side and of the account's own devices: every other device's session
 is superseded by the key generation, the directory refuses the old key, the
@@ -4464,7 +4464,7 @@ is unaffected (RFC 9420: a member that holds the current epoch secrets reads
 the current epoch; it does not learn what it was not sent), so the exposure is
 "continues to read" rather than "reads the past".
 
-**Closing: ADR-0065 phase 2 (design only).** A peer that observes a reset
+**Closing: ADR-0073 phase 2 (design only).** A peer that observes a reset
 (the pinned key differs from the published one, no supersession proof, the
 KT-log entry for the new key carries `is_reset`) marks the contact
 `reset-unverified`; in every group where the observer's account is owner or
@@ -4543,9 +4543,9 @@ DeviceGroup. What remains: an attacker holding the password (the reset is
 then a legitimate sign-in, and with the new phrase they change the password
 and lock the owner out; a recall from a surviving old device, or a delay,
 was discussed and is undecided); a grant read out of a device's memory
-together with the session inside its ten minutes (a recall from a surviving old device with the previous password was built on 2026-10-08, ADR-0066 T3-T4, unit-tested only, so "undecided" above is history); a stolen recovery phrase
+together with the session inside its ten minutes (a recall from a surviving old device with the previous password was built on 2026-10-08, ADR-0074 T3-T4, unit-tested only, so "undecided" above is history); a stolen recovery phrase
 or a passkey that carries keys, which need no reset at all. The second
-part below was closed in code on 2026-10-08 (ADR-0066 T1: the directory
+part below was closed in code on 2026-10-08 (ADR-0074 T1: the directory
 delete is under the generation floor, needs an account statement for
 another device's row, and tombstones the id). The paragraphs that follow describe the state before
 this amendment.
@@ -4553,12 +4553,12 @@ this amendment.
 **What the code does.** `POST /account/keys/reset/{start,finish}` is
 bearer-authenticated and needs **no ADR-0014 action grant** even when the
 account has a passkey (`services/auth/src/key_reset.rs`): the route exists for
-the lost-everything path, where the passkey may be gone too. Before ADR-0065 a
+the lost-everything path, where the passkey may be gone too. Before ADR-0073 a
 session could already mint a fresh identity (ADR-0017 `mintFreshIdentity`); it
 can now also delete every passkey, vault, WebAuthn state and action grant,
 every device grant and request, supersede every other session, and (through
 the attestation) re-root the DeviceGroup journal and delete every KeyPackage
-row. The password envelope and the TOTP secret survive (ADR-0065 open question
+row. The password envelope and the TOTP secret survive (ADR-0073 open question
 1), so an attacker holding the password or the authenticator can sign in again
 after the owner resets, and reach the reset themselves. Limits:
 `Scope::RecoveryReplace` (10 per hour) on both calls and `Scope::KeyReset` (3
@@ -4582,7 +4582,7 @@ ACCESS threat ADR-0017's `lakko-security` pass adjudged no-worse. The
 KeyPackage delete buys a brief denial of a device's chat membership, self-
 healing at the next re-publish.
 
-**Closing.** A narrower scope for the reset itself (ADR-0065 open question 3
+**Closing.** A narrower scope for the reset itself (ADR-0073 open question 3
 took `Scope::KeyReset`; a passkey action grant when one exists, or a password
 re-entry on the resetting device, would raise the bar for a stolen token
 without touching the lost-everything path - undecided); forcing a password

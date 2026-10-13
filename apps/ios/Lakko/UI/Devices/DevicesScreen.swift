@@ -23,12 +23,12 @@ public struct DevicesScreen: View {
     /// was removed.
     public var onChangePassword: () -> Void
     /// Called with a device's 32-byte key once it was signed out at the
-    /// server (ADR-0066 section 2.3); the removal itself, with its owed
+    /// server (ADR-0074 section 2.3); the removal itself, with its owed
     /// steps, is the runner's.
     public var onDeviceRemoved: (Data) -> Void
-    /// ADR-0066 section 2.3 — the removal flow and its owed records.
+    /// ADR-0074 section 2.3 — the removal flow and its owed records.
     private let removal: DeviceRemovalRunner
-    /// ADR-0066 section 3.2 — "It was lost or stolen": remove the device and
+    /// ADR-0074 section 3.2 — "It was lost or stolen": remove the device and
     /// change the account keys. `nil` offers the plain removal only.
     private let rotation: KeyRotationRunner?
 
@@ -602,10 +602,10 @@ private struct ScanView: View {
 private struct DevicesListView: View {
 
     let authRepository: AuthRepository
-    /// ADR-0066 section 2.3 — the removal flow; its pending set marks the
+    /// ADR-0074 section 2.3 — the removal flow; its pending set marks the
     /// rows whose device is signed out and still being removed.
     @ObservedObject var removal: DeviceRemovalRunner
-    /// ADR-0066 section 3.2 — the "remove and change keys" flow and what a
+    /// ADR-0074 section 3.2 — the "remove and change keys" flow and what a
     /// stored record of it asks of this screen.
     let rotation: KeyRotationRunner?
     /// What the stored rotation record asks for (re-read when the screen

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The last step of adding a recovery email (ADR-0067 section 6): seal the
+ * The last step of adding a recovery email (ADR-0075 section 6): seal the
  * email vault when the account needs one, then `enrol/finish`. Over ports,
  * so the rule is testable without a server, a worker or the wasm core.
  *

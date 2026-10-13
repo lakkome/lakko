@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0049: Identity recovery with three of the twenty-four words, another device, or a passkey
 
-> **Amended by ADR-0064 (2026-10-02).** The body below is left as written.
+> **Amended by ADR-0072 (2026-10-02).** The body below is left as written.
 > What no longer holds:
 >
 > - **The word vault (section 1) is gone.** There is no `word_vaults` table,
@@ -22,9 +22,9 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 >   per passkey, holds the 16-byte entropy, and has put / get / delete /
 >   list routes.
 >
-> See [ADR-0064](0064-recovery-model-simplification.md).
+> See [ADR-0072](0072-recovery-model-simplification.md).
 >
-> **Amended 2026-10-06 by [ADR-0065](0065-account-key-reset.md)** (section
+> **Amended 2026-10-06 by [ADR-0073](0073-account-key-reset.md)** (section
 > "Amended 2026-10-06: fresh-auth grant for delete and add-device"): the
 > signed-in device's `POST /device/requests/{id}/pake` and `/result` (section
 > 2) and `POST /device/authorize/start` now require a fresh-auth grant in the

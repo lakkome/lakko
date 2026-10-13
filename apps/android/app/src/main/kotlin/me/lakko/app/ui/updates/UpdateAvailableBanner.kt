@@ -31,7 +31,7 @@ import me.lakko.app.l10n.t
  * twin of the iOS `UpdateAvailableBanner`.
  *
  * The banner shape of the earlier identity-security banner (deleted with
- * ADR-0065: a changed published identity is now the signed-out screen or
+ * ADR-0073: a changed published identity is now the signed-out screen or
  * nothing): a horizontal row, leading icon + message + trailing controls,
  * `RoundedCornerShape(8.dp)`, `.padding(12.dp)` inner / `.padding(8.dp)` outer,
  * with an **informational** tone (UX section 3 / 9): `secondaryContainer` /

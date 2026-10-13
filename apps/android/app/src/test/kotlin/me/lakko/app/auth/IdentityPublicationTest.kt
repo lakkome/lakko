@@ -12,7 +12,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * Pins when the identity bundle is published, and (ADR-0065 section 4.2)
+ * Pins when the identity bundle is published, and (ADR-0073 section 4.2)
  * that nothing ever publishes a differing key back: every landing but signup
  * reads the directory first, and stale or mismatching keys are reported,
  * never overwritten.

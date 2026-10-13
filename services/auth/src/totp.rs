@@ -271,7 +271,7 @@ pub(crate) struct RecoverReq {
     pub handle: String,
     pub code: String,
     /// URL-safe base64 (no padding) of the 32-byte id of the device this
-    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// session lands on: its conversation leaf signature key (ADR-0074
     /// section 0.4). Absent when the device has no keys yet; the session then
     /// names no device and the client calls `POST /auth/session/bind-device`
     /// once it has them.
@@ -280,7 +280,7 @@ pub(crate) struct RecoverReq {
 }
 
 /// `POST /totp/recover` response — the account id plus the same session pair
-/// every other login flow returns (ADR-0065).
+/// every other login flow returns (ADR-0073).
 #[derive(Serialize)]
 pub(crate) struct RecoverRes {
     pub account_id_b64: String,
@@ -424,7 +424,7 @@ pub(crate) async fn is_enabled(
 /// Parse and check one authenticator code for `account_id`, with the rules
 /// of [`recover`]: the +-1 step window, strictly newer than the last accepted
 /// step, and an atomic compare-and-set so one step is accepted once. Shared
-/// with the recovery-email route (ADR-0067 D8).
+/// with the recovery-email route (ADR-0075 D8).
 ///
 /// `Ok(false)` for a wrong, replayed or malformed code and for an account
 /// without a confirmed authenticator.
@@ -530,7 +530,7 @@ pub(crate) async fn recover(
         .account_id;
     let now = now_unix_secs();
     // The generation the pair is issued at, read BEFORE the authenticator
-    // row (ADR-0066 "T3 as built"): a recall deletes that row in the
+    // row (ADR-0074 "T3 as built"): a recall deletes that row in the
     // transaction that bumps the generation, so a recovery that straddles
     // one either loses the compare-and-set below, or is issued at the
     // generation from before the change and refused on first use.

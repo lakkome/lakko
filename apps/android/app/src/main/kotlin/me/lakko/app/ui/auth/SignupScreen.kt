@@ -24,7 +24,7 @@ import me.lakko.app.l10n.text
 /**
  * Create account (docs/ux/client-redesign.md section 5.6): username with the
  * live availability hint, display name, password, confirm password, Create
- * account. No recovery phrase is shown (ADR-0067 D2); the "Protect your
+ * account. No recovery phrase is shown (ADR-0075 D2); the "Protect your
  * account" step that follows ([ProtectAccountStep]) is rendered by the app
  * root from `AuthRepository.protectStepOwed` once the account exists.
  */

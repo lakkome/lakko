@@ -91,7 +91,7 @@ public enum ContactsInboxMerge {
         public let kept: [IncomingContactRequest]
         /// The requests dropped, with the reason, for the debug log.
         public let dropped: [(request: IncomingContactRequest, reason: DropReason)]
-        /// ADR-0066 section 3.5a rule 5 — the `messageId`s of PENDING requests
+        /// ADR-0074 section 3.5a rule 5 — the `messageId`s of PENDING requests
         /// a fetched one replaces: the same person asked again from the key
         /// that superseded theirs by proof. One request per person.
         public let replaced: [Int64]
@@ -127,7 +127,7 @@ public enum ContactsInboxMerge {
     /// when a poll re-reads it (a cursor rewind, or a request the sender
     /// re-sent after being accepted).
     ///
-    /// ADR-0066 section 3.5a rule 5 — `currentKey` resolves an account key
+    /// ADR-0074 section 3.5a rule 5 — `currentKey` resolves an account key
     /// across PROVEN rotations (the key itself otherwise). A fetched request
     /// from the key that superseded a pending request's key replaces that row
     /// (the requester rotated and asked again: its old request's reply grant

@@ -6,7 +6,7 @@ import SwiftUI
 import UIKit
 
 // Settings > Devices > Remove (docs/ux/identity-recovery.md section 18.1,
-// ADR-0066 section 2.3): the app's own sheet, never a system dialog. It
+// ADR-0074 section 2.3): the app's own sheet, never a system dialog. It
 // carries the proof block; the main button runs the removal as ONE operation
 // (``DeviceRemovalRunner``): sign the device out at the server, delete its
 // directory row, then the DeviceGroup and the conversations.
@@ -15,7 +15,7 @@ import UIKit
 //   * ``RemoveDeviceSheetState``   what the sheet shows, decided purely;
 //   * ``RemoveDeviceSheet``        the view.
 //
-// The sheet's second choice, "It was lost or stolen" (ADR-0066 section 3.2):
+// The sheet's second choice, "It was lost or stolen" (ADR-0074 section 3.2):
 // remove the device AND change the account keys (``KeyRotationRunner``). The
 // sheet changes in place: the explanation and its four results, then a step
 // list while it runs, then the new recovery phrase.
@@ -72,7 +72,7 @@ enum RotateDeviceCopy {
     static let effectPhrase = "devices.rotate.effect_phrase"
     static let effectPasskeys = "devices.rotate.effect_passkeys"
     static let effectContacts = "devices.rotate.effect_contacts"
-    /// ADR-0066 section 3.5a rule 5 — the links and the unanswered requests
+    /// ADR-0074 section 3.5a rule 5 — the links and the unanswered requests
     /// made before the rotation stop working.
     static let effectLinks = "devices.rotate.effect_links"
     static let confirm = "devices.rotate.confirm"
@@ -146,7 +146,7 @@ enum RotateSheetRules {
         case .rotatedPublishOwed: return .publishOwed
         case .removedNotRotated(let outcome): return .notStarted(line: causeLine(outcome))
         case .notRemoved, .freshAuthRequired: return nil
-        // ADR-0067: not phrase-protected, so no words and no withheld-words
+        // ADR-0075: not phrase-protected, so no words and no withheld-words
         // state; the sheet closes as done.
         case .rotatedNoWords: return nil
         }
@@ -277,7 +277,7 @@ struct RemoveDeviceSheet: View {
     let deviceKey: Data
     let sessionToken: String
     @ObservedObject var runner: DeviceRemovalRunner
-    /// ADR-0066 section 3.2 — the second choice. `nil` hides the reason pair
+    /// ADR-0074 section 3.2 — the second choice. `nil` hides the reason pair
     /// (a caller that has no rotation to offer removes the device plainly).
     @ObservedObject var rotation: OptionalKeyRotationRunner
     /// The sheet opens straight on the second choice, for `Try again` after
@@ -652,7 +652,7 @@ struct RemoveDeviceSheet: View {
             if let phrase = rotationRunner.wordsToShow() {
                 rotate = .words(phrase)
             } else if rotationRunner.resume == .nothing {
-                // Nothing is owed and no words are shown (ADR-0067).
+                // Nothing is owed and no words are shown (ADR-0075).
                 rotate = .idle
                 onRotationClosed(true)
             } else {

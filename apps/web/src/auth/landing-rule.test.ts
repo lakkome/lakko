@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * No publish-back (`landing-rule.ts`, ADR-0065 section 4.2): what a landing
+ * No publish-back (`landing-rule.ts`, ADR-0073 section 4.2): what a landing
  * does with the identity the directory publishes, before it uploads
  * anything. The load-bearing property is that a different published key
  * never leads to an upload: it is either a known reset (a higher

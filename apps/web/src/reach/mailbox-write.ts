@@ -42,7 +42,7 @@ import { reachSession, reachSignerForGrant, reachSignerForGrantWire } from "./re
 export type WriteAuthKind = "own" | "explicit" | "kept" | "continuity" | "delegation" | "none";
 
 /**
- * ADR-0065 R.4 - the continuity reach key of an account whose reset this
+ * ADR-0073 R.4 - the continuity reach key of an account whose reset this
  * device ACCEPTED: derived from the account id and the attested generation,
  * registered by the resetting device on its new mailbox. A Welcome to the
  * new identity is signed with it when no grant issued by the new identity
@@ -93,7 +93,7 @@ function released(kind: WriteAuthKind, signer: ProofSigner | null, delegation: s
 /** The account mailbox pseudonym of an account key. */
 export async function accountMailboxOf(accountKey: Uint8Array): Promise<Uint8Array> {
   const wasm = await loadWasm();
-  // ADR-0066 section 3.5a rule 1 - resolve before you address: a proven
+  // ADR-0074 section 3.5a rule 1 - resolve before you address: a proven
   // predecessor names the person's CURRENT key, and so their current
   // mailbox. An unproven change is never resolved (`address-resolver.ts`).
   return wasm.IdentityPseudonym.fromIdentity(resolveAccountKey(accountKey)).asBytes();
@@ -134,7 +134,7 @@ export async function resolveWriteAuth(
   } = {},
 ): Promise<ResolvedWriteAuth> {
   const session = reachSession();
-  // ADR-0066 section 3.5a rules 1 and 2: the write goes to the CURRENT key's
+  // ADR-0074 section 3.5a rules 1 and 2: the write goes to the CURRENT key's
   // mailbox (the caller derives it with `accountMailboxOf`, which resolves
   // the same way), and the grants are the person's, under any key they had.
   const personHexes = personKeysHex(journalHex(targetAccountKey));
@@ -245,7 +245,7 @@ export async function writeThroughCandidates<T>(
 }
 
 // ----------------------------------------------------------------------------
-// A refused write re-checks the address once (ADR-0066 section 3.5a rule 6)
+// A refused write re-checks the address once (ADR-0074 section 3.5a rule 6)
 // ----------------------------------------------------------------------------
 
 /** Where a write goes and what it may be signed with, as resolved NOW. */
@@ -341,7 +341,7 @@ export async function planWriteToPerson(
     readonly explicit?: WasmReachGrant | string | null;
     readonly allowMember?: boolean;
     readonly neverUnsigned?: boolean;
-    /** ADR-0065 R.4: tried after every grant the person itself issued (once
+    /** ADR-0073 R.4: tried after every grant the person itself issued (once
      *  the new identity is in a conversation its own grants are used and
      *  this key is not), before a committer delegation. */
     readonly continuity?: ContinuityAuth | null;
@@ -400,7 +400,7 @@ export async function planWriteToPerson(
   }
   const candidates: WriteCandidate[] = [];
   if (session !== null) {
-    // ADR-0065 R.7 case 3 - a Welcome into the successor of a conversation
+    // ADR-0073 R.7 case 3 - a Welcome into the successor of a conversation
     // may use the `member` key the person granted for the conversation's
     // EARLIER group: the lineage makes it the same conversation. The scope
     // itself is tried first; each grant once.
@@ -475,7 +475,7 @@ function continuityCandidate(continuity: ContinuityAuth): WriteCandidate {
 }
 
 /** The earlier groups of the conversation a scope continues, as hex, or
- *  nothing (ADR-0065 R.5). Installed by the runtime that holds the lineage. */
+ *  nothing (ADR-0073 R.5). Installed by the runtime that holds the lineage. */
 export type ScopeLineage = (scopeHex: string) => readonly string[];
 
 let installedScopeLineage: ScopeLineage | null = null;
@@ -523,7 +523,7 @@ export async function writeToPerson<T>(
      *  {@link MailboxUnreachableError} so the caller keeps it owed. */
     readonly neverUnsigned?: boolean;
     readonly recheck?: AddressRecheck | null;
-    /** ADR-0065 R.4: see {@link planWriteToPerson}. */
+    /** ADR-0073 R.4: see {@link planWriteToPerson}. */
     readonly continuity?: ContinuityAuth | null;
   },
   write: (mailbox: Uint8Array, auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
@@ -551,7 +551,7 @@ export async function writeToPerson<T>(
  * So a Welcome for an account this device holds no grant for waits, owed,
  * until one arrives; it is never written unsigned.
  *
- * ADR-0066 section 3.5a rule 6: with `recheck`, the first refusal re-checks
+ * ADR-0074 section 3.5a rule 6: with `recheck`, the first refusal re-checks
  * the person's address once. `write` receives the mailbox to write to.
  */
 export async function writeWelcome<T>(
@@ -581,7 +581,7 @@ export async function writeWelcome<T>(
  * account's keys, for an add of the person `addedHexes` names (every key
  * they have had), with the signer of the key it names.
  *
- * ADR-0066 section 3.5a: a proposer names the committer's account key as IT
+ * ADR-0074 section 3.5a: a proposer names the committer's account key as IT
  * knows it. One that has observed this account's proven rotation names the
  * current key; one that has not names the key the role table carries, the
  * predecessor. So each own key this device holds the seed of is tried, the

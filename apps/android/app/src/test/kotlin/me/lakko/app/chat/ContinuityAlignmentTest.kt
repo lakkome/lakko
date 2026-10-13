@@ -11,7 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0065 R.13b alignment pass - the pure decisions it added on Android:
+ * ADR-0073 R.13b alignment pass - the pure decisions it added on Android:
  * the sealed claim store, the resumable and faithful re-send, the re-send
  * marker read from the stored log, the composer text of a conversation, and
  * the read position across segments.

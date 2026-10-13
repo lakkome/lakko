@@ -4,7 +4,7 @@
 import Foundation
 import Security
 
-/// Keychain-backed cache for the auth **session pair** (ADR-0065 section 3):
+/// Keychain-backed cache for the auth **session pair** (ADR-0073 section 3):
 /// the access token `services/auth` issues on every signup / login / recover /
 /// passkey / ACCESS-factor finish, the refresh credential beside it, both
 /// expiries, and the key generation they were issued under.
@@ -52,7 +52,7 @@ import Security
 ///   * `kSecValueData = JSON { "token", "expires_at_ms", "refresh_token",
 ///     "refresh_expires_at_ms", "key_generation", "device_id"? }`
 ///
-/// v2 is a flag day (ADR-0065: no users, no v1 token to keep valid): a v1
+/// v2 is a flag day (ADR-0073: no users, no v1 token to keep valid): a v1
 /// row under the old service tag is never read and is deleted beside the
 /// v2 row, so a device that upgraded lands logged out once.
 public enum SessionTokenStore {
@@ -60,7 +60,7 @@ public enum SessionTokenStore {
     /// Service tag — versioned so a future shape change lands beside v2.
     public static let serviceTag: String = "me.lakko.session-token.v2"
 
-    /// The pre-ADR-0065 tag, deleted on every delete so no row outlives it.
+    /// The pre-ADR-0073 tag, deleted on every delete so no row outlives it.
     static let legacyServiceTag: String = "me.lakko.session-token.v1"
 
     /// Persist `token` for `accountIdB64`, replacing any existing row.
@@ -143,7 +143,7 @@ public enum SessionTokenStore {
     }
 }
 
-/// A persisted session pair (ADR-0065): the access token and its expiry,
+/// A persisted session pair (ADR-0073): the access token and its expiry,
 /// the refresh credential and its expiry, the key generation.
 public struct PersistedSessionToken: Equatable, Codable {
     public let sessionToken: String
@@ -151,7 +151,7 @@ public struct PersistedSessionToken: Equatable, Codable {
     public let refreshToken: String
     public let refreshExpiresAtMs: Int64
     public let keyGeneration: UInt64
-    /// ADR-0066 — the device the pair was issued for, as this client
+    /// ADR-0074 — the device the pair was issued for, as this client
     /// asserted it (``SessionPair/deviceIdB64``); absent for an unbound pair.
     public let deviceIdB64: String?
 

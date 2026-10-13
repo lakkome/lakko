@@ -10,7 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0065 R.2 - the acceptance rule, the binding rule and the re-pin plan,
+/** ADR-0073 R.2 - the acceptance rule, the binding rule and the re-pin plan,
  *  row by row (mirror of the web `reset-verdict` / `verified-binding` /
  *  `local-store` tables). */
 class ResetVerdictTest {

@@ -33,7 +33,7 @@ import me.lakko.app.ui.auth.Lead
 
 /**
  * "Your account keys were reset" (docs/ux/identity-recovery.md section
- * 15.2; ADR-0065 section 3.5 and 4.2) — the same state as the removed
+ * 15.2; ADR-0073 section 3.5 and 4.2) — the same state as the removed
  * screen above with its own copy, shown in EVERY auth state instead of the
  * app, at launch too: this device's keys are not the account's keys any
  * more.
@@ -42,7 +42,7 @@ import me.lakko.app.ui.auth.Lead
  *     The deletion runs by itself ("Removing..." with a progress indicator,
  *     [KeyResetSignOut.Phase.Removing]); once done, the one button is
  *     **Sign in** ([onSignIn]), which goes to the anonymous sign-in screen.
- *   * [KeyResetSignOut.Kind.Removed] (ADR-0066, UX 18.2): another device of
+ *   * [KeyResetSignOut.Kind.Removed] (ADR-0074, UX 18.2): another device of
  *     the account removed this one. "This device was removed", the same
  *     self-starting deletion, then **Sign in**.
  *   * [KeyResetSignOut.Kind.Mismatch]: the directory publishes other keys of
@@ -69,7 +69,7 @@ internal fun KeysResetSignedOutScreen(
     }
     AuthScaffold(title = title, onBack = null, modifier = modifier) {
         when (signOut.kind) {
-            // ADR-0066 / UX 18.2 - another device removed this one. The
+            // ADR-0074 / UX 18.2 - another device removed this one. The
             // deletion starts by itself; there is no button to tap first,
             // no "Was it you?" and no way back (a removal changes no keys).
             KeyResetSignOut.Kind.Removed -> when (signOut.phase) {
@@ -110,7 +110,7 @@ internal fun KeysResetSignedOutScreen(
                 }
                 KeyResetSignOut.Phase.Removed -> {
                     Lead(t("devices.signed_out.body_removed", mapOf("username" to name)))
-                    // ADR-0066 / UX 18.4 - why the account could not be
+                    // ADR-0074 / UX 18.4 - why the account could not be
                     // taken back, when the form was open as that was learned.
                     signOut.notice?.let { notice ->
                         Text(

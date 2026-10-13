@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The recovery email ([ADR-0067]; UX `docs/ux/identity-recovery.md` section
+//! The recovery email ([ADR-0075]; UX `docs/ux/identity-recovery.md` section
 //! 19): a code mailed to an address the person added brings them back in.
 //!
 //! # What the server keeps
@@ -23,7 +23,7 @@
 //! server-minted `vault_salt`), wrapped again at rest under
 //! `LAKKO_VAULT_ENC_KEY`. It leaves the server only in the answer to a
 //! verified mailed code (and authenticator code). **This is the stated
-//! exception to invariant #2** (ADR-0067 section 2): the server handles the
+//! exception to invariant #2** (ADR-0075 section 2): the server handles the
 //! address in the clear whenever it sends a letter, so an operator who
 //! records it can open the vault. Saving a recovery phrase ends the exception
 //! for that account by changing its keys (a key rotation with
@@ -62,7 +62,7 @@
 //!   phrase_saved}`: the account becomes phrase-protected.
 //! - Re-binding or removing the login handle deletes both rows in the same
 //!   transaction ([`drop_for_handle_change`]), unless the bind carries the
-//!   address (`recovery_email`, ADR-0068 section 2): then the key is moved to
+//!   address (`recovery_email`, ADR-0076 section 2): then the key is moved to
 //!   the new handle in that transaction ([`rekey_for_handle_change`]), with
 //!   no letter.
 //!
@@ -100,7 +100,7 @@
 //! ticket is 32 random bytes, stored as a keyed hash, ten minutes, single
 //! use; one live ticket per account.
 //!
-//! # Limits (ADR-0067 section 10; defaults chosen, not measured)
+//! # Limits (ADR-0075 section 10; defaults chosen, not measured)
 //!
 //! [`Scope::EmailLetterHandle`] and the `Email` address bucket before
 //! anything is looked up; [`Scope::EmailLetterAccount`] after (a spent one
@@ -108,7 +108,7 @@
 //! [`Scope::EmailVerify`] per login handle across challenges;
 //! [`Scope::EmailVaultOpen`] per account.
 //!
-//! [ADR-0067]: ../../../docs/adr/0067-recovery-email.md
+//! [ADR-0075]: ../../../docs/adr/0075-recovery-email.md
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -999,7 +999,7 @@ async fn delete_rows(
 /// The login handle of `account_id` is changing or going away: the stored
 /// `email_key` (and the vault key the client derives) was made from the old
 /// name, so the recovery email is turned off in the SAME transaction
-/// (ADR-0067 section 6) and the account's devices are told.
+/// (ADR-0075 section 6) and the account's devices are told.
 ///
 /// # Errors
 ///
@@ -1014,7 +1014,7 @@ pub(crate) async fn drop_for_handle_change(
     Ok(())
 }
 
-/// The `recovery_email` object of `PUT /auth/login-handle` (ADR-0068 section
+/// The `recovery_email` object of `PUT /auth/login-handle` (ADR-0076 section
 /// 2): the address the account confirmed, so a change of handle re-keys the
 /// recovery email instead of dropping it.
 #[derive(Deserialize)]
@@ -1260,7 +1260,7 @@ pub(crate) struct PutVaultReq {
     pub(crate) sealed_entropy: String,
 }
 
-/// `PUT /recovery-email/vault` — bearer, NO fresh-auth grant (ADR-0067,
+/// `PUT /recovery-email/vault` — bearer, NO fresh-auth grant (ADR-0075,
 /// amended 2026-10-13). A device of the account that kept the address stores
 /// a vault again after a key reset or a rotation dropped it. No letter is
 /// sent: the address is the one already confirmed, which the server checks
@@ -1755,7 +1755,7 @@ pub(crate) struct RecoverTotpReq {
 }
 
 /// `POST /recovery-email/recover/totp` — anonymous, per-address limited. The
-/// authenticator step of a ticket that requires it (ADR-0067 D8), with the
+/// authenticator step of a ticket that requires it (ADR-0075 D8), with the
 /// rules of `/totp/recover`: the +-1 step window, strictly newer than the
 /// last accepted step, one acceptance per step.
 ///

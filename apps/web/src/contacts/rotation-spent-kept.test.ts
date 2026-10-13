@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066 section 3.5a rule 5 on a KEPT device, and the pieces the third
+ * ADR-0074 section 3.5a rule 5 on a KEPT device, and the pieces the third
  * pass added: the durable marker of the spend round, the links this device
  * minted itself (`/c/` call links among them), the kept intro of a sent
  * request, and the five-minute throttle of the address re-check.

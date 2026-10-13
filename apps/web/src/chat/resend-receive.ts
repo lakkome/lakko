@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0065 R.7 case 1 - the receive side of the re-send marker: gathers the
+ * ADR-0073 R.7 case 1 - the receive side of the re-send marker: gathers the
  * facts `resend-marker.ts` `resendVerdict` reads, for one batch of one
  * group, and answers "is this message a re-send whose original this device
  * already holds".

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The recovery email's two flows as pure step machines (ADR-0067 sections 6
+ * The recovery email's two flows as pure step machines (ADR-0075 sections 6
  * and 7, `docs/ux/identity-recovery.md` 19.2 and 19.3):
  *
  *   - enrol: address -> code -> done, with the rule for when the email
@@ -152,7 +152,7 @@ export function resendRemainingMs(resendAtMs: number, nowMs: number): number {
 
 /**
  * Whether the email vault is sealed and sent with `enrol/finish`: only for
- * an account WITHOUT a saved phrase (ADR-0067 section 2). A phrase-protected
+ * an account WITHOUT a saved phrase (ADR-0075 section 2). A phrase-protected
  * account never gets a vault; the server refuses one (`409 phrase-saved`).
  */
 export function enrolSealsVault(phraseSaved: boolean): boolean {

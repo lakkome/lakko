@@ -853,10 +853,10 @@ pub fn pin_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> b
 }
 
 // ============================================================================
-// Group-closed envelope — ADR-0065 phase 2
+// Group-closed envelope — ADR-0073 phase 2
 // ============================================================================
 
-/// A group's closed notice (ADR-0065 phase 2, `docs/ux/identity-recovery.md`
+/// A group's closed notice (ADR-0073 phase 2, `docs/ux/identity-recovery.md`
 /// §16.5). Mirror of [`lakko_contacts::group_closed::GroupClosed`].
 ///
 /// **A notice received from someone else is that person's assertion about
@@ -887,7 +887,7 @@ impl From<RustGroupClosed> for FfiGroupClosed {
     }
 }
 
-/// Compose a group-closed envelope (ADR-0065 phase 2) — the inner plaintext
+/// Compose a group-closed envelope (ADR-0073 phase 2) — the inner plaintext
 /// to publish as an MLS application message on the OLD group's journal.
 /// `successor_group_id` is the recreated group's 32-byte id, or `None` when
 /// the group is closed without one.
@@ -918,7 +918,7 @@ pub fn compose_group_closed_envelope(
     }))
 }
 
-/// Strictly decode a group-closed envelope (ADR-0065 phase 2). Fail-closed:
+/// Strictly decode a group-closed envelope (ADR-0073 phase 2). Fail-closed:
 /// a plaintext without the group-closed domain separator, truncated, with
 /// trailing bytes, an unknown version or a successor of the wrong length is
 /// refused as a whole.
@@ -2265,7 +2265,7 @@ pub enum FfiIncomingEnvelopeKind {
     /// Store it per member, keyed on the sender's account key resolved at
     /// receipt (C-68), only when [`shared_channels_is_newer`] for that member.
     SharedChannels,
-    /// An admin closed this group and names the recreated one (ADR-0065
+    /// An admin closed this group and names the recreated one (ADR-0073
     /// phase 2). The decoded notice rides the `group_closed` field of
     /// [`FfiIncomingEnvelope`]; `payload` is empty. Never render it as a chat
     /// bubble. Appended last so every earlier variant keeps its ordinal.
@@ -2276,7 +2276,7 @@ pub enum FfiIncomingEnvelopeKind {
     /// when [`group_closed_is_newer`] for that group.
     GroupClosed,
     /// Another device of this account is changing the account keys
-    /// (ADR-0066 section 3.3). The decoded envelope rides the `key_rotation`
+    /// (ADR-0074 section 3.3). The decoded envelope rides the `key_rotation`
     /// field of [`FfiIncomingEnvelope`]; `payload` is empty. Never render
     /// it. Appended last so every earlier variant keeps its ordinal.
     ///
@@ -2346,11 +2346,11 @@ pub struct FfiIncomingEnvelope {
     /// every other kind. Defaults to `None` so existing initialisers compile.
     #[uniffi(default = None)]
     pub shared_channels: Option<FfiSharedChannels>,
-    /// Set only for `GroupClosed` (ADR-0065): the decoded notice. `None` for
+    /// Set only for `GroupClosed` (ADR-0073): the decoded notice. `None` for
     /// every other kind. Defaults to `None` so existing initialisers compile.
     #[uniffi(default = None)]
     pub group_closed: Option<FfiGroupClosed>,
-    /// Set only for `KeyRotation` (ADR-0066): the decoded envelope, shape
+    /// Set only for `KeyRotation` (ADR-0074): the decoded envelope, shape
     /// only. `None` for every other kind. Defaults to `None` so existing
     /// initialisers compile.
     #[uniffi(default = None)]

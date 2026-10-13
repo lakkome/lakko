@@ -373,7 +373,7 @@ pub struct ConversationOrderEntry {
     pub group_ids: Vec<Vec<u8>>,
 }
 
-/// One conversation-lineage register (ADR-0065 R.5): the group
+/// One conversation-lineage register (ADR-0073 R.5): the group
 /// `successor_group_id` continues the conversation whose id is
 /// `root_conversation_id` (the group id of the FIRST group of the lineage).
 ///
@@ -413,7 +413,7 @@ impl LineageEntry {
     }
 }
 
-/// The account's recovery email address (ADR-0067, amended 2026-10-13): one
+/// The account's recovery email address (ADR-0075, amended 2026-10-13): one
 /// register per account.
 ///
 /// `address` is the NORMALISED address
@@ -488,7 +488,7 @@ impl RecoveryEmailEntry {
     }
 }
 
-/// The account's own username (ADR-0068 section 3): one register per
+/// The account's own username (ADR-0076 section 3): one register per
 /// account.
 ///
 /// `username` is the CANONICAL username
@@ -563,11 +563,11 @@ pub enum SyncEntry {
     Draft(DraftEntry),
     /// The explicit conversation order.
     ConversationOrder(ConversationOrderEntry),
-    /// A conversation-lineage register (ADR-0065 R.5).
+    /// A conversation-lineage register (ADR-0073 R.5).
     Lineage(LineageEntry),
-    /// The account's recovery email address (ADR-0067).
+    /// The account's recovery email address (ADR-0075).
     RecoveryEmail(RecoveryEmailEntry),
-    /// The account's own username (ADR-0068). Appended last.
+    /// The account's own username (ADR-0076). Appended last.
     OwnUsername(OwnUsernameEntry),
 }
 

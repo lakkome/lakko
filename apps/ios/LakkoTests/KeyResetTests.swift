@@ -6,7 +6,7 @@ import XCTest
 
 @testable import Lakko
 
-// ADR-0065 "Reset account keys": the pure rules, the token provider and the
+// ADR-0073 "Reset account keys": the pure rules, the token provider and the
 // signed-out device, driven without a server.
 
 // MARK: - The landing rule (section 4.2)
@@ -431,7 +431,7 @@ final class KeyResetPublishTests: XCTestCase {
     func testTheAttestedResetBodyAddsTheOneFieldBesideTheStatement() throws {
         let plain = DsStatementRequest(
             path: "/ds/group/ab/reset", bodyJson: #"{"statement_b64":"c3RtdA=="}"#)
-        // ADR-0066 section 4.6 — the DS refuses the attestation without the
+        // ADR-0074 section 4.6 — the DS refuses the attestation without the
         // root endorsement, so the two fields are only ever attached together.
         let attested = try AttestedResetBody.attach(
             attestation: Data([1, 2, 3]), endorsement: Data([9, 8, 7]), to: plain)
@@ -607,7 +607,7 @@ final class KeysSignOutTests: XCTestCase {
         XCTAssertNil(h.repository.keysSignOut)
     }
 
-    /// ADR-0066 section 1.1: a device that holds the keys learns of the
+    /// ADR-0074 section 1.1: a device that holds the keys learns of the
     /// reset at launch, deletes what the account kept, and asks.
     func testARefreshRefusedAsSupersededOnADeviceWithKeysAsksWasItYou() async {
         let h = restoredSession(refresh: .failure(AuthClientError.http(

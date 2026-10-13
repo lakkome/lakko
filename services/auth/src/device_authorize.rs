@@ -9,7 +9,7 @@
 //!
 //! - **`POST /device/authorize/start`** — bearer-authenticated (the
 //!   existing device proves it already holds a session) AND a live
-//!   fresh-auth grant in the JSON body, `{"fresh_grant": "..."}` (ADR-0065,
+//!   fresh-auth grant in the JSON body, `{"fresh_grant": "..."}` (ADR-0073,
 //!   amended 2026-10-06): the person signed in on this device with the
 //!   password or a passkey within the grant's lifetime. Without one: `403
 //!   fresh-auth-required`, nothing minted, no counter charged, so a stolen
@@ -154,7 +154,7 @@ pub(crate) async fn start(
     // Refresh `expires_at` if the same (astronomically-unlikely) hash
     // already exists for this account — mirrors `write_action_grant`.
     //
-    // Inside the generation fence (ADR-0066 "T3 as built"): a device grant
+    // Inside the generation fence (ADR-0074 "T3 as built"): a device grant
     // is redeemable for a session, so one minted by a session that a key
     // reset or a recall has just displaced must not survive it.
     let mut tx =
@@ -236,7 +236,7 @@ pub(crate) async fn redeem(
 /// on the row lock; the second reads nothing once the first commits.
 ///
 /// Also returns the account's key generation, read while the grant row's
-/// lock is held (ADR-0066 "T3 as built"). A key reset and a recall delete the
+/// lock is held (ADR-0074 "T3 as built"). A key reset and a recall delete the
 /// account's device grants in the transaction that bumps the generation, so a
 /// redeem that straddles one either finds no grant, or issues its pair at the
 /// generation from before the change, which is refused on first use.
@@ -302,7 +302,7 @@ pub(crate) struct DeviceAuthorizeRedeemReq {
     /// received over the rendezvous channel.
     pub grant_token_b64: String,
     /// URL-safe base64 (no padding) of the 32-byte id of the device this
-    /// session lands on: its conversation leaf signature key (ADR-0066
+    /// session lands on: its conversation leaf signature key (ADR-0074
     /// section 0.4). Absent when the device has no keys yet; the session then
     /// names no device and the client calls `POST /auth/session/bind-device`
     /// once it has them.
@@ -312,7 +312,7 @@ pub(crate) struct DeviceAuthorizeRedeemReq {
 
 /// `POST /device/authorize/redeem` response body. Mirrors `AuthFinishRes`
 /// (webauthn.rs) — the account id plus the same session pair every login
-/// flow returns (ADR-0065).
+/// flow returns (ADR-0073).
 #[derive(Serialize)]
 pub(crate) struct DeviceAuthorizeRedeemRes {
     /// URL-safe base64 of the 16-byte account id. Since ADR-0056 this is
@@ -506,7 +506,7 @@ mod device_authorize_e2e_tests {
         );
 
         // A bearer alone (the old empty body) mints nothing: the fresh-auth
-        // grant is required (ADR-0065, amended 2026-10-06).
+        // grant is required (ADR-0073, amended 2026-10-06).
         let (st, body) = send(
             &state,
             Request::builder()

@@ -95,7 +95,7 @@ class TapDeepLinkRoutingTest {
         }
     }
 
-    // ---- ADR-0065 phase 2 / UX 16.4: a closed one-to-one's wake ------------
+    // ---- ADR-0073 phase 2 / UX 16.4: a closed one-to-one's wake ------------
 
     @Test
     fun `a wake for a closed one-to-one is recognised through the route index`() {

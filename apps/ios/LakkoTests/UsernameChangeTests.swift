@@ -5,7 +5,7 @@ import XCTest
 import LakkoCore
 @testable import Lakko
 
-// ADR-0068 — changing a username: the pure rules. The flow over a scripted
+// ADR-0076 — changing a username: the pure rules. The flow over a scripted
 // server is in `RecoveryFlowTests`.
 
 @MainActor

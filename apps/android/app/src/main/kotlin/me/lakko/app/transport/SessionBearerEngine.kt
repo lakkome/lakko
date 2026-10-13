@@ -25,7 +25,7 @@ import me.lakko.app.auth.deviceRevokedHintOf
 import me.lakko.app.auth.sessionRefusalOf
 
 /**
- * ADR-0065 section 3.3 — the one place every bearer request passes through.
+ * ADR-0073 section 3.3 — the one place every bearer request passes through.
  *
  * Every REST client of this app builds its Ktor `HttpClient` over
  * [lakkoHttpEngine], which is this engine around the anti-censorship one
@@ -42,7 +42,7 @@ import me.lakko.app.auth.sessionRefusalOf
  *      retry, reports it to the provider - the account's keys were reset
  *      elsewhere and the device signs out (contract section 7) - and hands
  *      the response back unchanged;
- *   4. on `401 device-revoked` (ADR-0066: this device was removed from the
+ *   4. on `401 device-revoked` (ADR-0074: this device was removed from the
  *      account) reports that instead, the same way; and on discovery's
  *      `403 device-revoked`, which proves nothing, refreshes at auth so
  *      auth's answer decides.
@@ -98,7 +98,7 @@ public class SessionBearerEngine(
     }
 
     /**
-     * ADR-0066 "T1 as built" point 24 - discovery's `403 device-revoked` on
+     * ADR-0074 "T1 as built" point 24 - discovery's `403 device-revoked` on
      * a KeyPackage publish is not proof of removal. Refresh at auth and let
      * auth's answer decide: its `401 device-revoked` reaches the provider's
      * refusal hook (the removed screen), and a new pair means the device is
@@ -184,7 +184,7 @@ public class SessionBearerEngine(
 
 /**
  * The engine every REST client of the app builds its `HttpClient` over: the
- * session-bearer layer (ADR-0065) around the anti-censorship routing
+ * session-bearer layer (ADR-0073) around the anti-censorship routing
  * (ADR-0026) around OkHttp.
  */
 public fun lakkoHttpEngine(): HttpClientEngine =

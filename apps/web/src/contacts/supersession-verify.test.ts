@@ -175,7 +175,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     expect(pin?.rotationMarker).toBe(Number(expires));
   });
 
-  it("ADR-0066: a PROVEN rotation at a higher generation is followed silently, and the old key is the proven predecessor", async () => {
+  it("ADR-0074: a PROVEN rotation at a higher generation is followed silently, and the old key is the proven predecessor", async () => {
     const oldPeer = identityFromSeed(41);
     const newPeer = identityFromSeed(42);
     const accountIdB64 = b64(ACCOUNT_ID);
@@ -240,7 +240,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     expect([...trustedBoundKeys(keys, undefined, superseded)].sort()).toEqual(both);
   });
 
-  it("ADR-0066: a changed key WITHOUT a proof is refused and leaves NO predecessor", async () => {
+  it("ADR-0074: a changed key WITHOUT a proof is refused and leaves NO predecessor", async () => {
     const oldPeer = identityFromSeed(43);
     const newPeer = identityFromSeed(44);
     const accountIdB64 = b64(ACCOUNT_ID);

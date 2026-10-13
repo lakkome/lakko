@@ -29,7 +29,7 @@ use crate::AppState;
 pub(crate) const TEST_PEPPER: [u8; 32] = [0x70; 32];
 
 /// The auth attest signing key every test app pins the verifying half of
-/// (ADR-0065); a test mints key-reset attestations with it.
+/// (ADR-0073); a test mints key-reset attestations with it.
 pub(crate) static TEST_ATTEST_KEY: std::sync::LazyLock<SigningKey> =
     std::sync::LazyLock::new(|| SigningKey::from_seed(&[0x4b; 32]));
 

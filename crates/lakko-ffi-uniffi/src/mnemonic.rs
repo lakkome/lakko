@@ -112,7 +112,7 @@ impl RecoveryMnemonic {
     }
 
     /// Extract the 16-byte BIP39 entropy. The passkey vault
-    /// (ADR-0064) seals this exact buffer;
+    /// (ADR-0072) seals this exact buffer;
     /// [`RecoveryMnemonic::from_entropy`] rebuilds the mnemonic from it.
     pub fn to_entropy(&self) -> Vec<u8> {
         self.inner.to_entropy().as_ref().to_vec()

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0066: the pairing state bundle v2 and a device paired AFTER a rotation
+ * ADR-0074: the pairing state bundle v2 and a device paired AFTER a rotation
  * of the account keys. The codec and its bounds, the receive rule (what is
  * stored, the mailbox window, a contact's proven predecessors), and - through
  * the real core - that the paired device binds its conversation identity
@@ -110,7 +110,7 @@ afterEach(() => {
   delete g["indexedDB"];
 });
 
-describe("state bundle v2 codec (ADR-0066)", () => {
+describe("state bundle v2 codec (ADR-0074)", () => {
   it("round-trips the own predecessors and each pin's proven predecessors", () => {
     expect(decodeStateBundle(encodeStateBundle(base))).toEqual(base);
   });

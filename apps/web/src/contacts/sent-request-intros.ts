@@ -10,7 +10,7 @@
  * synchronous "Sent" list. The intro is what the person wrote to a stranger,
  * so it does not go there: it lives here, AES-256-GCM under the device root
  * key, one row per account. With it a request re-sent after a rotation of
- * the account keys (ADR-0066 section 3.5a rule 5) carries the same words,
+ * the account keys (ADR-0074 section 3.5a rule 5) carries the same words,
  * also after a reload.
  *
  * ```text

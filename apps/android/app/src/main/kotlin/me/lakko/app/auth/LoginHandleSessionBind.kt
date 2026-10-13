@@ -66,7 +66,7 @@ public class LoginHandleSessionRebinder(
     private val launch: (suspend () -> Unit) -> Unit,
     /** Diagnostic sink (status only, never a token, never a handle). */
     private val log: (String) -> Unit,
-    /** Told when auth confirmed a handle in this session (ADR-0068). */
+    /** Told when auth confirmed a handle in this session (ADR-0076). */
     private val onConfirmed: () -> Unit = {},
 ) {
     private val spent: MutableSet<String> = HashSet()
@@ -114,7 +114,7 @@ public class LoginHandleSessionRebinder(
         }
         launch {
             try {
-                // ADR-0068 section 2 - never a blind PUT: the account may
+                // ADR-0076 section 2 - never a blind PUT: the account may
                 // have been renamed on another device, and a bind here would
                 // revert it at auth. Bind only when the account holds none.
                 when (handleSyncAction(binder.check(sessionToken, handle))) {

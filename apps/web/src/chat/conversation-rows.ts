@@ -53,7 +53,7 @@ export function createConversationRows() {
   const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
   const auth = useAuth();
-  // ADR-0065 R.5 — one row per CONVERSATION: a conversation that continued
+  // ADR-0073 R.5 — one row per CONVERSATION: a conversation that continued
   // in a successor group keeps its row, and everything a person attached to
   // it (pin / mute / archive, folder, read position) stays keyed on its id.
   const lineageView = useLineage();
@@ -65,7 +65,7 @@ export function createConversationRows() {
 
   // Accepted contacts name a chat linked to one; a rename propagates here.
   const [accepted, setAccepted] = createSignal<AcceptedContact[]>(loadAccepted());
-  // ADR-0065 R.2 — a retired key still names the person.
+  // ADR-0073 R.2 — a retired key still names the person.
   const [aliases, setAliases] = createSignal<Map<string, string>>(loadKeyAliases());
   onMount(() => {
     const unsubscribe = subscribeAcceptedChanged(() => {

@@ -14,7 +14,7 @@ import { base64Encode } from "./account-id";
 
 const seed = (fill: number): Uint8Array => new Uint8Array(64).fill(fill);
 
-describe("the sealed key-rotation state (ADR-0066 part 3)", () => {
+describe("the sealed key-rotation state (ADR-0074 part 3)", () => {
   it("keeps the predecessor seeds oldest first, each once", () => {
     let state = withPredecessorSeed(EMPTY_KEY_ROTATION_STATE, seed(1));
     state = withPredecessorSeed(state, seed(2));
@@ -55,7 +55,7 @@ describe("the sealed key-rotation state (ADR-0066 part 3)", () => {
   });
 });
 
-describe("own predecessors are a chain (ADR-0066 section 3.5a)", () => {
+describe("own predecessors are a chain (ADR-0074 section 3.5a)", () => {
   it("every held seed, oldest first: the conversation key, then the keys held in between", () => {
     const one = new Uint8Array(64).fill(1);
     const two = new Uint8Array(64).fill(2);

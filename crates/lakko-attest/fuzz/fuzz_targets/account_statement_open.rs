@@ -3,7 +3,7 @@
 
 //! Fuzz target — `AccountStatement::decode_unverified`, `AccountStatement::open`
 //! and `verify_account_statement` (the client-signed account-key statement,
-//! ADR-0066 section 0.3). The fuzz input is the attacker-controlled wire
+//! ADR-0074 section 0.3). The fuzz input is the attacker-controlled wire
 //! form: a fixed-layout 138-byte blob (`version | kind | account_id(16) |
 //! unix_ms(8 BE) | nonce(16) | body_hash(32) | sig(64)`) that anyone can send
 //! to auth's device-revoke route as a body field and to discovery's

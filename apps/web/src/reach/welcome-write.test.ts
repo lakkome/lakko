@@ -131,7 +131,7 @@ describe("the order grants are tried in", () => {
   });
 });
 
-describe("the own keys a committer delegation may name (ADR-0066 section 3.5a)", () => {
+describe("the own keys a committer delegation may name (ADR-0074 section 3.5a)", () => {
   it("the current key first, then every own predecessor, newest first", async () => {
     const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x51));
     const oldest = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x52));
@@ -207,11 +207,11 @@ describe("an owed Welcome is retried when a grant arrives", () => {
   });
 });
 
-// ---- ADR-0065 R.4: the continuity key as a Welcome candidate ----------------
+// ---- ADR-0073 R.4: the continuity key as a Welcome candidate ----------------
 
 import { planWriteToPerson } from "./mailbox-write";
 
-describe("the continuity key (ADR-0065 R.4)", () => {
+describe("the continuity key (ADR-0073 R.4)", () => {
   let TARGET: Uint8Array;
   beforeAll(() => {
     const id = wasm.Identity.fromSeed(new Uint8Array(32).fill(0x42));
