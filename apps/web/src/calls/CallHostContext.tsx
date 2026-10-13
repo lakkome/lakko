@@ -189,6 +189,7 @@ import {
   decideGroupCallEpochChange,
   groupCallAloneAction,
   groupCallStartAbandoned,
+  runGroupCallStart,
   planGroupCallLeave,
   selectGroupCallBanner,
   type GroupLeaveReason,
@@ -1377,8 +1378,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     aloneTimer: ReturnType<typeof setTimeout> | null;
   }
   let activeGroupCall: ActiveGroupCall | null = null;
-  /** Synchronous latch so a double tap cannot open two SFU sessions. */
-  let groupCallStarting = false;
+  /** The start the group slot belongs to while it has no session yet: a
+   *  joiner's group sync, the JWT mint and the Start publish all run before
+   *  there is anything to hang up. Leaving clears it (`releaseGroupSlot`),
+   *  and a start that finds it changed after an await builds nothing
+   *  (`runGroupCallStart`). The same shape as `linkAttempt`. */
+  let groupAttempt: object | null = null;
 
   function readEpoch(group: { readonly epoch: bigint }): bigint | undefined {
     try {
@@ -1460,7 +1465,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    */
   async function startGroupCall(opts: StartGroupCallOptions): Promise<GroupCallStartOutcome> {
     {
-      const occupant = groupCallStarting ? "group" : currentOccupant();
+      // The slot is the latch: it is written below with no await in between,
+      // so a double tap finds it taken.
+      const occupant = currentOccupant();
       if (occupant !== null) {
         return { kind: "busy", message: callBusyMessage(occupant, opts.joinCallIdHex === null ? "start" : "join") };
       }
@@ -1480,179 +1487,231 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
     const groupIdB64 = opts.groupIdB64;
     const hex = callIdHex(callId);
-    groupCallStarting = true;
+    const attempt = {};
+    groupAttempt = attempt;
     // One call at a time, app-wide: from here on a 1x1 offer from any chat is
     // answered busy, and the receive paths keep this group polled.
     setGroupSlot({ groupIdB64, callIdHex: hex, starting: true });
     // The session this start builds, once it exists: what the outcome is
     // read from when the start does not end connected.
     let started: SfuCallUiHandle | null = null;
+    /** What the awaits before the session produce. */
+    interface StartMaterial {
+      readonly base: string;
+      readonly id: NonNullable<ReturnType<typeof chats.identity>>;
+      readonly wasm: Awaited<ReturnType<typeof loadWasm>>;
+      readonly seed: Uint8Array;
+      readonly localLeaf: number;
+      readonly keyedEpoch: bigint | null;
+      readonly safetyNumber: string | undefined;
+      readonly jwt: string;
+      /** When this device asked for the call. */
+      readonly startedAtMs: number;
+    }
+    const callOf = (m: StartMaterial): ActiveGroupCall => ({
+      groupIdB64,
+      callId,
+      callIdHex: hex,
+      ownLeaf: m.localLeaf,
+      ownMemberKey: base64Encode(m.id.signaturePublicKey),
+      ownPersonKey: ownPersonKeyB64(m.id) ?? base64Encode(m.id.signaturePublicKey),
+      initiator,
+      joinPublished: false,
+      heartbeat: null,
+      keyedEpoch: m.keyedEpoch,
+      video: opts.withVideo,
+      startedAtMs: m.startedAtMs,
+      connectedAtMs: null,
+      sawRemote: false,
+      aloneTimer: null,
+    });
+    const sessionEnded = (): GroupCallStartOutcome => ({
+      kind: "failed",
+      message: () => t("common.error.session_ended"),
+    });
     try {
-      const base = sfuBaseUrl();
-      if (base === null) {
-        return {
-          kind: "failed",
-          // No SFU endpoint in this build (`VITE_LAKKO_SFU_URL`).
-          message: () => t("chat.call.unavailable"),
-        };
-      }
-      if (chats.identity() === null || auth.identitySecrets() === null) {
-        return {
-          kind: "failed",
-          message: () => t("common.error.session_ended"),
-        };
-      }
-      if (!initiator) {
-        if (opts.syncGroup !== undefined) {
-          try {
-            await opts.syncGroup();
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn("group call join: syncing the group failed; joining on the state in hand", err);
+      const run = await runGroupCallStart<StartMaterial, GroupCallStartOutcome>({
+        initiator,
+        isCurrent: () => groupAttempt === attempt,
+        sync: async () => {
+          if (opts.syncGroup !== undefined) {
+            try {
+              await opts.syncGroup();
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.warn("group call join: syncing the group failed; joining on the state in hand", err);
+            }
           }
-        }
-        // The sync enqueues any signaling it decrypted; wait for it to apply.
-        await queue.whenIdle();
-        const account = accountId();
-        const still = account === null ? undefined : groupCallsFor(account, groupIdB64).get(hex);
-        // Not in this call yet: this device's own stale entry (a session that
-        // died before a reload) must not make a finished call look joinable.
-        const ownId = chats.identity();
-        const viewer: GroupCallViewer | undefined =
-          ownId === null
-            ? undefined
-            : { ownMemberKey: base64Encode(ownId.signaturePublicKey), inCallIdHex: null };
-        if (still === undefined || !isGroupCallLive(still, Date.now(), viewer)) {
-          return { kind: "ended" };
-        }
-      }
-      const id = chats.identity();
-      const secrets = auth.identitySecrets();
-      const entry = groupEntry(groupIdB64);
-      if (id === null || secrets === null) {
-        return {
-          kind: "failed",
-          message: () => t("common.error.session_ended"),
-        };
-      }
-      if (entry === undefined || readIsActive(entry.group) === false) {
-        return { kind: "failed", message: () => t("call.error.not_member") };
-      }
-      const wasm = await loadWasm();
-      // Per-call SFrame seed + this client's leaf. Deterministic per MLS epoch
-      // (audit-pack C-1) so every participant derives identical bytes.
-      // `ownLeafIndex` is the leaf this client stamps into the frame KID.
-      const keyedEpoch = readEpoch(entry.group) ?? null;
-      const seed = entry.group.exportSecret(id, "lakko/call/v1", callId, 32);
-      const localLeaf = entry.group.ownLeafIndex;
-      // Canonical call safety number — display-only; a derivation failure must
-      // never abort the call.
-      let safetyNumber: string | undefined;
-      try {
-        safetyNumber = wasm.callSafetyNumber(seed);
-      } catch {
-        safetyNumber = undefined;
-      }
-      // Call-admission JWT (JWS Compact, EdDSA) bound to the session.
-      const jwt = new CallJwtClient(wasm);
-      jwt.setSessionToken(secrets.sessionToken);
-      const minted = await jwt.mint(hex, "participant");
-      // ADR-0021 — the per-call peer_tag -> person map, derived locally (the
-      // SFU never sends a name) over every account id this device holds: the
-      // accepted contacts' AND the ones members claimed in their profiles
-      // (ADR-0048 v2). Not frozen at call start — a newcomer's profile is
-      // answered within the first poll or so, and the roster event that
-      // named its tile may have run before it landed. The map is rebuilt
-      // whenever the profile store changes (`profiles.version` also bumps on
-      // an accepted-contacts change), and `refreshNames` below re-runs the
-      // roster through it.
-      const resolveDisplayName = peerNameResolver(wasm, hex);
-      if (initiator) {
+          // The sync enqueues any signaling it decrypted; wait for it to apply.
+          await queue.whenIdle();
+        },
+        callStillLive: () => {
+          const account = accountId();
+          const still = account === null ? undefined : groupCallsFor(account, groupIdB64).get(hex);
+          // Not in this call yet: this device's own stale entry (a session that
+          // died before a reload) must not make a finished call look joinable.
+          const ownId = chats.identity();
+          const viewer: GroupCallViewer | undefined =
+            ownId === null
+              ? undefined
+              : { ownMemberKey: base64Encode(ownId.signaturePublicKey), inCallIdHex: null };
+          return still !== undefined && isGroupCallLive(still, Date.now(), viewer);
+        },
+        prepare: async () => {
+          const base = sfuBaseUrl();
+          if (base === null) {
+            return {
+              ok: false,
+              // No SFU endpoint in this build (`VITE_LAKKO_SFU_URL`).
+              reason: { kind: "failed", message: () => t("chat.call.unavailable") },
+            };
+          }
+          const id = chats.identity();
+          const secrets = auth.identitySecrets();
+          const entry = groupEntry(groupIdB64);
+          if (id === null || secrets === null) return { ok: false, reason: sessionEnded() };
+          if (entry === undefined || readIsActive(entry.group) === false) {
+            return {
+              ok: false,
+              reason: { kind: "failed", message: () => t("call.error.not_member") },
+            };
+          }
+          const wasm = await loadWasm();
+          // Per-call SFrame seed + this client's leaf. Deterministic per MLS epoch
+          // (audit-pack C-1) so every participant derives identical bytes.
+          // `ownLeafIndex` is the leaf this client stamps into the frame KID.
+          const keyedEpoch = readEpoch(entry.group) ?? null;
+          const seed = entry.group.exportSecret(id, "lakko/call/v1", callId, 32);
+          const localLeaf = entry.group.ownLeafIndex;
+          // Canonical call safety number — display-only; a derivation failure must
+          // never abort the call.
+          let safetyNumber: string | undefined;
+          try {
+            safetyNumber = wasm.callSafetyNumber(seed);
+          } catch {
+            safetyNumber = undefined;
+          }
+          // Call-admission JWT (JWS Compact, EdDSA) bound to the session.
+          const jwt = new CallJwtClient(wasm);
+          jwt.setSessionToken(secrets.sessionToken);
+          const minted = await jwt.mint(hex, "participant");
+          return {
+            ok: true,
+            material: {
+              base,
+              id,
+              wasm,
+              seed,
+              localLeaf,
+              keyedEpoch,
+              safetyNumber,
+              jwt: minted.jwt,
+              startedAtMs: Date.now(),
+            },
+          };
+        },
         // Announce before connecting, so a member who opens the chat while the
         // SFU handshake is still running already sees a call to join.
-        const now = Date.now();
-        const announced = await publishGroupControl(groupIdB64, (w) =>
-          w.composeGroupCallStartSignaling(callId, localLeaf, BigInt(now), true, opts.withVideo),
-        );
-        if (!announced) throw new Error("the call could not be announced to the group");
-        // Our own publish never comes back to us (the poll drops the echo), so
-        // the record is updated here as it would be on every other member.
-        applyGroupCallEvent(groupIdB64, {
-          kind: "start",
-          callIdHex: hex,
-          initiatorLeaf: localLeaf,
-          initiatorPersonKey: ownPersonKeyB64(id) ?? base64Encode(id.signaturePublicKey),
-          createdAtMs: now,
-          mediaAudio: true,
-          mediaVideo: opts.withVideo,
-          observedAtMs: now,
-        });
-      }
-      // Set before any further await, so a failure from here on reaches
-      // `leaveGroupCall` — which is what publishes the End an initiator owes.
-      activeGroupCall = {
-        groupIdB64,
-        callId,
-        callIdHex: hex,
-        ownLeaf: localLeaf,
-        ownMemberKey: base64Encode(id.signaturePublicKey),
-        ownPersonKey: ownPersonKeyB64(id) ?? base64Encode(id.signaturePublicKey),
-        initiator,
-        joinPublished: false,
-        heartbeat: null,
-        keyedEpoch,
-        video: opts.withVideo,
-        startedAtMs: Date.now(),
-        connectedAtMs: null,
-        sawRemote: false,
-        aloneTimer: null,
-      };
-      const handle = createSfuCallUi(
-        {
-          sfuBaseUrl: base,
-          jwt: minted.jwt,
-          seed,
-          localLeaf,
-          media: {
-            audio: true,
-            // A group video call publishes the camera at connect (SFrame-sealed
-            // like the audio sender); the in-call toggle gates the live track.
-            video: opts.withVideo,
-            audioDeviceId: callUi.settings().selectedAudioInput,
-            videoDeviceId: callUi.settings().selectedVideoInput,
-          },
+        announce: (m) =>
+          publishGroupControl(groupIdB64, (w) =>
+            w.composeGroupCallStartSignaling(callId, m.localLeaf, BigInt(m.startedAtMs), true, opts.withVideo),
+          ),
+        // The Start is on the journal and no call follows it: tell the group
+        // what leaving tells it (the End an initiator owes), through the same
+        // ordered queue, so the End lands behind the Start.
+        takeBackAnnouncement: (m, why) => {
+          void announceGroupLeave(callOf(m), why === "left" ? "hungUp" : "error", false, Date.now());
         },
-        {
-          localDisplayName: ownTileName(),
-          safetyNumber,
-          resolveDisplayName,
-          onSessionStateChange: (state) => onGroupSessionState(hex, state),
+        open: (m) => {
+          // Set before anything else, so a failure from here on reaches
+          // `leaveGroupCall` — which is what publishes the End an initiator owes.
+          activeGroupCall = callOf(m);
+          if (initiator) {
+            // Our own publish never comes back to us (the poll drops the echo), so
+            // the record is updated here as it would be on every other member.
+            applyGroupCallEvent(groupIdB64, {
+              kind: "start",
+              callIdHex: hex,
+              initiatorLeaf: m.localLeaf,
+              initiatorPersonKey: ownPersonKeyB64(m.id) ?? base64Encode(m.id.signaturePublicKey),
+              createdAtMs: m.startedAtMs,
+              mediaAudio: true,
+              mediaVideo: opts.withVideo,
+              observedAtMs: m.startedAtMs,
+            });
+          }
+          // ADR-0021 — the per-call peer_tag -> person map, derived locally (the
+          // SFU never sends a name) over every account id this device holds: the
+          // accepted contacts' AND the ones members claimed in their profiles
+          // (ADR-0048 v2). Not frozen at call start — a newcomer's profile is
+          // answered within the first poll or so, and the roster event that
+          // named its tile may have run before it landed. The map is rebuilt
+          // whenever the profile store changes (`profiles.version` also bumps on
+          // an accepted-contacts change), and `refreshNames` re-runs the
+          // roster through it.
+          const resolveDisplayName = peerNameResolver(m.wasm, hex);
+          const handle = createSfuCallUi(
+            {
+              sfuBaseUrl: m.base,
+              jwt: m.jwt,
+              seed: m.seed,
+              localLeaf: m.localLeaf,
+              media: {
+                audio: true,
+                // A group video call publishes the camera at connect (SFrame-sealed
+                // like the audio sender); the in-call toggle gates the live track.
+                video: opts.withVideo,
+                audioDeviceId: callUi.settings().selectedAudioInput,
+                videoDeviceId: callUi.settings().selectedVideoInput,
+              },
+            },
+            {
+              localDisplayName: ownTileName(),
+              safetyNumber: m.safetyNumber,
+              resolveDisplayName,
+              onSessionStateChange: (state) => onGroupSessionState(hex, state),
+            },
+          );
+          // The SFU has a public address, so most clients reach it on a
+          // server-reflexive candidate - but one behind a symmetric NAT has none,
+          // and for it the relay is the only way into the room.
+          handle.session.setTurnProvider(async () => {
+            turn.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
+            return turn.fetchOrNull();
+          });
+          started = handle;
+          setGroupHandle(handle);
+          setGroupSlot({ groupIdB64, callIdHex: hex, starting: false });
+          // The awaits above (JWT mint, the Start publish — which itself runs under
+          // the group lock) can straddle an epoch advance whose drain found no
+          // session to rekey. Catch up now, before any media is sealed.
+          onGroupMlsSettled(groupIdB64);
         },
-      );
-      // The SFU has a public address, so most clients reach it on a
-      // server-reflexive candidate - but one behind a symmetric NAT has none,
-      // and for it the relay is the only way into the room.
-      handle.session.setTurnProvider(async () => {
-        turn.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
-        return turn.fetchOrNull();
+        connect: async () => {
+          await (started as SfuCallUiHandle | null)?.connect();
+        },
       });
-      started = handle;
-      setGroupHandle(handle);
-      setGroupSlot({ groupIdB64, callIdHex: hex, starting: false });
-      // The awaits above (JWT mint, the Start publish — which itself runs under
-      // the group lock) can straddle an epoch advance whose drain found no
-      // session to rekey. Catch up now, before any media is sealed.
-      onGroupMlsSettled(groupIdB64);
-      await handle.connect();
-      return { kind: "connected" };
-    } catch (err) {
+      switch (run.kind) {
+        case "connected":
+        case "left":
+        case "ended":
+          // `left`: the person left (or a newer call took the slot) while this
+          // start was in flight. Nothing failed, the screens are told nothing,
+          // and the slot is not this attempt's to touch.
+          return { kind: run.kind };
+        case "refused":
+          return run.reason;
+        case "failed":
+          break;
+      }
+      const session = started as SfuCallUiHandle | null;
       // The person left while the session was connecting (`leaveGroupCall`
-      // took it out of the slot and hung it up): nothing failed, and the
-      // screens are told nothing.
+      // took it out of the slot and hung it up). An attempt that is no longer
+      // current never gets here; this is the same answer read off the session.
       if (
         groupCallStartAbandoned({
-          sessionState: started?.session.getState() ?? null,
-          stillInSlot: started !== null && groupHandle() === started,
+          sessionState: session?.session.getState() ?? null,
+          stillInSlot: session !== null && groupHandle() === session,
         })
       ) {
         return { kind: "left" };
@@ -1660,22 +1719,25 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       // The SFU says the call ended before this device arrived
       // (`sfu-call-state.ts`): close the chat's record for everyone rather
       // than report a failure, since nothing failed on this side.
-      const endedByServer =
-        (started ?? groupHandle())?.session.callEndedByServer() === true;
+      const endedByServer = session?.session.callEndedByServer() === true;
       await leaveGroupCall("error");
       if (endedByServer) {
         await endGroupCallRecord(groupIdB64, hex, callId);
         return { kind: "ended" };
       }
       // eslint-disable-next-line no-console
-      console.warn("group call could not start", err);
+      console.warn("group call could not start", run.error);
       return {
         kind: "failed",
-        message: callFailureText(err, couldNot),
+        message: callFailureText(run.error, couldNot),
       };
     } finally {
-      groupCallStarting = false;
-      if (groupHandle() === null && activeGroupCall === null) setGroupSlot(null);
+      // Only the attempt the slot still belongs to frees it: one the person
+      // left has had it taken back already, and it may be a newer call's now.
+      if (groupAttempt === attempt) {
+        groupAttempt = null;
+        if (groupHandle() === null && activeGroupCall === null) setGroupSlot(null);
+      }
     }
   }
 
@@ -1870,7 +1932,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         h.hangUp();
       }
     }
-    if (!groupCallStarting) setGroupSlot(null);
+    // A start still in its awaits is no longer the current attempt: it
+    // builds no session, and the slot is free now, not when it returns.
+    groupAttempt = null;
+    setGroupSlot(null);
     return { call: g, failed };
   }
 
@@ -1946,7 +2011,22 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const lastInbound = groupHandle()?.session.lastInboundAtMs() ?? 0;
     const { call: g, failed } = releaseGroupSlot();
     if (g === null) return;
-    recordGroupCall(g, callEndedAtMs(Date.now(), lastInbound));
+    await announceGroupLeave(g, reason, failed, callEndedAtMs(Date.now(), lastInbound));
+  }
+
+  /**
+   * Write the call's row and tell the group this device is out of the call
+   * `g`, as `planGroupCallLeave` decides. `g` is already out of the slot, or
+   * never reached it: a start the person left after its `GroupCallStart` was
+   * published takes the announcement back through here.
+   */
+  async function announceGroupLeave(
+    g: ActiveGroupCall,
+    reason: GroupLeaveReason,
+    failed: boolean,
+    endedAtMs: number,
+  ): Promise<void> {
+    recordGroupCall(g, endedAtMs);
     const account = accountId();
     const rec = account === null ? undefined : groupCallsFor(account, g.groupIdB64).get(g.callIdHex);
     const plan = planGroupCallLeave({
