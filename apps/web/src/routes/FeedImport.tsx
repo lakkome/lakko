@@ -13,7 +13,7 @@
  */
 
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
-import { useNavigate } from "@solidjs/router";
+import { useLocation, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
@@ -26,6 +26,7 @@ import { writeFeedSelection } from "../feed/feed-selection-store";
 import { paths } from "./paths";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
+import { screenAnchor } from "../ui/screen-anchor";
 
 const REFUSED = (): string => t("feed.import.refused");
 
@@ -38,6 +39,7 @@ interface LaunchQueueLike {
 export default function FeedImport(): JSX.Element {
   const auth = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [core, setCore] = createSignal<Wasm | null>(null);
   const [draft, setDraft] = createSignal<FeedDraft | null>(null);
   const [error, setError] = createLiveText();
@@ -97,6 +99,8 @@ export default function FeedImport(): JSX.Element {
     const s = auth.state();
     if (w === null || d === null || s.kind !== "session") return;
     setBusy(true);
+    // The feed is saved either way; going to it is for a person still here.
+    const here = screenAnchor(location);
     try {
       const deviceKey = await getDeviceKey(s.account.accountId);
       if (deviceKey === null) throw new Error("no device key");
@@ -110,7 +114,7 @@ export default function FeedImport(): JSX.Element {
       // The feed opens on its default when storage refuses; the saved feed
       // is still in the row.
       writeFeedSelection(s.account.accountId, `custom:${id}`);
-      navigate(paths.feed);
+      if (here()) navigate(paths.feed);
     } catch {
       setError(() => t("feed.error.save"));
     } finally {

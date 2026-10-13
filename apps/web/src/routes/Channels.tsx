@@ -40,6 +40,7 @@ import {
   onMount,
   Show,
   Switch,
+  untrack,
   type Component,
   type JSX,
 } from "solid-js";
@@ -102,6 +103,7 @@ import { Icon } from "../ui/icons";
 import { ModalLayer } from "../ui/ModalLayer";
 import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
 import { requestConfirm } from "../ui/confirm-dialog";
+import { screenAnchor } from "../ui/screen-anchor";
 
 // ============================================================================
 // Shared pieces
@@ -475,6 +477,7 @@ async function decodePage(
 
 const NewChannel: Component = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const auth = useAuth();
   const chats = useChats();
   const [name, setName] = createSignal("");
@@ -509,6 +512,9 @@ const NewChannel: Component = () => {
     }
     setBusy(true);
     setError(null);
+    // The channel exists and is recorded whether or not the person waits for
+    // it; only opening it is addressed to this screen (`ui/screen-anchor.ts`).
+    const here = screenAnchor(location);
     const id = freshChannelIdHex();
     try {
       // ADR-0057, the second security pass (finding 3) - found the channel's
@@ -585,7 +591,7 @@ const NewChannel: Component = () => {
         // eslint-disable-next-line no-console
         console.warn("channel metadata record not posted at creation", err);
       }
-      navigate(paths.channel(id));
+      if (here()) navigate(paths.channel(id));
     } catch (err) {
       if (err instanceof LegacyChannelError) {
         setError(() => err.text());
@@ -693,6 +699,7 @@ const NewChannel: Component = () => {
  */
 const JoinCoPublisher: Component = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const auth = useAuth();
   const chats = useChats();
   const [link, setLink] = createSignal("");
@@ -719,10 +726,22 @@ const JoinCoPublisher: Component = () => {
     setError(null);
     setOfferRetry(false);
     setStatus(() => t("group.join.sending"));
+    // The wait below runs for minutes and is not cut short when the person
+    // leaves: the Welcome it is waiting for carries the channel's keys, and
+    // they have to be kept. Opening the channel at the end is for a person
+    // still on this screen (`ui/screen-anchor.ts`).
+    const here = screenAnchor(location);
+    // What does cut it short is the ACCOUNT changing. The keys belong to the
+    // account that asked: the session's account identity is freed and
+    // replaced on sign-out, so "still the same instance" is "still the same
+    // session", and a stale wait writes nothing into the next one.
+    const sameSession = (): boolean => chats.accountIdentity() === identity;
     try {
       await awaitChannelsHydration();
+      if (!sameSession()) return;
       const ds = new DsClient();
       const { groupId, channelIdHex, joinerKey } = await requestToCoPublish(ds, identity, l);
+      if (!sameSession()) return;
       // The proposal's KeyPackage private keys are in the provider now; get
       // them on disk so a reload while waiting can still open the Welcome.
       channelsActions.notePublisherGroupChanged();
@@ -737,7 +756,9 @@ const JoinCoPublisher: Component = () => {
           channelIdHex,
           channelsState.keysByChannel().get(channelIdHex)?.signingKeySeed,
         );
+        if (!sameSession()) return;
         if (keys === null) await new Promise((r) => setTimeout(r, 3000));
+        if (!sameSession()) return;
       }
       if (keys === null) {
         setError(() => t("channels.join.no_approval"));
@@ -750,7 +771,7 @@ const JoinCoPublisher: Component = () => {
         addedAtMs: Date.now(),
       });
       channelsActions.setKeys(channelIdHex, keys);
-      navigate(paths.channel(channelIdHex));
+      if (here()) navigate(paths.channel(channelIdHex));
     } catch (err) {
       // The knock's three sentences (ADR-0053); never the raw error.
       // eslint-disable-next-line no-console
@@ -859,10 +880,38 @@ const JoinCoPublisher: Component = () => {
 // ChannelView — `/channels/:id`
 // ============================================================================
 
+/**
+ * The two channel views are KEYED on the channel id. The router keeps one
+ * component instance while only `:id` changes (list pane -> another channel),
+ * and both views are built from work that spans awaits: the subscriber
+ * bootstrap, the post fetch, the decode. Unkeyed, that work re-read the
+ * route param after each await and so finished on whichever channel was open
+ * by then - the subscriber key looked up for channel A stored over channel
+ * B's (orphaning the seeds sealed to B's key), A's posts and A's epoch filed
+ * under B, a post composed under the wrong epoch.
+ *
+ * Keyed, each instance has ONE id for its whole life (`props.id`); switching
+ * channel disposes the instance and builds a new one, as `Chat.tsx` does for
+ * a chat. Work an instance started still finishes after it is disposed, and
+ * that is right: it writes under its own id (the registration, the keys and
+ * the seeds are that channel's and are worth keeping), and what it sets on
+ * the disposed instance's own signals is shown to nobody.
+ */
 const ChannelView: Component = () => {
-  const params = useParams<{ id: string }>();
+  const route = useParams<{ id: string }>();
+  return (
+    <Show when={route.id} keyed>
+      {(id) => <ChannelViewFor id={id} />}
+    </Show>
+  );
+};
+
+const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
+  // Read once: constant for this instance (see `ChannelView`).
+  const params = { id: untrack(() => props.id) } as const;
   const chats = useChats();
   const navigate = useNavigate();
+  const location = useLocation();
   const [publishBusy, setPublishBusy] = createSignal(false);
   const [publishError, setPublishError] = createLiveText();
   const [composeText, setComposeText] = createSignal("");
@@ -967,6 +1016,7 @@ const ChannelView: Component = () => {
   const [decodedByCursor, setDecodedByCursor] = createSignal<ReadonlyMap<number, PostDecode>>(
     new Map(),
   );
+  let decodeSeq = 0;
 
   // Decode every post in the latest fetch. The publisher holds a single
   // content-key seed (its PublisherGroup exporter output) which it applies
@@ -976,11 +1026,17 @@ const ChannelView: Component = () => {
     const d = data();
     const keys = channelsState.keysByChannel().get(params.id);
     if (d === undefined || keys === undefined) {
+      decodeSeq += 1;
       setDecodedByCursor(new Map());
       return;
     }
     const seed = keys.seed;
-    void decodePage(params.id, d.posts, () => seed).then(setDecodedByCursor);
+    // The newest request wins: an older page's decode that resolves later
+    // must not replace the newer one's (cursors are per channel, not global).
+    const mine = ++decodeSeq;
+    void decodePage(params.id, d.posts, () => seed).then((decoded) => {
+      if (mine === decodeSeq) setDecodedByCursor(decoded);
+    });
   });
 
   /** Under the name (UX spec §5): the description when there is one, else
@@ -1055,10 +1111,13 @@ const ChannelView: Component = () => {
                 setManageOpen(true);
               }}
               onUnsubscribe={(): void => {
+                // Leaving on the server is a round trip; the way back to the
+                // list is for a person still on this channel.
+                const here = screenAnchor(location);
                 void confirmStopFollowing(params.id, meta().name).then((done) => {
                   if (!done) return;
                   setInfoOpen(false);
-                  navigate(paths.channels);
+                  if (here()) navigate(paths.channels);
                 });
               }}
             />
@@ -1117,7 +1176,18 @@ const ChannelView: Component = () => {
 // ============================================================================
 
 const ChannelSubscribe: Component = () => {
-  const params = useParams<{ id: string }>();
+  const route = useParams<{ id: string }>();
+  // Keyed on the id, for the reasons given at `ChannelView`.
+  return (
+    <Show when={route.id} keyed>
+      {(id) => <ChannelSubscribeFor id={id} />}
+    </Show>
+  );
+};
+
+const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
+  // Read once: constant for this instance (see `ChannelView`).
+  const params = { id: untrack(() => props.id) } as const;
   const location = useLocation<{ handle?: string }>();
   const navigate = useNavigate();
   const [infoOpen, setInfoOpen] = createSignal(false);
@@ -1336,6 +1406,7 @@ const ChannelSubscribe: Component = () => {
     })();
   });
 
+  let decodeSeq = 0;
   // Decode-by-epoch — re-runs whenever the post list OR the recovered seed
   // map changes, so a seed that arrives later (a re-sync reseal) upgrades a
   // "Not available" card to text without a reload. Each post is opened
@@ -1346,10 +1417,15 @@ const ChannelSubscribe: Component = () => {
     const ps = posts();
     const seedMap = channelsState.subscribedSeedsByChannel().get(params.id);
     if (ps.length === 0) {
+      decodeSeq += 1;
       setDecodedByCursor(new Map());
       return;
     }
-    void decodePage(params.id, ps, (epoch) => seedMap?.get(epoch)).then(setDecodedByCursor);
+    // The newest request wins (as in the owner view).
+    const mine = ++decodeSeq;
+    void decodePage(params.id, ps, (epoch) => seedMap?.get(epoch)).then((decoded) => {
+      if (mine === decodeSeq) setDecodedByCursor(decoded);
+    });
   });
 
   const meta = (): ReturnType<typeof channelMetaOf> => channelMetaOf(params.id);
@@ -1405,10 +1481,11 @@ const ChannelSubscribe: Component = () => {
             }
             onManage={(): void => undefined}
             onUnsubscribe={(): void => {
+              const here = screenAnchor(location);
               void confirmStopFollowing(params.id, meta().name).then((done) => {
                 if (!done) return;
                 setInfoOpen(false);
-                navigate(paths.channels);
+                if (here()) navigate(paths.channels);
               });
             }}
           />

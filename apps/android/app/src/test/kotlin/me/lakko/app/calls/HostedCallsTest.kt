@@ -44,9 +44,17 @@ class HostedCallsTest {
         var hangUps = 0
         val mic = mutableListOf<Boolean>()
 
+        /** When set, [connect] suspends here, as on a slow network. */
+        var connectGate: CompletableDeferred<Unit>? = null
+
+        /** When set, [connect] throws this once [connectGate] opens. */
+        var errorAfterGate: Throwable? = null
+
         override suspend fun connect() {
-            connectError?.let { throw it }
-            ui.setPhase(CallUiState.CallPhase.Connected)
+            connectGate?.await()
+            (errorAfterGate ?: connectError)?.let { throw it }
+            // A session hung up while it connected starts nothing more.
+            if (hangUps == 0) ui.setPhase(CallUiState.CallPhase.Connected)
         }
 
         override fun hangUp() {
@@ -118,8 +126,15 @@ class HostedCallsTest {
             published += groupIdHex to body
             return true
         }
+        /** The gate of each session still to be created, in order; a session
+         *  past the end of the list connects at once. */
+        val connectGates = ArrayDeque<CompletableDeferred<Unit>>()
+
         override fun createSession(request: GroupCallSessionRequest, ui: CallUiState): GroupCallSessionHandle =
-            FakeGroupSession(ui, connectError).also { sessions += it }
+            FakeGroupSession(ui, connectError).also {
+                it.connectGate = connectGates.removeFirstOrNull()
+                sessions += it
+            }
 
         fun kinds(): List<String> = published.map { it.second::class.simpleName ?: "?" }
 

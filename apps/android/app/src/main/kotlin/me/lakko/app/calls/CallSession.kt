@@ -398,6 +398,11 @@ public class CallSession(
         // initial configuration (same rationale as iOS).
         scope.launch {
             val iceServers = resolveIceServers()
+            // The credential fetch can take seconds, and the person may have
+            // pressed End meanwhile. Nothing may start for a call that is no
+            // longer being placed: the camera opened below would have nobody
+            // left to close it.
+            if (mutableState.value != WebCallState.Outgoing) return@launch
             val rtc = WebRtcPeerConnection(applicationContext, iceServers = iceServers)
             if (!rtc.isReady) {
                 android.util.Log.w("CallSession", "dial: PeerConnection allocation failed")
@@ -422,6 +427,9 @@ public class CallSession(
                     "CallSession",
                     "dial: SFrame attach failed — refusing per security invariant #4",
                 )
+                // Not this session's connection yet, so the teardown below
+                // would not find it: close it here.
+                rtc.close()
                 endLocal(WebCallEndReason.Error)
                 return@launch
             }
@@ -817,15 +825,24 @@ public class CallSession(
      *  through to here. */
     override fun acceptCall(withVideo: Boolean) {
         if (mutableState.value != WebCallState.Ringing || isOfferer) return
+        // One answer per call: the state stays Ringing while the credential is
+        // fetched, and a second accept in that time would build a second peer
+        // connection and open the camera twice.
+        if (accepting) return
         val offerSdp = pendingRemoteOfferSdp
         if (offerSdp == null) {
             android.util.Log.w("CallSession", "acceptCall: pendingRemoteOfferSdp missing — race?")
             endLocal(WebCallEndReason.Error)
             return
         }
+        accepting = true
 
         scope.launch {
             val iceServers = resolveIceServers()
+            // The caller may have hung up, or the ring run out, while the
+            // credential was fetched: the call is then over and must neither
+            // open the camera nor come back as connecting.
+            if (mutableState.value != WebCallState.Ringing) return@launch
             val rtc = WebRtcPeerConnection(applicationContext, iceServers = iceServers)
             if (!rtc.isReady) {
                 android.util.Log.w("CallSession", "acceptCall: PeerConnection allocation failed")
@@ -847,6 +864,9 @@ public class CallSession(
                     "CallSession",
                     "acceptCall: SFrame attach failed — refusing per security invariant #4",
                 )
+                // Not this session's connection yet, so the teardown below
+                // would not find it: close it here.
+                rtc.close()
                 endLocal(WebCallEndReason.Error)
                 return@launch
             }
@@ -884,6 +904,9 @@ public class CallSession(
             }
         }
     }
+
+    /** [acceptCall] has been taken for this call. Main thread only. */
+    private var accepting = false
 
     /** Inbound side: decline. */
     override fun declineCall() {

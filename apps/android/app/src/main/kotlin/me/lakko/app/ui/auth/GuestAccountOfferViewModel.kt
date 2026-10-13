@@ -188,6 +188,9 @@ public class GuestAccountOfferViewModel internal constructor(
                 // screen that asked. Nothing to say.
                 mutableState.update { it.copy(busy = GuestOfferBusy.NONE, error = null, password = "", confirm = "") }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = GuestOfferBusy.NONE) }
+                }
                 log("keeping the guest account failed", err)
                 mutableState.update {
                     if (err is GuestPhraseUnavailable) {

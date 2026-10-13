@@ -66,6 +66,8 @@ public class TurnCredentialClient(
      *   * transport / HTTP error
      *   * missing session token
      *
+     * A cancelled caller is not answered: the cancellation is passed on.
+     *
      * Logs the underlying cause at WARN with the `lakko.turn`
      * tag so the audit pack can grep for it.
      */
@@ -73,6 +75,11 @@ public class TurnCredentialClient(
         return try {
             fetch()
         } catch (cause: Throwable) {
+            // A call that ended while the credential was being fetched has
+            // cancelled its start. That is not "no TURN": answering `null`
+            // here let the cancelled start run on and open a peer connection
+            // and the camera for a call that was already over.
+            me.lakko.app.rethrowIfCancelled(cause)
             Log.w(TAG, "fetch failed, proceeding STUN-only", cause)
             null
         }

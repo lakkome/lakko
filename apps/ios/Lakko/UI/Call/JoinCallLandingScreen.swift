@@ -397,6 +397,13 @@ public final class JoinCallLandingViewModel: ObservableObject {
             )
             loading = false
         } catch {
+            // The screen was left while the link was being fetched. Nothing
+            // failed: keep the loading state and let the next appearance
+            // fetch it again, rather than show a link that "does not work".
+            if Cancellation.endedByCancellation(error) {
+                didDecode = false
+                return
+            }
             NSLog("join-call: decode/verify failed: %@", String(describing: error))
             decoded = nil
             rateLimited = DiscoveryClientError.isRateLimited(error)
@@ -415,16 +422,22 @@ public final class JoinCallLandingViewModel: ObservableObject {
         if beginning { return }
         beginning = true
         localPhase = .starting
-        let outcome = await linkCallHost.start(
-            LinkCallHost.Request(
-                slug: slug,
-                callId: decoded.callId,
-                ownerAccountId: decoded.ownerAccountId,
-                ownerSignatureKey: decoded.ownerSignatureKey,
-                mediaVideo: decoded.mediaVideo,
-                isOwner: decoded.isOwner
-            )
+        // The call belongs to the app-level host, not to this screen: a call
+        // still starting keeps going when the person leaves (``exit()``). The
+        // auto-resume reaches here from the screen's `.task`, which is
+        // cancelled on leaving, and a cancelled start would be filed on the
+        // host's slot as a call that failed. So the start is not this task's
+        // to cancel.
+        let host = linkCallHost
+        let request = LinkCallHost.Request(
+            slug: slug,
+            callId: decoded.callId,
+            ownerAccountId: decoded.ownerAccountId,
+            ownerSignatureKey: decoded.ownerSignatureKey,
+            mediaVideo: decoded.mediaVideo,
+            isOwner: decoded.isOwner
         )
+        let outcome = await Cancellation.shielded { await host.start(request) }
         beginning = false
         switch outcome {
         case .started, .alreadyInThisCall:

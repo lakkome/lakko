@@ -236,6 +236,7 @@ private fun SocialRecoveryOptions(phrase: String) {
                                     ShamirBridge.splitMnemonic(phrase)
                                 }
                             } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
                                 error = me.lakko.app.l10n.UiText("recovery.shares.error.generic")
                             } finally {
                                 busy = false

@@ -397,7 +397,7 @@ final class MultiJoinerCall {
             do {
                 try await self.session.publish(seed: seed, localLeaf: leaf)
             } catch {
-                self.cbs.onError?(error)
+                self.reportPublishFailure(error)
             }
         }
     }
@@ -484,6 +484,15 @@ final class MultiJoinerCall {
         // broadcast is on its way (a call with no live committer is dead).
         call.startAdmissionTimer()
         return call
+    }
+
+    /// A publish that threw. One that stopped because the call was left or
+    /// ended while it was awaited is not a failure: the end was already
+    /// reported through the session's state (`onEnded`), and "could not
+    /// start" is not what happened.
+    private func reportPublishFailure(_ error: Error) {
+        if case SfuCallSession.SfuCallError.endedWhileConnecting = error { return }
+        cbs.onError?(error)
     }
 
     private func start() async throws {
@@ -859,7 +868,7 @@ final class MultiJoinerCall {
             do {
                 try await self.session.publish(seed: publishSeed, localLeaf: leaf)
             } catch {
-                self.cbs.onError?(error)
+                self.reportPublishFailure(error)
             }
         }
     }

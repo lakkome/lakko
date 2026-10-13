@@ -540,6 +540,7 @@ public fun FeedScreen(
                         readAtMs = System.currentTimeMillis().toULong(),
                     )
                 } catch (e: Throwable) {
+                    me.lakko.app.rethrowIfCancelled(e)
                     android.util.Log.w("FeedScreen", "read cursor failed", e)
                 }
             }
@@ -583,6 +584,7 @@ public fun FeedScreen(
                         try {
                             flushSeen()
                         } catch (e: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(e)
                             android.util.Log.w("FeedScreen", "marking seen failed", e)
                         }
                     }
@@ -630,7 +632,8 @@ public fun FeedScreen(
                                 editing = null
                                 choose(CUSTOM_PREFIX + id)
                             }
-                        } catch (_: Throwable) {
+                        } catch (cause: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(cause)
                             editError = UiText("feed.error.save")
                         }
                     }

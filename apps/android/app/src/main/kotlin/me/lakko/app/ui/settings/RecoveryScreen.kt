@@ -285,6 +285,7 @@ private fun TotpEnrollSection(sessionToken: String) {
                                 else -> TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                             }
                         } catch (err: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(err)
                             TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                         }
                     }
@@ -353,6 +354,7 @@ private fun TotpEnrollSection(sessionToken: String) {
                                     else -> TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                                 }
                             } catch (err: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(err)
                                 TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                             }
                         }
@@ -556,6 +558,7 @@ private fun ContactEnrollSection(sessionToken: String) {
                                     else -> ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
                                 }
                             } catch (err: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(err)
                                 ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
                             }
                         }
@@ -629,6 +632,7 @@ private fun ContactEnrollSection(sessionToken: String) {
                                     else -> ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
                                 }
                             } catch (err: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(err)
                                 ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
                             }
                         }

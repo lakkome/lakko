@@ -8,6 +8,7 @@ import {
   chatCallAffordance,
   decideGroupCallEpochChange,
   groupCallAloneAction,
+  groupCallStartAbandoned,
   planGroupCallLeave,
   selectGroupCallBanner,
   type ChatCallAffordanceInput,
@@ -251,5 +252,30 @@ describe("groupCallAloneAction", () => {
   it("does nothing while others are present and nothing is armed", () => {
     expect(groupCallAloneAction(2, true, false)).toBe("none");
     expect(groupCallAloneAction(1, false, false)).toBe("none");
+  });
+});
+
+describe("groupCallStartAbandoned", () => {
+  it("a session this device hung up and took out of the slot was left, not failed", () => {
+    // End pressed while the SFU session was connecting: no failure is shown.
+    expect(groupCallStartAbandoned({ sessionState: "closed", stillInSlot: false })).toBe(true);
+  });
+
+  it("a session that failed is a failure, in or out of the slot", () => {
+    // The ended-phase effect may already have released a failed session.
+    expect(groupCallStartAbandoned({ sessionState: "failed", stillInSlot: false })).toBe(false);
+    expect(groupCallStartAbandoned({ sessionState: "failed", stillInSlot: true })).toBe(false);
+  });
+
+  it("a start that stopped before or while its session was up is a failure", () => {
+    expect(groupCallStartAbandoned({ sessionState: null, stillInSlot: false })).toBe(false);
+    expect(groupCallStartAbandoned({ sessionState: "idle", stillInSlot: true })).toBe(false);
+    expect(groupCallStartAbandoned({ sessionState: "connecting", stillInSlot: true })).toBe(false);
+    expect(groupCallStartAbandoned({ sessionState: "connected", stillInSlot: true })).toBe(false);
+  });
+
+  it("a closed session still in the slot is not called abandoned", () => {
+    // Nothing took it out of the slot, so nobody chose to leave it.
+    expect(groupCallStartAbandoned({ sessionState: "closed", stillInSlot: true })).toBe(false);
   });
 });

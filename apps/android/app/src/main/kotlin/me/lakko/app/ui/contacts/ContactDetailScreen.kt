@@ -534,6 +534,7 @@ public fun SafetyNumberScreen(
             val raw = withContext(Dispatchers.Default) { contactsRepository.safetyNumber(c.request.fromPubkey) }
             SafetyNumberUi.Ready(safetyNumberGroups(raw))
         } catch (cause: Throwable) {
+            me.lakko.app.rethrowIfCancelled(cause)
             android.util.Log.w("LakkoContacts", "WARN safety number failed: ${cause.javaClass.simpleName}")
             SafetyNumberUi.Error
         }

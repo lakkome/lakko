@@ -43,7 +43,7 @@ import {
   untrack,
   type JSX,
 } from "solid-js";
-import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
+import { A, useLocation, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as hexOf } from "../devices/sync/state";
@@ -54,6 +54,8 @@ import { callOwnsCaptureNow } from "../calls/capture-rule";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import {
   appendToGroupSlot,
+  ClosedViewBaseline,
+  mergeClosedViewSlot,
   eventToPersistedMessage,
   mergeForegroundSlot,
 } from "../chat/background-log";
@@ -85,6 +87,7 @@ import {
   type ReplySnapshot,
 } from "../chat/reply-snapshot";
 import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
+import { screenAnchor } from "../ui/screen-anchor";
 import { sendFailureNotice, withSendAck } from "../chat/send-failure";
 import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, peopleCountOf, personKeyOf } from "../chat/person-key";
@@ -520,6 +523,12 @@ function ChatView(props: {
   // The header's way to a contact's own page (`openInfo`): a one-to-one's
   // info is the contact screen on the Contacts route, not a layer here.
   const navigate = useNavigate();
+  // Whether the person is still on THIS conversation's route. A request that
+  // outlives the view (a forward, a delete) consults it before navigating, so
+  // its result never pulls the person out of wherever they went meanwhile
+  // (`ui/screen-anchor.ts`). The path rather than a mounted flag: deleting the
+  // chat unmounts this view by its own success, and the way out is still owed.
+  const onThisScreen = screenAnchor(useLocation());
   // ADR-0048 — profile names: the one display resolver, the received-profile
   // store the receive loop feeds, and the publish triggers.
   const profiles = useProfiles();
@@ -618,7 +627,19 @@ function ChatView(props: {
     },
   );
 
-  const [rows, setRows] = createSignal<TimelineRow[]>([]);
+  /** Set in `onCleanup`. From then on nothing is on screen for this view, and
+   *  what its still-running requests produce goes to the log as a closed
+   *  view's write (`noteClosedViewChange`). */
+  let viewIsClosed = false;
+  let closedBaseline: ClosedViewBaseline | null = null;
+  let closedFlushQueued = false;
+  const [rows, setRowsSignal] = createSignal<TimelineRow[]>([]);
+  /** Every timeline write goes through here, so a write that lands after the
+   *  view closed still reaches the log (`noteClosedViewChange`). */
+  const setRows = (next: TimelineRow[]): void => {
+    setRowsSignal(next);
+    noteClosedViewChange();
+  };
   /** docs/ux/calls.md section 6 — the calls this device was in, in this
    *  conversation. Local to this device and never on the wire; the store is
    *  `calls/call-log-store.ts`, so they survive a reload the way the
@@ -697,9 +718,14 @@ function ChatView(props: {
   // (the sender never receives its own application message
   // back). A fresh Map replaces the signal on every mutation so
   // SolidJS re-renders the affected bubbles.
-  const [msgOps, setMsgOps] = createSignal<Map<number, MessageOpState>>(
+  const [msgOps, setMsgOpsSignal] = createSignal<Map<number, MessageOpState>>(
     new Map(),
   );
+  /** As `setRows`: an op applied after the view closed still reaches the log. */
+  const setMsgOps = (next: Map<number, MessageOpState>): void => {
+    setMsgOpsSignal(next);
+    noteClosedViewChange();
+  };
   // Inline-edit composer state — the messageId currently being
   // edited (or `null`), plus the working text.
   const [editingId, setEditingId] = createSignal<number | null>(null);
@@ -872,8 +898,12 @@ function ChatView(props: {
     if (entry === undefined) throw new KeyedError("chat.error.conversation_gone");
     await forwardOne(messageId, entry);
     setForwardingId(null);
-    // Into this very conversation the person is already looking at it.
-    if (entry.groupIdB64 !== props.entry.groupIdB64) navigate(hrefOfConversation(entry));
+    // Into this very conversation the person is already looking at it. And a
+    // person who left while the forward was in flight stays where they went:
+    // the message is sent and recorded either way.
+    if (entry.groupIdB64 !== props.entry.groupIdB64 && onThisScreen()) {
+      navigate(hrefOfConversation(entry));
+    }
   }
   /**
    * Section 8 "Forward" — the picker was chosen for the whole selection. One
@@ -902,7 +932,9 @@ function ChatView(props: {
       done.push(id);
     }
     leaveSelectionMode();
-    if (entry.groupIdB64 !== props.entry.groupIdB64) navigate(hrefOfConversation(entry));
+    if (entry.groupIdB64 !== props.entry.groupIdB64 && onThisScreen()) {
+      navigate(hrefOfConversation(entry));
+    }
   }
   /**
    * ONE forward of ONE message into `entry`: compose, re-encrypt, publish,
@@ -1336,6 +1368,11 @@ function ChatView(props: {
       stream = null;
     }
     if (stream !== null) for (const track of stream.getTracks()) track.stop();
+    // The probe can sit behind the browser's permission prompt for as long as
+    // the person leaves it there. One who closed this chat meanwhile is not
+    // rung into a call from a screen they left; the probe's stream is already
+    // released above either way.
+    if (viewIsClosed) return;
     const plan = planCallStart("video", stream !== null);
     if (plan.notice !== null) setNotice(plan.notice);
     placeCall(plan.media.video);
@@ -2741,7 +2778,9 @@ function ChatView(props: {
       } catch {
         // best-effort
       }
-      props.onLeave();
+      // Only when the person is still here. The delete takes a while, and one
+      // who already went to another screen must not be sent back to the list.
+      if (onThisScreen()) props.onLeave();
     } catch (err) {
       setError(errorText(err, "chat.error.delete_chat"));
     } finally {
@@ -2913,6 +2952,11 @@ function ChatView(props: {
     void (async () => {
       try {
         const attrs = await contacts.fetchJoinAttributions(gid);
+        // The view closed while the journal was being read. The gate is shared
+        // across mounts of this group, and telling it "fetched" here would be
+        // an answer for a map nobody shows: a view opened meanwhile starts
+        // from an empty one and must read for itself.
+        if (viewIsClosed) return;
         const map = new Map<string, string>();
         for (const a of attrs) {
           map.set(base64Encode(a.joinerSignatureKey), base64Encode(a.issuerSignaturePubkey));
@@ -3733,7 +3777,13 @@ function ChatView(props: {
       // again — so write them now rather than lose them. The rest of this
       // function still runs: an ADR-0043 rotation owed for a removal in this
       // batch must not be skipped because the view closed.
-      if (signal?.aborted === true) void persistToLogBestEffort();
+      //
+      // Asked of the VIEW, not of `signal`: a poll with no signal (the mount
+      // sequence's first refresh, a refresh at the tail of a membership
+      // action) can be in flight at the close just as the long poll can. The
+      // rows reach the log through `setRows` (`noteClosedViewChange`); this
+      // call covers a batch that moved only the cursor.
+      if (viewIsClosed) void persistToLogBestEffort("closed");
       // NB: no `setCursor` here — `pollMessages` advanced it under the lock, or
       // deliberately HELD it (`outcome: "persist-held"`) because the MLS
       // snapshot did not reach disk. The events are still consumed either way:
@@ -5758,6 +5808,12 @@ function ChatView(props: {
   });
 
   onCleanup(() => {
+    viewIsClosed = true;
+    // What the log holds for this view from here on: the rows as they are now
+    // (the flush below, or the last debounced write, covers them). A view that
+    // closed before its log was read has nothing to compare against yet;
+    // `hydrateFromLog` takes the baseline once it has seeded the timeline.
+    if (didHydrateFromLog) takeClosedBaseline();
     if (pendingPersistTimer !== null) {
       clearTimeout(pendingPersistTimer);
       pendingPersistTimer = null;
@@ -5765,9 +5821,48 @@ function ChatView(props: {
       // already moved the shared cursor, so the background receive that takes
       // this group over will not fetch them again — this write is the only
       // place they reach the log. The merge keeps anything it files meanwhile.
-      void persistToLogBestEffort();
+      // Explicitly the VIEW's write: it is the last one whose rows are
+      // everything the person saw.
+      void persistToLogBestEffort("view");
     }
   });
+
+  /**
+   * The view is gone and a request it started has just changed the timeline
+   * or the op overlay: a send that was in flight came back, an edit landed, a
+   * poll batch was applied. Nothing cancels those, and what they produced
+   * exists only here — the debounced persist died with the view, the delivery
+   * service never returns an own message, and a consumed row cannot be
+   * decrypted twice. So write it, as a closed view writes
+   * (`mergeClosedViewSlot`). Coalesced per microtask: a batch sets the rows
+   * and the overlay in one synchronous run.
+   */
+  function noteClosedViewChange(): void {
+    if (!viewIsClosed || closedBaseline === null || closedFlushQueued) return;
+    closedFlushQueued = true;
+    queueMicrotask(() => {
+      closedFlushQueued = false;
+      void persistToLogBestEffort("closed");
+    });
+  }
+
+  /** The timeline as the log stores it, with the op overlay folded in. */
+  function persistedTimelineNow(): PersistedMessage[] {
+    // ADR-0023 — fold the mutation overlay in on the way out. Without this
+    // the row written here is the message as first received, so a reload
+    // brings back text the author replaced and messages they deleted - and
+    // brings them back for good, because the op rows are long behind the
+    // cursor and MLS forward secrecy will not decrypt them a second time.
+    const ops = msgOps();
+    return dedupByMessageId(rows())
+      .map((r) => timelineRowToPersisted(r, hub.playedKeys()))
+      .filter((m): m is PersistedMessage => m !== null)
+      .map((m) => persistedWithOps(m, ops.get(Number(m.messageId))));
+  }
+
+  function takeClosedBaseline(): void {
+    closedBaseline = new ClosedViewBaseline(persistedTimelineNow(), cursor());
+  }
 
   async function hydrateFromLog(): Promise<void> {
     try {
@@ -5824,27 +5919,49 @@ function ChatView(props: {
       // eslint-disable-next-line no-console
       console.warn("hydrateFromLog failed", err);
       didHydrateFromLog = true;
+    } finally {
+      // The view closed while its log was being read: what was just seeded is
+      // what the log already holds, so it is the baseline a later write of
+      // this closed view is compared against.
+      if (viewIsClosed && closedBaseline === null) takeClosedBaseline();
     }
   }
 
-  async function persistToLogBestEffort(): Promise<void> {
+  /**
+   * `"view"`: the open view's write — its rows are authoritative up to the
+   * newest one it holds. `"closed"`: a write after the view went away — only
+   * what changed since it closed, merged without displacing anything the
+   * background receive filed meanwhile and without marking anything viewed.
+   */
+  async function persistToLogBestEffort(
+    mode: "view" | "closed" = viewIsClosed ? "closed" : "view",
+  ): Promise<void> {
     try {
       const accountIdB64 = accountIdB64ForLog();
       if (accountIdB64 === null) return;
       const deviceKey = await getDeviceKey(accountIdB64);
       if (deviceKey === null) return;
-      // ADR-0023 — fold the mutation overlay in on the way out. Without this
-      // the row written here is the message as first received, so a reload
-      // brings back text the author replaced and messages they deleted - and
-      // brings them back for good, because the op rows are long behind the
-      // cursor and MLS forward secrecy will not decrypt them a second time.
-      const ops = msgOps();
-      const messages = dedupByMessageId(rows())
-        .map((r) => timelineRowToPersisted(r, hub.playedKeys()))
-        .filter((m): m is PersistedMessage => m !== null)
-        .map((m) => persistedWithOps(m, ops.get(Number(m.messageId))));
+      const messages = persistedTimelineNow();
       const hex = groupIdHexForLog();
       const at = cursor();
+      if (mode === "closed") {
+        const baseline = closedBaseline;
+        // No baseline yet: the log is still being read (`hydrateFromLog`
+        // takes it), and nothing can be told apart from what it holds.
+        if (baseline === null) return;
+        const changed = baseline.changed(messages);
+        if (changed.length === 0 && !baseline.cursorAdvanced(at)) return;
+        await updateMessageLog(accountIdB64, deviceKey, (existing) => {
+          const groups = existing?.groups ?? {};
+          return {
+            version: MESSAGE_LOG_VERSION,
+            groups: { ...groups, [hex]: mergeClosedViewSlot(groups[hex], changed, at) },
+          };
+        });
+        // Only once the write landed: a failed one leaves the rows owed.
+        baseline.accept(changed, at);
+        return;
+      }
       // Serialized with every other writer of this account's log, and MERGED
       // rather than replacing this group's slot: the background receive may
       // have filed newer rows for this chat after this view last looked (the

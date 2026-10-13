@@ -503,6 +503,7 @@ public fun CallScreen(
                             try {
                                 session.addLocalVideo()
                             } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
                                 android.util.Log.w("CallScreen", "addLocalVideo failed", cause)
                             }
                         }
@@ -517,6 +518,7 @@ public fun CallScreen(
                             try {
                                 session.stopSendingVideo()
                             } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
                                 android.util.Log.w("CallScreen", "stopSendingVideo failed", cause)
                             }
                         }

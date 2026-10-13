@@ -7,8 +7,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import me.lakko.app.l10n.UiText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -245,6 +248,10 @@ public class LinkCallHost(
     /** Identity of the current start; reports from an abandoned one are ignored. */
     private var attempt: Any? = null
 
+    /** The last start, in flight or finished. [leave] cancels one in flight;
+     *  the next start waits for a cancelled one to finish ([start]). */
+    private var startJob: Job? = null
+
     private val mutableInvite = MutableStateFlow<InCallInvite>(InCallInvite.Idle)
 
     /**
@@ -383,12 +390,38 @@ public class LinkCallHost(
             true
         }.await()
 
-    /** Found (owner) or join the call a `/c/` link names. Never throws. */
-    public suspend fun start(request: LinkCallRequest): LinkCallStartOutcome =
-        scope.async { runStart(request) }.await()
+    /**
+     * Found (owner) or join the call a `/c/` link names. Never throws.
+     *
+     * A start the person left while it was in flight ([leave]) is cancelled
+     * and comes back as [LinkCallStartOutcome.Started]: there is no outcome
+     * to show, which is what the slot already says. The start after it waits
+     * for that one to finish tearing down before it takes the call screen's
+     * state, so nothing the abandoned start writes on its way out lands on
+     * the new call.
+     */
+    public suspend fun start(request: LinkCallRequest): LinkCallStartOutcome {
+        val abandoned = startJob?.takeIf { it.isCancelled }
+        val job = scope.async {
+            abandoned?.join()
+            runStart(request)
+        }
+        startJob = job
+        return try {
+            job.await()
+        } catch (cancel: CancellationException) {
+            // The caller's own cancellation is passed on; [leave] cancelling
+            // the start is the person's doing and not a failure.
+            currentCoroutineContext().ensureActive()
+            LinkCallStartOutcome.Started
+        }
+    }
 
     /** Leave the link call (or stop waiting to be admitted). No outcome to show. */
     public fun leave() {
+        // A start still in flight stops here: what it has opened so far is
+        // closed by its own cancellation, and it reports nothing.
+        startJob?.cancel()
         attempt = null
         val h = handle
         handle = null
@@ -618,6 +651,9 @@ public class LinkCallHost(
             if (attempt === thisAttempt) leave()
             throw cancel
         } catch (error: Throwable) {
+            // The person left while the start was in flight and it failed
+            // under the teardown: nothing to report.
+            if (attempt !== thisAttempt) return LinkCallStartOutcome.Started
             val message = error.message ?: error.toString()
             warn("link call: start failed", error)
             apply(thisAttempt, LinkCallEvent.Error, callErrorReason(error))

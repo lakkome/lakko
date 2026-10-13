@@ -484,6 +484,9 @@ public final class ContactsViewModel: ObservableObject {
             }
             activeInvitesLoaded = true
         } catch {
+            // The screen was left while the list was loading: not a failure
+            // of the load. The next visit loads it again.
+            if Cancellation.endedByCancellation(error) { return }
             activeInvitesError = Self.contactsErrorText(for: error, fallbackKey: "invite.links.error.load")
         }
     }

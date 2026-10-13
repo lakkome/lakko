@@ -126,6 +126,14 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   // The signed-in account's mailbox cursor + pending requests, persisted
   // together (`inbox-store.ts`). `null` while signed out.
   let inbox: PendingInbox | null = null;
+  /** What a poll is started for: the account and its inbox, replaced as one
+   *  value on every `start` / `stop`. A poll captures it and everything it
+   *  does afterwards goes through the captured one (`mailbox-poller.ts`). */
+  interface MailboxScope {
+    readonly accountIdB64: string;
+    readonly inbox: PendingInbox;
+  }
+  let scope: MailboxScope | null = null;
   // Welcome rows already joined in this page lifetime. A batch whose cursor
   // write was HELD (the post-join persist failed) is fetched again; without
   // this, the second pass would try to open a Welcome whose KeyPackage the
@@ -136,12 +144,20 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   let loopAbort: AbortController | null = null;
   const resume = createWakeLatch();
 
-  async function dispatch(events: readonly IncomingMailboxEvent[]): Promise<void> {
-    const s = auth.state();
-    if (s.kind !== "session") throw new Error("mailbox dispatch without a session");
-    const accountIdB64 = s.account.accountId;
-    const target = inbox;
-    if (target === null) throw new Error("mailbox dispatch without an inbox");
+  async function dispatch(
+    events: readonly IncomingMailboxEvent[],
+    polled: MailboxScope | null,
+  ): Promise<void> {
+    if (polled === null) throw new Error("mailbox dispatch without an inbox");
+    // The account the batch was FETCHED for, not whoever is signed in when
+    // the dispatch runs. A throw holds that account's cursor.
+    const accountIdB64 = polled.accountIdB64;
+    const target = polled.inbox;
+    const current = (): boolean => scope === polled;
+    const requireCurrent = (): void => {
+      if (!current()) throw new Error("mailbox dispatch: the session it was polled for ended");
+    };
+    requireCurrent();
     const fresh: FetchedRequest[] = [];
     let welcomeAttempted = false;
     let joined = false;
@@ -165,6 +181,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
               auth.identitySecrets(),
               ev.welcome.welcomeBytes,
             );
+            // Signed out during the join: the chat list is not this
+            // account's any more. Not added, not marked joined; the cursor
+            // is held (the catch below is skipped by the rethrow).
+            if (!current()) throw new StaleMailboxScope();
             // ADR-0051 — a name this device already holds for the group (a
             // re-join, a second Welcome) titles it at once; otherwise the
             // stand-in the title resolver reads as "unnamed".
@@ -178,6 +198,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             joinedGroupIds.push(active.groupIdB64);
             joined = true;
           } catch (err) {
+            if (err instanceof StaleMailboxScope) throw err;
             // ADR-0060 — every device of the account reads the one account
             // mailbox, so a Welcome here may add ANOTHER device of ours, or be
             // a channel co-publisher's (opened by that flow under the account
@@ -205,28 +226,37 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             // roster can resolve to this contact's name.
             accountIdHex: groupIdHex(ev.ack.accepterAccountId),
           };
+          // Durable, and keyed by the captured account: recorded even when
+          // the session has ended since.
           upsertAccepted(accepter, accountIdB64);
-          setAcceptedVersion(acceptedVersion() + 1);
+          if (current()) setAcceptedVersion(acceptedVersion() + 1);
         }
       }
       // Persisted with the cursor it was fetched under; a failed write throws
       // here, which holds the cursor so the rows are fetched again.
       if (fresh.length > 0) target.addFetched(fresh);
       if (joined) {
+        // `persistSnapshotDurable` writes the identity that is live NOW under
+        // the id it is given: after a sign-out that pairing would be wrong.
+        requireCurrent();
         // The joined group lives only in memory until a snapshot lands, and
         // the Welcome cannot be opened a second time in this page lifetime.
         // A failed persist throws, which HOLDS the mailbox cursor: after a
         // reload the durable snapshot still holds the unconsumed KeyPackage,
         // so the re-fetched Welcome can be opened then.
         await chats.persistSnapshotDurable(accountIdB64);
+        requireCurrent();
         // ADR-0048 §2 — publish this device's profile into every group it just
         // joined, once the join is durable. The members already there cannot
         // learn the newcomer's name any other way.
         for (const groupIdB64 of joinedGroupIds) profiles.groupJoined(groupIdB64);
       }
     } finally {
-      if (failed) setJoinFailure(JOIN_FAILURE_MESSAGE);
-      if (welcomeAttempted) {
+      // `stop()` cleared the banner when the session ended; a late failure of
+      // the ended session must not put it back on the login screen or in the
+      // next account's session.
+      if (failed && current()) setJoinFailure(JOIN_FAILURE_MESSAGE);
+      if (welcomeAttempted && current()) {
         void auth.republishKeyPackage().catch((err: unknown) => {
           // eslint-disable-next-line no-console
           console.warn("KeyPackage republish after Welcome failed", err);
@@ -235,13 +265,15 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
-  const poller: MailboxPoller = createMailboxPoller<IncomingMailboxEvent>({
-    readCursor: () => inbox?.cursor() ?? 0,
-    writeCursor: (next) => {
+  const poller: MailboxPoller = createMailboxPoller<IncomingMailboxEvent, MailboxScope | null>({
+    scope: () => scope,
+    readCursor: (polled) => polled?.inbox.cursor() ?? 0,
+    writeCursor: (next, polled) => {
       // One write for the cursor and the pending rows; a failure throws and
-      // leaves the in-memory cursor where it was.
-      if (inbox === null) throw new Error("mailbox cursor write without an inbox");
-      inbox.advanceCursor(next);
+      // leaves the in-memory cursor where it was. Through the inbox the batch
+      // was fetched for; a disposed one refuses the write, which holds it.
+      if (polled === null) throw new Error("mailbox cursor write without an inbox");
+      polled.inbox.advanceCursor(next);
     },
     fetch: async (after, waitSecs, signal) =>
       client.pollMailbox(auth.identitySecrets(), after, waitSecs, signal),
@@ -268,6 +300,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       onChange: () => setPending(opened.pending()),
     });
     inbox = opened;
+    scope = { accountIdB64, inbox: opened };
     setPending(opened.pending());
     // Requests kept from an earlier page load: back through the poller's own
     // verify-and-open path before they are listed.
@@ -307,6 +340,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       inbox.dispose();
       inbox = null;
     }
+    scope = null;
     if (activeAccount !== null) {
       activeAccount = null;
       setPending([]);
@@ -350,11 +384,14 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         setError(() => t("contacts.mailbox.sign_in"));
         return;
       }
+      // The session the refresh was asked in. Its failure is that session's
+      // to see: `stop()` cleared the error line when it ended.
+      const asked = scope;
       setBusy(true);
       try {
         await poller.poll(0);
       } catch (err) {
-        setError(formatMailboxError(err));
+        if (scope === asked) setError(formatMailboxError(err));
       } finally {
         setBusy(false);
       }
@@ -377,6 +414,14 @@ function formatMailboxError(err: unknown): () => string {
   }
   console.warn("contacts inbox: poll failed", err);
   return () => t("contacts.mailbox.poll_failed");
+}
+
+/** A dispatch found its session gone after an await. Holds the cursor. */
+class StaleMailboxScope extends Error {
+  override name = "StaleMailboxScope";
+  constructor() {
+    super("mailbox dispatch: the session it was polled for ended");
+  }
 }
 
 export function useMailbox(): MailboxApi {

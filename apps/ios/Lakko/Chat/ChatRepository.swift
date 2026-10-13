@@ -4103,7 +4103,17 @@ public final class ChatRepository: ObservableObject {
         // own acquisition below.
         if !sweptGroupsThisSession.contains(groupIdHex) {
             sweptGroupsThisSession.insert(groupIdHex)
-            await sweepPendingCommits(record: record, groupIdHex: groupIdHex)
+            // Shielded from the caller's cancellation. This poll may be the
+            // chat screen's `.task`, cancelled when the person leaves; the
+            // re-publish below runs outside the commit chain, so a cancelled
+            // caller would stop it with the entry un-acked, and the guard
+            // above lets the sweep run only once per session. A commit this
+            // device is durably past, and that never reached the DS, would
+            // then stay unpublished until the next launch. The order of the
+            // sweep and what it does are unchanged; only who may stop it is.
+            await Cancellation.shielded { [self] in
+                await sweepPendingCommits(record: record, groupIdHex: groupIdHex)
+            }
         }
         // G-38 step 2 — the NETWORK half, outside the lock. Both values are read
         // here and re-validated under the lock; `groupId` is the record's cached

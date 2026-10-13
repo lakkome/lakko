@@ -105,6 +105,9 @@ public class PasskeysViewModel(
                     }
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e) {
+                    mutableState.update { it.copy(loading = false) }
+                }
                 mutableState.update {
                     it.copy(
                         loading = false,
@@ -158,6 +161,7 @@ public class PasskeysViewModel(
                                     accountIdB64 = base64Encode(secrets.accountId),
                                 )
                             } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
                                 Log.w(
                                     "PasskeysViewModel",
                                     "failed to enable attested removals",
@@ -198,6 +202,9 @@ public class PasskeysViewModel(
                     it.copy(busy = false, message = Message.Error(explain(e)))
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,
@@ -250,6 +257,9 @@ public class PasskeysViewModel(
                     it.copy(busy = false, message = Message.Error(explain(e)))
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,
@@ -316,6 +326,9 @@ public class PasskeysViewModel(
                     it.copy(busy = false, message = Message.Error(explain(e)))
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,
@@ -355,6 +368,9 @@ public class PasskeysViewModel(
                     it.copy(busy = false, message = Message.Error(explain(e)))
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,

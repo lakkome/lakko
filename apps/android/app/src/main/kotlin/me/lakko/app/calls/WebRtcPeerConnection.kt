@@ -1641,8 +1641,23 @@ public class WebRtcPeerConnection(
             )
         }
         val offer = createOfferSuspend(peer, constraints)
+        requireStillOpen(peer)
         setLocalDescriptionSuspend(peer, offer)
+        requireStillOpen(peer)
         return offer.description
+    }
+
+    /**
+     * After a suspension of an SDP step: refuse to go on when [close] ran
+     * meanwhile. [close] disposes the native connection, and the next step
+     * would call into it. The caller's own teardown has already happened;
+     * what it gets is an ordinary [WebRtcException].
+     *
+     * Call on the thread [close] is called on (the main thread, where every
+     * session resumes), so the check and the step after it cannot be split.
+     */
+    private fun requireStillOpen(peer: PeerConnection) {
+        if (this.peer !== peer) throw WebRtcException("PeerConnection was closed")
     }
 
     /**
@@ -1658,7 +1673,9 @@ public class WebRtcPeerConnection(
     public suspend fun createRenegotiationOffer(): String {
         val peer = peer ?: throw WebRtcException("PeerConnection is not allocated")
         val offer = createOfferSuspend(peer, MediaConstraints())
+        requireStillOpen(peer)
         setLocalDescriptionSuspend(peer, offer)
+        requireStillOpen(peer)
         return offer.description
     }
 
@@ -1676,8 +1693,11 @@ public class WebRtcPeerConnection(
         val peer = peer ?: throw WebRtcException("PeerConnection is not allocated")
         val remoteOffer = SessionDescription(SessionDescription.Type.OFFER, remoteOfferSdp)
         setRemoteDescriptionSuspend(peer, remoteOffer)
+        requireStillOpen(peer)
         val answer = createAnswerSuspend(peer, MediaConstraints())
+        requireStillOpen(peer)
         setLocalDescriptionSuspend(peer, answer)
+        requireStillOpen(peer)
         return answer.description
     }
 
@@ -1687,6 +1707,7 @@ public class WebRtcPeerConnection(
         val peer = peer ?: throw WebRtcException("PeerConnection is not allocated")
         val remoteAnswer = SessionDescription(SessionDescription.Type.ANSWER, remoteAnswerSdp)
         setRemoteDescriptionSuspend(peer, remoteAnswer)
+        requireStillOpen(peer)
     }
 
     /**

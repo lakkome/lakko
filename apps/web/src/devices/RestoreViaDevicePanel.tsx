@@ -122,6 +122,10 @@ export default function RestoreViaDevicePanel(props: {
   /** Bumped by every `start()`, so a finishing Welcome loop of an earlier
    *  attempt never touches the link or the state of a newer one. */
   let attemptSeq = 0;
+  /** Set by `onCleanup`, which also bumps `attemptSeq`: once the panel is
+   *  gone no attempt is current, so nothing asks another device, arms a
+   *  timer or lands a session on a screen the person has left. */
+  let disposed = false;
   let statusTimer: ReturnType<typeof setInterval> | null = null;
   const stopStatusPolling = (): void => {
     if (statusTimer !== null) {
@@ -203,6 +207,7 @@ export default function RestoreViaDevicePanel(props: {
       setShowQr(true);
       return;
     }
+    stopStatusPolling();
     statusTimer = setInterval(() => void initiator.poll(), DEVICE_REQUEST_STATUS_POLL_MS);
   }
 
@@ -237,6 +242,12 @@ export default function RestoreViaDevicePanel(props: {
       flow = await props.prepare();
     } catch (err) {
       setState({ kind: "error", error: err });
+      return;
+    }
+    if (disposed) {
+      // Left while the join flow was being prepared: no request goes out
+      // (the account's other devices are not asked "Is this you?").
+      flow.dispose();
       return;
     }
     try {
@@ -301,6 +312,14 @@ export default function RestoreViaDevicePanel(props: {
               setState({ kind: "error", messageKey: "device_link.error.no_identity" });
               return;
             }
+            if (!current()) {
+              // The panel was left while the Welcome was being accepted. No
+              // session is landed on whatever screen is up now; the join is
+              // dropped with the flow, and pairing again recovers it.
+              recovery.phraseSeed?.fill(0);
+              flow.dispose();
+              return;
+            }
             await props.onRestored(recovery);
             flow.dispose();
             setState({ kind: "done" });
@@ -336,6 +355,8 @@ export default function RestoreViaDevicePanel(props: {
   }
 
   onCleanup(() => {
+    disposed = true;
+    attemptSeq += 1;
     abandonLink();
     const s = state();
     if (s.kind === "waiting") {

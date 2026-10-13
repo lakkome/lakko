@@ -343,7 +343,11 @@ final class CallHost: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.callStarting = false }
-            guard await self.ports.microphoneGranted() else {
+            let micGranted = await self.ports.microphoneGranted()
+            // Signed out while the permission was asked (`reset()` clears
+            // the flag): there is no session to place a call for.
+            guard self.callStarting else { return }
+            guard micGranted else {
                 self.callError = MicrophonePermission.deniedText
                 return
             }
@@ -444,6 +448,8 @@ final class CallHost: ObservableObject {
     func reset() {
         if hasLiveCall { activeCall?.hangUp(reason: .hungUp) }
         clearSlot()
+        // A start still waiting for the microphone answer stands down.
+        callStarting = false
         seenRows.removeAll()
         endedCallIds.removeAll()
         callError = nil

@@ -62,9 +62,15 @@ final class SfuCallSession {
         case sframeUnavailable
         /// Mid-call camera-on (piece B): no usable camera on this device.
         case noCamera
+        /// The session was hung up, failed, or was told by the SFU that the
+        /// call had ended while a step of the connect was awaited. Nothing
+        /// was captured or published for it.
+        case endedWhileConnecting
 
         var errorDescription: String? {
             switch self {
+            case .endedWhileConnecting:
+                return "The call ended before it connected."
             case .alreadyConnected:
                 return "The call is already connected."
             case .sframeUnavailable:
@@ -293,6 +299,14 @@ final class SfuCallSession {
     /// `hangUp`. `nil` for an audio-only call (or when no camera exists).
     private var localCameraCapture: LocalCameraCapture?
     private(set) var state: State = .idle
+    /// The session is connecting or connected: not yet started, hung up and
+    /// failed are all "no call to capture or publish for".
+    private var isLive: Bool { state == .connecting || state == .connected }
+    /// ``openPeerConnectionAndPublish()`` is between its start and the peer
+    /// connection existing (it awaits the relay credential first), so a
+    /// second ``publish(seed:localLeaf:)`` in that window does not build a
+    /// second connection.
+    private var openingPeerConnection = false
     /// Whether the SFU refused this device because the call had already
     /// ended (`ErrorCode::CallEnded`). Read by the host after a failed
     /// `connect()` to tell that from a connection failure.
@@ -585,7 +599,12 @@ final class SfuCallSession {
     /// - Throws: `SfuCallError.sframeUnavailable` if no seed is available (never
     ///   publishes unencrypted).
     func publish(seed: Data?, localLeaf: UInt32?) async throws {
-        guard pc == nil else { return }
+        // A publish asked of a session that is over (the person left, the
+        // admission timed out or the socket closed between the Welcome and
+        // this call) captures nothing and reports nothing: the end was
+        // already reported through the state.
+        guard isLive else { return }
+        guard pc == nil, !openingPeerConnection else { return }
         if let seed { activeSeed = seed }
         if let localLeaf { publishLeaf = localLeaf }
         guard activeSeed != nil else { throw SfuCallError.sframeUnavailable }
@@ -668,11 +687,18 @@ final class SfuCallSession {
         }
         signaling?.close()
         signaling = nil
+        // Only a session that set the default output puts it back. One that
+        // never opened a peer connection (an attempt abandoned during its
+        // connect, hung up after a newer call started) would otherwise take
+        // the loudspeaker default away from the call that is up now.
+        let setCallOutput = pc != nil
         pc?.close()
         pc = nil
-        // The next call is not necessarily a group one: hand the default
-        // output back to the earpiece.
-        CallAudioSession.configureCallOutput(loudspeakerByDefault: false)
+        if setCallOutput {
+            // The next call is not necessarily a group one: hand the default
+            // output back to the earpiece.
+            CallAudioSession.configureCallOutput(loudspeakerByDefault: false)
+        }
         audioTrackPeers.removeAll()
         lightTrackIds.removeAll()
         middleTrackIds.removeAll()
@@ -731,13 +757,23 @@ final class SfuCallSession {
             // Never publish media without a seed (invariant #4).
             throw SfuCallError.sframeUnavailable
         }
+        openingPeerConnection = true
+        defer { openingPeerConnection = false }
+        let iceServers = await resolveIceServers()
+        // The call may be over by now: the person pressed End, the socket
+        // closed, or the SFU answered `call-ended` in place of the Welcome
+        // while the relay credential was fetched. `hangUp()` ran with no
+        // peer connection to close, so building one now would leave the
+        // microphone and the camera running with no call and nothing left to
+        // stop them.
+        guard isLive else { throw SfuCallError.endedWhileConnecting }
         // A group call plays on the loudspeaker unless a headset or a
         // Bluetooth device is connected, which then takes over by itself; it
         // has no Speaker control to move the sound with. Set before the peer
         // connection exists, so it is what WebRTC applies when it brings the
         // audio up.
         CallAudioSession.configureCallOutput(loudspeakerByDefault: true)
-        let connection = WebRTCPeerConnection(iceServers: await resolveIceServers())
+        let connection = WebRTCPeerConnection(iceServers: iceServers)
         connection.installDelegate(makePeerDelegate())
         pc = connection
 
@@ -758,6 +794,10 @@ final class SfuCallSession {
             throw SfuCallError.sframeUnavailable
         }
         let offer = try await connection.createOffer(audio: config.audio, video: config.video)
+        // Hung up or failed while the offer was built: `hangUp()` closed
+        // this connection and reset the negotiation state, which must stay
+        // reset.
+        guard pc === connection else { throw SfuCallError.endedWhileConnecting }
         // Mark our initial publish offer in flight so an SFU subscribe-offer
         // that arrives before the answer waits in `offerQueue`
         // (`drainServerOffers` guards on `makingOffer`). The first
@@ -805,8 +845,11 @@ final class SfuCallSession {
             } catch {
                 NSLog("SfuCallSession: camera start failed: %@", String(describing: error))
                 await MainActor.run {
-                    self?.localCameraCapture = nil
-                    self?.callbacks.onLocalVideoTrack?(nil)
+                    // Only while this capture is still the session's: after a
+                    // hang-up the preview was already cleared.
+                    guard let self, self.localCameraCapture === capture else { return }
+                    self.localCameraCapture = nil
+                    self.callbacks.onLocalVideoTrack?(nil)
                 }
             }
         }
@@ -896,6 +939,10 @@ final class SfuCallSession {
         do {
             try await capture.start()
         } catch {
+            // Hung up while the camera was starting: `hangUp()` already put
+            // the state back, and a camera that did not start for a call that
+            // is over is not a failure to show.
+            guard pc === connection else { return }
             setVideoPublishState(.failed)
             throw error
         }
@@ -928,11 +975,13 @@ final class SfuCallSession {
         localCameraCapture = capture
         guard liveConn.armSFrameVideoEncryptor(seed: seed, localLeaf: publishLeaf) else {
             liveConn.removeLocalVideoTrack()
-            await capture.stop()
             localCameraCapture = nil
             localCameraSource = nil
             callbacks.onLocalVideoTrack?(nil)
-            setVideoPublishState(.failed)
+            await capture.stop()
+            // The call may have ended while the camera stopped; a hang-up
+            // already put the state back to `.off`.
+            if pc === liveConn { setVideoPublishState(.failed) }
             throw SfuCallError.sframeUnavailable
         }
         // Self-preview tile.
@@ -977,11 +1026,15 @@ final class SfuCallSession {
         makingOffer = true
         do {
             let offer = try await connection.createRenegotiationOffer()
+            // Hung up while the offer was built: nothing to send, and the
+            // flags `hangUp()` reset stay reset.
+            guard pc === connection else { return }
             signaling.sendSdpOffer(
                 offer, lightMids: connection.cameraCopyMids(.light),
                 middleMids: connection.cameraCopyMids(.middle))
             // `makingOffer` stays true until `applyRemoteAnswer` clears it.
         } catch {
+            guard pc === connection else { return }
             makingOffer = false
             // A failed renegotiation leaves the call up as-is; the local
             // self-preview is already live. A later stable transition re-drives
@@ -1140,9 +1193,14 @@ final class SfuCallSession {
         do {
             try await pc.applyRemoteAnswer(sdp)
         } catch {
-            fail()
+            // An apply that failed because the call was hung up meanwhile is
+            // not a failure of the call.
+            if self.pc === pc { fail() }
             return
         }
+        // Hung up while the answer was applied: the negotiation state
+        // `hangUp()` reset stays reset.
+        guard self.pc === pc else { return }
         // The initial publish (or a mid-call renegotiation) is now answered:
         // clear the in-flight flag + arm renegotiation for future track
         // changes (piece B). Then either drive a camera-on that queued while we
@@ -1179,6 +1237,8 @@ final class SfuCallSession {
             guard let pc = pc, let signaling = signaling else { break }
             do {
                 let answer = try await pc.createAnswer(remoteOfferSdp: sdp)
+                // Hung up while the answer was built.
+                guard self.pc === pc else { break }
                 signaling.sendSdpAnswer(answer)
                 NSLog("SfuCallSession: answered server offer bytes=%d", answer.count)
                 // Harmless when nothing changed for the senders (ADR-0071).

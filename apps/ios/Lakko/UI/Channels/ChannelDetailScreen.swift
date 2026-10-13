@@ -359,6 +359,11 @@ private struct ChannelOwnerView: View {
             state.setEpoch(channelId: channelId, epoch: epoch)
             decodeAll(posts: postsResult.posts)
         } catch {
+            // The screen was left (or covered by Manage) mid-refresh. Nothing
+            // failed; the refresh runs again when the screen is back, and it
+            // does not clear this line on success, so a cancellation filed
+            // here would stay on screen.
+            if Cancellation.endedByCancellation(error) { return }
             NSLog("Channels: refresh failed: %@", String(describing: error))
             publishError = .key("channels.posts.error.load")
         }

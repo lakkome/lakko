@@ -107,6 +107,9 @@ public class RestoreIdentityPromptViewModel(
                     it.copy(busy = false, error = err.text ?: UiText("restore_identity.error.generic"))
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,
@@ -153,6 +156,9 @@ public class RestoreIdentityPromptViewModel(
                 // Repository flipped to SaveFreshPhrase — clear local busy.
                 mutableState.update { it.copy(busy = false, error = null) }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,

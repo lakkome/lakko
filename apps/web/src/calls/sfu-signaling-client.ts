@@ -186,6 +186,18 @@ export class SfuSignalingArgError extends Error {
   }
 }
 
+/**
+ * `connect()` was still pending when this client was closed. Not a failure
+ * of the socket: the caller closed it (the person left, or the session was
+ * torn down), so whoever awaited the connect is told so and reports nothing.
+ */
+export class SfuSignalingClosedError extends Error {
+  constructor() {
+    super("SFU signaling was closed before it connected");
+    this.name = "SfuSignalingClosedError";
+  }
+}
+
 // ---- Client --------------------------------------------------------
 
 /** The WebSocket subprotocol the SFU requires. */
@@ -200,6 +212,12 @@ export const SFU_SUBPROTOCOL = "lakko-sfu-v1";
 export class SfuSignalingClient {
   private socket: WebSocket | null = null;
   private wasm: Awaited<ReturnType<typeof loadWasm>> | null = null;
+  /** `close()` was called. Sticky: a closed client never opens a socket. */
+  private closed = false;
+  /** Settles a `connect()` that is still waiting for the socket to open;
+   *  `null` once it has settled. `close()` uses it, because it also removes
+   *  the socket's own handlers and nothing else would settle the promise. */
+  private rejectPendingConnect: ((err: Error) => void) | null = null;
 
   constructor(
     /** SFU origin, e.g. `wss://sfu.lakko.me`. No trailing path. */
@@ -225,7 +243,8 @@ export class SfuSignalingClient {
    * Open the WebSocket and start dispatching frames. Resolves when
    * the socket reaches OPEN (the SFU's `Welcome` frame follows on the
    * `onWelcome` callback); rejects if the socket errors / closes
-   * before opening. Idempotent-guarded: throws if already connected.
+   * before opening, and with {@link SfuSignalingClosedError} if `close()` is
+   * called first. Idempotent-guarded: throws if already connected.
    */
   async connect(): Promise<void> {
     if (this.socket !== null) {
@@ -233,15 +252,25 @@ export class SfuSignalingClient {
     }
     // Pre-load wasm so the synchronous message handler can call the
     // shared validator without an await per frame.
+    if (this.closed) throw new SfuSignalingClosedError();
     this.wasm = await loadWasm();
+    // Closed while the module loaded: no socket is opened for a client
+    // nobody holds any more.
+    if (this.closed) throw new SfuSignalingClosedError();
     const url = `${this.baseUrl}/v1/connect?token=${encodeURIComponent(this.jwt)}`;
     const socket = new WebSocket(url, SFU_SUBPROTOCOL);
     this.socket = socket;
 
     return new Promise<void>((resolve, reject) => {
       let settled = false;
+      this.rejectPendingConnect = (err: Error): void => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      };
       socket.onopen = (): void => {
         settled = true;
+        this.rejectPendingConnect = null;
         resolve();
       };
       socket.onmessage = (ev: MessageEvent): void => {
@@ -255,6 +284,7 @@ export class SfuSignalingClient {
         this.callbacks.onSocketError?.();
         if (!settled) {
           settled = true;
+          this.rejectPendingConnect = null;
           reject(new Error("SFU WebSocket errored before opening"));
         }
       };
@@ -262,6 +292,7 @@ export class SfuSignalingClient {
         this.callbacks.onClose?.(ev.code, ev.reason);
         if (!settled) {
           settled = true;
+          this.rejectPendingConnect = null;
           reject(
             new Error(`SFU WebSocket closed before opening (code ${ev.code})`),
           );
@@ -270,8 +301,16 @@ export class SfuSignalingClient {
     });
   }
 
-  /** Close the socket. Idempotent. */
+  /**
+   * Close the socket. Idempotent. A `connect()` still waiting for the socket
+   * to open is rejected with {@link SfuSignalingClosedError}: the socket's
+   * handlers are removed below, so nothing else would ever settle it.
+   */
   close(code = 1000, reason = "client closed"): void {
+    this.closed = true;
+    const rejectPending = this.rejectPendingConnect;
+    this.rejectPendingConnect = null;
+    rejectPending?.(new SfuSignalingClosedError());
     const socket = this.socket;
     this.socket = null;
     if (socket !== null) {

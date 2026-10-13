@@ -1118,6 +1118,7 @@ public class ContactsRepository(
                     discovery.fetchInvite(blobId)
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e)
                 if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return AcceptInviteResult.RateLimited
                 return AcceptInviteResult.Failed(message = e.message ?: "fetch failed")
             } ?: return AcceptInviteResult.NotFound
@@ -1164,6 +1165,7 @@ public class ContactsRepository(
                     discovery.consumeInvite(blobId, capabilityBytes, secrets.accountId)
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e)
                 if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) {
                     return@use AcceptInviteResult.RateLimited
                 }
@@ -1210,6 +1212,7 @@ public class ContactsRepository(
                     )
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e)
                 return@use AcceptInviteResult.Failed(
                     message = e.message ?: "ContactRequest send failed",
                 )

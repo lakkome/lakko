@@ -195,6 +195,27 @@ export interface MultiJoinerCallOptions {
   readonly onNoCommitter?: () => void;
   /** Fired on a fatal setup error. */
   readonly onError?: (err: unknown) => void;
+  /**
+   * Whether this attempt is still the one the host's link slot belongs to
+   * (the host's attempt token). An attempt the person already left, or that
+   * a newer call replaced, may finish its awaits later; from then on it
+   * writes nothing to the shared call store, which belongs to whatever call
+   * is current, and it is not started at all when it is found stale before
+   * its session exists. Absent: always current.
+   */
+  readonly isCurrent?: () => boolean;
+}
+
+/**
+ * The attempt was left or replaced before its session was built
+ * ({@link MultiJoinerCallOptions.isCurrent}). Nothing was started and nothing
+ * failed: the host reports nothing for it.
+ */
+export class LinkCallAbandonedError extends Error {
+  constructor() {
+    super("the link call attempt was left before it started");
+    this.name = "LinkCallAbandonedError";
+  }
 }
 
 /** The orchestrator instance IS the caller's handle. */
@@ -384,7 +405,7 @@ export class MultiJoinerCall {
           // `onRemoteTrack`).
           const id = `${PEER_PREFIX}${peerId}`;
           this.lastKnownCameraOn.set(id, cameraOn);
-          callActions.setParticipantCamera(id, cameraOn);
+          if (this.current()) callActions.setParticipantCamera(id, cameraOn);
         },
         onSignalRelay: (from, payload): void => this.onRelay(from, payload),
         onLocalStream: (stream): void => this.setLocalStream(stream),
@@ -404,6 +425,7 @@ export class MultiJoinerCall {
    *  controls off on the own tile and say so once. */
   private onCaptureFallback(fallback: CaptureFallback): void {
     this.captureFallback = fallback;
+    if (!this.current()) return;
     callActions.setCamera(false);
     if (fallback.missing === "camera-and-microphone") callActions.setMic(false);
     callActions.showNotice(captureFallbackNotice(fallback));
@@ -425,6 +447,8 @@ export class MultiJoinerCall {
     const wasm = await loadWasm();
     const callIdHex = groupIdHex(opts.callId);
     const jwt = await mintJwt(wasm, opts, callIdHex);
+    // Left or replaced while the token was minted: no session is opened.
+    if (opts.isCurrent?.() === false) throw new LinkCallAbandonedError();
     const ownerKeyHex = hexKey(opts.ownerSignatureKey);
     // Owner-presence rides `self` (ownerPeerTag = null on the owner's client).
     const call = new MultiJoinerCall(
@@ -526,6 +550,8 @@ export class MultiJoinerCall {
     const wasm = await loadWasm();
     const callIdHex = groupIdHex(opts.callId);
     const jwt = await mintJwt(wasm, opts, callIdHex);
+    // Left or replaced while the token was minted: no session is opened.
+    if (opts.isCurrent?.() === false) throw new LinkCallAbandonedError();
     const ownerKeyHex = hexKey(opts.ownerSignatureKey);
     // The owner's per-call peer_tag lets a joiner detect owner presence on
     // the SFU roster (ADR-0021 + ADR-0032 election).
@@ -546,6 +572,9 @@ export class MultiJoinerCall {
     const kp = opts.identity.createKeyPackage();
     call.pendingKeyPackage = wasm.wrapCallKeyPackage(kp);
     await call.start();
+    // Left while signaling opened: the caller hangs this call up, and no
+    // admission clock is started for it.
+    if (!call.current()) return call;
     // Start the admission clock only once signaling is open + the first
     // broadcast is on its way (a call with no live committer is dead).
     call.admissionTimer = setTimeout(
@@ -559,9 +588,16 @@ export class MultiJoinerCall {
     try {
       await this.session.connect();
     } catch (err) {
-      this.opts.onError?.(err);
+      // Hung up by this device while it connected: left, not failed.
+      if (this.session.getState() !== "closed") this.opts.onError?.(err);
       throw err;
     }
+  }
+
+  /** Whether the shared call store is this attempt's to write
+   *  ({@link MultiJoinerCallOptions.isCurrent}). */
+  private current(): boolean {
+    return this.opts.isCurrent?.() ?? true;
   }
 
   // -----------------------------------------------------------------
@@ -632,7 +668,9 @@ export class MultiJoinerCall {
     this.setRemoteVideoGiven(new Map());
     this.setLocalStream(null);
     this.setVideoPublishState("off");
-    callActions.reset();
+    // The store is reset only by the attempt it belongs to: an abandoned
+    // attempt that is hung up late must not reset it under a newer call.
+    if (this.current()) callActions.reset();
   }
 
   /** The SFU session's lifecycle state. `closed` / `failed` means the call
@@ -694,16 +732,22 @@ export class MultiJoinerCall {
   // -----------------------------------------------------------------
 
   private onSessionState(state: string): void {
+    // An attempt that is not current reports to the host (which drops the
+    // report by the same token) and leaves the shared store alone: an
+    // `ended` phase written here would hang a newer call up.
+    const current = this.current();
     switch (state) {
       case "connecting":
-        callActions.setPhase({ kind: "connecting" });
+        if (current) callActions.setPhase({ kind: "connecting" });
         break;
       case "connected":
-        callActions.setPhase({ kind: "connected" });
-        callActions.setE2ee({
-          active: true,
-          shortFingerprint: this.safetyNumber ?? null,
-        });
+        if (current) {
+          callActions.setPhase({ kind: "connected" });
+          callActions.setE2ee({
+            active: true,
+            shortFingerprint: this.safetyNumber ?? null,
+          });
+        }
         if (!this.firedLive) {
           this.firedLive = true;
           this.opts.onLive?.();
@@ -711,7 +755,7 @@ export class MultiJoinerCall {
         break;
       case "failed":
       case "closed":
-        callActions.setPhase({ kind: "ended", endedAt: Date.now() });
+        if (current) callActions.setPhase({ kind: "ended", endedAt: Date.now() });
         this.opts.onEnded?.();
         break;
       default:
@@ -734,7 +778,7 @@ export class MultiJoinerCall {
           p.peer_id,
         ),
       );
-    callActions.setParticipants([this.localParticipant(), ...remotes]);
+    if (this.current()) callActions.setParticipants([this.localParticipant(), ...remotes]);
     if (this.role === "owner" && this.group === null && !this.joined) {
       if (remotes.length === 0) {
         this.foundGroup();
@@ -753,12 +797,11 @@ export class MultiJoinerCall {
     peerTag: string | undefined,
   ): void {
     this.presence.addPeer(peerId, peerTag);
-    callActions.participantJoined(
-      this.remoteParticipant(
-        this.nameOf(peerId, accountPseudonym, peerTag),
-        peerId,
-      ),
+    const joined = this.remoteParticipant(
+      this.nameOf(peerId, accountPseudonym, peerTag),
+      peerId,
     );
+    if (this.current()) callActions.participantJoined(joined);
     // A newly-present peer may be a freshly-elected committer (owner
     // reclaim / a successor); re-broadcast so it sees a still-pending join.
     this.broadcastKeyPackage();
@@ -778,7 +821,7 @@ export class MultiJoinerCall {
     // The companion and the middle track go with their peer.
     this.setRemoteLightStreams((prev) => withoutLightStream(prev, peerId));
     this.setRemoteMiddleStreams((prev) => withoutLightStream(prev, peerId));
-    callActions.participantLeft(id);
+    if (this.current()) callActions.participantLeft(id);
     // Someone who leaves can come back: forget their admission (else the
     // G-22 dedup re-serves a Welcome a fresh page cannot open and they wait
     // forever) and, if this client is now the acting committer, remove their
@@ -845,17 +888,19 @@ export class MultiJoinerCall {
       // `trackPresent ? (lastKnown ?? true) : false` — the track is present
       // here, and the removal case is the `ended` handler below. Mirrors
       // `sfu-call-ui.ts` `addStream`.
-      callActions.setParticipantCamera(
-        participantId,
-        this.lastKnownCameraOn.get(participantId) ?? true,
-      );
+      if (this.current()) {
+        callActions.setParticipantCamera(
+          participantId,
+          this.lastKnownCameraOn.get(participantId) ?? true,
+        );
+      }
     }
     // Prune when the SFU stops forwarding this track (peer left / unpublished).
     // The `ended` event is the reliable track-gone signal — complementary to
     // the `onRemoteMediaState` camera-toggle (a mute fires no `ended`). Mirrors
     // `sfu-call-ui.ts` `addStream` exactly.
     rt.track.addEventListener("ended", () => {
-      if (rt.track.kind === "video") {
+      if (rt.track.kind === "video" && this.current()) {
         callActions.setParticipantCamera(participantId, false);
       }
       this.setRemoteStreams((prev) => {
@@ -1192,7 +1237,7 @@ export class MultiJoinerCall {
 
   private renameTile(peerId: string): void {
     const inputs = this.namingInputs.get(peerId);
-    if (inputs === undefined) return;
+    if (inputs === undefined || !this.current()) return;
     callActions.setParticipantName(
       `${PEER_PREFIX}${peerId}`,
       this.nameOf(peerId, inputs.pseudonym, inputs.peerTag),
@@ -1258,7 +1303,9 @@ export class MultiJoinerCall {
     const seed = this.deriveSeed(this.group);
     this.session.rekey(seed);
     this.safetyNumber = safeSafetyNumber(this.wasm, seed);
-    callActions.setE2ee({ active: true, shortFingerprint: this.safetyNumber ?? null });
+    if (this.current()) {
+      callActions.setE2ee({ active: true, shortFingerprint: this.safetyNumber ?? null });
+    }
   }
 
   /** Re-derive the store roster after a membership change (mostly a no-op —

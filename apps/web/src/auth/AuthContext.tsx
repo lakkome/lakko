@@ -138,6 +138,7 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
+import { BindingEpoch, StaleBindingError } from "./binding-epoch";
 import { releaseWakeBinding } from "../push/wake-binding";
 import { anonTokens } from "../tokens/anon-token-pool";
 import {
@@ -829,6 +830,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     readonly kind: ContactKind;
   } | null>(null);
 
+  /** Advanced by every sign-out (`logout`, `forgetDevice`). A session landing
+   *  captures it and refuses to land once it has moved. */
+  const signOuts = new BindingEpoch();
+  /** Counts landings, so a refused one undoes only its own installs. */
+  let landingSeq = 0;
+  /** The account the push subscription was asked for is still signed in. */
+  function subscribePushFor(accountIdB64: string): Promise<unknown> {
+    return subscribeToPush(accountIdB64, () => {
+      const s = state();
+      return s.kind === "session" && s.account.accountId === accountIdB64;
+    });
+  }
+  /** A completion of the restore prompt found its parked context gone: the
+   *  person signed out (or another completion landed) while it ran. */
+  function requireStillParked(pending: PendingRecovery): void {
+    if (pendingRecovery() !== pending) throw new StaleBindingError();
+  }
+
   const client = new AuthClient();
   const discovery = new DiscoveryClient();
   /**
@@ -998,8 +1017,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       current = undefined;
     }
     // A logout (or another sign-in) while the fetch was out: this identity is
-    // no longer the session's, so it must neither alert nor publish.
-    if (chats.identity() !== canonical) return;
+    // no longer the session's, so it must neither alert nor publish. Compared
+    // with the ACCOUNT identity: since ADR-0050 `chats.identity()` is the
+    // device identity, never this instance, and comparing against it made
+    // this return on every call - no alert, no re-publish, ever.
+    if (chats.accountIdentity() !== canonical) return;
     const signatureMatches =
       current !== undefined &&
       current !== null &&
@@ -1155,8 +1177,26 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
      *  this site may send notifications. */
     guest?: boolean;
   }): Promise<void> {
+    // A landing runs across many awaits, and Sign out is on screen during
+    // some of them (the restore prompt). A sign-out that lands in one must
+    // win: nothing below may install a session after it.
+    const signedIn = signOuts.capture();
+    const mine = ++landingSeq;
+    const requireNotSignedOut = (): void => {
+      if (signedIn()) return;
+      // Undo what THIS landing installed after the sign-out cleared the
+      // session - unless a later landing has started, whose installs these
+      // would be.
+      if (landingSeq === mine) {
+        keyPackageAccount = null;
+        chats.clear();
+        installSessionToken(null);
+      }
+      throw new StaleBindingError();
+    };
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
     await installSessionIdentities(args.wasm, canonical, args.accountIdB64);
+    requireNotSignedOut();
     keyPackageAccount = {
       accountIdBytes: args.accountIdBytes,
       accountIdB64: args.accountIdB64,
@@ -1168,6 +1208,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // key to it. This is the device's OWN locally persisted MLS state; an
     // account backup never supplies any (`backup/restore.ts`).
     await rehydrateMlsState(chats, args.accountIdB64);
+    requireNotSignedOut();
 
     // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — the
     // self-check + re-publish lives in `refreshPublishedIdentity`. Best-effort:
@@ -1177,6 +1218,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     setIdentityAlert(null);
 
     await restoreOwedSignupPhrase(args.accountIdB64);
+    requireNotSignedOut();
 
     if (args.silentRestore === true) {
       setIdentitySecrets({
@@ -1200,7 +1242,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       void restoreOwedBackupOnLanding(args);
       void (async (): Promise<void> => {
         await refreshPublishedIdentity(canonical, args.accountIdBytes, true);
-        if (chats.identity() !== canonical) return;
+        // (The account identity, as in `refreshPublishedIdentity`.)
+        if (chats.accountIdentity() !== canonical) return;
         // A KeyPackage on every session start, reload included: the one the
         // directory serves may have been consumed by a Welcome this device
         // processed in an earlier page lifetime.
@@ -1214,6 +1257,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // The persist inside it also captures the rehydrated state, which is what
     // the separate post-login snapshot write used to do.
     await publishKeyPackageBestEffort("sign-in");
+    requireNotSignedOut();
 
     setIdentitySecrets({
       accountId: args.accountIdBytes,
@@ -1236,7 +1280,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       sessionToken: args.sessionToken,
     });
     if (args.guest !== true) {
-      void subscribeToPush(args.accountIdB64).catch((err) => {
+      void subscribePushFor(args.accountIdB64).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("push subscribe failed", err);
       });
@@ -1525,6 +1569,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // Never a half state: undo whatever the restore installed and land
       // signed out, with the username pre-filled for `/login`.
       // eslint-disable-next-line no-console
+      // A sign-out won the race: it already cleared everything, and what is
+      // installed now (if anything) is not this restore's to undo.
+      if (err instanceof StaleBindingError) {
+        seed.fill(0);
+        return;
+      }
       console.warn("session restore on load failed; signing out", err);
       keyPackageAccount = null;
       chats.clear();
@@ -1805,7 +1855,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // a no-op when the build has no VAPID public key set or the
       // user denies the Notification permission prompt — fall
       // back to foreground polling without throwing.
-      void subscribeToPush(accountIdB64).catch((err) => {
+      void subscribePushFor(accountIdB64).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("push subscribe (signup) failed", err);
       });
@@ -2049,7 +2099,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // eslint-disable-next-line no-console
         console.warn("removing the guest recovery phrase row failed", err);
       }
-      void subscribeToPush(accountIdB64).catch((err) => {
+      void subscribePushFor(accountIdB64).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("push subscribe (guest kept) failed", err);
       });
@@ -2457,6 +2507,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdBytes: pending.accountIdBytes,
         accountIdentitySeed,
       });
+      // Signed out while the bundle was being fetched: persist nothing.
+      if (pendingRecovery() !== pending) {
+        accountIdentitySeed.fill(0);
+        throw new StaleBindingError();
+      }
 
       // ADR-0018 factor (c): a TOTP-recovered fresh browser parked
       // with NO device root key (no password ⇒ no export key to
@@ -2529,6 +2584,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // like the restore screen does. Marked BEFORE the session lands: the
       // automatic backup uploads nothing while it is owed, so it cannot
       // replace the blob the restore is about to read.
+      requireStillParked(pending);
       markBackupRestoreOwed(pending.accountIdB64);
 
       await finishCanonicalSession({
@@ -2570,6 +2626,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdentitySeed: phraseSeed,
         source: "device",
       });
+      // Signed out while the bundle was being fetched: persist nothing.
+      if (pendingRecovery() !== pending) {
+        phraseSeed.fill(0);
+        throw new StaleBindingError();
+      }
 
       // ADR-0018 factor (c): a TOTP-recovered fresh browser parked
       // with NO device root key. Bootstrap it from the VERIFIED
@@ -2652,6 +2713,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
 
+      requireStillParked(pending);
       await finishCanonicalSession({
         wasm,
         accountIdentitySeed: phraseSeed,
@@ -2804,6 +2866,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         );
       }
       const wasm = await loadWasm();
+      requireStillParked(pending);
 
       // Mint a BRAND-NEW recovery phrase + derive its 64-byte BIP39
       // seed. This is a fresh random identity for the SAME account —
@@ -2883,6 +2946,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // upload (and before the `finally` free); a mint failure rejects
       // the whole mint flow rather than publishing an unauthorised
       // bundle the server will refuse.
+      // The publish below cannot be taken back. Signed out before it: stop
+      // here, with the old identity still the published one. (Once it HAS
+      // been published the flow goes on to the phrase screen whatever
+      // happened meanwhile: an identity whose phrase nobody was shown is the
+      // worse outcome.)
+      if (pendingRecovery() !== pending) {
+        accountIdentitySeed.fill(0);
+        throw new StaleBindingError();
+      }
       const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
       try {
         const freshLeafAuth = await mintLeafGenesisAuth(
@@ -2946,6 +3018,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         );
       }
       const wasm = await loadWasm();
+      // Signed out during the load: `logout` zeroed the seed and dropped
+      // the stash.
+      if (pendingFreshPhrase() !== pending) throw new StaleBindingError();
       // CONSUME the stash so the parked seed cannot be replayed.
       setPendingFreshPhrase(null);
       await finishCanonicalSession({
@@ -3300,7 +3375,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // the new password changes the device key, but the
         // device push pseudonym persists in localStorage so
         // the server's existing token row simply gets re-keyed.
-        void subscribeToPush(accountIdB64).catch((err) => {
+        void subscribePushFor(accountIdB64).catch((err) => {
           // eslint-disable-next-line no-console
           console.warn("push subscribe (recover) failed", err);
         });
@@ -3398,6 +3473,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // binding goes FIRST, so the service worker drops every wake from here
       // on, and this account's notifications leave the screen with it.
       void releaseWakeBinding();
+      // A session landing still in flight must not land after this.
+      signOuts.advance();
       // Keep localStorage + IDB device key intact. Re-login on
       // this device remains cheap, and the device key stays
       // available for any encrypted local stores 1.16f wires up.
@@ -3465,6 +3542,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // ADR-0042 — as in `logout`: the wake binding first, then this app's
       // delivered notifications.
       await releaseWakeBinding();
+      // A session landing still in flight must not land after this.
+      signOuts.advance();
       const cached = loadPersisted();
       const current = state();
       const sessionAccountIdB64 =

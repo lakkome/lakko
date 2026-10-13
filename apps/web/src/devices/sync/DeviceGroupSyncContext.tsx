@@ -81,6 +81,7 @@ import {
   getDeviceGroupJournalCursor,
 } from "../device-group-snapshot-store";
 import { applyDeviceJournalBatch, startingCursor } from "./journal-batch";
+import { BindingEpoch, StaleBindingError } from "../../auth/binding-epoch";
 import { forkVerdict } from "./fork-verdict";
 import {
   forkRepairAllowed,
@@ -253,6 +254,14 @@ export function DeviceGroupSyncProvider(props: {
   let pollAbort: AbortController | null = null;
   let pollDone: Promise<void> | null = null;
   let activeAccountIdB64: string | null = null;
+  /** Bumped by every `teardown`. Work started under one binding (a bootstrap,
+   *  a handle reload, a fork repair, an outbox drain) captures it and, after
+   *  each await, stops when it has moved: the account it was working for has
+   *  signed out, and anything it assigned would belong to nobody or - after
+   *  another sign-in - to somebody else. A counter rather than the account id
+   *  alone, because signing out and back in to the SAME account is also a new
+   *  binding with new handles. */
+  const binding = new BindingEpoch();
   /** While the handle is being reloaded after a change made through another
    *  handle on this device, nothing is sent from the stale one. */
   let reloading = false;
@@ -416,14 +425,22 @@ export function DeviceGroupSyncProvider(props: {
     // Already bootstrapping concurrently — drop the duplicate.
     if (activeAccountIdB64 === accountIdB64 && identity !== null) return;
     activeAccountIdB64 = accountIdB64;
+    // Everything below runs across awaits a sign-out can land in. `current`
+    // is asked after each one; a stale bootstrap assigns nothing, starts
+    // nothing and frees what it built.
+    const current = binding.capture();
+    let ownId: Uint8Array | null = null;
     try {
-      ownDeviceGroupId = (await loadWasm()).deviceGroupIdFor(accountIdBytes);
+      ownId = (await loadWasm()).deviceGroupIdFor(accountIdBytes);
     } catch {
-      ownDeviceGroupId = null;
+      ownId = null;
     }
+    if (!current()) return;
+    ownDeviceGroupId = ownId;
     accountIdBytesActive = accountIdBytes;
 
     const deviceKey = await getDeviceKey(accountIdB64);
+    if (!current()) return;
     if (deviceKey === null) {
       // No device key — recovery / forget-device race. Bail;
       // the next session transition retries.
@@ -445,6 +462,9 @@ export function DeviceGroupSyncProvider(props: {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("DeviceGroupSyncProvider bootstrap failed", err);
+      // The session this bootstrap was for is gone: its failure says nothing
+      // about the binding that is current now, and must not unbind it.
+      if (!current()) return;
       activeAccountIdB64 = null;
       // A founding whose journal claim did not land (ADR-0057, the second
       // security pass: it fails closed, nothing persisted) is retried while
@@ -459,6 +479,13 @@ export function DeviceGroupSyncProvider(props: {
       return;
     }
 
+    if (!current()) {
+      // Signed out while the group was being read or founded. The handles
+      // belong to no session; holding them would leak them, and assigning
+      // them would hand the next account this one's identity.
+      freeHandles(ensured.group, ensured.identity);
+      return;
+    }
     identity = ensured.identity;
     group = ensured.group;
 
@@ -474,10 +501,14 @@ export function DeviceGroupSyncProvider(props: {
     // client resumes the journal from a persisted cursor, so the rows behind
     // it are never read again. The stored state is a head start, not an
     // authority: the poll folds newer rows on top by stamp.
+    // From here on a stale return frees nothing: `teardown` is what made it
+    // stale, and it already freed the handles assigned above.
     const wasm = await loadWasm();
+    if (!current()) return;
     // A write the previous session flushed on Log out may still be in flight;
     // read after it, so a sign-in right after a sign-out finds the last edit.
     await persister.idle();
+    if (!current()) return;
     boundSyncGeneration = syncStateGeneration(accountIdB64);
     let restored: Awaited<ReturnType<typeof loadSyncState>> = null;
     try {
@@ -486,6 +517,9 @@ export function DeviceGroupSyncProvider(props: {
       // eslint-disable-next-line no-console
       console.warn("device-sync state restore failed; starting empty", err);
     }
+    // The row just read is this account's drafts, flags and folders; shown
+    // under another session they would be another person's.
+    if (!current()) return;
     // A row this build cannot read (an older encoding version) is "none
     // held": start empty, the other devices' growth re-send and the journal
     // refill it, and the next write replaces the row.
@@ -558,17 +592,27 @@ export function DeviceGroupSyncProvider(props: {
     const accountBytes = accountIdBytesActive;
     if (account === null || accountBytes === null || group === null) return;
     if (deviceRemoved()) return;
+    const current = binding.capture();
     reloading = true;
     try {
       pollAbort?.abort();
       pollAbort = null;
       if (pollDone !== null) await pollDone;
+      if (!current()) return;
       pollDone = null;
       const deviceKey = await getDeviceKey(account);
-      if (deviceKey === null || activeAccountIdB64 !== account) return;
+      if (deviceKey === null || !current()) return;
       const seed = await ensureDeviceIdentitySeed(account, deviceKey);
+      if (!current()) {
+        seed.fill(0);
+        return;
+      }
       const ensured = await ensureDeviceGroup(accountBytes, account, seed, deviceKey);
       seed.fill(0);
+      if (!current()) {
+        freeHandles(ensured.group, ensured.identity);
+        return;
+      }
       try {
         group?.free();
         identity?.free();
@@ -587,8 +631,10 @@ export function DeviceGroupSyncProvider(props: {
       // eslint-disable-next-line no-console
       console.warn("DeviceGroup handle reload failed", err);
     } finally {
-      reloading = false;
+      // Only this binding's flag: a later session may be reloading too.
+      if (current()) reloading = false;
     }
+    if (!current()) return;
     void drainFolderOutbox();
     // ADR-0060 section 7 - an envelope marked while the handle was being
     // replaced (a pairing hands its setting over this way) goes now.
@@ -604,6 +650,8 @@ export function DeviceGroupSyncProvider(props: {
     // unbound. Forget device and Delete account remove the row through the
     // account wipe (`auth/wipe-account.ts`).
     void persister.flush();
+    binding.advance();
+    reloading = false;
     unregisterServiceSender?.();
     unregisterServiceSender = null;
     if (pollAbort !== null) {
@@ -705,11 +753,16 @@ export function DeviceGroupSyncProvider(props: {
    *  stamp; the registers inside keep their ORIGINAL stamps. */
   async function sendSnapshot(): Promise<void> {
     if (synced === null || group === null || identity === null || deviceRemoved()) return;
+    // The parts are THIS account's fold. Each send awaits the network; the
+    // handle is re-checked by identity before the next part is sealed, so a
+    // part is never sealed into the DeviceGroup of whoever signed in since.
+    const g = group;
+    const id = identity;
     const parts = synced.snapshotParts();
     try {
       for (const part of parts) {
-        if (group === null || identity === null) return;
-        const bytes = group.createDeviceGroupSnapshotMessage(identity, part, mintHlc());
+        if (group !== g || identity !== id) return;
+        const bytes = g.createDeviceGroupSnapshotMessage(id, part, mintHlc());
         await publishGroupMessage(bytes);
       }
     } catch (err) {
@@ -805,6 +858,9 @@ export function DeviceGroupSyncProvider(props: {
         await sleepCancellable(5000, signal);
         continue;
       }
+      // Stopped while the key was being fetched: `g` and `id` may be freed,
+      // and the fold may already be another session's.
+      if (signal.aborted) return;
 
       // ADR-0058 section 5.1 — who was here before this batch.
       const membersBefore = membersOf(g);
@@ -831,6 +887,10 @@ export function DeviceGroupSyncProvider(props: {
             if (data === undefined) return;
             try {
               const wasm = await loadWasm();
+              // The fold `applyParsed` writes is the provider's current one.
+              // A loop stopped during the await above must not fold its row
+              // into it: after a sign-in it is another account's.
+              if (signal.aborted) return;
               const parsed = wasm.parseDeviceGroupPayload(data);
               try {
                 applyParsed(parsed);
@@ -877,7 +937,11 @@ export function DeviceGroupSyncProvider(props: {
       // section 3.1). The batch that carried the removal was persisted above,
       // so the next launch finds the inactive snapshot and shows the same
       // screen; nothing after it is polled or persisted.
-      if (!signal.aborted && pollStepAfterBatch(readDeviceGroupActive(g)) === "stop-removed") {
+      // Stopped while the batch was applied: nothing below (the removed
+      // screen, the growth re-send, the fork repair) is this loop's to decide
+      // any more, and `g` may be freed.
+      if (signal.aborted) return;
+      if (pollStepAfterBatch(readDeviceGroupActive(g)) === "stop-removed") {
         markRemoved();
         return;
       }
@@ -903,6 +967,7 @@ export function DeviceGroupSyncProvider(props: {
       } else if (raw.messages.length > 0) {
         // Held: give storage a moment before the same rows are fetched again.
         await sleepCancellable(2000, signal);
+        if (signal.aborted) return;
       }
 
       // Forked off the account's chain? A drained read (no rows, nothing
@@ -989,14 +1054,16 @@ export function DeviceGroupSyncProvider(props: {
     if (forkRepaired.has(account)) return;
     if (deviceRemoved() || !forkRepairAllowed(readDeviceGroupActive(group))) return;
     forkRepaired.add(account);
+    const current = binding.capture();
     reloading = true;
     try {
       pollAbort?.abort();
       pollAbort = null;
       if (pollDone !== null) await pollDone;
+      if (!current()) return;
       pollDone = null;
       const deviceKey = await getDeviceKey(account);
-      if (deviceKey === null || activeAccountIdB64 !== account) return;
+      if (deviceKey === null || !current()) return;
       try {
         await deleteDeviceGroupSnapshot(account);
       } catch (err) {
@@ -1004,9 +1071,12 @@ export function DeviceGroupSyncProvider(props: {
         // it again: keep following with the handle held, as before.
         // eslint-disable-next-line no-console
         console.warn("DeviceGroup snapshot delete failed; not re-founding", err);
-        startPollLoop(account, deviceKey);
+        if (current()) startPollLoop(account, deviceKey);
         return;
       }
+      // Signed out during the delete: the handles are freed and unbound
+      // already, and the ones held now (if any) are a later session's.
+      if (!current()) return;
       try {
         group?.free();
         identity?.free();
@@ -1016,9 +1086,9 @@ export function DeviceGroupSyncProvider(props: {
       group = null;
       identity = null;
       ownPublishedIds.clear();
-      await installRefoundedDeviceGroup(account, accountBytes, deviceKey, headCursor);
+      await installRefoundedDeviceGroup(account, accountBytes, deviceKey, headCursor, current);
     } finally {
-      reloading = false;
+      if (current()) reloading = false;
     }
   }
 
@@ -1029,8 +1099,9 @@ export function DeviceGroupSyncProvider(props: {
     accountBytes: Uint8Array,
     deviceKey: CryptoKey,
     headCursor: number,
+    current: () => boolean,
   ): Promise<void> {
-    if (activeAccountIdB64 !== account || group !== null || deviceRemoved()) return;
+    if (!current() || activeAccountIdB64 !== account || group !== null || deviceRemoved()) return;
     let ensured;
     try {
       const seed = await ensureDeviceIdentitySeed(account, deviceKey);
@@ -1048,15 +1119,15 @@ export function DeviceGroupSyncProvider(props: {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("DeviceGroup re-founding failed; trying again later", err);
+      if (!current()) return;
       setReady(false);
       setTimeout(() => {
-        void installRefoundedDeviceGroup(account, accountBytes, deviceKey, headCursor);
+        void installRefoundedDeviceGroup(account, accountBytes, deviceKey, headCursor, current);
       }, BOOTSTRAP_RETRY_MS);
       return;
     }
-    if (activeAccountIdB64 !== account || group !== null) {
-      ensured.group.free();
-      ensured.identity.free();
+    if (!current() || activeAccountIdB64 !== account || group !== null) {
+      freeHandles(ensured.group, ensured.identity);
       return;
     }
     if (!ensured.bootstrapped) {
@@ -1073,6 +1144,10 @@ export function DeviceGroupSyncProvider(props: {
       // the old group's rows are refused, which costs only the re-read.
       // eslint-disable-next-line no-console
       console.warn("DeviceGroup re-founding cursor persist failed", err);
+    }
+    if (!current() || group !== null) {
+      freeHandles(ensured.group, ensured.identity);
+      return;
     }
     group = ensured.group;
     identity = ensured.identity;
@@ -1111,6 +1186,13 @@ export function DeviceGroupSyncProvider(props: {
     if (deviceRemoved()) {
       throw new Error("this device was removed from the account");
     }
+    // The account and the identity the message was sealed with. Both awaits
+    // below can span a sign-out, and what is persisted afterwards is this
+    // identity's snapshot under this account's row - never whatever the
+    // provider holds by then.
+    const account = activeAccountIdB64;
+    const id = identity;
+    const current = binding.capture();
     const ds = new DsClient();
     // G-13 (ADR-0015): wrap in the journal envelope (application messages
     // carry no attestation).
@@ -1118,16 +1200,20 @@ export function DeviceGroupSyncProvider(props: {
       group.groupId(),
       encodeJournalEntry(wireBytes, null),
     );
+    // The session ended while the publish was out: its handles are freed and
+    // its own-echo set was cleared. The row is on the journal; the snapshot
+    // that sealed it went with the sign-out.
+    if (!current()) throw new StaleBindingError();
     // The DS hands this row straight back to the receive loop; remember its id
     // so the loop skips it rather than failing to decrypt its own message.
     ownPublishedIds.add(published.id);
-    const deviceKey = await getDeviceKey(activeAccountIdB64);
-    if (deviceKey !== null && identity !== null) {
-      await persistDeviceGroupSnapshot(
-        identity,
-        activeAccountIdB64,
-        deviceKey,
-      );
+    const deviceKey = await getDeviceKey(account);
+    if (!current()) throw new StaleBindingError();
+    // A handle reload in between replaced `identity`; the snapshot on disk is
+    // already the newer one.
+    if (deviceKey !== null && identity === id) {
+      await persistDeviceGroupSnapshot(id, account, deviceKey);
+      if (!current()) throw new StaleBindingError();
     }
   }
 
@@ -1143,14 +1229,15 @@ export function DeviceGroupSyncProvider(props: {
     text: string,
     replyToId?: Uint8Array,
   ): Promise<void> {
-    const { g, id } = requireReady();
+    const { g, id, s } = requireReady();
     const hlc = mintHlc();
     const reply = replyToId ?? new Uint8Array(0);
     const bytes = g.createDeviceGroupDraftMessage(id, groupId, text, reply, hlc);
     await publishGroupMessage(bytes);
     // A device never receives its own DeviceGroup messages: fold the write
-    // in here, at the same stamp.
-    if (synced?.applyDraft(hlc, groupId, text, reply) === true) refresh();
+    // in here, at the same stamp. Into the fold the write was made against:
+    // `synced !== s` means the session changed while the publish was out.
+    if (synced === s && s.applyDraft(hlc, groupId, text, reply)) refresh();
   }
 
   async function setFlagsImpl(
@@ -1162,7 +1249,7 @@ export function DeviceGroupSyncProvider(props: {
       readonly unreadOverride: boolean;
     },
   ): Promise<void> {
-    const { g, id } = requireReady();
+    const { g, id, s } = requireReady();
     const hlc = mintHlc();
     const bytes = g.createDeviceGroupFlagsMessage(
       id,
@@ -1175,8 +1262,8 @@ export function DeviceGroupSyncProvider(props: {
     );
     await publishGroupMessage(bytes);
     if (
-      synced?.applyFlags(hlc, groupId, next.pinned, next.muted, next.archived, next.unreadOverride) ===
-      true
+      synced === s &&
+      s.applyFlags(hlc, groupId, next.pinned, next.muted, next.archived, next.unreadOverride)
     ) {
       refresh();
     }
@@ -1187,24 +1274,24 @@ export function DeviceGroupSyncProvider(props: {
     upToMessageId: Uint8Array,
     readAtMs: bigint,
   ): Promise<void> {
-    const { g, id } = requireReady();
+    const { g, id, s } = requireReady();
     const hlc = mintHlc();
     const bytes = g.createDeviceGroupReadCursorMessage(id, groupId, upToMessageId, readAtMs, hlc);
     await publishGroupMessage(bytes);
-    if (synced?.applyReadCursor(hlc, groupId, upToMessageId, readAtMs) === true) refresh();
+    if (synced === s && s.applyReadCursor(hlc, groupId, upToMessageId, readAtMs)) refresh();
   }
 
   async function setOrderImpl(
     groupIds: readonly Uint8Array[],
   ): Promise<void> {
-    const { g, id } = requireReady();
+    const { g, id, s } = requireReady();
     const hlc = mintHlc();
     // Defensive copy — mutating the caller's arrays later must not affect
     // the wire bytes.
     const ids = groupIds.map((x) => new Uint8Array(x));
     const bytes = g.createDeviceGroupOrderMessage(id, ids, hlc);
     await publishGroupMessage(bytes);
-    if (synced?.applyConversationOrder(hlc, ids.map((x) => new Uint8Array(x))) === true) {
+    if (synced === s && s.applyConversationOrder(hlc, ids.map((x) => new Uint8Array(x)))) {
       refresh();
     }
   }
@@ -1215,6 +1302,9 @@ export function DeviceGroupSyncProvider(props: {
     if (edits.length === 0) return;
     const { s } = requireReady();
     const wasm = await loadWasm();
+    // Signed out during the await: `s` is freed, and the outbox is no longer
+    // this account's.
+    if (synced !== s) throw new Error("DeviceGroupSyncProvider is not ready");
     const stamped = stampEdits(edits, mintHlc);
     // Build (and so validate) before anything is applied: a broken bound
     // throws here with nothing changed.
@@ -1243,14 +1333,22 @@ export function DeviceGroupSyncProvider(props: {
       scheduleOutboxRetry();
       return;
     }
+    // The queue drained is the one of the session this call starts in. After
+    // a sign-out its result is nobody's: writing it back would put this
+    // account's unsent edits into an emptied (or another account's) outbox,
+    // and re-arming the retry would keep a timer alive while signed out.
+    const current = binding.capture();
     draining = true;
     try {
       const wasm = await loadWasm();
+      if (!current()) return;
       const queue = outbox();
       const result = await drainOutbox(
         queue,
         async (batch) => {
-          if (group === null || identity === null) throw new Error("not ready");
+          // Not `StaleBindingError`: a failed batch only stops the drain, and
+          // the stale result is dropped below.
+          if (!current() || group === null || identity === null) throw new Error("not ready");
           const cs = buildFolderChangeSet(wasm, batch);
           try {
             const bytes = group.createDeviceGroupFolderChangesMessage(identity, cs, mintHlc());
@@ -1263,10 +1361,12 @@ export function DeviceGroupSyncProvider(props: {
         // here. Anything else (the network) is retried.
         (err) => err instanceof Error && /bound|folder id|not hex|invalid/i.test(err.message),
       );
+      if (!current()) return;
       // Batches added while this ran are kept after what is still waiting.
-      setOutbox((current) => [...result.remaining, ...current.slice(queue.length)]);
+      setOutbox((now) => [...result.remaining, ...now.slice(queue.length)]);
       if (result.failed) scheduleOutboxRetry();
     } catch (err) {
+      if (!current()) return;
       // eslint-disable-next-line no-console
       console.warn("folder outbox drain failed", err);
       scheduleOutboxRetry();
@@ -1334,6 +1434,15 @@ function deviceGroupEpoch(g: WasmDeviceGroup, id: WasmIdentity): bigint | null {
     return signer.epoch;
   } finally {
     signer.free();
+  }
+}
+
+function freeHandles(g: WasmDeviceGroup, id: WasmIdentity): void {
+  try {
+    g.free();
+    id.free();
+  } catch {
+    // best-effort
   }
 }
 

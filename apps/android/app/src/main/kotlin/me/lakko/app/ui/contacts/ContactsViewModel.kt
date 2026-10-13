@@ -232,6 +232,9 @@ public class ContactsViewModel(
                     )
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableUi.update { it.copy(sending = false) }
+                }
                 // ADR-0054 - the username lookup spends an anonymous token.
                 logFailure("send contact request", err)
                 mutableUi.update {
@@ -286,6 +289,9 @@ public class ContactsViewModel(
                     it.copy(generatingInvite = false, inviteError = null)
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableUi.update { it.copy(generatingInvite = false) }
+                }
                 logFailure("create invite link", err)
                 mutableUi.update {
                     it.copy(generatingInvite = false, inviteError = contactsErrorText(err, "chat.error.create_link"))
@@ -304,6 +310,7 @@ public class ContactsViewModel(
             try {
                 repo.revokeInviteLink(blobId)
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
                 logFailure("revoke invite link", err)
                 mutableUi.update {
                     it.copy(inviteError = contactsErrorText(err, "chat.error.revoke_link"))
@@ -345,6 +352,9 @@ public class ContactsViewModel(
                     )
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableUi.update { it.copy(loadingActiveInvites = false) }
+                }
                 logFailure("list invite links", err)
                 mutableUi.update {
                     it.copy(
@@ -396,6 +406,9 @@ public class ContactsViewModel(
                     )
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableUi.update { it.copy(revokingActiveInviteSlug = null) }
+                }
                 logFailure("revoke invite link", err)
                 mutableUi.update {
                     it.copy(

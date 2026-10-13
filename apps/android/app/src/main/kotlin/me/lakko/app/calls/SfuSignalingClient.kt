@@ -138,6 +138,16 @@ class SfuSignalingClient(
     private var tunnelSendJob: Job? = null
     private val tunnelOutbound = Channel<String>(Channel.UNLIMITED)
 
+    /**
+     * Set by [close]. A socket that finishes opening after it is shut again
+     * at once and never becomes this client's session: [connect] suspends on
+     * the upgrade (and the tunneled dial blocks), and the call may be left
+     * meanwhile. Without it the late socket stayed open with nobody to close
+     * it, and the SFU went on counting this device as a peer of the call.
+     */
+    @Volatile
+    private var closed = false
+
     /** True once the WebSocket session (direct or tunneled) is open. */
     val isOpen: Boolean
         get() = session != null || tunneledConn != null
@@ -146,10 +156,13 @@ class SfuSignalingClient(
      * Open the WebSocket and start dispatching frames. Suspends until
      * the session is established (the SFU's Welcome frame then follows
      * on [SfuSignalingCallbacks.onWelcome]); throws if the upgrade
-     * fails. Idempotent-guarded: throws if already connected.
+     * fails, and if [close] ran before the upgrade finished (the socket is
+     * then closed again and nothing is dispatched). Idempotent-guarded:
+     * throws if already connected.
      */
     suspend fun connect() {
         check(session == null && tunneledConn == null) { "connect() called twice" }
+        check(!closed) { CLOSED_WHILE_CONNECTING }
         // ADR-0026 — armed: route the signaling WebSocket through the tunnel.
         val antiCensorship = AntiCensorshipConfig.current
         if (antiCensorship.armed) {
@@ -166,8 +179,25 @@ class SfuSignalingClient(
             // The SFU refuses upgrades without this subprotocol header.
             header("Sec-WebSocket-Protocol", SFU_SUBPROTOCOL)
         }
+        if (closed) {
+            // Closed while the upgrade was in flight: this socket belongs to
+            // no call. Shut it and say so, rather than keep it as the session.
+            discard(s)
+            throw IllegalStateException(CLOSED_WHILE_CONNECTING)
+        }
         session = s
         receiveJob = scope.launch { receiveLoop(s) }
+    }
+
+    /** Close a socket that opened after [close]. Best effort, off the caller. */
+    private fun discard(s: DefaultClientWebSocketSession) {
+        scope.launch {
+            try {
+                s.close()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+        }
     }
 
     private suspend fun receiveLoop(s: DefaultClientWebSocketSession) {
@@ -241,7 +271,20 @@ class SfuSignalingClient(
                 callbacks.onClosed()
                 return@launch
             }
+            if (closed) {
+                // The dial blocks and cannot be cancelled; the client was
+                // closed while it ran. Shut the tunnel rather than keep it.
+                runCatching { conn.shutdown() }
+                return@launch
+            }
             tunneledConn = conn
+            if (closed) {
+                // [close] ran between the check and the assignment (it is on
+                // another thread): it saw no connection to shut.
+                tunneledConn = null
+                runCatching { conn.shutdown() }
+                return@launch
+            }
 
             // Ordered outbound sender on its own IO coroutine.
             tunnelSendJob = scope.launch(Dispatchers.IO) {
@@ -360,6 +403,7 @@ class SfuSignalingClient(
     /** Close the socket + cancel the receive loop. Idempotent. Closing the
      *  tunneled connection unblocks its receive loop (`recv()` returns Closed). */
     fun close() {
+        closed = true
         receiveJob?.cancel()
         receiveJob = null
         tunnelSendJob?.cancel()
@@ -385,6 +429,8 @@ class SfuSignalingClient(
         client.close()
     }
 }
+
+private const val CLOSED_WHILE_CONNECTING = "the signaling client was closed"
 
 /** Where the tunneled signaling socket dials and which request it sends. */
 internal data class TunneledSignalingTarget(

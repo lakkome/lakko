@@ -98,14 +98,32 @@ function readableChannels(): ReadableChannel[] {
   return out;
 }
 
-/** Syncs every readable channel; returns how many were tried and how many
- *  the server answered (`feed-refresh.ts`), or `null` when nothing ran. */
-async function syncAll(accountIdB64: string): Promise<CheckTally | null> {
+/**
+ * Syncs every readable channel; returns how many were tried and how many
+ * the server answered (`feed-refresh.ts`), or `null` when nothing ran.
+ *
+ * The channel state it reads and folds into (`channelsState`) is the
+ * signed-in account's and is swapped on sign-out, while this runs for a
+ * minute's worth of fetches. `isCurrent` says whether `accountIdB64` is still
+ * the session the run was started for; it is asked after every await that
+ * precedes a read of that state or a write, and a run that is no longer
+ * current stops with `null`: it folds no metadata into the next account's
+ * channels, reports no tally to its feed, and writes no row (after Forget
+ * device that write would re-create the row the wipe removed).
+ */
+export async function syncAll(
+  accountIdB64: string,
+  isCurrent: () => boolean = () => true,
+): Promise<CheckTally | null> {
   const deviceKey = await getDeviceKey(accountIdB64);
-  if (deviceKey === null) return null;
+  if (deviceKey === null || !isCurrent()) return null;
   const wasm = await loadWasm();
+  if (!isCurrent()) return null;
   const channels = readableChannels();
   const before = (await loadChannelPostLog(accountIdB64, deviceKey)) ?? emptyChannelPostLog();
+  // `channelsState.channels()` below is read for the retain: after a change
+  // of account it would prune this account's log down to the other's list.
+  if (!isCurrent()) return null;
   let log: ChannelPostLog = retainChannels(
     before,
     new Set(channelsState.channels().map((c) => c.id)),
@@ -143,11 +161,16 @@ async function syncAll(accountIdB64: string): Promise<CheckTally | null> {
       // eslint-disable-next-line no-console
       console.warn("[feed] channel post sync failed", err);
     }
+    if (!isCurrent()) return null;
     // A metadata record read here names the channel in the feed and the
     // list without opening it (ADR-0051).
-    if (metas.length > 0) await foldChannelMeta(channel.idHex, metas);
+    if (metas.length > 0) {
+      await foldChannelMeta(channel.idHex, metas);
+      if (!isCurrent()) return null;
+    }
   }
 
+  if (!isCurrent()) return null;
   // docs/ux/feed.md section 5 — a channel's first slot marks what it held
   // at subscription as read, so only posts arriving afterwards count as new.
   // Idempotent: a channel already marked is left alone and nothing is written.
@@ -157,9 +180,11 @@ async function syncAll(accountIdB64: string): Promise<CheckTally | null> {
     console.warn("[feed] seeding channel read markers failed", err);
   });
 
+  if (!isCurrent()) return null;
   const tally: CheckTally = { tried: channels.length, answered };
   if (!changed) return tally;
   await saveChannelPostLog(accountIdB64, deviceKey, log);
+  if (!isCurrent()) return null;
   publishChannelPostLogChanged(accountIdB64);
   return tally;
 }
@@ -168,6 +193,11 @@ export const ChannelPostSync: Component = () => {
   const auth = useAuth();
   let running: Promise<void> | null = null;
   let again = false;
+  // Monotone token, as in `channels/ChannelsHydration.tsx`: bumped whenever
+  // the signed-in account changes, so a run started for one session stops
+  // writing once that session is over (sign-out and back in included).
+  let generation = 0;
+  let bound: string | null = null;
 
   const accountId = (): string | null => {
     const s = auth.state();
@@ -182,7 +212,8 @@ export const ChannelPostSync: Component = () => {
       again = true;
       return;
     }
-    running = syncAll(account)
+    const mine = generation;
+    running = syncAll(account, () => mine === generation && accountId() === account)
       .then((tally) => {
         // docs/ux/feed.md — the feed's "Couldn't check for new messages."
         if (tally !== null) reportChannelCheck(tally);
@@ -202,7 +233,12 @@ export const ChannelPostSync: Component = () => {
 
   // As soon as the channel state is there for a session.
   createEffect(() => {
-    if (accountId() !== null && channelsState.hydrated()) run();
+    const account = accountId();
+    if (account !== bound) {
+      bound = account;
+      generation += 1;
+    }
+    if (account !== null && channelsState.hydrated()) run();
   });
 
   onMount(() => {

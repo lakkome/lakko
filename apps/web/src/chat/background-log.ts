@@ -122,6 +122,82 @@ export function mergeForegroundSlot(
   };
 }
 
+/**
+ * A CLOSED chat view's write: the rows an abandoned request changed after the
+ * view went away, and nothing else.
+ *
+ * A send, an edit or a poll batch that was in flight when the person left the
+ * chat still completes — nothing cancels it — and what it produced exists
+ * nowhere but in the closed view's memory: the delivery service never hands a
+ * device its own message back, and MLS forward secrecy means a consumed row
+ * cannot be decrypted a second time. So it has to reach the log.
+ *
+ * Neither of the other two merges fits. The view's own merge treats its rows
+ * as authoritative for everything up to the newest one it holds, which is no
+ * longer true: the background receive took the group over the moment the view
+ * closed and may have filed rows the view never saw, below the id of a send
+ * that lands later. And the background's merge only ever adds, so an edit that
+ * completed after the close would not replace the stored row.
+ *
+ * So: each row in `changed` replaces the stored row of the same DS id or is
+ * added; every other stored row is kept; the cursor only moves forward. And
+ * `lastViewedMessageId` is left alone — nobody is looking at this chat, so a
+ * message that arrived after the person left stays unread.
+ */
+export function mergeClosedViewSlot(
+  slot: PersistedGroup | undefined,
+  changed: readonly PersistedMessage[],
+  cursor: number,
+): PersistedGroup {
+  const byId = new Map<string, PersistedMessage>();
+  for (const m of changed) byId.set(m.messageId, m);
+  const stored = new Set<string>();
+  const kept = (slot?.messages ?? []).map((m) => {
+    stored.add(m.messageId);
+    return byId.get(m.messageId) ?? m;
+  });
+  const added = [...byId.values()].filter((m) => !stored.has(m.messageId));
+  return {
+    ...(slot ?? {}),
+    cursor: maxCursor(slot?.cursor, cursor),
+    messages: added.length === 0 ? kept : [...kept, ...added].sort(compareById),
+  };
+}
+
+/**
+ * What a closed chat view has already handed to the log, so that its later
+ * writes carry only what changed since ({@link mergeClosedViewSlot}).
+ *
+ * Built from the rows the view held when it closed (its last ordinary write
+ * covers those). `changed` compares by content, not identity: the view
+ * re-derives its persisted rows on every write.
+ */
+export class ClosedViewBaseline {
+  private readonly handed = new Map<string, string>();
+  private cursor: number;
+
+  constructor(messages: readonly PersistedMessage[], cursor: number) {
+    for (const m of messages) this.handed.set(m.messageId, JSON.stringify(m));
+    this.cursor = cursor;
+  }
+
+  /** The rows of `messages` that are new or differ from what was handed. */
+  changed(messages: readonly PersistedMessage[]): PersistedMessage[] {
+    return messages.filter((m) => this.handed.get(m.messageId) !== JSON.stringify(m));
+  }
+
+  /** Whether `cursor` is past the position already handed. */
+  cursorAdvanced(cursor: number): boolean {
+    return cursor > this.cursor;
+  }
+
+  /** Record a write that reached the log. */
+  accept(written: readonly PersistedMessage[], cursor: number): void {
+    for (const m of written) this.handed.set(m.messageId, JSON.stringify(m));
+    this.cursor = Math.max(this.cursor, cursor);
+  }
+}
+
 function maxBigintString(stored: string | undefined, next: bigint | null): string | undefined {
   let prev: bigint | null = null;
   if (stored !== undefined) {

@@ -398,6 +398,7 @@ class MultiJoinerCall private constructor(
         try {
             session.connect()
         } catch (err: Throwable) {
+            me.lakko.app.rethrowIfCancelled(err)
             opts.onError(err)
             throw err
         }
@@ -450,6 +451,7 @@ class MultiJoinerCall private constructor(
             try {
                 session.publish(seed, leaf)
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
                 opts.onError(err)
             }
         }
@@ -840,6 +842,7 @@ class MultiJoinerCall private constructor(
             try {
                 session.publish(seed, leaf)
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
                 opts.onError(err)
             }
         }

@@ -65,6 +65,7 @@ import { journalHex } from "../ds/access";
 import { rosterOf } from "../chat/client";
 import { reachSession, reachSessionSignal, reachVersionsTick } from "../reach/reach-service";
 import { foldProfileGrants } from "../reach/grant-intake";
+import { AccountSlot } from "./account-slot";
 import { ScopedDiscoveryClient, usernameCertKey } from "../reach/scoped-discovery";
 import { visibilitySetting } from "../reach/visibility-store";
 import { grantSignatureOf, recordGrantSignature } from "./grant-signatures";
@@ -210,26 +211,20 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
 
   const scoped = new ScopedDiscoveryClient(() => auth.identitySecrets()?.sessionToken ?? null);
   const [ownCert, setOwnCert] = createSignal<Uint8Array | null>(null);
-  let certFetch: Promise<void> | null = null;
+  // The certificate is ONE account's: it binds that account's username to
+  // that account's id. The slot is emptied on every change of account (the
+  // account-bind effect below), and a fetch that returns after the change
+  // fills nothing - otherwise the next account's profile envelopes would
+  // carry the previous account's certificate.
+  const ownCertSlot = new AccountSlot<Uint8Array>((value) => setOwnCert(value));
   /** Fetch this account's username certificate once (retried on the next
    *  publish when it failed). */
   function ensureOwnCertificate(): Promise<void> {
-    if (ownCert() !== null || ownUsername() === null) return Promise.resolve();
-    if (certFetch === null) {
-      certFetch = scoped
-        .usernameCertificate()
-        .then((c) => {
-          if (c !== null) setOwnCert(c);
-        })
-        .catch((err: unknown) => {
-          // eslint-disable-next-line no-console
-          console.warn("[profile] username certificate not fetched; retried later", err);
-        })
-        .finally(() => {
-          certFetch = null;
-        });
-    }
-    return certFetch;
+    if (ownUsername() === null) return Promise.resolve();
+    return ownCertSlot.ensure(accountId(), () => scoped.usernameCertificate()).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("[profile] username certificate not fetched; retried later", err);
+    });
   }
   const verifier = new UsernameVerifier({
     // ADR-0060 section 5 — a claimed username is verified against the
@@ -402,6 +397,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     untrack(() => {
       if (account === boundAccount) return;
       boundAccount = account;
+      // The previous account's username certificate, held or on its way.
+      ownCertSlot.rebind(account);
       if (account === null) {
         unbindOwnProfileSync();
         scheduler.stop();

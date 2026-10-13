@@ -940,6 +940,7 @@ public class ChatViewModel(
                     try {
                         repo.setSharedPin(groupIdHex, messageId, pinned)
                     } catch (err: Throwable) {
+                        me.lakko.app.rethrowIfCancelled(err)
                         composer.update { it.copy(sendError = chatError(err, "chat.error.pin")) }
                         android.util.Log.w("ChatViewModel", "onPinAction failed", err)
                     }
@@ -1011,6 +1012,7 @@ public class ChatViewModel(
                 mutableGroupNameError.value = groupNameErrorText(e)
                 android.util.Log.w("ChatViewModel", "saveGroupName refused", e)
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e)
                 mutableGroupNameError.value = me.lakko.app.chat.GROUP_NAME_SEND_FAILED
                 android.util.Log.w("ChatViewModel", "saveGroupName failed", e)
             } finally {
@@ -1066,13 +1068,19 @@ public class ChatViewModel(
      * raw text, and §6 row 7 is about not leaking a *refusal's* internal
      * reason, not about hiding every error.
      */
-    private fun reportMembershipFailure(e: Throwable, op: String, fallbackKey: String) {
+    private suspend fun reportMembershipFailure(e: Throwable, op: String, fallbackKey: String) {
         // The screen going away cancels whatever a handler had in flight. That
         // is not a failure of the request and not something to report (the
         // retry path above says the same): every handler funnels its
         // `catch (e: Throwable)` through here, so the cancellation is passed
         // on from here, once, and the handler's `finally` still runs.
-        if (e is kotlinx.coroutines.CancellationException) throw e
+        //
+        // The check asks the coroutine, not only the exception type: the
+        // repository wraps what its publish throws (`ChatError(..., cause)`),
+        // so a cancellation that lands mid-publish arrives here as a
+        // `ChatError` and an `is CancellationException` test alone lets it
+        // through as a failed request.
+        me.lakko.app.rethrowIfCancelled(e)
         // ADR-0061 section 6: the reason, the token pool or the device clock
         // pick the sentence; anything else is the action's own key. The raw
         // message stays in the log, for the people it was written for.
@@ -2378,6 +2386,8 @@ public class ChatViewModel(
             when (val outcome = host.start(groupIdHex, video = video, joinCallIdHex = joinCallIdHex)) {
                 GroupCallStartOutcome.Connected,
                 GroupCallStartOutcome.AlreadyInThisCall,
+                // The person pressed End while it connected: nothing to say.
+                GroupCallStartOutcome.Left,
                 -> Unit
                 is GroupCallStartOutcome.Busy -> {
                     mutableCallNotice.value = outcome.message
@@ -2535,6 +2545,7 @@ public class ChatViewModel(
                     readAtMs = now,
                 )
             } catch (cause: Throwable) {
+                me.lakko.app.rethrowIfCancelled(cause)
                 android.util.Log.w(
                     "ChatViewModel",
                     "setReadCursor failed",
@@ -2590,6 +2601,7 @@ public class ChatViewModel(
             try {
                 deviceGroupSync?.setDraft(groupId = gid, text = text)
             } catch (cause: Throwable) {
+                me.lakko.app.rethrowIfCancelled(cause)
                 // Best-effort — the next keystroke retries.
                 android.util.Log.w(
                     "ChatViewModel",
@@ -2808,6 +2820,9 @@ public class ChatViewModel(
                 )
                 composer.update { it.copy(sending = false, sendError = null) }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    composer.update { it.copy(sending = false) }
+                }
                 // One sentence; the action is on the row, next to the message
                 // it belongs to. Same words as the web client
                 // (`chat/send-failure.ts`) and iOS. A refusal that names
@@ -2831,6 +2846,7 @@ public class ChatViewModel(
             try {
                 repo.retrySend(groupIdHex = groupIdHex, localId = localId)
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
                 composer.update { it.copy(sendError = chatError(err, "chat.send.failed")) }
             }
         }
@@ -2854,6 +2870,7 @@ public class ChatViewModel(
                     newText = trimmed,
                 )
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
                 composer.update { it.copy(sendError = chatError(err, "chat.error.edit")) }
                 android.util.Log.w("ChatViewModel", "onEditMessage failed", err)
             }
@@ -2872,6 +2889,7 @@ public class ChatViewModel(
                     targetMessageId = targetMessageId,
                 )
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
                 composer.update { it.copy(sendError = chatError(err, "chat.error.delete_message")) }
                 android.util.Log.w("ChatViewModel", "onDeleteMessage failed", err)
             }
@@ -2896,6 +2914,7 @@ public class ChatViewModel(
                     emoji = emoji,
                 )
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
                 composer.update { it.copy(sendError = chatError(err, "chat.error.react")) }
                 android.util.Log.w("ChatViewModel", "onReactToMessage failed", err)
             }

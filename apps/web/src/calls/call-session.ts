@@ -562,14 +562,28 @@ export class CallSession {
     // The call may have ended while the capture permission prompt was open
     // (read through the getter: the narrowing above predates the await).
     if (this.getState() !== "outgoing") return;
-    if (this.pc === null) throw new Error("peer connection not initialised");
-    this.armFrameDescriptor(this.pc);
-    const offer = await this.pc.createOffer();
-    await this.pc.setLocalDescription(offer);
+    const pc = this.pc;
+    if (pc === null) throw new Error("peer connection not initialised");
+    this.armFrameDescriptor(pc);
+    let offer: RTCSessionDescriptionInit;
+    try {
+      offer = await pc.createOffer();
+      // The call ended while the offer was being made: no Offer is published
+      // for a call whose End is already out.
+      if (this.offerIsStale(pc)) return;
+      await pc.setLocalDescription(offer);
+    } catch (err) {
+      // A peer connection closed by an ended call may reject what was pending
+      // on it; that is the call having ended, not a failure to start it.
+      if (this.offerIsStale(pc)) return;
+      throw err;
+    }
+    if (this.offerIsStale(pc)) return;
     if (offer.sdp === undefined) {
       throw new Error("createOffer produced no SDP body");
     }
     const wasm = await loadWasm();
+    if (this.offerIsStale(pc)) return;
     const bytes = wasm.composeCallOfferSignaling(
       this.callId,
       offer.sdp,
@@ -578,6 +592,13 @@ export class CallSession {
       media.video,
     );
     this.callbacks.onOutboundSignaling(bytes);
+  }
+
+  /** Whether the dial that built `pc` is over: the call left `outgoing`, or
+   *  the peer connection is no longer this session's. Read through the
+   *  getter, since the callers' narrowing predates their awaits. */
+  private offerIsStale(pc: RTCPeerConnection): boolean {
+    return this.getState() !== "outgoing" || this.pc !== pc;
   }
 
   /**
@@ -627,13 +648,19 @@ export class CallSession {
         if (this.pc === null) return;
         if (this.state === "outgoing") {
           // Initial answer to our dial.
+          const pc = this.pc;
           try {
-            await this.pc.setRemoteDescription({
+            await pc.setRemoteDescription({
               type: "answer",
               sdp: parsed.sdp,
             });
+            // The call ended (hung up, timed out, ended by the peer) while
+            // the answer was being applied: it does not come back as
+            // `connecting`, and no connect timer is armed for it.
+            if (this.offerIsStale(pc)) return;
             this.coverSFrame();
             await this.applyQueuedCandidates();
+            if (this.offerIsStale(pc)) return;
             this.setState("connecting");
             // Answered: the ring clock is over, the connect clock starts now.
             this.armConnectTimer();
@@ -642,21 +669,28 @@ export class CallSession {
             // Arm onnegotiationneeded for future local track changes (B2b).
             this.negotiationReady = true;
           } catch (err) {
+            // A peer connection closed by an ended call may reject the
+            // description; the call is over already and nothing failed.
+            if (this.offerIsStale(pc)) return;
             // eslint-disable-next-line no-console
             console.warn("setRemoteDescription(answer) failed", err);
             this.endLocal("error");
           }
         } else if (this.state === "connecting" || this.state === "connected") {
           // Mid-call renegotiation answer (to a reneg offer we sent).
+          const pc = this.pc;
           try {
             this.isSettingRemoteAnswerPending = true;
-            await this.pc.setRemoteDescription({
+            await pc.setRemoteDescription({
               type: "answer",
               sdp: parsed.sdp,
             });
+            // Ended meanwhile: `dispose()` reset the flag, leave it so.
+            if (this.pc !== pc) return;
             this.isSettingRemoteAnswerPending = false;
             this.coverSFrame();
           } catch (err) {
+            if (this.pc !== pc) return;
             this.isSettingRemoteAnswerPending = false;
             // eslint-disable-next-line no-console
             console.warn("setRemoteDescription(reneg answer) failed", err);
@@ -742,7 +776,11 @@ export class CallSession {
       }
       this.armFrameDescriptor(pc);
       const answer = await pc.createAnswer();
+      if (this.getState() !== "ringing" || this.pc !== pc) return;
       await pc.setLocalDescription(answer);
+      // The caller hung up, or the establish timer fired, while the answer
+      // was being made: an ended call does not come back as `connecting`.
+      if (this.getState() !== "ringing" || this.pc !== pc) return;
       if (answer.sdp === undefined) {
         throw new Error("createAnswer produced no SDP body");
       }
@@ -757,9 +795,15 @@ export class CallSession {
       // negotiation is applied on our side.
       this.negotiationReady = true;
       const wasm = await loadWasm();
+      // No Answer is published for a call that ended meanwhile.
+      if (this.pc !== pc) return;
       const bytes = wasm.composeCallAnswerSignaling(this.callId, answer.sdp);
       this.callbacks.onOutboundSignaling(bytes);
     } catch (err) {
+      // The call ended while the accept was in flight (a closed peer
+      // connection may reject what was pending on it): nothing failed.
+      const now = this.getState();
+      if (now === "ending" || now === "done") return;
       // eslint-disable-next-line no-console
       console.warn("accept failed", err);
       void this.endLocal("error");
@@ -909,8 +953,10 @@ export class CallSession {
   ): Promise<void> {
     if (this.pc === null || this.localStream === null) return;
     if (deviceId.length === 0) return;
+    const pc = this.pc;
+    const localStream = this.localStream;
     // Only meaningful if a sender of this kind is already on the wire.
-    const sender = this.pc
+    const sender = pc
       .getSenders()
       .find((s) => s.track?.kind === kind);
     if (sender === undefined) return;
@@ -928,10 +974,17 @@ export class CallSession {
       console.warn(`getUserMedia (${kind} device switch) failed`, err);
       return;
     }
+    // The call ended while the capture (and its permission prompt) was open:
+    // release the new device at once. `dispose()` nulled `this.localStream`,
+    // so nothing below may touch it.
+    if (this.pc !== pc || this.localStream !== localStream) {
+      for (const t of captured.getTracks()) t.stop();
+      return;
+    }
     const oldTracks =
       kind === "audio"
-        ? this.localStream.getAudioTracks()
-        : this.localStream.getVideoTracks();
+        ? localStream.getAudioTracks()
+        : localStream.getVideoTracks();
     const newTrack =
       kind === "audio"
         ? captured.getAudioTracks()[0]
@@ -951,14 +1004,20 @@ export class CallSession {
       newTrack.stop();
       return;
     }
+    if (this.pc !== pc || this.localStream !== localStream) {
+      // Ended while the track was being replaced: `dispose()` stopped the
+      // old tracks, and the new one is in no stream it knew of.
+      newTrack.stop();
+      return;
+    }
 
     // Swap the track inside the local stream so the self-preview rebinds.
     for (const t of oldTracks) {
-      this.localStream.removeTrack(t);
+      localStream.removeTrack(t);
       t.stop();
     }
-    this.localStream.addTrack(newTrack);
-    this.callbacks.onLocalStream?.(this.localStream);
+    localStream.addTrack(newTrack);
+    this.callbacks.onLocalStream?.(localStream);
   }
 
   /** Idempotent tear-down — safe to call multiple times. */
@@ -1040,6 +1099,11 @@ export class CallSession {
     try {
       stream = await navigator.mediaDevices.getUserMedia(constraints);
     } catch (err) {
+      // The call ended while the permission prompt was open, and the prompt
+      // was then dismissed or refused: nothing was captured and nothing
+      // failed that the person has not already chosen. The callers re-check
+      // the state and stand down.
+      if (this.callIsOver()) return;
       // eslint-disable-next-line no-console
       console.warn("getUserMedia denied / failed", err);
       void this.endLocal("error");
@@ -1048,7 +1112,7 @@ export class CallSession {
     // The call ended while the capture (and its permission prompt) was in
     // flight. Release the microphone / camera at once rather than attaching
     // it to a peer connection nobody will ever close.
-    if (this.state === "ending" || this.state === "done") {
+    if (this.callIsOver()) {
       for (const track of stream.getTracks()) track.stop();
       return;
     }
@@ -1061,9 +1125,17 @@ export class CallSession {
     // the SFrame worker by `createEncodedStreams()` the connection has to be
     // constructed for it (`./sframe-transport.ts`); elsewhere the
     // configuration is unchanged.
+    const iceServers = await this.resolveIceServers();
+    // The call ended while the relay credential was being fetched. `dispose()`
+    // stopped the stream it knew of; stopped again here in case this is not
+    // that stream. No peer connection is built for a call that is over.
+    if (this.callIsOver() || this.localStream !== stream) {
+      for (const track of stream.getTracks()) track.stop();
+      return;
+    }
     const pc = new RTCPeerConnection(
       sframePeerConnectionConfig({
-        iceServers: await this.resolveIceServers(),
+        iceServers,
         bundlePolicy: "max-bundle",
         rtcpMuxPolicy: "require",
       }),
@@ -1092,6 +1164,8 @@ export class CallSession {
       // Trickled candidates flow out through signaling.
       void (async (): Promise<void> => {
         const wasm = await loadWasm();
+        // No candidate is published for a call that ended meanwhile.
+        if (this.pc !== pc) return;
         const bytes = wasm.composeCallIceCandidateSignaling(
           this.callId,
           c.candidate,
@@ -1136,14 +1210,26 @@ export class CallSession {
             if (this.pc !== pc) return;
             const now = pc.iceConnectionState;
             if (now === "disconnected" || now === "failed") {
-              void this.endWithTransport("ICE stayed " + now + " past the grace");
+              void this.endWithTransport("ICE stayed " + now + " past the grace", () => {
+                const still = pc.iceConnectionState;
+                return this.pc === pc && (still === "disconnected" || still === "failed");
+              });
             }
           }, this.timing.iceDisconnectedGraceMs);
         }
       } else if (s === "failed") {
-        void this.endWithTransport("ICE failed");
+        void this.endWithTransport(
+          "ICE failed",
+          () => this.pc === pc && pc.iceConnectionState === "failed",
+        );
       }
     };
+  }
+
+  /** The call is ending or over. A method, so a check made after an await
+   *  is not narrowed away by one made before it. */
+  private callIsOver(): boolean {
+    return this.state === "ending" || this.state === "done";
   }
 
   private async applyQueuedCandidates(): Promise<void> {
@@ -1276,6 +1362,7 @@ export class CallSession {
       if (this.state === "ringing" || this.state === "connecting") {
         void this.endWithTransport(
           `no connected transport within ${this.timing.connectTimeoutMs} ms`,
+          () => this.state === "ringing" || this.state === "connecting",
         );
       }
     });
@@ -1366,9 +1453,17 @@ export class CallSession {
     this.setState("connected");
   }
 
-  /** End with `error`, naming the transport as it was before the teardown. */
-  private async endWithTransport(what: string): Promise<void> {
+  /**
+   * End with `error`, naming the transport as it was before the teardown.
+   *
+   * Describing the transport awaits `getStats()`, and the call goes on
+   * living during it: it can connect, recover, or receive media again.
+   * `stillHolds` is the condition that brought the caller here, asked again
+   * after the await; a call for which it no longer holds is not ended.
+   */
+  private async endWithTransport(what: string, stillHolds: () => boolean): Promise<void> {
     const transport = await this.describeTransport();
+    if (!stillHolds()) return;
     await this.endLocal("error", `${what}; ${transport}`);
   }
 
@@ -1485,18 +1580,23 @@ export class CallSession {
    * anything YET, which is a different thing from having stopped.
    */
   private endIfMediaHasGoneSilent(): void {
-    if (this.state !== "connected") return;
-    if (
-      !inboundHasGoneSilent(
+    if (!this.mediaHasGoneSilent()) return;
+    void this.endWithTransport(
+      `nothing received for ${this.timing.mediaSilenceTimeoutMs} ms`,
+      () => this.mediaHasGoneSilent(),
+    );
+  }
+
+  /** A connected call whose inbound media has been silent for the whole of
+   *  {@link CallSessionTiming.mediaSilenceTimeoutMs}, as last sampled. */
+  private mediaHasGoneSilent(): boolean {
+    return (
+      this.state === "connected" &&
+      inboundHasGoneSilent(
         this.inboundActivity,
         performance.now(),
         this.timing.mediaSilenceTimeoutMs,
       )
-    ) {
-      return;
-    }
-    void this.endWithTransport(
-      `nothing received for ${this.timing.mediaSilenceTimeoutMs} ms`,
     );
   }
 
@@ -1519,6 +1619,9 @@ export class CallSession {
     } catch {
       return null;
     }
+    // Ended while the report was being read: no sample for a call that is
+    // over (the caller's stats handler belongs to whatever call is current).
+    if (this.pc !== pc) return null;
     const byId = new Map<string, unknown>();
     const pairs: unknown[] = [];
     // The watchdog's meter is INBOUND RTP, not the candidate pair. The pair's

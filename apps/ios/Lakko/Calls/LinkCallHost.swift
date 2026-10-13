@@ -278,6 +278,13 @@ final class LinkCallHost: ObservableObject {
         self.attempt = attempt
         controls.removeAll()
         handle = nil
+        // The screen of a call that is over (its "Call ended" overlay, not
+        // dismissed yet) belongs to that call. Kept, it would be shown with
+        // this call's `Invite`, and this call's own screen would never be
+        // presented.
+        presentation = nil
+        presentationId = nil
+        presentationSlug = nil
         // A new call starts with no link: the first `Invite` makes one, and
         // every later one in the same call re-offers it.
         invite = request.isOwner ? CallInviteOffer(
@@ -334,6 +341,9 @@ final class LinkCallHost: ObservableObject {
             started = try await ports.startCall(request, session, base, joinWithVideo, ui, callbacks)
         } catch {
             NSLog("multi-joiner call: start failed: %@", String(describing: error))
+            // Left or replaced while the start was in flight: whatever it
+            // threw afterwards is not this person's failed call.
+            guard self.attempt == attempt else { return .started }
             let reason = CallErrorText.reasonText(for: error)
             apply(attempt, .error, errorMessage: reason)
             return .failed(message: reason ?? .key("call.link.error.generic"))

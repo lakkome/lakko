@@ -359,6 +359,9 @@ public class RecoverViewModel(
                     )
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(busy = false, error = UiText("recovery.error.generic"))
                 }
@@ -423,6 +426,9 @@ public class RecoverViewModel(
                     )
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(busy = false, error = UiText("recovery.totp.error.generic"))
                 }
@@ -500,6 +506,9 @@ public class RecoverViewModel(
                     )
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(busy = false, error = UiText("recovery.contact.error.generic"))
                 }
@@ -550,6 +559,9 @@ public class RecoverViewModel(
                     )
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(busy = false, error = UiText("recovery.contact.error.generic"))
                 }

@@ -48,6 +48,38 @@ export interface DiscoverPrefs {
   readonly introDismissed: boolean;
 }
 
+/** What one refresh of the directory produced: the fields a refresh owns. */
+export interface RefreshOutcome {
+  readonly decoys: DecoyDraw | null;
+  /** Absent when every request failed: the cached buckets stay. */
+  readonly fetched?: {
+    readonly buckets: Readonly<Record<string, CachedBucket>>;
+    readonly lastRefreshMs: number;
+    readonly lastFetchedKey: string;
+  };
+}
+
+/**
+ * Write a refresh's outcome into the preferences as they are NOW.
+ *
+ * A refresh takes seconds, and the person keeps using the screen meanwhile:
+ * they pick topics, hide a channel, answer the intro card. Each of those is
+ * saved at once. Persisting the refresh as "the preferences from when it
+ * started, plus the new buckets" wrote every one of them back out. So the
+ * refresh contributes only the fields it owns (the decoy draw, the buckets
+ * and the two refresh stamps), and everything else comes from `current`.
+ */
+export function withRefreshOutcome(current: DiscoverPrefs, outcome: RefreshOutcome): DiscoverPrefs {
+  if (outcome.fetched === undefined) return { ...current, decoys: outcome.decoys };
+  return {
+    ...current,
+    decoys: outcome.decoys,
+    buckets: outcome.fetched.buckets,
+    lastRefreshMs: outcome.fetched.lastRefreshMs,
+    lastFetchedKey: outcome.fetched.lastFetchedKey,
+  };
+}
+
 export function defaultDiscoverPrefs(): DiscoverPrefs {
   return {
     topics: [],

@@ -337,7 +337,15 @@ final class GroupCallHost: ObservableObject {
             } else {
                 announced = false
             }
-            guard isCurrent(attempt) else { return }
+            guard isCurrent(attempt) else {
+                // Left while the Start was being published. The group has
+                // been told of a call nobody will be in: take it back, or
+                // every member is offered it until its record goes stale.
+                if announced {
+                    await endRecordReportedBySfu(groupIdHex: groupIdHex, callId: callId)
+                }
+                return
+            }
             guard announced else {
                 // Not announced: nobody could join, so the call is refused
                 // rather than connected as an invisible room.

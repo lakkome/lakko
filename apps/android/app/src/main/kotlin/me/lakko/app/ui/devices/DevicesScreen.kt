@@ -383,6 +383,7 @@ private fun PairSection(
                                             )
                                             state = PairUi.Done
                                         } catch (cause: Throwable) {
+                                            me.lakko.app.rethrowIfCancelled(cause)
                                             Log.w(TAG, "WARN accept failed: ${cause.javaClass.simpleName}")
                                             state = PairUi.Error(LINK_FAILED)
                                         }
@@ -395,6 +396,7 @@ private fun PairSection(
                                     }
                                 }
                             } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
                                 Log.w(TAG, "WARN pairing failed: ${cause.javaClass.simpleName}")
                                 state = PairUi.Error(LINK_FAILED)
                             }
@@ -685,6 +687,7 @@ private fun ScanSection(
                                     chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
                                     state = ScanUi.Done
                                 } catch (cause: Throwable) {
+                                    me.lakko.app.rethrowIfCancelled(cause)
                                     state = ScanUi.Error(PAIRING_FAILED_COPY)
                                 }
                             }
@@ -837,6 +840,9 @@ private fun DevicesList(
                 removingLeaf = null
                 refresh()
             } catch (cause: Throwable) {
+                me.lakko.app.rethrowIfCancelled(cause) {
+                    removingLeaf = null
+                }
                 removingLeaf = null
                 Log.w(TAG, "WARN device removal failed: ${cause.javaClass.simpleName}")
                 state = DevicesListUi.Error(UiText("settings.devices.error.remove"))

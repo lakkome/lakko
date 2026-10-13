@@ -189,6 +189,12 @@ public sealed interface GroupCallStartOutcome {
     /** The call to join is no longer live. */
     public data object Ended : GroupCallStartOutcome
 
+    /**
+     * The person left the call while it was still connecting (they pressed
+     * End). Not a failure: there is nothing to tell them.
+     */
+    public data object Left : GroupCallStartOutcome
+
     /** [message] renders from the kind of failure (ADR-0061); the diagnostic is in the log. */
     public data class Failed(val message: UiText) : GroupCallStartOutcome
 }
@@ -299,6 +305,10 @@ public class GroupCallHost(
         var endedForEveryone: Boolean = false,
         /** Set by [release]: no Join may be published for this call any more. */
         @Volatile var stopped: Boolean = false,
+        /** This device left the call as a hang-up (the person's End, or the
+         *  call ended for everyone) and not because its session failed. A
+         *  start still in flight then reports [GroupCallStartOutcome.Left]. */
+        var hungUp: Boolean = false,
     )
 
     private var active: Active? = null
@@ -546,6 +556,12 @@ public class GroupCallHost(
         }
         val callIdHex = callIdHexOf(callId)
         val gen = generation
+        // What this start built, for the outcome of a start that was left or
+        // failed under it (the fields are cleared by then).
+        var startedCall: Active? = null
+        var startedSession: GroupCallSessionHandle? = null
+        // This run holds [starting] until the session exists.
+        var holdsStarting = true
         // One call at a time, app-wide, from here on.
         starting = true
         setSlot(GroupCallSlot(groupIdHex, callIdHex, starting = true))
@@ -613,6 +629,7 @@ public class GroupCallHost(
                 keyedEpoch = read.epoch,
             )
             active = a
+            startedCall = a
             val h = p.createSession(
                 GroupCallSessionRequest(
                     groupIdHex = groupIdHex,
@@ -626,6 +643,7 @@ public class GroupCallHost(
                 ui,
             )
             handle = h
+            startedSession = h
             // Whether `End` offers to end the call for everyone: the record
             // names its starter from the `GroupCallStart` (this device's own,
             // folded in as it was published, or the one it joined on).
@@ -633,6 +651,7 @@ public class GroupCallHost(
             // A camera chosen in the Settings sheet before the session existed.
             ui.devices.camera.value?.let { h.selectCamera(it) }
             starting = false
+            holdsStarting = false
             setSlot(GroupCallSlot(groupIdHex, callIdHex, starting = false))
             mutableOverlay.value = true
             // A call is born expanded (see [collapsed]): cleared here, in the
@@ -640,36 +659,71 @@ public class GroupCallHost(
             // put-away can never suppress this one's screen.
             mutableCollapsed.value = false
             h.connect()
-            if (active !== a) return GroupCallStartOutcome.Failed(UiText(fallbackKey))
+            // Left, ended or failed while connecting: the session is already
+            // released. Which of the three decides what the person is told.
+            if (active !== a) return abandonedStartOutcome(a, h, groupIdHex, callId, fallbackKey)
             a.connected = true
             // A drain that arrived while connecting found no peer connection to
             // rekey; catch up now that the session can take a new key.
             settle(groupIdHex)
             return GroupCallStartOutcome.Connected
         } catch (cancel: CancellationException) {
-            release()
+            if (active == null || active === startedCall) release()
             throw cancel
         } catch (error: Throwable) {
-            val endedByServer = handle?.callEndedByServer == true
+            // Only this start's own call is left below: a start that was left
+            // while connecting can throw after the next call took the slot.
+            val ownCallActive = active != null && active === startedCall
+            // The person pressed End while the session was connecting and the
+            // connect threw under the teardown: not a failure to report.
+            if (startedCall?.hungUp == true) return GroupCallStartOutcome.Left
+            val endedByServer = startedSession?.callEndedByServer == true
             if (endedByServer) {
                 // The SFU says the call ended before this device arrived
                 // (`docs/ux/calls.md` section 4.3): close the chat's record
                 // for everyone rather than report a failure.
                 warn("group call: the SFU says the call ended before we joined", error)
-                if (active != null) leaveWith(GroupLeaveReason.ERROR)
+                if (ownCallActive) leaveWith(GroupLeaveReason.ERROR)
                 endRecordReportedBySfu(groupIdHex, callId)
                 return GroupCallStartOutcome.Ended
             }
             warn("group call: connect failed", error)
-            if (active != null) leaveWith(GroupLeaveReason.ERROR)
+            if (ownCallActive) leaveWith(GroupLeaveReason.ERROR)
             return GroupCallStartOutcome.Failed(callErrorText(error, fallbackKey))
         } finally {
-            starting = false
+            // A start that was left while connecting can finish after the next
+            // one began: it gave [starting] up when its session came up, and
+            // the slot and the call screen are the newer call's by now.
+            if (holdsStarting) starting = false
             if (active == null && handle == null) {
-                if (mutableSlot.value?.callIdHex == callIdHex) setSlot(null)
-                ui.setPhase(CallUiState.CallPhase.Ended(clock()))
+                val slotCallIdHex = mutableSlot.value?.callIdHex
+                if (slotCallIdHex == callIdHex) setSlot(null)
+                if (slotCallIdHex == null || slotCallIdHex == callIdHex) {
+                    ui.setPhase(CallUiState.CallPhase.Ended(clock()))
+                }
             }
         }
+    }
+
+    /**
+     * What a start came to when its call was taken out of the slot while the
+     * session was connecting. The person's own End says nothing; the SFU
+     * saying the call was over closes the chat's record, as when the connect
+     * throws for it; anything else is the failure it was before.
+     */
+    private fun abandonedStartOutcome(
+        a: Active,
+        h: GroupCallSessionHandle,
+        groupIdHex: String,
+        callId: ByteArray,
+        fallbackKey: String,
+    ): GroupCallStartOutcome = when {
+        a.hungUp -> GroupCallStartOutcome.Left
+        h.callEndedByServer -> {
+            endRecordReportedBySfu(groupIdHex, callId)
+            GroupCallStartOutcome.Ended
+        }
+        else -> GroupCallStartOutcome.Failed(UiText(fallbackKey))
     }
 
     private suspend fun settle(groupIdHex: String) {
@@ -792,6 +846,7 @@ public class GroupCallHost(
             return
         }
         val failed = handle?.failed == true
+        a.hungUp = reason == GroupLeaveReason.HUNG_UP && !failed
         // Read before the session is released: the call ended when the link
         // was last known alive, not when this device noticed.
         val lastInbound = handle?.lastInboundAtMs ?: 0L

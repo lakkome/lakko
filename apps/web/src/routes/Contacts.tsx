@@ -89,6 +89,7 @@ import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { foundOneToOneWith } from "../contacts/found-one-to-one";
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
+import { screenAnchor } from "../ui/screen-anchor";
 
 export default function Contacts(): JSX.Element {
   const auth = useAuth();
@@ -446,7 +447,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       return;
     }
     setDetailError(null);
-    setDetailBusy(true);
+    const stillOn = beginDetailAction();
     try {
       await deleteChat({
         accountIdB64: s.account.accountId,
@@ -454,18 +455,51 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         groupIdHex: syncGroupIdHex(g.group.groupId),
         chats,
       });
-      clearSelection();
+      // `clearSelection` navigates and deselects; only for a person still on
+      // THIS contact.
+      if (stillOn()) clearSelection();
     } catch (err) {
-      setDetailError(contactsErrorText(err, "chat.error.delete_chat", chatLabelOf(c)));
+      if (stillOn()) setDetailError(contactsErrorText(err, "chat.error.delete_chat", chatLabelOf(c)));
     } finally {
-      setDetailBusy(false);
+      if (stillOn()) setDetailBusy(false);
     }
   }
 
   // ---- detail actions --------------------------------------------
   const [detailBusy, setDetailBusy] = createSignal(false);
   const [detailError, setDetailError] = createLiveText();
-  createEffect(on(selectedKey, () => setDetailError(null), { defer: true }));
+  /**
+   * The busy flag and the error line are ONE pair for the whole pane, and the
+   * pane shows whichever contact is selected: picking another contact from
+   * the list changes neither the component nor the URL. So an action belongs
+   * to the contact it was started on. `beginDetailAction` marks the pane
+   * busy and returns "is that contact still the one shown, and has no later
+   * action replaced this one"; an action that is no longer current reports
+   * nothing - its late failure is not shown under another person's name, and
+   * it never deselects the person now open. What it did (the chat deleted or
+   * created) stands either way.
+   */
+  let detailAction = 0;
+  function beginDetailAction(): () => boolean {
+    const mine = ++detailAction;
+    const forKey = selectedKey();
+    const here = screenAnchor(location);
+    setDetailBusy(true);
+    return () => mine === detailAction && selectedKey() === forKey && here();
+  }
+  createEffect(
+    on(
+      selectedKey,
+      () => {
+        // Another contact: the pane starts clean, whatever is still running
+        // for the previous one.
+        detailAction += 1;
+        setDetailBusy(false);
+        setDetailError(null);
+      },
+      { defer: true },
+    ),
+  );
 
   /** Message: open the chat, or create it first when this device has none
    *  and the contact's account id is known. */
@@ -476,25 +510,29 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       return;
     }
     if (c.accountIdHex === undefined) return;
-    setDetailBusy(true);
     setDetailError(null);
+    // The chat is created and recorded whether or not the person waits; only
+    // opening it is addressed to this screen and this contact.
+    const stillOn = beginDetailAction();
     try {
       const href = await foundChatWith(
         c,
         hexToBytes(c.accountIdHex),
         base64Decode(c.signaturePubkeyB64),
       );
-      navigate(href);
+      if (stillOn()) navigate(href);
     } catch (err) {
-      setDetailError(
-        contactsErrorText(
-          err,
-          "contacts.error.start_chat",
-          memberNameOf(profiles.resolve(c.signaturePubkeyB64)),
-        ),
-      );
+      if (stillOn()) {
+        setDetailError(
+          contactsErrorText(
+            err,
+            "contacts.error.start_chat",
+            memberNameOf(profiles.resolve(c.signaturePubkeyB64)),
+          ),
+        );
+      }
     } finally {
-      setDetailBusy(false);
+      if (stillOn()) setDetailBusy(false);
     }
   }
 

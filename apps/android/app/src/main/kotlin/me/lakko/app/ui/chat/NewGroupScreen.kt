@@ -218,6 +218,9 @@ public fun NewGroupScreen(
                                 kind = uniffi.lakko_ffi_uniffi.GroupKind.GROUP,
                             )
                         } catch (cause: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(cause) {
+                                creating = false
+                            }
                             android.util.Log.w("NewGroupScreen", "group creation failed", cause)
                             error = UiText("chats.new_group.error")
                             creating = false
@@ -233,6 +236,7 @@ public fun NewGroupScreen(
                             try {
                                 chatRepository.setGroupName(groupIdHex, name, storeFirst = true)
                             } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
                                 android.util.Log.w("NewGroupScreen", "group name not sent", cause)
                             }
                         }
@@ -244,6 +248,7 @@ public fun NewGroupScreen(
                                     recipientSignaturePubkey = next.request.fromPubkey,
                                 )
                             } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
                                 // The group exists with the members that landed;
                                 // the members panel adds the rest.
                                 android.util.Log.w("NewGroupScreen", "addMemberToGroup failed", cause)

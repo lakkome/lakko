@@ -777,6 +777,7 @@ private fun toggleFlag(
                 unreadOverride = unreadOverride,
             )
         } catch (cause: Throwable) {
+            me.lakko.app.rethrowIfCancelled(cause)
             android.util.Log.w("ChatListScreen", "setFlags failed", cause)
         }
     }

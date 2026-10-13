@@ -395,21 +395,32 @@ function PairView(props: {
     | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(null);
+  /** Set by `onCleanup`. `start` spans several awaits before there is a
+   *  session for the cleanup to abort; it checks this after each, so leaving
+   *  the panel meanwhile creates no session and starts no long poll. */
+  let disposed = false;
 
   async function start(): Promise<void> {
     setState({ kind: "preparing" });
     try {
       const deviceKey = await getDeviceKey(props.accountIdB64);
+      if (disposed) return;
       if (deviceKey === null) {
         setState({ kind: "error", message: noDeviceKey });
         return;
       }
+      const loginHandle = await ownPairingHandle(props.username);
+      if (disposed) return;
       const sess = await prepareJoinFlow({
         accountIdBytes: props.accountIdBytes,
         accountIdB64: props.accountIdB64,
         deviceKey,
-        loginHandle: await ownPairingHandle(props.username),
+        loginHandle,
       });
+      if (disposed) {
+        sess.dispose();
+        return;
+      }
       // Encode the wire bytes as a base64url string and feed
       // into `qrcode`. The library accepts arbitrary strings;
       // base64url keeps the QR within Byte mode without
@@ -423,6 +434,10 @@ function PairView(props: {
           width: 256,
           margin: 1,
         });
+        if (disposed) {
+          sess.dispose();
+          return;
+        }
       }
       const abort = new AbortController();
       setState({ kind: "waiting", session: sess, abort });
@@ -469,6 +484,7 @@ function PairView(props: {
   }
 
   onCleanup(() => {
+    disposed = true;
     const s = state();
     if (s.kind === "waiting") {
       s.abort.abort();
@@ -561,6 +577,11 @@ function ScanView(props: {
   const [videoRef, setVideoRef] = createSignal<HTMLVideoElement | null>(null);
   let stream: MediaStream | null = null;
   let rafHandle: number | null = null;
+  /** One per `start`, advanced by `reset` and by the cleanup. The permission
+   *  prompt has no time limit: the person can leave the panel (or press
+   *  Cancel) while it is open, and a camera granted after that must be
+   *  switched off at once, not shown to a screen that is gone. */
+  let attempt = 0;
 
   function stopCamera(): void {
     if (rafHandle !== null) {
@@ -577,7 +598,10 @@ function ScanView(props: {
     }
   }
 
-  onCleanup(stopCamera);
+  onCleanup(() => {
+    attempt += 1;
+    stopCamera();
+  });
 
   async function handleDecoded(scannedBytes: Uint8Array): Promise<void> {
     setState({ kind: "processing" });
@@ -627,18 +651,28 @@ function ScanView(props: {
 
   async function start(): Promise<void> {
     setState({ kind: "opening" });
+    const mine = ++attempt;
+    let granted: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
+      granted = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" },
         audio: false,
       });
     } catch (err) {
+      if (mine !== attempt) return;
       setState({
         kind: "error",
         message: cameraFailure(err),
       });
       return;
     }
+    if (mine !== attempt) {
+      // Left, or cancelled, during the prompt: the camera goes off here,
+      // since nothing else holds this stream.
+      granted.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    stream = granted;
     const video = videoRef();
     if (video === null) {
       stopCamera();
@@ -647,6 +681,8 @@ function ScanView(props: {
     }
     video.srcObject = stream;
     await video.play();
+    // `stopCamera` already ran if the attempt was abandoned during `play`.
+    if (mine !== attempt) return;
     setState({ kind: "scanning" });
 
     const canvas = document.createElement("canvas");
@@ -685,6 +721,7 @@ function ScanView(props: {
   }
 
   function reset(): void {
+    attempt += 1;
     stopCamera();
     setState({ kind: "idle" });
   }

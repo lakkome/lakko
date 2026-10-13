@@ -79,6 +79,16 @@ final class SfuSignalingClient {
     // FFI splits the sink + stream, so concurrent send / recv is safe).
     private let stateLock = NSLock()
     private var tunneledConn: TunneledWsConnection?
+    /// `close()` was called. Read under `stateLock`: the tunneled dial runs
+    /// on its own queue and may finish after the caller has gone, and a frame
+    /// already read may be dispatched after it.
+    private var closed = false
+
+    private var isClosed: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return closed
+    }
     private let tunnelRecvQueue = DispatchQueue(label: "me.lakko.sfu.tunnel.recv", qos: .userInitiated)
 
     init(
@@ -107,7 +117,7 @@ final class SfuSignalingClient {
     /// - Throws: `SfuSignalingError.alreadyConnected` if called twice,
     ///   `.badUrl` if the base URL / JWT cannot form a valid URL.
     func connect() throws {
-        guard task == nil, tunneledConn == nil else {
+        guard task == nil, tunneledConn == nil, !isClosed else {
             throw SfuSignalingError.alreadyConnected
         }
         // ADR-0026 — armed: route the signaling WebSocket through the tunnel.
@@ -162,6 +172,9 @@ final class SfuSignalingClient {
     /// Parse + dispatch one signaling frame (shared by the direct + tunneled
     /// receive loops). A parse failure surfaces via `onParseError`, never closes.
     private func handleFrameText(_ text: String) {
+        // A frame read before `close()` and dispatched after it belongs to a
+        // call that is over.
+        if isClosed { return }
         do {
             let frame = try parseSfuServerFrame(json: text)
             dispatch(frame)
@@ -230,9 +243,19 @@ final class SfuSignalingClient {
                 self.callbacks.onClosed?()
                 return
             }
+            // The caller may have closed while the tunnel was dialled (the
+            // person ended the call during the connect). `close()` found no
+            // connection to shut down then, so it is shut down here; kept, it
+            // would hold a socket on the SFU and a place in the call for a
+            // session nobody owns.
             self.stateLock.lock()
-            self.tunneledConn = conn
+            let closedMeanwhile = self.closed
+            if !closedMeanwhile { self.tunneledConn = conn }
             self.stateLock.unlock()
+            if closedMeanwhile {
+                try? conn.shutdown()
+                return
+            }
 
             // Blocking receive loop on this dedicated serial queue.
             while true {
@@ -357,6 +380,7 @@ final class SfuSignalingClient {
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         stateLock.lock()
+        closed = true
         let conn = tunneledConn
         tunneledConn = nil
         stateLock.unlock()

@@ -229,3 +229,26 @@ export function chatCallAffordance(input: ChatCallAffordanceInput): ChatCallAffo
   if (input.liveCallInThisChat) return "join-group";
   return input.isGroup ? "start-group" : "start-one-to-one";
 }
+
+export interface GroupCallStartFailureInput {
+  /** The state of the SFU session the start built, or `null` when the start
+   *  stopped before there was one. */
+  readonly sessionState: "idle" | "connecting" | "connected" | "failed" | "closed" | null;
+  /** That session is still the one in the host's group slot. */
+  readonly stillInSlot: boolean;
+}
+
+/**
+ * Whether a group call start that did not end connected was abandoned by
+ * this device, as opposed to having failed.
+ *
+ * A session ends `closed` only by `hangUp()` (a failure ends `failed`), and
+ * it is out of the slot only once `releaseGroupSlot` took it: the person
+ * pressed End, signed out, or left the chat while the session was still
+ * connecting. The start's `connect()` then rejects, and that rejection is
+ * the person's own choice coming back, so the screens are told nothing: no
+ * "could not start the call" for a call they chose not to be in.
+ */
+export function groupCallStartAbandoned(input: GroupCallStartFailureInput): boolean {
+  return input.sessionState === "closed" && !input.stillInSlot;
+}

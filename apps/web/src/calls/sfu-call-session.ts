@@ -266,6 +266,20 @@ export interface SfuRemoteTrack {
 // importers (`sfu-call-ui.ts`).
 export type { VideoPublishState };
 
+/**
+ * `connect()` was still running when the session ended: `closed` when this
+ * device hung it up (the person left), `failed` when it failed on its own
+ * (the reason was logged by `fail`, and `callEndedByServer()` says whether
+ * the SFU refused it as over). Whatever the connect had started is released;
+ * a caller that sees `closed` reports nothing.
+ */
+export class SfuCallOverError extends Error {
+  constructor(readonly state: "closed" | "failed") {
+    super(`the SFU call session ${state === "closed" ? "was closed" : "failed"} while connecting`);
+    this.name = "SfuCallOverError";
+  }
+}
+
 /** Callbacks the caller wires in. */
 export interface SfuCallCallbacks {
   /** Lifecycle tick. */
@@ -801,6 +815,10 @@ export class SfuCallSession {
    * Throws (before any media capture) if the browser can hand encoded
    * frames to the SFrame worker by neither interface
    * (`./sframe-transport.ts`) - invariant #4, no non-E2EE fallback.
+   *
+   * Rejects with {@link SfuCallOverError} when the session was hung up or
+   * failed while this was running. Everything it had started by then is
+   * released: no captured track, peer connection or timer is left.
    */
   async connect(): Promise<void> {
     if (this.state !== "idle") {
@@ -852,12 +870,18 @@ export class SfuCallSession {
         onSocketError: (): void => this.onSignalingClosed(),
       },
     );
+    const signaling = this.signaling;
     try {
-      await this.signaling.connect();
+      await signaling.connect();
     } catch (err) {
+      // Closed by this device while the socket was opening (`hangUp()`, or a
+      // failure that already named itself): `fail` is then a no-op and the
+      // caller reads the state to tell an abandoned start from a failed one.
       this.fail("signaling connect failed", err);
       throw err;
     }
+    // Hung up, or failed, in the same turn the socket opened.
+    this.throwIfOver();
 
     // The shared rules (the signaling client has loaded the module already).
     try {
@@ -865,6 +889,9 @@ export class SfuCallSession {
     } catch {
       this.wasm = null;
     }
+    // Nothing is started for a session that ended meanwhile: a keepalive
+    // timer armed here would never be cleared.
+    this.throwIfOver();
 
     // The socket is open and the Welcome has arrived: start the keepalive.
     this.lastInboundMs = this.lastPingMs = this.nowMs();
@@ -875,11 +902,68 @@ export class SfuCallSession {
     //    holds a Welcome + a derived seed, then call `publish()`).
     if (this.config.deferPublish === true) return;
     try {
-      await this.openPeerConnectionAndPublish();
+      await this.orOver(this.openPeerConnectionAndPublish());
     } catch (err) {
+      // Ended while the publish was in flight (a closed peer connection may
+      // reject what was pending on it): released already. Said as what it
+      // is, an ended session, not as a failed publish.
+      this.throwIfOver();
       this.fail("publish failed", err);
       throw err;
     }
+    // Ended while the publish was in flight, and the publish stood down.
+    this.throwIfOver();
+  }
+
+  /** The session was hung up or failed: nothing more may be started for it. */
+  private isOver(): boolean {
+    return this.state === "closed" || this.state === "failed";
+  }
+
+  /** `connect()` does not resolve for a session that ended while it ran. */
+  private throwIfOver(): void {
+    if (this.state === "closed" || this.state === "failed") {
+      throw new SfuCallOverError(this.state);
+    }
+  }
+
+  /** A publish (capture, peer connection, offer) is in flight, so a second
+   *  one must not open the devices again. */
+  private publishing = false;
+
+  /** Told when the session ends, by {@link setState}. */
+  private readonly overListeners = new Set<() => void>();
+
+  /**
+   * `work`, unless the session ends first: then this rejects with
+   * {@link SfuCallOverError} at once and `work` is left to finish by itself.
+   *
+   * A publish parks on things this session cannot hurry: a permission prompt
+   * the person never answers, and `createOffer` / `setLocalDescription` on a
+   * peer connection that was closed meanwhile, which a browser is allowed to
+   * leave pending for good. Whoever awaits `connect()` must still be told
+   * the session ended, or the host's start latch is never released. `work`
+   * checks the session after each of its awaits and releases what it holds,
+   * so abandoning it here leaves nothing behind; its own late rejection is
+   * taken here and goes nowhere.
+   */
+  private orOver<T>(work: Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const onOver = (): void => {
+        reject(new SfuCallOverError(this.state === "failed" ? "failed" : "closed"));
+      };
+      this.overListeners.add(onOver);
+      work.then(
+        (value) => {
+          this.overListeners.delete(onOver);
+          resolve(value);
+        },
+        (err: unknown) => {
+          this.overListeners.delete(onOver);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
+    });
   }
 
   /**
@@ -893,7 +977,9 @@ export class SfuCallSession {
    * @throws if no seed is available (never publishes unencrypted).
    */
   async publish(seed?: Uint8Array, localLeaf?: number): Promise<void> {
-    if (this.pc !== null) return;
+    if (this.pc !== null || this.publishing) return;
+    // A session that was hung up, or failed, opens no device.
+    if (this.isOver()) return;
     if (seed !== undefined) this.activeSeed = seed;
     if (localLeaf !== undefined) this.publishLeaf = localLeaf;
     if (this.activeSeed === null) {
@@ -903,8 +989,12 @@ export class SfuCallSession {
       );
     }
     try {
-      await this.openPeerConnectionAndPublish();
+      await this.orOver(this.openPeerConnectionAndPublish());
     } catch (err) {
+      // Ended while the publish was in flight: what it did is released
+      // already (or is released by the publish itself, the moment the await
+      // it is parked on returns) and there is nothing to report.
+      if (this.isOver()) return;
       this.fail("publish failed", err);
       throw err;
     }
@@ -1067,11 +1157,25 @@ export class SfuCallSession {
       if (ended?.track != null) {
         const old = ended.track;
         await ended.replaceTrack(track);
+        if (this.pc !== pc2 || this.localStream !== localStream) {
+          // Torn down while the track was being replaced: the stream the
+          // teardown stopped no longer holds this track, so stop it here.
+          track.stop();
+          this.setVideoPublishState("off");
+          return;
+        }
         localStream.removeTrack(old);
         localStream.addTrack(track);
         // The copies' clones ended with the camera they were cloned from:
         // each takes a clone of the new track, in place as well.
         await this.followCamera(pc2, track, seed);
+        if (this.pc !== pc2) {
+          // Torn down while the copies were being set up. The teardown
+          // stopped the stream's tracks, this one among them.
+          track.stop();
+          this.setVideoPublishState("off");
+          return;
+        }
         this.setVideoPublishState("live");
         this.setLocalCameraOn(true);
         this.callbacks.onLocalStream?.(localStream);
@@ -1140,6 +1244,7 @@ export class SfuCallSession {
     if (this.pc === null || this.localStream === null) return;
     if (deviceId.length === 0) return;
     const pc = this.pc;
+    const localStream = this.localStream;
     const sender = this.mainSenderOf(pc, kind);
     if (sender === undefined) return;
 
@@ -1156,10 +1261,17 @@ export class SfuCallSession {
       console.warn(`getUserMedia (SFU ${kind} device switch) failed`, err);
       return;
     }
+    // The call was torn down (or its stream replaced) while the capture and
+    // its permission prompt were open: release the new device at once. The
+    // teardown nulled `this.localStream`, so nothing below may touch it.
+    if (this.pc !== pc || this.localStream !== localStream) {
+      for (const t of captured.getTracks()) t.stop();
+      return;
+    }
     const oldTracks =
       kind === "audio"
-        ? this.localStream.getAudioTracks()
-        : this.localStream.getVideoTracks();
+        ? localStream.getAudioTracks()
+        : localStream.getVideoTracks();
     const newTrack =
       kind === "audio"
         ? captured.getAudioTracks()[0]
@@ -1181,12 +1293,18 @@ export class SfuCallSession {
       newTrack.stop();
       return;
     }
+    if (this.pc !== pc || this.localStream !== localStream) {
+      // Torn down while the track was being replaced: the old tracks were
+      // stopped by the teardown, and the new one is not in any stream it knew.
+      newTrack.stop();
+      return;
+    }
 
     for (const t of oldTracks) {
-      this.localStream.removeTrack(t);
+      localStream.removeTrack(t);
       t.stop();
     }
-    this.localStream.addTrack(newTrack);
+    localStream.addTrack(newTrack);
     // The copies follow the camera to the new device. Their old clones are
     // stopped there; the old camera track was stopped just above. A copy the
     // browser would not take is not tried again here.
@@ -1742,6 +1860,18 @@ export class SfuCallSession {
       );
     }
     const seed = this.activeSeed;
+    this.publishing = true;
+    try {
+      await this.openAndPublishWith(seed);
+    } finally {
+      this.publishing = false;
+    }
+  }
+
+  /** {@link openPeerConnectionAndPublish}, with the seed in hand. After every
+   *  await it asks whether the session is still the one that started the
+   *  step, and starts nothing for one that is not. */
+  private async openAndPublishWith(seed: Uint8Array): Promise<void> {
     // Capture what the device has (section 4.4): the camera and microphone
     // when both work, the microphone alone when the camera fails, nothing
     // when neither can be had — the person joins in every case. Honour the
@@ -1749,12 +1879,29 @@ export class SfuCallSession {
     // OS default).
     const captured = await captureWithFallback(
       this.config.media,
-      (audio, video) =>
-        navigator.mediaDevices.getUserMedia({
+      (audio, video) => {
+        // The fallback's second attempt (microphone alone) is not made for a
+        // session that ended while the first one was failing.
+        if (this.isOver()) {
+          return Promise.reject(new Error("the call ended before capture"));
+        }
+        return navigator.mediaDevices.getUserMedia({
           audio: audioTrackConstraint(audio, this.config.media.audioDeviceId),
           video: trackConstraint(video, this.config.media.videoDeviceId),
-        }),
+        });
+      },
     );
+    // The person pressed End, the session failed, or the SFU answered
+    // `call-ended` while the capture (and its permission prompt) was open.
+    // `releaseResources()` ran then, with no stream to stop, so the devices
+    // are released here: nothing is kept and nothing is built for a session
+    // that is over. The same when another publish got there first.
+    if (this.isOver() || this.pc !== null || this.localStream !== null) {
+      if (captured.stream !== null) {
+        for (const track of captured.stream.getTracks()) track.stop();
+      }
+      return;
+    }
     // An empty stream when nothing was captured, so a camera turned on later
     // (`publishVideo`) has a stream to join.
     const stream = captured.stream ?? new MediaStream();
@@ -1772,9 +1919,17 @@ export class SfuCallSession {
     // the SFrame worker by `createEncodedStreams()` the connection has to be
     // constructed for it (`./sframe-transport.ts`); elsewhere the
     // configuration is unchanged.
+    const iceServers = await this.resolveIceServers();
+    // Ended while the relay credential was being fetched. The teardown
+    // stopped the stream it knew of; stopped again here in case this is not
+    // that stream any more. No peer connection, no timer.
+    if (this.isOver() || this.localStream !== stream || this.pc !== null) {
+      for (const track of stream.getTracks()) track.stop();
+      return;
+    }
     const pc = new RTCPeerConnection(
       sframePeerConnectionConfig({
-        iceServers: await this.resolveIceServers(),
+        iceServers,
         bundlePolicy: "max-bundle",
         rtcpMuxPolicy: "require",
       }),
@@ -1881,7 +2036,10 @@ export class SfuCallSession {
     // frames in the sealed VP8 this browser sends (`frame-descriptor.ts`).
     this.armFrameDescriptor(pc);
     const offer = await pc.createOffer();
+    // Torn down while the offer was being made: nothing is sent.
+    if (this.pc !== pc) return;
     await pc.setLocalDescription(offer);
+    if (this.pc !== pc) return;
     if (offer.sdp === undefined) {
       throw new Error("createOffer produced no SDP body");
     }
@@ -2044,6 +2202,9 @@ export class SfuCallSession {
         // A malformed relay payload is dropped, not fatal.
         return;
       }
+      // Hung up while the module resolved: a relay is not delivered to a
+      // call that is over.
+      if (this.isOver()) return;
       // Classify: consume a MediaState signal (camera-off-cleanup); everything
       // else passes through to onSignalRelay unchanged.
       if (mediaCb !== undefined) {
@@ -2271,6 +2432,12 @@ export class SfuCallSession {
   private setState(state: SfuCallState): void {
     this.state = state;
     this.callbacks.onStateChange?.(state);
+    if (state === "closed" || state === "failed") {
+      // Whatever was awaiting a step of this session is told it is over.
+      const listeners = [...this.overListeners];
+      this.overListeners.clear();
+      for (const listener of listeners) listener();
+    }
   }
 
   private fail(reason: string, err?: unknown): void {

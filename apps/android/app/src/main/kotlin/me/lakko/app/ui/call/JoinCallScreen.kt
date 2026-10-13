@@ -583,6 +583,7 @@ internal suspend fun decodeCallLink(slug: String, secrets: IdentitySecrets?): Ca
             }
         }
     } catch (e: Throwable) {
+        me.lakko.app.rethrowIfCancelled(e)
         Log.w("JoinCall", "decode/verify failed", e)
         CallLinkDecode.Invalid
     }

@@ -145,6 +145,7 @@ public fun RestoreViaDevicePanel(
                                     }
                                 }
                             } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
                                 ui = RestoreViaDeviceUi.Error(deviceRestoreErrorText(cause))
                             } finally {
                                 session?.dispose()

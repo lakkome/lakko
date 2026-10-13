@@ -612,9 +612,12 @@ class SfuCallSession(
         try {
             sig.connect()
         } catch (e: Throwable) {
-            fail()
+            if (startAbandoned(e)) return
             throw e
         }
+        // Hung up (or failed) while the socket was opening: nothing more of
+        // this call may start. [hangUp] has closed the socket.
+        if (leftWhileStarting()) return
 
         // Signaling is open: start the keepalive on BOTH paths (a deferred
         // publisher sits signaling-only for a while and must notice a dead
@@ -636,9 +639,45 @@ class SfuCallSession(
         try {
             openPeerConnectionAndPublish()
         } catch (e: Throwable) {
-            fail()
+            if (startAbandoned(e)) return
             throw e
         }
+    }
+
+    /** The session was hung up or has failed: nothing of it may start. */
+    private fun isOver(): Boolean = state == State.CLOSED || state == State.FAILED
+
+    /**
+     * After a suspension of [connect] / [publish]: `true` when the person
+     * left meanwhile ([hangUp] ran, which released everything; the start just
+     * stops, and that is not a failure). Throws when the session failed
+     * meanwhile, so the caller of the start hears of it as before.
+     *
+     * Without this check a start that was waiting for the socket, for the
+     * TURN credential or for the offer went on after the call was over:
+     * it opened a peer connection, the microphone track and the camera, and
+     * nothing was left to close them.
+     */
+    private fun leftWhileStarting(): Boolean = when (state) {
+        State.CLOSED -> true
+        State.FAILED -> throw SfuCallException("the call ended while it was starting")
+        else -> false
+    }
+
+    /**
+     * A start threw [e]. Returns `true` when that is not a failure to report:
+     * the person hung up while it ran (the step that threw was cut short by
+     * [hangUp]'s teardown). A cancelled start is torn down as a hang-up, not
+     * marked failed, and the cancellation is passed on. Anything else fails
+     * the session and returns `false`: the caller rethrows.
+     */
+    private suspend fun startAbandoned(e: Throwable): Boolean {
+        // Asked first: closing the socket under a pending upgrade surfaces as
+        // a cancellation of that request, which is not this coroutine's.
+        if (state == State.CLOSED) return true
+        me.lakko.app.rethrowIfCancelled(e) { hangUp() }
+        fail()
+        return false
     }
 
     /**
@@ -654,6 +693,9 @@ class SfuCallSession(
      */
     suspend fun publish(seed: ByteArray? = null, localLeaf: Int? = null) {
         if (pc != null) return
+        // A call that is over publishes nothing: the Welcome that brought the
+        // seed may be handled after the person pressed End.
+        if (isOver()) return
         if (seed != null) activeSeed = seed
         if (localLeaf != null) publishLeaf = localLeaf
         if (activeSeed == null) {
@@ -665,7 +707,7 @@ class SfuCallSession(
         try {
             openPeerConnectionAndPublish()
         } catch (e: Throwable) {
-            fail()
+            if (startAbandoned(e)) return
             throw e
         }
     }
@@ -802,11 +844,15 @@ class SfuCallSession(
             ?: throw SfuCallException(
                 "no SFrame seed — refusing to publish media (invariant #4)",
             )
+        val iceServers = resolveIceServers()
+        // The credential fetch is a network round trip. Left meanwhile:
+        // nothing is opened (no connection, no microphone track, no camera).
+        if (leftWhileStarting()) return
         val connection = WebRtcPeerConnection(
             applicationContext = applicationContext,
-            iceServers = resolveIceServers(),
+            iceServers = iceServers,
         )
-        connection.installDelegate(peerDelegate())
+        connection.installDelegate(peerDelegate(connection))
         pc = connection
         startMediaCounters(connection)
 
@@ -832,6 +878,12 @@ class SfuCallSession(
         // first answer clears `makingOffer` + arms renegotiation.
         makingOffer = true
         val offer = connection.createOffer(audio = config.audio, video = config.video)
+        // Left while the offer was built: [hangUp] closed this connection and
+        // released the camera; the offer goes nowhere.
+        if (pc !== connection) {
+            leftWhileStarting()
+            return
+        }
         sendOffer(connection, offer)
         // The SFU has media state for this peer from this offer on: tell it
         // what this device shows of everyone.
@@ -949,7 +1001,13 @@ class SfuCallSession(
         val capture = localCameraCapture ?: return
         val target = cameraName ?: CameraVideoCapture.defaultCameraName(applicationContext) ?: return
         capture.switchTo(target) { switched, isFrontFacing ->
-            if (switched) scope.launch { callbacks.onCameraFacing(isFrontFacing) }
+            // Reported from the camera thread, possibly after the call ended:
+            // only the capture still in use says which way it faces.
+            if (switched) {
+                scope.launch {
+                    if (localCameraCapture === capture) callbacks.onCameraFacing(isFrontFacing)
+                }
+            }
         }
     }
 
@@ -1163,9 +1221,13 @@ class SfuCallSession(
         makingOffer = true
         try {
             val offer = connection.createRenegotiationOffer()
+            // The call ended while the offer was built: [hangUp] reset the
+            // negotiation flags, and they stay reset.
+            if (pc !== connection) return
             sendOffer(connection, offer)
             // makingOffer stays true until applyRemoteAnswer clears it.
         } catch (e: Throwable) {
+            if (pc !== connection) return
             makingOffer = false
             android.util.Log.w("SfuCallSession", "renegotiation offer failed", e)
             // A failed renegotiation leaves the call up as-is; the local
@@ -1415,6 +1477,9 @@ class SfuCallSession(
                     return
                 }
                 scope.launch {
+                    // Handled after the call ended: a relay of a call that is
+                    // over (a late Welcome above all) starts nothing.
+                    if (isOver()) return@launch
                     // camera-off-cleanup — classify the opaque relay payload.
                     // A camera on/off media-state signal fires the typed
                     // [Callbacks.onRemoteMediaState] (so the receiver flips this
@@ -1478,6 +1543,9 @@ class SfuCallSession(
             fail()
             return
         }
+        // The call ended while the answer was applied: its negotiation state
+        // was reset by [hangUp] and nothing of it is driven further.
+        if (pc !== connection) return
         // The senders' codecs are negotiated now: their SFrame encryptors need
         // them to leave the right codec header in the clear (ADR-0071).
         connection.syncSenderCodecs()
@@ -1511,6 +1579,7 @@ class SfuCallSession(
                 val sig = signaling ?: break
                 try {
                     val answer = connection.createAnswer(sdp)
+                    if (pc !== connection) break
                     sig.sendSdpAnswer(answer)
                     // A renegotiation can change what a sender sends as
                     // (ADR-0071) and reset an encoding's flag.
@@ -1538,17 +1607,24 @@ class SfuCallSession(
 
     // ---- Peer connection delegate -----------------------------------
 
-    private fun peerDelegate(): WebRtcPeerConnection.Delegate =
+    /**
+     * The delegate of [connection]. libwebrtc calls it on its own threads and
+     * the reports hop to [scope], so one can be handled after [hangUp] closed
+     * the connection: it then belongs to no call and is dropped, rather than
+     * handed to the call screen (which several calls share) with a track that
+     * has been disposed.
+     */
+    private fun peerDelegate(connection: WebRtcPeerConnection): WebRtcPeerConnection.Delegate =
         WebRtcPeerConnection.Delegate(
             onLocalCandidate = { _, _, candidateSdp ->
                 // trySend is thread-safe + order-preserving; no hop needed.
                 signaling?.sendIceCandidate(candidateSdp)
             },
             onConnectionState = { rtcState ->
-                scope.launch { onConnectionState(rtcState) }
+                scope.launch { if (pc === connection) onConnectionState(rtcState) }
             },
             onRemoteVideoTrack = { track, streamId ->
-                scope.launch { callbacks.onRemoteVideoTrack(track, streamId) }
+                scope.launch { if (pc === connection) callbacks.onRemoteVideoTrack(track, streamId) }
             },
             onRemoteReceiver = { receiver: RtpReceiver, _ ->
                 // Arm the SFrame decryptor on every incoming track

@@ -318,6 +318,9 @@ public fun NewChannelScreen(
                             } catch (e: LegacyChannelException) {
                                 throw e
                             } catch (e: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(e) {
+                                    busy = false
+                                }
                                 Log.w(TAG, "channel journal claim did not land; not created", e)
                                 // The claim is a DS request; whatever refused it, the
                                 // person can only check the connection and retry.
@@ -401,12 +404,14 @@ public fun NewChannelScreen(
                                     updatedAtMs = System.currentTimeMillis().toULong(),
                                 )
                             } catch (e: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(e)
                                 Log.w(TAG, "channel record not posted at creation", e)
                             }
                             onCreated(id)
                         } catch (e: LegacyChannelException) {
                             error = e.text
                         } catch (e: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(e)
                             Log.w(TAG, "create channel failed", e)
                             error = channelsErrorText(e, "channels.new.error.create")
                         } finally {
@@ -714,6 +719,7 @@ private fun OwnerChannelView(
                 }
             }
         } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
             Log.w(TAG, "fetch posts failed", e)
             loadError = channelsErrorText(e, "channels.posts.error.load")
         } finally {
@@ -772,6 +778,7 @@ private fun OwnerChannelView(
                         me.lakko.app.feed.requestChannelPostSync()
                         refresh()
                     } catch (e: Throwable) {
+                        me.lakko.app.rethrowIfCancelled(e)
                         Log.w(TAG, "publish failed", e)
                         publishError = channelsErrorText(
                             e,
@@ -1422,6 +1429,7 @@ private fun SubscriberChannelView(
                 }
             }
         } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
             Log.w(TAG, "subscribe failed", e)
             // ADR-0059 section 4 — a used-up `channel-subscribe` allowance has
             // its own line (docs/ux/feed.md section 7).
@@ -1560,6 +1568,7 @@ public fun ChannelManageScreen(
             }
             pubGroup = opened
         } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
             Log.w(TAG, "open publisher group failed", e)
             openError = LegacyChannelV1.describeText(e) { UiText("channels.manage.error.open") }
         }
@@ -1581,6 +1590,7 @@ public fun ChannelManageScreen(
             state.setKeys(channelId, current.copy(seed = seed))
             state.setEpoch(channelId, client.fetchEpoch(channelId))
         } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
             Log.w(TAG, "publisher key refresh failed", e)
         }
     }
@@ -1737,6 +1747,7 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
                         Log.w(TAG, "channel record refused: ${e.message}")
                         error = channelMetaErrorText(e.message)
                     } catch (e: Throwable) {
+                        me.lakko.app.rethrowIfCancelled(e)
                         Log.w(TAG, "channel record not posted", e)
                         error = channelsErrorText(
                             e,
@@ -1895,6 +1906,7 @@ private fun CoPublishersCard(
                                 CoPublisher.createCoPublisherLink(id, pg)
                             }
                         } catch (e: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(e)
                             Log.w(TAG, "create co-publisher link failed", e)
                             error = UiText("chat.error.create_link")
                         } finally {
@@ -1943,6 +1955,7 @@ private fun CoPublishersCard(
                                         CoPublisher.pending(pg)
                                     }
                                 } catch (e: Throwable) {
+                                    me.lakko.app.rethrowIfCancelled(e)
                                     Log.w(TAG, "reject failed", e)
                                     error = UiText("channels.copublishers.error.reject")
                                 }
@@ -1969,6 +1982,7 @@ private fun CoPublishersCard(
                                     }
                                     afterApprove()
                                 } catch (e: Throwable) {
+                                    me.lakko.app.rethrowIfCancelled(e)
                                     Log.w(TAG, "approve failed", e)
                                     error = channelsErrorText(e, "channels.copublishers.error.approve")
                                 } finally {
@@ -2109,6 +2123,7 @@ private fun KeysCard(
                             afterRotate()
                         }
                     } catch (e: Throwable) {
+                        me.lakko.app.rethrowIfCancelled(e)
                         Log.w(TAG, "rotate now failed", e)
                         error = UiText("channels.rotation.error.refresh")
                     } finally {
@@ -2259,6 +2274,7 @@ public fun JoinCoPublisherScreen(
                     } catch (e: LegacyChannelException) {
                         error = e.text
                     } catch (e: Throwable) {
+                        me.lakko.app.rethrowIfCancelled(e)
                         // The raw cause goes to the log; the person reads
                         // one of the join screen's fixed sentences (the
                         // "isn't taking requests yet" one when the owner

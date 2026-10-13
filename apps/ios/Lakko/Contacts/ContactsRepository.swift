@@ -331,13 +331,11 @@ public final class ContactsRepository: ObservableObject {
     /// `true` when `error` is a cancellation of the poll itself rather than
     /// a failure of it: Swift's `CancellationError`, a `URLError.cancelled`,
     /// or a `DsClientError.network` wrapping one.
+    ///
+    /// The rule itself is ``Cancellation/isCancellation(_:)``, shared by every
+    /// screen; this name is kept for the inbox poll and its tests.
     static func isCancellation(_ error: Error) -> Bool {
-        if error is CancellationError { return true }
-        if let url = error as? URLError, url.code == .cancelled { return true }
-        if case .network(_, let underlying) = error as? DsClientError {
-            return isCancellation(underlying)
-        }
-        return false
+        Cancellation.isCancellation(error)
     }
 
     /// The catalog key (ADR-0061) for a Welcome this device could not join.

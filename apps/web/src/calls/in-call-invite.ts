@@ -195,3 +195,29 @@ export async function copyCallLink(
   }
   return { kind: "shown" };
 }
+
+/** What becomes of a link once its mint has finished. */
+export type MintedInviteFate =
+  /** The call it was minted for still holds the slot. */
+  | "show"
+  /** No call holds the slot: the line goes back to idle. */
+  | "call-over"
+  /** Another call holds the slot: nothing of this link is shown on it. */
+  | "another-call";
+
+/**
+ * A mint takes a round trip, and the call it was started for can end during
+ * it and be followed by another. Asking only "does some link call hold the
+ * slot" then shows the first call's link on the second, where anyone it is
+ * sent to joins a call that is over. So the call id read before the mint is
+ * compared with the one in the slot after it.
+ */
+export function mintedInviteFate(input: {
+  /** The call the mint was started for. */
+  readonly mintedForCallIdHex: string;
+  /** The link call holding the slot now, or `null` for none. */
+  readonly slotCallIdHex: string | null;
+}): MintedInviteFate {
+  if (input.slotCallIdHex === null) return "call-over";
+  return input.slotCallIdHex === input.mintedForCallIdHex ? "show" : "another-call";
+}

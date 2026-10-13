@@ -508,6 +508,10 @@ final class GroupCallHostTests: XCTestCase {
         /// finish / started so far.
         var noticeTicks = 0
         var noticeSleeps = 0
+        /// While set, a publish does not finish (a slow Delivery Service).
+        var publishHeld = false
+        /// Publishes that have been asked for so far, finished or not.
+        var publishesAsked = 0
         /// The seed a given epoch derives, so a rekey is checkable.
         static func seed(_ epoch: UInt64?) -> Data {
             Data(repeating: UInt8(truncatingIfNeeded: epoch ?? 0), count: 32)
@@ -561,6 +565,8 @@ final class GroupCallHostTests: XCTestCase {
                 return true
             },
             publish: { _, bytes in
+                h.publishesAsked += 1
+                while h.publishHeld { try? await Task.sleep(nanoseconds: 2_000_000) }
                 if let body = try? parseCallSignaling(plaintext: bytes) { h.published.append(body) }
                 return true
             },
@@ -838,6 +844,28 @@ final class GroupCallHostTests: XCTestCase {
         if case .end(_, let reason)? = h.published.last {
             XCTAssertEqual(reason, .error)
         }
+    }
+
+    /// A start left while its announcement was still being published must not
+    /// leave the group with a call nobody is in: the Start is taken back, and
+    /// no session is opened for the call the person left.
+    func testAStartLeftWhileItIsAnnouncedTakesTheAnnouncementBack() async throws {
+        let h = Harness()
+        h.nowMs = t0
+        h.publishHeld = true
+        let host = makeHost(h)
+        host.start(groupIdHex: group, video: false, joinCallId: nil)
+        XCTAssertTrue(host.occupiesSlot)
+        // Let the start reach its (held) announcement, then leave.
+        try await waitUntil { h.publishesAsked == 1 }
+        host.leave(hungUp: true)
+        XCTAssertFalse(host.occupiesSlot)
+        h.publishHeld = false
+        try await waitUntil { self.kinds(h.published).last == "end" }
+        XCTAssertEqual(kinds(h.published), ["start", "end"])
+        XCTAssertTrue(h.handles.isEmpty, "no session for a call the person left")
+        XCTAssertNil(host.presentation)
+        XCTAssertNil(host.callError, "leaving is not a failed start")
     }
 
     // MARK: Alone in the call (docs/ux/calls.md section 4.3)
@@ -1134,6 +1162,8 @@ final class LinkCallHostTests: XCTestCase {
         /// Hang-ups of every earlier session at the moment each new one was
         /// built.
         var earlierHangUpsAtStart: [[Int]] = []
+        /// While set, `startCall` does not return (a slow JWT mint or SFU).
+        var startHeld = false
     }
 
     private func makeHost(_ h: Harness) -> LinkCallHost {
@@ -1144,6 +1174,7 @@ final class LinkCallHostTests: XCTestCase {
             cameraGranted: { _ in true },
             startCall: { request, _, _, _, _, callbacks in
                 h.callbacks.append(callbacks)
+                while h.startHeld { try? await Task.sleep(nanoseconds: 2_000_000) }
                 if let error = h.startError { throw error }
                 if request.isOwner || h.joinedDuringStart { callbacks.onJoined?() }
                 h.earlierHangUpsAtStart.append(h.handles.map(\.hangUps))
@@ -1178,6 +1209,63 @@ final class LinkCallHostTests: XCTestCase {
             mediaVideo: false,
             isOwner: owner
         )
+    }
+
+    // MARK: - A start that is left or superseded while it is in flight
+
+    /// The person left while the call was starting, and the start then
+    /// failed: that is not their failed call, so nothing is reported for it.
+    func testAStartLeftBeforeItFailedIsNotReportedAsAFailure() async throws {
+        let h = Harness()
+        h.startHeld = true
+        h.startError = LinkCallHostError.identityUnavailable
+        let host = makeHost(h)
+        let start = Task { @MainActor in await host.start(self.request(0x0A, owner: false)) }
+        try await waitUntil { h.callbacks.count == 1 }
+        host.leave()
+        h.startHeld = false
+        let outcome = await start.value
+        XCTAssertEqual(outcome, .started, "an abandoned start reports no failure")
+        XCTAssertNil(host.slot, "and writes nothing into the slot the person freed")
+    }
+
+    /// The control: the same failure for a start nobody left is reported.
+    func testAStartThatFailsWhileStillWantedIsReported() async throws {
+        let h = Harness()
+        h.startError = LinkCallHostError.identityUnavailable
+        let host = makeHost(h)
+        let outcome = await host.start(request(0x0A, owner: false))
+        guard case .failed = outcome else { return XCTFail("a wanted start that failed says so") }
+        XCTAssertEqual(host.slot?.phase, .error)
+    }
+
+    /// A call that ended keeps its screen for the "Call ended" overlay. A new
+    /// call started over it gets its own screen and its own `Invite`: the old
+    /// screen is never shown with the new call's link.
+    func testANewCallReplacesTheScreenOfTheCallThatEnded() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = await host.start(request(0x0A, owner: true))
+        let firstUi = try XCTUnwrap(host.presentation)
+        let firstId = host.presentationId
+        let firstInvite = try XCTUnwrap(host.invite)
+        h.callbacks[0].onEnded?()
+        XCTAssertEqual(host.slot?.phase, .ended)
+        XCTAssertTrue(host.presentation === firstUi, "the ended call keeps its screen")
+
+        _ = await host.start(request(0x0B, owner: true))
+        XCTAssertEqual(host.slot?.phase, .live)
+        let secondUi = try XCTUnwrap(host.presentation)
+        XCTAssertFalse(secondUi === firstUi, "the new call is presented on its own screen")
+        XCTAssertNotEqual(host.presentationId, firstId)
+        XCTAssertEqual(host.presentationId, host.slot?.callIdHex)
+        let secondInvite = try XCTUnwrap(host.invite)
+        XCTAssertFalse(secondInvite === firstInvite)
+
+        // A link made for the first call stays the first call's.
+        await firstInvite.copyLink()
+        XCTAssertEqual(h.minted, [Data(repeating: 0x0A, count: 16)])
+        XCTAssertEqual(secondInvite.state, .idle, "nothing of it shows on the new call")
     }
 
     // MARK: - New call (`docs/ux/call-links.md` section 2)

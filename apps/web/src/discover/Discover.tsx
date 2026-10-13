@@ -16,7 +16,7 @@
  */
 
 import { createMemo, createSignal, For, onMount, Show, type Accessor, type JSX } from "solid-js";
-import { useNavigate } from "@solidjs/router";
+import { useLocation, useNavigate } from "@solidjs/router";
 
 import { cardsWithoutHidden } from "../feed/feed-marks";
 import { useAuth } from "../auth/AuthContext";
@@ -47,6 +47,7 @@ import {
   loadDiscoverPrefs,
   MAX_NOT_INTERESTED,
   saveDiscoverPrefs,
+  withRefreshOutcome,
   type CachedBucket,
   type DiscoverPrefs,
 } from "./discover-store";
@@ -55,6 +56,7 @@ import { topicLabel } from "./topic-names";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { aggregateShared, type SharedChannelsRow } from "./shared-channels";
+import { screenAnchor } from "../ui/screen-anchor";
 
 // ----- Copy (UX spec sections 6 and 7) ---------------------------------------
 
@@ -160,6 +162,7 @@ export interface DiscoverModel {
 export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
   const auth = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [prefs, setPrefs] = createSignal<DiscoverPrefs>(defaultDiscoverPrefs());
   const [loaded, setLoaded] = createSignal(false);
   const [wasm, setWasm] = createSignal<Wasm | null>(null);
@@ -208,10 +211,22 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
     })();
   });
 
+  /** A forced refresh (new picks) asked while one was running. */
+  let forcedAgain = false;
+
   async function refresh(force = false): Promise<void> {
     const w = wasm();
     const p = prefs();
-    if (w === null || refreshing() || p.topics.length === 0) return;
+    if (refreshing()) {
+      // The run in flight was planned from the picks it started with; picks
+      // saved since need a run of their own, which follows it.
+      if (force) forcedAgain = true;
+      return;
+    }
+    if (w === null || p.topics.length === 0) return;
+    // Whose preferences these are. `persist` writes under the account that is
+    // signed in when it runs.
+    const startedFor = account();
     const lang = language();
     const now = Date.now();
     const key = pickedKey(p.topics, lang);
@@ -237,9 +252,10 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
           if (picked.has(topic)) buckets[bucketKey(topic, lang)] = { fetchedAtMs: now, items: r.value };
         });
       }
+      if (account() !== startedFor) return;
       if (asked > 0 && failures === asked) {
         setUnavailable(true);
-        await persist({ ...p, decoys: draw });
+        await persist(withRefreshOutcome(prefs(), { decoys: draw }));
         return;
       }
       setUnavailable(false);
@@ -249,9 +265,20 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
         const old = p.buckets[k];
         if (buckets[k] === undefined && old !== undefined) buckets[k] = old;
       }
-      await persist({ ...p, decoys: draw, buckets, lastRefreshMs: now, lastFetchedKey: key });
+      // Into the preferences as they are now, not as they were when the
+      // requests went out (`withRefreshOutcome`).
+      await persist(
+        withRefreshOutcome(prefs(), {
+          decoys: draw,
+          fetched: { buckets, lastRefreshMs: now, lastFetchedKey: key },
+        }),
+      );
     } finally {
       setRefreshing(false);
+      if (forcedAgain) {
+        forcedAgain = false;
+        if (account() === startedFor) void refresh(true);
+      }
     }
   }
 
@@ -318,8 +345,13 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
     return rankCards(cardsWithoutHidden([...fromBuckets, ...groupCards()], hidden), ctx());
   });
 
+  /** Bumped by every search and by clearing it: only the newest request may
+   *  put its answer on screen. */
+  let searchSeq = 0;
+
   async function runSearch(query: string): Promise<void> {
     const q = query.trim();
+    const mine = ++searchSeq;
     if (q.length < 2) {
       setSearch({ kind: "error", message: COPY.searchTooShort });
       return;
@@ -327,6 +359,8 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
     setSearch({ kind: "busy" });
     try {
       const items = await searchDirectory(q.slice(0, 64));
+      // Cleared, or searched again, while this one was out.
+      if (mine !== searchSeq) return;
       const w = wasmOrThrow();
       const found = rankCards(cardsFromItems(items, "search", (x) => decodeListingB64(w, x)), {
         ...ctx(),
@@ -335,6 +369,7 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
       });
       setSearch({ kind: "done", query: q, cards: found });
     } catch (err) {
+      if (mine !== searchSeq) return;
       setSearch({ kind: "error", message: () => searchErrorText(err) });
     }
   }
@@ -358,6 +393,9 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
 
   async function subscribe(card: DirectoryCard): Promise<void> {
     setNotice(null);
+    // The handle check is a network round trip; a person who went elsewhere
+    // meanwhile is not sent to the channel (`ui/screen-anchor.ts`).
+    const here = screenAnchor(location);
     let resolved: string | null;
     try {
       resolved = await resolveChannelHandle(card.handle);
@@ -372,6 +410,7 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
       return;
     }
     setVerified(new Set([...verified(), card.channelIdHex]));
+    if (!here()) return;
     navigate(paths.channelSubscribe(card.channelIdHex), { state: { handle: card.handle } });
   }
 
@@ -406,7 +445,10 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
     },
     refresh,
     runSearch,
-    clearSearch: () => setSearch({ kind: "idle" }),
+    clearSearch: () => {
+      searchSeq += 1;
+      setSearch({ kind: "idle" });
+    },
     openCard,
     subscribe,
     relation: (id) =>

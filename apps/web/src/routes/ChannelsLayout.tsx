@@ -27,6 +27,7 @@ import type { ChannelHandle } from "../channels/api";
 import { channelsState } from "../state/channels-state";
 import { Icon } from "../ui/icons";
 import { paths } from "./paths";
+import { screenAnchor } from "../ui/screen-anchor";
 
 export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
   const params = useParams<{ id?: string }>();
@@ -97,8 +98,13 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
     if (raw.length === 0) return;
     setFindBusy(true);
     setFindError(null);
+    // A lookup is a network round trip. A person who opened another channel
+    // or left the section meanwhile keeps what they chose
+    // (`ui/screen-anchor.ts`).
+    const here = screenAnchor(location);
     try {
       const idHex = await resolveChannelIdOrHandle(raw);
+      if (!here()) return;
       if (idHex === null) {
         const handle = atHandle(raw);
         setFindError(() => t("channels.find.none", { handle }));

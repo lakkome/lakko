@@ -11,6 +11,7 @@ import {
   inviteBusy,
   inviteStatusHoldMs,
   inviteStatusLine,
+  mintedInviteFate,
   mintedInviteUrl,
   nextInvitePress,
 } from "./in-call-invite";
@@ -139,5 +140,19 @@ describe("copyCallLink", () => {
         throw new Error("denied");
       }),
     ).toEqual({ kind: "shown" });
+  });
+});
+
+describe("mintedInviteFate", () => {
+  it("the call the mint was started for still holds the slot: the link is shown", () => {
+    expect(mintedInviteFate({ mintedForCallIdHex: "aa", slotCallIdHex: "aa" })).toBe("show");
+  });
+
+  it("the call ended during the mint: the line goes back to idle", () => {
+    expect(mintedInviteFate({ mintedForCallIdHex: "aa", slotCallIdHex: null })).toBe("call-over");
+  });
+
+  it("the call ended and another started during the mint: the first call's link is not shown on the second", () => {
+    expect(mintedInviteFate({ mintedForCallIdHex: "aa", slotCallIdHex: "bb" })).toBe("another-call");
   });
 });

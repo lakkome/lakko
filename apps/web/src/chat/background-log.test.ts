@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   appendToGroupSlot,
+  ClosedViewBaseline,
   eventToPersistedMessage,
+  mergeClosedViewSlot,
   mergeForegroundSlot,
   summarizeGroupSlot,
 } from "./background-log";
@@ -249,5 +251,79 @@ describe("eventToPersistedMessage", () => {
       attachments: [],
       createdAt: "t",
     });
+  });
+});
+
+describe("mergeClosedViewSlot (a closed view's late write)", () => {
+  it("adds an own send that completed after the view closed", () => {
+    const slot: PersistedGroup = { cursor: "3", messages: [msg(1), msg(3)], lastViewedMessageId: "3" };
+    const next = mergeClosedViewSlot(slot, [msg(4, "outgoing")], 3);
+    expect(next.messages.map((m) => m.messageId)).toEqual(["1", "3", "4"]);
+  });
+
+  it("keeps a row the background receive filed below the late send", () => {
+    // The view closed at 3; the background receive filed 5; the send that was
+    // in flight came back as 6. The view never held 5 and must not erase it,
+    // which is what its ordinary merge would do.
+    const slot: PersistedGroup = { cursor: "5", messages: [msg(3), msg(5)] };
+    const next = mergeClosedViewSlot(slot, [msg(6, "outgoing")], 3);
+    expect(next.messages.map((m) => m.messageId)).toEqual(["3", "5", "6"]);
+    expect(mergeForegroundSlot(slot, { messages: [msg(3), msg(6, "outgoing")], cursor: 3 })
+      .messages.map((m) => m.messageId)).toEqual(["3", "6"]);
+  });
+
+  it("replaces the stored row an edit changed, and only that row", () => {
+    const slot: PersistedGroup = { cursor: "4", messages: [msg(2), msg(4, "outgoing", "before")] };
+    const next = mergeClosedViewSlot(slot, [{ ...msg(4, "outgoing", "after"), edited: true }], 4);
+    expect(next.messages.map((m) => m.text)).toEqual(["m2", "after"]);
+    expect(next.messages[0]).toBe(slot.messages[0]);
+  });
+
+  it("does not mark anything as viewed: nobody is looking", () => {
+    const slot: PersistedGroup = { cursor: "3", messages: [msg(3)], lastViewedMessageId: "3" };
+    const next = mergeClosedViewSlot(slot, [msg(7)], 7);
+    expect(next.lastViewedMessageId).toBe("3");
+    expect(summarizeGroupSlot(next, null).unread).toBe(1);
+    expect(mergeClosedViewSlot(undefined, [msg(7)], 7).lastViewedMessageId).toBeUndefined();
+  });
+
+  it("never moves the cursor backward, and keeps the slot's other fields", () => {
+    const slot: PersistedGroup = { cursor: "9", messages: [], feedSeen: ["8"] };
+    const next = mergeClosedViewSlot(slot, [], 2);
+    expect(next.cursor).toBe("9");
+    expect(next.feedSeen).toEqual(["8"]);
+    expect(mergeClosedViewSlot(slot, [], 12).cursor).toBe("12");
+  });
+
+  it("writes a row named twice once, in its last form", () => {
+    const next = mergeClosedViewSlot(undefined, [msg(2, "outgoing", "a"), msg(2, "outgoing", "b")], 2);
+    expect(next.messages.map((m) => m.text)).toEqual(["b"]);
+  });
+});
+
+describe("ClosedViewBaseline", () => {
+  it("reports nothing for the rows the view held when it closed", () => {
+    const b = new ClosedViewBaseline([msg(1), msg(2)], 2);
+    // Re-derived objects, same content.
+    expect(b.changed([msg(1), msg(2)])).toEqual([]);
+    expect(b.cursorAdvanced(2)).toBe(false);
+  });
+
+  it("reports a new row and a changed row, and not the untouched ones", () => {
+    const b = new ClosedViewBaseline([msg(1), msg(2)], 2);
+    const changed = b.changed([msg(1), msg(2, "incoming", "edited"), msg(3, "outgoing")]);
+    expect(changed.map((m) => m.messageId)).toEqual(["2", "3"]);
+  });
+
+  it("stops reporting a row once its write was accepted, and reports it again on failure", () => {
+    const b = new ClosedViewBaseline([], 0);
+    const rows = [msg(5, "outgoing")];
+    // Not accepted (the write failed): still owed.
+    expect(b.changed(rows)).toHaveLength(1);
+    expect(b.changed(rows)).toHaveLength(1);
+    b.accept(rows, 5);
+    expect(b.changed(rows)).toEqual([]);
+    expect(b.cursorAdvanced(5)).toBe(false);
+    expect(b.cursorAdvanced(6)).toBe(true);
   });
 });

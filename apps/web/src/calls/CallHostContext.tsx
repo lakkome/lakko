@@ -101,6 +101,7 @@ import {
 import {
   INVITE_IDLE,
   copyCallLink,
+  mintedInviteFate,
   mintedInviteUrl,
   inviteBusy as inviteIsBusy,
   inviteStatusHoldMs,
@@ -187,6 +188,7 @@ import {
   GROUP_CALL_ALONE_END_MS,
   decideGroupCallEpochChange,
   groupCallAloneAction,
+  groupCallStartAbandoned,
   planGroupCallLeave,
   selectGroupCallBanner,
   type GroupLeaveReason,
@@ -435,6 +437,9 @@ export type GroupCallStartOutcome =
   | { readonly kind: "busy"; readonly message: CallText }
   /** The call to join is no longer live. */
   | { readonly kind: "ended" }
+  /** The person left while the call was still connecting. Nothing failed
+   *  and nothing is said. */
+  | { readonly kind: "left" }
   | { readonly kind: "failed"; readonly message: CallText };
 
 const CallHostContext = createContext<CallHostApi>();
@@ -903,12 +908,22 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     ringWindowMs: number,
   ): CallSession {
     const session: CallSession = new CallSession(callId, {
+      // Each of these, like `onStateChange` below, is dropped unless it comes
+      // from the session that holds (or last held) the slot: a session that
+      // was replaced can still finish an await and report.
       onRemoteStream: (s) => {
+        if (slotSession !== session) return;
         setRemoteStream(s);
         watchRemoteVideo(s, setRemoteHasVideo);
       },
-      onLocalStream: (s) => setLocalStream(s),
-      onVideoPublishState: (s) => setVideoPublishState(s),
+      onLocalStream: (s) => {
+        if (slotSession !== session) return;
+        setLocalStream(s);
+      },
+      onVideoPublishState: (s) => {
+        if (slotSession !== session) return;
+        setVideoPublishState(s);
+      },
       onOutboundSignaling: publisherFor(groupIdB64),
       onStateChange: (s, reason) => {
         // Only the session that holds (or last held) the slot drives the UI; a
@@ -938,6 +953,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         }
       },
       onConnectionStats: (stats) => {
+        // Only for the live call: a sample read by a session that has ended
+        // would be written onto whatever call is current.
+        if (activeCall !== session) return;
         setConnStats(stats);
         callActions.setConnectionDetail({
           rttMs: stats.rttMs,
@@ -1211,6 +1229,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         videoDeviceId: callUi.settings().selectedVideoInput,
       });
     } catch (err) {
+      // A later call has the slot: this one was already over, and neither its
+      // failure nor its video flag belongs to the call that replaced it.
+      if (slotSession !== session) return;
       // `dial` drives the session to `done` on a capture / setup failure; make
       // sure the slot is free even if it threw before reporting a state.
       if (activeCall === session) {
@@ -1229,8 +1250,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (withVideo) setVideoCall(true);
     await call.accept();
     // Opting into video on accept drives the same mid-call camera-on path the
-    // caller uses (see the camera effect below).
-    if (withVideo) callActions.setCamera(true);
+    // caller uses (see the camera effect below). Only for the call that was
+    // accepted: it may have ended, or been replaced, while the answer was made.
+    if (withVideo && activeCall === call) callActions.setCamera(true);
   }
 
   async function decline(): Promise<void> {
@@ -1286,7 +1308,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const local = callUi.participants().find((p) => p.isLocal);
     if (local === undefined || activeCall === null) return;
     if (local.camOn) {
-      void activeCall.addLocalVideo().catch((err: unknown) => {
+      const call = activeCall;
+      void call.addLocalVideo().catch((err: unknown) => {
+        // The call ended, or another took its place, while the camera was
+        // starting: the failure is not the current call's to show.
+        if (activeCall !== call) return;
         const outcome = cameraStartFailure(err);
         setVideoCall(outcome.videoCall);
         callActions.setCamera(outcome.camOn);
@@ -1458,6 +1484,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     // One call at a time, app-wide: from here on a 1x1 offer from any chat is
     // answered busy, and the receive paths keep this group polled.
     setGroupSlot({ groupIdB64, callIdHex: hex, starting: true });
+    // The session this start builds, once it exists: what the outcome is
+    // read from when the start does not end connected.
+    let started: SfuCallUiHandle | null = null;
     try {
       const base = sfuBaseUrl();
       if (base === null) {
@@ -1607,6 +1636,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         turn.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
         return turn.fetchOrNull();
       });
+      started = handle;
       setGroupHandle(handle);
       setGroupSlot({ groupIdB64, callIdHex: hex, starting: false });
       // The awaits above (JWT mint, the Start publish — which itself runs under
@@ -1616,10 +1646,22 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       await handle.connect();
       return { kind: "connected" };
     } catch (err) {
+      // The person left while the session was connecting (`leaveGroupCall`
+      // took it out of the slot and hung it up): nothing failed, and the
+      // screens are told nothing.
+      if (
+        groupCallStartAbandoned({
+          sessionState: started?.session.getState() ?? null,
+          stillInSlot: started !== null && groupHandle() === started,
+        })
+      ) {
+        return { kind: "left" };
+      }
       // The SFU says the call ended before this device arrived
       // (`sfu-call-state.ts`): close the chat's record for everyone rather
       // than report a failure, since nothing failed on this side.
-      const endedByServer = groupHandle()?.session.callEndedByServer() === true;
+      const endedByServer =
+        (started ?? groupHandle())?.session.callEndedByServer() === true;
       await leaveGroupCall("error");
       if (endedByServer) {
         await endGroupCallRecord(groupIdB64, hex, callId);
@@ -2075,6 +2117,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (local === undefined || h === null) return;
     if (local.camOn) {
       void h.publishVideo().catch((err: unknown) => {
+        // Left, or replaced by another call, while the camera was starting.
+        if (untrack(groupHandle) !== h) return;
         callActions.setCamera(false);
         // eslint-disable-next-line no-console
         console.warn("could not start the camera", err);
@@ -2240,10 +2284,15 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       onEnded: () => applyLinkEvent(attempt, { kind: "ended" }),
       onNoCommitter: () => applyLinkEvent(attempt, { kind: "no-committer" }),
       onError: (err: unknown) => {
+        // An attempt the person already left has nothing to report.
+        if (linkAttempt !== attempt) return;
         // eslint-disable-next-line no-console
         console.warn("link call failed", err);
         applyLinkEvent(attempt, { kind: "error" }, callFailureReason(err));
       },
+      // The shared call store belongs to the attempt in the slot; an older
+      // one that finishes later writes nothing to it and is never started.
+      isCurrent: () => linkAttempt === attempt,
     };
 
     try {
@@ -2262,6 +2311,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       applyLinkEvent(attempt, { kind: "signaling-open", role: opts.isOwner ? "owner" : "joiner" });
       return { kind: "started" };
     } catch (err) {
+      // Left, or replaced, while the start was in flight: whatever the
+      // attempt ran into afterwards is not shown as a call that could not
+      // start. The same neutral outcome as the branch above.
+      if (linkAttempt !== attempt) return { kind: "started" };
       // eslint-disable-next-line no-console
       console.warn("link call could not start", err);
       const reason = callFailureReason(err);
@@ -2281,8 +2334,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
 
   /** Leave the link call: no outcome to show, the user chose it. */
   function leaveLinkCall(): void {
+    // Read before the slot is cleared: whether a link call holds the shared
+    // call store at all (this also runs at sign-out with none).
+    const slot = untrack(linkSlot);
+    const h = untrack(linkHandle);
+    const held = h !== null || (slot !== null && linkCallOccupiesSlot(slot.phase));
     linkAttempt = null;
-    const h = linkHandle();
     // `finally`, as in `releaseGroupSlot`: the writes below take the call
     // screen down, and the session is closed whatever it does on its way out.
     try {
@@ -2293,6 +2350,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       setInviteLineShown(false);
     } finally {
       h?.hangUp();
+      // The attempt is no longer current, so its `hangUp` leaves the store
+      // alone (`MultiJoinerCallOptions.isCurrent`); the store is put back
+      // here, now, by the call that held it. A session still being built
+      // when the person left is hung up when it arrives and by then writes
+      // nothing: the store may be a newer call's.
+      if (held) callActions.reset();
     }
   }
 
@@ -2373,13 +2436,26 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       showInvite({ kind: "failed", failure: "unavailable" });
       return null;
     }
-    // The call may have ended while the mint was in flight.
+    // The call may have ended while the mint was in flight, or ended and
+    // been followed by another: the link is the first call's and is never
+    // shown on the second.
     const after = untrack(linkSlot);
-    if (after === null || !linkCallOccupiesSlot(after.phase)) {
-      showInvite(INVITE_IDLE);
-      return null;
+    switch (
+      mintedInviteFate({
+        mintedForCallIdHex: slot.callIdHex,
+        slotCallIdHex:
+          after !== null && linkCallOccupiesSlot(after.phase) ? after.callIdHex : null,
+      })
+    ) {
+      case "show":
+        return url;
+      case "call-over":
+        showInvite(INVITE_IDLE);
+        return null;
+      case "another-call":
+        // The line and the state are the new call's: left as they are.
+        return null;
     }
-    return url;
   }
 
   /** `Copy link`: the link goes to the clipboard, and the line says so. */
@@ -2440,6 +2516,13 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
     const url = await linkForCall();
     if (url === null) throw new KeyedError("call.invite.send_failed");
+    const forCallIdHex = untrack(linkSlot)?.callIdHex ?? null;
+    // Whether the call the link was made for still holds the slot; asked
+    // after the send, before its outcome is written to the call's status.
+    const sameCall = (): boolean => {
+      const now = untrack(linkSlot);
+      return now !== null && linkCallOccupiesSlot(now.phase) && now.callIdHex === forCallIdHex;
+    };
     try {
       let entry = conversationWithContact({
         contact,
@@ -2470,12 +2553,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("call host: could not send the call invitation", err);
-      showInvite({ kind: "failed", failure: "not-sent", url });
+      if (sameCall()) showInvite({ kind: "failed", failure: "not-sent", url });
       throw new KeyedError("call.invite.send_failed");
     }
     // The picker stays open: several contacts can be invited one after
     // another, and it is closed by the person.
-    showInvite({ kind: "ready", url, delivery: { kind: "sent", name: target.name } });
+    if (sameCall()) {
+      showInvite({ kind: "ready", url, delivery: { kind: "sent", name: target.name } });
+    }
   }
 
   // The embedded in-call UI's End button moves the store to `ended`. A session
@@ -2514,6 +2599,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (local === undefined || h === null) return;
     if (local.camOn) {
       void h.publishVideo().catch((err: unknown) => {
+        // Left, or replaced by another call, while the camera was starting.
+        if (untrack(linkHandle) !== h) return;
         callActions.setCamera(false);
         // eslint-disable-next-line no-console
         console.warn("could not start the camera", err);
