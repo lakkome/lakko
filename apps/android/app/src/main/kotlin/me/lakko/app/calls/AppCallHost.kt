@@ -244,7 +244,7 @@ public object AppCallHost {
         video: Boolean = CALL_INVITE_LINK_MEDIA_VIDEO,
     ): LinkCallStartOutcome {
         val ownSignatureKey = try {
-            Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
+            me.lakko.app.auth.SessionSecretWipe.identity(accountIdentitySeed).use { it.signaturePublicKey() }
         } catch (error: Throwable) {
             android.util.Log.w("AppCallHost", "no live identity to start a call with", error)
             return LinkCallStartOutcome.Failed("no live identity")
@@ -595,7 +595,7 @@ internal class MultiJoinerLinkCallPort(
     ): LinkCallHandle {
         // The canonical identity for the call's lifetime; freed on hang-up.
         val identity = try {
-            Identity.fromSeed(request.accountIdentitySeed)
+            me.lakko.app.auth.SessionSecretWipe.identity(request.accountIdentitySeed)
         } catch (error: Throwable) {
             throw IllegalStateException("Re-authenticate to join this call (no live identity).", error)
         }
@@ -686,7 +686,7 @@ internal class MultiJoinerLinkCallPort(
      * is why this runs on the first `Invite` and not at the call's start.
      */
     override suspend fun mintInviteLink(callId: ByteArray, identity: CallInviteIdentity): String =
-        Identity.fromSeed(identity.accountIdentitySeed).use { own ->
+        me.lakko.app.auth.SessionSecretWipe.identity(identity.accountIdentitySeed).use { own ->
             val discovery = me.lakko.app.discovery.DiscoveryClient()
             discovery.setSessionToken(identity.sessionToken)
             discovery.use { client ->

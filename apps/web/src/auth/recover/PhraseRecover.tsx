@@ -12,6 +12,7 @@
  * and that surfaces as the same sentence as a wrong phrase: telling the two
  * apart would reveal the social-recovery layer to the server.
  */
+import { isAbandoned } from "../binding-epoch";
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { recoverErrorMessage, screenText } from "../auth-error-copy";
@@ -87,6 +88,8 @@ export function PhraseRecover(props: {
       setConfirm("");
       props.onDone();
     } catch (err) {
+      // Overtaken by another session on this device: nothing to report.
+      if (isAbandoned(err)) return;
       setError(recoverErrorMessage(err));
     } finally {
       setBusy(false);

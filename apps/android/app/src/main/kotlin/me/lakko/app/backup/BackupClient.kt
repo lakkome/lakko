@@ -350,7 +350,7 @@ public sealed interface GatedRestoreOutcome {
  *  identity-bearing operation uses. Helper so the auth-side bootstrap
  *  can skip threading the seed through the public surface. */
 public fun ed25519SeedFromIdentitySeed(identitySeed: ByteArray): ByteArray {
-    return Identity.fromSeed(identitySeed).use { it.ed25519Seed() }
+    return me.lakko.app.auth.SessionSecretWipe.identity(identitySeed).use { it.ed25519Seed() }
 }
 
 /**

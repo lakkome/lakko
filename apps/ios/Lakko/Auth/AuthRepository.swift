@@ -2602,9 +2602,10 @@ public final class AuthRepository: ObservableObject {
         //
         // The publish cannot be taken back. Signed out before it: stop there,
         // with the old identity still the published one. Once it HAS been
-        // published the flow goes on to the phrase screen whatever happened
-        // meanwhile: an identity whose phrase nobody was shown is the worse
-        // outcome (the web decision).
+        // published the flow goes on to the phrase screen even after a
+        // sign-out: an identity whose phrase nobody was shown is the worse
+        // outcome (the web decision). The one exception is another account
+        // signed in by then (``FreshIdentityLanding``).
         let bound = binding.capture()
         try await publishFreshIdentityBundle(
             accountId: pending.accountIdBytes,
@@ -2629,6 +2630,33 @@ public final class AuthRepository: ObservableObject {
             )
         } catch {
             NSLog("fresh-identity seed persist failed: \(error)")
+        }
+
+        switch FreshIdentityLanding.decide(
+            mintedFor: pending.accountIdB64,
+            bindingIsCurrent: bound.isCurrent,
+            signedIn: signedInAccountIdB64
+        ) {
+        case .showPhrase(let rebinds):
+            // After a sign-out the phrase screen binds the device to this
+            // account again: a sign-in still out from the signed-out state
+            // was overtaken by it.
+            if rebinds { binding.advance() }
+        case .keepForNextSignIn:
+            // Another account signed in while the publish was out. Its
+            // session and its screens are not this flow's: nothing of the
+            // state is touched. The phrase is kept under THIS account's own
+            // keys and marked owed, so this account's next sign-in on this
+            // device (warm, from the seed cached above) shows it before
+            // anything else (``restoreOwedSignupPhrase(accountIdB64:)``).
+            cacheBackupPhraseBestEffort(
+                accountIdB64: pending.accountIdB64,
+                phrase: phrase,
+                context: "mintFreshIdentity, another account signed in"
+            )
+            signupPhraseOwed.mark(accountIdB64: pending.accountIdB64)
+            NSLog("[auth] fresh identity published after another account signed in; its phrase is owed at that account's next sign-in")
+            throw StaleBindingError()
         }
 
         // Stash the completion + phrase; flip to the save-phrase state.
@@ -3497,6 +3525,28 @@ struct PendingFreshPhrase {
     let sessionExpiresAtMs: Int64
     let username: String
     let phrase: String
+}
+
+/// Where ``AuthRepository/mintFreshIdentity()`` goes once the fresh identity
+/// is published, which cannot be taken back.
+enum FreshIdentityLanding: Equatable {
+    /// Show the new phrase now. `rebinds` when the binding the mint started
+    /// under has ended (a sign-out, or the same account parked again): the
+    /// phrase screen then binds the device to the account anew.
+    case showPhrase(rebinds: Bool)
+    /// Another account is signed in: its session is left exactly as it is,
+    /// and the phrase is kept for the minting account's next sign-in.
+    case keepForNextSignIn
+
+    /// `signedIn` is ``AuthRepository/signedInAccountIdB64`` after the
+    /// publish returned.
+    static func decide(
+        mintedFor: String, bindingIsCurrent: Bool, signedIn: String?
+    ) -> FreshIdentityLanding {
+        if bindingIsCurrent { return .showPhrase(rebinds: false) }
+        if let signedIn, signedIn != mintedFor { return .keepForNextSignIn }
+        return .showPhrase(rebinds: true)
+    }
 }
 
 /// ADR-0018 factor (d) — the context for an in-flight phone / email OTP

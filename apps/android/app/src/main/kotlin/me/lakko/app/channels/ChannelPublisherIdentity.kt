@@ -107,7 +107,7 @@ public class ChannelPublisherIdentity(
                 identity?.close()
                 identity = null
                 boundAccountIdB64 = null
-                val fresh = Identity.fromSeed(accountIdentitySeed)
+                val fresh = me.lakko.app.auth.SessionSecretWipe.identity(accountIdentitySeed)
                 val snapshot = try {
                     loadSnapshot(accountIdB64)
                 } catch (e: Throwable) {

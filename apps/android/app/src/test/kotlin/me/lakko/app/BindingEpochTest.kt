@@ -184,4 +184,104 @@ class BindingEpochTest {
         block: suspend CoroutineScope.() -> Unit,
     ): kotlinx.coroutines.Job =
         launch(context = parent, start = CoroutineStart.ATOMIC, block = block)
+
+    @Test
+    fun `a stale binding out of one pass does not end the loop that made the call`() = runBlocking {
+        var passes = 0
+        val loop = launch {
+            while (passes < 3) {
+                try {
+                    passes += 1
+                    // The repository's session ended under this pass.
+                    if (passes == 1) throw StaleBindingException()
+                } catch (cancel: CancellationException) {
+                    endPassUnlessCancelled(cancel)
+                }
+            }
+        }
+        withTimeout(5_000) { loop.join() }
+        assertEquals(3, passes)
+        assertFalse(loop.isCancelled)
+    }
+
+    @Test
+    fun `any other cancellation still ends the loop`() = runBlocking {
+        try {
+            endPassUnlessCancelled(CancellationException("the screen went away"))
+            fail("a cancellation that is not a stale binding was swallowed")
+        } catch (cause: CancellationException) {
+            assertFalse(cause is StaleBindingException)
+        }
+    }
+
+    @Test
+    fun `a stale binding ends the loop when the loop itself is cancelled too`() = runBlocking {
+        var wentOn = false
+        val loop = launch {
+            // Cancelled, and still running up to its next suspension.
+            coroutineContext.cancel()
+            try {
+                endPassUnlessCancelled(StaleBindingException())
+                wentOn = true
+            } catch (_: CancellationException) {
+                // expected
+            }
+        }
+        withTimeout(5_000) { loop.join() }
+        assertFalse(wentOn)
+    }
+
+    @Test
+    fun `of the work that captured one binding exactly one takes it over`() {
+        val epoch = BindingEpoch()
+        val first = epoch.capture()
+        val second = epoch.capture()
+
+        first.takeOver()
+
+        // The binding ended with the take-over: the other sign-in is dropped,
+        // and so is a second attempt by the first.
+        assertFalse(second.isCurrent)
+        for (late in listOf(second, first)) {
+            try {
+                late.takeOver()
+                fail("a binding was taken over twice")
+            } catch (_: StaleBindingException) {
+                // expected
+            }
+        }
+        // What is captured now is the binding the winner lands into.
+        assertTrue(epoch.capture().isCurrent)
+    }
+
+    @Test
+    fun `a binding that already ended cannot be taken over`() {
+        val epoch = BindingEpoch()
+        val bound = epoch.capture()
+        epoch.advance()
+        try {
+            bound.takeOver()
+            fail("a sign-in that outlived a sign-out took the binding over")
+        } catch (_: StaleBindingException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun `taking a binding over ends the work launched for it`() = runBlocking {
+        val epoch = BindingEpoch()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val started = CompletableDeferred<Unit>()
+        val job = scope.launchBound(epoch) {
+            started.complete(Unit)
+            CompletableDeferred<Unit>().await()
+        }
+        withTimeout(5_000) { started.await() }
+
+        epoch.capture().takeOver()
+
+        withTimeout(5_000) { job.join() }
+        assertTrue(job.isCancelled)
+        scope.cancel()
+    }
 }

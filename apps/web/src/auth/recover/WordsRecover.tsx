@@ -8,6 +8,7 @@
  * phrase, and runs the SAME `auth.recover` the phrase form runs, so the
  * published-identity check and the password rotation are unchanged.
  */
+import { isAbandoned } from "../binding-epoch";
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { AuthHttpError } from "../client";
@@ -89,6 +90,8 @@ export function WordsRecover(props: {
       setConfirm("");
       props.onDone();
     } catch (err) {
+      // Overtaken by another session on this device: nothing to report.
+      if (isAbandoned(err)) return;
       if (err instanceof AuthHttpError && err.status === 401) {
         const next = misses() + 1;
         setMisses(next);

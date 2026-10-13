@@ -556,7 +556,7 @@ internal suspend fun decodeCallLink(slug: String, secrets: IdentitySecrets?): Ca
             CallInviteCapability.openLink(bytes, key)
         }.use { cap ->
             val isOwner = secrets != null &&
-                Identity.fromSeed(secrets.accountIdentitySeed).use {
+                me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use {
                     hexKey(it.signaturePublicKey()) == hexKey(cap.ownerSignaturePubkey())
                 }
             CallLinkDecode.Opened(

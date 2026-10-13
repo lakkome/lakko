@@ -46,3 +46,49 @@ export class StaleBindingError extends Error {
     super("the session this work was started for has ended");
   }
 }
+
+/**
+ * The binding of this browser to an account, as the auth flows see it.
+ *
+ * Two things end the binding a sign-in round trip started under: a sign-out,
+ * and ANOTHER landing (a guest account made by opening a call link, a passkey
+ * sign-in to a second account, a restore prompt parked for someone else). A
+ * flow that began before either must not land after it: its late response
+ * would replace the session the person is in.
+ *
+ * The two are counted apart because one kind of landing answers only to the
+ * first. An account whose registration has finished on the server is landed
+ * whatever else landed meanwhile (`captureSignOut`); every other flow asks
+ * `capture`.
+ */
+export class SessionBinding {
+  private readonly signOuts = new BindingEpoch();
+  private readonly changes = new BindingEpoch();
+
+  /** The person signed out (or this device was forgotten). */
+  signedOut(): void {
+    this.signOuts.advance();
+    this.changes.advance();
+  }
+
+  /** An account landed: a session, or a restore / new-phrase prompt for it. */
+  landed(): void {
+    this.changes.advance();
+  }
+
+  /** `false` once a sign-out OR another landing happened after this call. */
+  capture(): () => boolean {
+    return this.changes.capture();
+  }
+
+  /** `false` only once a sign-out happened after this call. */
+  captureSignOut(): () => boolean {
+    return this.signOuts.capture();
+  }
+}
+
+/** A flow that ended because its binding did: the person moved on, so the
+ *  screen that started it shows no error and runs no success step. */
+export function isAbandoned(err: unknown): boolean {
+  return err instanceof StaleBindingError;
+}

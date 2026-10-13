@@ -8,6 +8,7 @@
  * prompt (phrase, three words, another device). No navigation here: the
  * route's guard reacts to the state flip.
  */
+import { isAbandoned } from "../binding-epoch";
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { AuthHttpError } from "../client";
@@ -70,6 +71,8 @@ export function TotpRecover(props: {
       await auth.recoverWithTotp(user, normalized);
       setCode("");
     } catch (err) {
+      // Overtaken by another session on this device: nothing to report.
+      if (isAbandoned(err)) return;
       setError(totpRecoverErrorMessage(err));
     } finally {
       setBusy(false);

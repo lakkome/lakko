@@ -151,3 +151,36 @@ export function clearSignupPhraseOwed(storage: MarkerStorage | undefined, accoun
     // Storage blocked: nothing was recorded either.
   }
 }
+
+// ---------------------------------------------------------------------------
+// A new identity whose phrase screen would cover another account
+// ---------------------------------------------------------------------------
+
+/** What happens to a freshly minted recovery phrase once its identity has
+ *  been published. */
+export type FreshPhraseDisposition =
+  /** Show the "save your phrase" screen now. */
+  | "show"
+  /** Leave the screen as it is; the minting account's next sign-in on this
+   *  browser shows the phrase first. */
+  | "owe";
+
+/**
+ * ADR-0017 lost-everything fallback, after the publish. The publish cannot be
+ * taken back, so the phrase is shown whenever this browser is still the
+ * minting account's or nobody's: the binding unchanged, a sign-out, the same
+ * account parked again. When ANOTHER account is bound (signed in, or sitting
+ * in its own restore / new-phrase prompt), its screen is not replaced: the
+ * phrase is already in the minting account's device-protected cache and stays
+ * owed to that account.
+ *
+ * `boundAccount` is the account id the auth state names, `null` when it names
+ * none (`anon`, `loading`).
+ */
+export function freshPhraseDisposition(args: {
+  readonly mintedFor: string;
+  readonly boundAccount: string | null;
+}): FreshPhraseDisposition {
+  if (args.boundAccount === null) return "show";
+  return args.boundAccount === args.mintedFor ? "show" : "owe";
+}

@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  freshPhraseDisposition,
   anonymousGuardView,
   clearSignupPhraseOwed,
   isSignupPhraseOwed,
@@ -133,5 +134,30 @@ describe("the owed-phrase marker (surviving a reload)", () => {
     };
     expect(() => markSignupPhraseOwed(blocked, "acct")).not.toThrow();
     expect(isSignupPhraseOwed(blocked, "acct")).toBe(false);
+  });
+});
+
+describe("a freshly minted phrase after its identity was published", () => {
+  it("is shown while the browser is still the minting account's", () => {
+    // Binding unchanged (still parked), or the same account parked again.
+    expect(freshPhraseDisposition({ mintedFor: "alice", boundAccount: "alice" })).toBe("show");
+  });
+
+  it("is shown after a mere sign-out", () => {
+    expect(freshPhraseDisposition({ mintedFor: "alice", boundAccount: null })).toBe("show");
+  });
+
+  it("is not shown over another account, and stays owed to the minting one", () => {
+    expect(freshPhraseDisposition({ mintedFor: "alice", boundAccount: "bob" })).toBe("owe");
+    // What `mintFreshIdentity` does with "owe": the marker is the minting
+    // account's own, so bob's sign-ins never see it and alice's next one does.
+    const storage = memoryStorage();
+    markSignupPhraseOwed(storage, "alice");
+    expect(isSignupPhraseOwed(storage, "bob")).toBe(false);
+    expect(isSignupPhraseOwed(storage, "alice")).toBe(true);
+    // Shown as the unacknowledged-phrase screen once alice's session lands.
+    expect(sessionGuardView("session", true)).toBe("save-signup-phrase");
+    clearSignupPhraseOwed(storage, "alice");
+    expect(isSignupPhraseOwed(storage, "alice")).toBe(false);
   });
 });

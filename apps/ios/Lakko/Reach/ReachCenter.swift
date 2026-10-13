@@ -105,6 +105,11 @@ public final class ReachCenter: ObservableObject {
     }
     private var syncTask: Task<Void, Never>?
     private var syncAgain = false
+    /// Which ``sync()`` run ``syncTask`` belongs to. ``deactivate()`` moves
+    /// it on, so a run it cancelled, finishing later, cannot clear the
+    /// reference to the run the next account started (a second run would
+    /// then start beside it).
+    private var syncRun: UInt64 = 0
 
     init(persistence: ReachPersistence = KeychainReachPersistence(), ds: ReachDsTransport = DsClient()) {
         self.persistence = persistence
@@ -156,6 +161,8 @@ public final class ReachCenter: ObservableObject {
     public func deactivate() {
         syncTask?.cancel()
         syncTask = nil
+        syncAgain = false
+        syncRun &+= 1
         accountIdB64 = nil
         accountSeed = nil
         ownAccountKey = nil
@@ -186,13 +193,17 @@ public final class ReachCenter: ObservableObject {
             syncAgain = true
             return
         }
+        let run = syncRun
         syncTask = Task { @MainActor [weak self] in
             guard let self else { return }
             repeat {
+                // A run the account left behind neither consumes the next
+                // run's follow-up request nor starts another pass.
+                guard self.syncRun == run else { return }
                 self.syncAgain = false
                 _ = await self.syncOnce()
-            } while self.syncAgain && !Task.isCancelled
-            self.syncTask = nil
+            } while self.syncRun == run && self.syncAgain && !Task.isCancelled
+            if self.syncRun == run { self.syncTask = nil }
         }
     }
 

@@ -19,6 +19,7 @@
  * diverge (authenticated vs anonymous join, `completeFromPairing`
  * vs `completeFromDeviceRestore`).
  */
+import { isAbandoned } from "../auth/binding-epoch";
 import { authLimitMessage, deviceRestoreErrorMessage } from "../auth/auth-error-copy";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
@@ -337,6 +338,12 @@ export default function RestoreViaDevicePanel(props: {
           endLink();
           flow.dispose();
           if (!current() || state().kind === "link-ended") return;
+          // The completion was overtaken by another session on this device:
+          // back to the start, with no error.
+          if (isAbandoned(err)) {
+            setState({ kind: "idle" });
+            return;
+          }
           setState({ kind: "error", error: err });
         }
       })();

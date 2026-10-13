@@ -431,7 +431,9 @@ class BackupRestoreTest {
         val derive = source("src/main/kotlin/me/lakko/app/backup/BackupClient.kt")
             .substringAfter("public fun ed25519SeedFromIdentitySeed(identitySeed: ByteArray): ByteArray {")
             .substringBefore("\n}")
-        assertTrue("Identity.fromSeed(identitySeed).use { it.ed25519Seed() }" in derive)
+        // (`SessionSecretWipe.identity` is `Identity.fromSeed` on a seed the
+        // sign-out has not wiped; it refuses a wiped one.)
+        assertTrue("me.lakko.app.auth.SessionSecretWipe.identity(identitySeed).use { it.ed25519Seed() }" in derive)
         // The automatic backup: the session's phrase seed, through that one helper.
         val wiring = source("src/main/kotlin/me/lakko/app/MainActivity.kt")
             .substringAfter("me.lakko.app.backup.AutoBackupDriver.Inputs(")

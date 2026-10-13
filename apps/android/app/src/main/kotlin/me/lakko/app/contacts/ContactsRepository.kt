@@ -1015,7 +1015,7 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        return Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
+        return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
             uniffi.lakko_ffi_uniffi.computeSafetyNumber(
                 myPubkey = identity.signaturePublicKey(),
                 theirPubkey = theirPubkey,
@@ -1346,7 +1346,7 @@ public class ContactsRepository(
         val expiryMs = (System.currentTimeMillis() + expiryMillisFromNow).toULong()
 
         val bound = sessionBinding.capture()
-        return Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
+        return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
             // ADR-0060 §6 — the link carries a `link` grant scoped to this
             // link, registered on the mailbox BEFORE the link is shared, so
             // revoking the link removes exactly its key.
@@ -1465,7 +1465,7 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        return Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
+        return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
             val signingSeed = identity.ed25519Seed()
             try {
                 val result = authenticatedDiscoveryClient().use { discovery ->
@@ -1512,7 +1512,7 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        return Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
+        return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
             val signingSeed = identity.ed25519Seed()
             try {
                 authenticatedDiscoveryClient().use { discovery ->
@@ -1585,7 +1585,7 @@ public class ContactsRepository(
         return clientFactory().use { client ->
             // ADR-0017: contact-request sender material is the canonical
             // AccountIdentity — seeded from the phrase seed, not exportKey.
-            Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
+            me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
                 val sender = SenderMaterial(
                     signingSeed = identity.ed25519Seed(),
                     signaturePubkey = identity.signaturePublicKey(),

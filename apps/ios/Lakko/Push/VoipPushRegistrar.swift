@@ -64,9 +64,8 @@ final class VoipPushRegistrar: NSObject {
 
     private let provider: CallKitProvider
     private let registry: CallKitCallRegistry
-    private let client: PushClient
+    private let tokens: VoipTokenRegistration
     private var pushRegistry: PKPushRegistry?
-    private var lastRegisteredToken: Data?
     private var placeholderTimeout: Task<Void, Never>?
 
     /// `registry` is `nil`-defaulted rather than `= .shared` because a default
@@ -75,24 +74,26 @@ final class VoipPushRegistrar: NSObject {
     init(
         provider: CallKitProvider = .shared,
         registry: CallKitCallRegistry? = nil,
-        client: PushClient = PushClient(),
+        gateway: VoipPushGateway = .live(),
         bindingStore: PushAccountBindingStore = .live
     ) {
         self.provider = provider
         self.registry = registry ?? .shared
-        self.client = client
         self.bindingStore = bindingStore
+        self.tokens = VoipTokenRegistration(gateway: gateway, bindingStore: bindingStore)
         super.init()
     }
 
     /// Begin receiving VoIP pushes. Idempotent — the registry is created once
-    /// and iOS re-delivers the current token to the delegate on every launch.
+    /// and iOS delivers the current token to the delegate once per launch.
     ///
     /// Called at launch rather than at sign-in: a VoIP token is device state,
     /// not account state, and the app has to be able to receive a push before
     /// it knows whether anyone will send one. The REGISTRATION with the gateway
-    /// is what is account-scoped, and it is refused harmlessly when there is no
-    /// device pseudonym yet.
+    /// is what is account-scoped (``VoipTokenRegistration``): it is made only
+    /// for a pseudonym bound to a signed-in account, at launch for a restored
+    /// session and at each sign-in
+    /// (``registerForSignIn(devicePseudonym:)``).
     func start() {
         guard pushRegistry == nil else { return }
         // The main queue, so the delegate callbacks below can reach main-actor
@@ -104,53 +105,21 @@ final class VoipPushRegistrar: NSObject {
         pushRegistry = registry
     }
 
-    /// Forget the VoIP registration (logout / forget device). Best-effort: a
-    /// gateway that keeps the row only sends pushes this device will refuse to
-    /// turn into a call.
-    func unregister() async {
-        lastRegisteredToken = nil
-        guard let pseudonym = (try? DevicePushId.peek()) ?? nil else { return }
-        do {
-            _ = try await client.unregister(devicePseudonym: pseudonym, provider: .apnsVoip)
-        } catch {
-            Self.log.warning("voip unregister failed: \(error.localizedDescription)")
-        }
+    /// Forget the VoIP registration made under `devicePseudonym` (logout /
+    /// forget device). See ``VoipTokenRegistration/unregister(devicePseudonym:)``.
+    func unregister(devicePseudonym: Data) async {
+        await tokens.unregister(devicePseudonym: devicePseudonym)
     }
 
-    // MARK: - Token
-
-    private func register(token: Data) {
-        guard PushTokenRegistration.shouldRegister(
-            token: token,
-            lastRegistered: lastRegisteredToken
-        ) else {
-            return
-        }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard let pseudonym = (try? DevicePushId.peek()) ?? nil else {
-                // No device pseudonym yet — the account has not finished
-                // signing in. The next `start()` after sign-in re-delivers the
-                // same token and this runs again.
-                Self.log.info("voip token held: no device pseudonym yet")
-                return
-            }
-            do {
-                try await self.client.register(
-                    devicePseudonym: pseudonym,
-                    provider: PushTokenKind.voip.provider,
-                    tokenBytes: token
-                )
-                self.lastRegisteredToken = token
-                Self.log.info("voip token registered")
-            } catch {
-                // Expected until the gateway learns the provider — see the
-                // `apnsVoip` case in `PushClient.Provider`. Never fatal: the
-                // alert-push path keeps working, and the NSE keeps raising the
-                // call alert that stands in for a VoIP wake.
-                Self.log.warning("voip token register failed: \(error.localizedDescription)")
-            }
-        }
+    /// Register the VoIP token under the pseudonym a sign-in has just been
+    /// bound under (``PushSubscriber/subscribe(accountIdB64:stillSignedIn:)``).
+    ///
+    /// PushKit delivers the token once per launch, not once per sign-in, so
+    /// without this a sign-in in a running app (the first one after install,
+    /// or one after Log out) had no VoIP registration until the next launch.
+    func registerForSignIn(devicePseudonym: Data) async {
+        if let token = pushRegistry?.pushToken(for: .voIP) { tokens.noteToken(token) }
+        await tokens.registerForSignIn(devicePseudonym: devicePseudonym)
     }
 
     // MARK: - Incoming
@@ -313,6 +282,196 @@ final class VoipPushRegistrar: NSObject {
     }
 }
 
+// MARK: - Token registration
+
+/// The two `services/push-gw` calls the registration makes, as closures so a
+/// test can hold one open and watch the order they arrive in.
+struct VoipPushGateway {
+    var register: @MainActor (_ devicePseudonym: Data, _ token: Data) async throws -> Void
+    var unregister: @MainActor (_ devicePseudonym: Data) async throws -> Void
+
+    static func live(client: PushClient = PushClient()) -> VoipPushGateway {
+        VoipPushGateway(
+            register: { pseudonym, token in
+                try await client.register(
+                    devicePseudonym: pseudonym,
+                    provider: PushTokenKind.voip.provider,
+                    tokenBytes: token
+                )
+            },
+            unregister: { pseudonym in
+                _ = try await client.unregister(
+                    devicePseudonym: pseudonym, provider: PushTokenKind.voip.provider)
+            }
+        )
+    }
+}
+
+/// The VoIP token's registration with `services/push-gw`, kept apart from
+/// PushKit and CallKit so its ordering can be tested.
+///
+/// The token is device state and outlives a sign-out; the registration is
+/// made under the device pseudonym, which is minted per sign-in and cleared
+/// at Log out (``DevicePushId``). Three rules keep a sign-out and the sign-in
+/// after it from undoing each other:
+///
+///   * Every call names its pseudonym explicitly, read by the caller before
+///     it waited on anything. An unregister that is still in flight when the
+///     next account signs in names the OLD pseudonym, so it cannot take the
+///     new registration off the gateway.
+///   * A token is registered only under the pseudonym the push binding names
+///     (``VoipPushRegistration/isBound(devicePseudonym:binding:)``), asked
+///     again when the call's turn comes. Log out clears that binding first,
+///     so from then on nothing is registered for the session that ended.
+///   * Gateway calls run one after another in the order they were asked for,
+///     so a register and the unregister behind it (same pseudonym) reach the
+///     gateway in that order.
+@MainActor
+final class VoipTokenRegistration {
+
+    private static let log = Logger(subsystem: "me.lakko", category: "voip-push")
+
+    private let gateway: VoipPushGateway
+    private let bindingStore: PushAccountBindingStore
+    private let devicePseudonym: @MainActor () -> Data?
+
+    /// The newest VoIP token PushKit delivered.
+    private var currentToken: Data?
+
+    /// What the gateway holds as far as this process knows: the token, and
+    /// the pseudonym it is registered under. A new sign-in mints a new
+    /// pseudonym, so the same token is registered again for it.
+    private var lastRegistered: (devicePseudonym: Data, token: Data)?
+
+    /// The newest gateway call; each one runs after the one before it.
+    private var chain: Task<Void, Never>?
+
+    init(
+        gateway: VoipPushGateway,
+        bindingStore: PushAccountBindingStore,
+        devicePseudonym: @escaping @MainActor () -> Data? = { (try? DevicePushId.peek()) ?? nil }
+    ) {
+        self.gateway = gateway
+        self.bindingStore = bindingStore
+        self.devicePseudonym = devicePseudonym
+    }
+
+    /// Remember a token without registering it.
+    func noteToken(_ token: Data) {
+        guard !token.isEmpty else { return }
+        currentToken = token
+    }
+
+    /// PushKit delivered a token (at launch, or because it changed). It is
+    /// registered now when an account is signed in; otherwise it is held for
+    /// ``registerForSignIn(devicePseudonym:)``.
+    @discardableResult
+    func tokenDelivered(_ token: Data) -> Task<Void, Never>? {
+        noteToken(token)
+        guard let pseudonym = boundPseudonym() else {
+            Self.log.info("voip token held: no signed-in account")
+            return nil
+        }
+        return Task { @MainActor [weak self] in
+            await self?.register(token: token, devicePseudonym: pseudonym)
+        }
+    }
+
+    /// PushKit invalidated the token: nothing is held and nothing is known
+    /// to be registered.
+    func tokenInvalidated() {
+        currentToken = nil
+        lastRegistered = nil
+    }
+
+    /// Register the held token under the pseudonym a sign-in was just bound
+    /// under. Nothing to do when PushKit has not delivered a token yet:
+    /// ``tokenDelivered(_:)`` registers it when it arrives.
+    func registerForSignIn(devicePseudonym pseudonym: Data) async {
+        guard let token = currentToken else {
+            Self.log.info("voip token not delivered yet")
+            return
+        }
+        await register(token: token, devicePseudonym: pseudonym)
+    }
+
+    /// Forget the registration made under `pseudonym`. Best-effort: a
+    /// gateway that keeps the row only sends pushes this device will refuse
+    /// to turn into a call.
+    func unregister(devicePseudonym pseudonym: Data) async {
+        if lastRegistered?.devicePseudonym == pseudonym { lastRegistered = nil }
+        await enqueue { [gateway] in
+            do {
+                try await gateway.unregister(pseudonym)
+            } catch {
+                Self.log.warning("voip unregister failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// The device pseudonym, when it is the one bound to a signed-in account.
+    private func boundPseudonym() -> Data? {
+        guard let pseudonym = devicePseudonym() else { return nil }
+        return VoipPushRegistration.isBound(
+            devicePseudonym: pseudonym, binding: bindingStore.current()) ? pseudonym : nil
+    }
+
+    private func register(token: Data, devicePseudonym pseudonym: Data) async {
+        await enqueue { [weak self] in
+            guard let self else { return }
+            // Asked here, after every gateway call queued before this one:
+            // the sign-in this was started for may have ended.
+            guard self.boundPseudonym() == pseudonym else { return }
+            let last = self.lastRegistered
+            guard PushTokenRegistration.shouldRegister(
+                token: token,
+                lastRegistered: last?.devicePseudonym == pseudonym ? last?.token : nil
+            ) else {
+                return
+            }
+            do {
+                try await self.gateway.register(pseudonym, token)
+                // A sign-out during the round trip queued its unregister
+                // behind this call; the row is not remembered as held.
+                guard self.boundPseudonym() == pseudonym else { return }
+                self.lastRegistered = (pseudonym, token)
+                Self.log.info("voip token registered")
+            } catch {
+                // Expected until the gateway learns the provider — see the
+                // `apnsVoip` case in `PushClient.Provider`. Never fatal: the
+                // alert-push path keeps working, and the NSE keeps raising the
+                // call alert that stands in for a VoIP wake.
+                Self.log.warning("voip token register failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Run `operation` after every gateway call asked for before it.
+    private func enqueue(_ operation: @escaping @MainActor () async -> Void) async {
+        let previous = chain
+        let task = Task { @MainActor in
+            await previous?.value
+            await operation()
+        }
+        chain = task
+        await task.value
+    }
+}
+
+/// When a VoIP token may be registered under a device pseudonym.
+enum VoipPushRegistration {
+    /// `true` when `devicePseudonym` is the one the push binding names, that
+    /// is, the pseudonym of a sign-in that has not ended.
+    static func isBound(devicePseudonym: Data, binding: PushAccountBinding?) -> Bool {
+        guard let binding, !binding.accountIdB64.isEmpty,
+              let bound = PushAccountBinding.normalizedPseudonymHex(binding.devicePseudonymHex)
+        else {
+            return false
+        }
+        return bound == PushAccountBinding.hex(devicePseudonym)
+    }
+}
+
 // MARK: - Wake decision
 
 /// Where a VoIP wake points, once it is known to be for the signed-in account.
@@ -351,7 +510,7 @@ extension VoipPushRegistrar: PKPushRegistryDelegate {
     ) {
         guard type == .voIP else { return }
         MainActor.assumeIsolated {
-            register(token: pushCredentials.token)
+            _ = tokens.tokenDelivered(pushCredentials.token)
         }
     }
 
@@ -361,7 +520,7 @@ extension VoipPushRegistrar: PKPushRegistryDelegate {
     ) {
         guard type == .voIP else { return }
         MainActor.assumeIsolated {
-            lastRegisteredToken = nil
+            tokens.tokenInvalidated()
             Self.log.warning("voip push token invalidated")
         }
     }

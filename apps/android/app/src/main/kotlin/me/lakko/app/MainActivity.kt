@@ -187,33 +187,25 @@ class MainActivity : ComponentActivity() {
         // process lifetime.
         me.lakko.sframe.SFrameAvailability.bootProbe()
 
-        val authRepository = AuthRepository(applicationContext)
-        // ChatRepository before ContactsRepository — the
-        // contacts side optionally bridges to chat via
-        // joinGroupFromWelcome, and the order of construction
-        // makes the dependency obvious in the call site.
-        val chatRepository = ChatRepository(applicationContext)
+        // One set per process, not per Activity: a configuration change
+        // recreates this Activity, and a second set built here would run
+        // beside the first for the same account (see [AppRepositories]).
+        val repositories = AppRepositories.get(applicationContext)
+        val authRepository = repositories.auth
+        val chatRepository = repositories.chat
         // Every call lives in the process-wide call host, not in a screen: the
         // 1x1 call must ring whichever screen is showing, and no call — 1x1,
         // group or call link — may end or vanish because its screen went away.
         // Every poll of every group hands one-to-one call signaling to it, and
-        // every settled group reaches the group-call rekey. An activity
-        // recreate builds a new repository, so the wiring is re-attached here
-        // each time.
+        // every settled group reaches the group-call rekey. Attached on every
+        // Activity create; the repository is the process's one.
         me.lakko.app.calls.AppCallHost.attach(
             applicationContext = applicationContext,
             repository = chatRepository,
             sessionTokenProvider = { authRepository.identitySecrets.value?.sessionToken },
         )
         val callHost = me.lakko.app.calls.AppCallHost.instance
-        val contactsRepository = ContactsRepository(
-            authRepo = authRepository,
-            // G-4 (ADR-0016) — the app context backs the persistent
-            // PeerPinStore so the fetch-path supersession gate is
-            // active on every real send.
-            appContext = applicationContext,
-            chatRepo = chatRepository,
-        )
+        val contactsRepository = repositories.contacts
         // ADR-0060 §4 / §5 — contacts of contacts: an offer or a bundle a
         // contact sent is kept, and the relay re-runs; a changed setting
         // re-runs the offer. Re-attached on every activity recreate, like the
@@ -233,8 +225,7 @@ class MainActivity : ComponentActivity() {
         // identitySecrets land; cleared on logout /
         // forgetDevice from the same place ChatRepository
         // gets cleared.
-        val deviceGroupSync = me.lakko.app.devices.sync
-            .DeviceGroupSyncRepository(applicationContext)
+        val deviceGroupSync = repositories.deviceGroupSync
 
         // ADR-0026 Phase 4 — the anti-censorship arming controller.
         // Apply the persisted preference at boot: when on, fetch +
@@ -1289,7 +1280,9 @@ private fun SessionRoot(
                             )
                         }
                     } catch (cancel: kotlinx.coroutines.CancellationException) {
-                        throw cancel
+                        // The repository's session ending under one pass is
+                        // not this loop ending.
+                        endPassUnlessCancelled(cancel)
                     } catch (_: Throwable) {
                         kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
                     }
@@ -1379,7 +1372,7 @@ private fun SessionRoot(
                 try {
                     contactsRepository.refreshInbox(waitSecs = APP_LONG_POLL_SECS)
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
-                    throw cancel
+                    endPassUnlessCancelled(cancel)
                 } catch (_: Throwable) {
                     kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
                 }
@@ -1419,7 +1412,9 @@ private fun SessionRoot(
                     try {
                         chatRepository.pollGroup(laneGroup, waitSecs = APP_LONG_POLL_SECS)
                     } catch (cancel: kotlinx.coroutines.CancellationException) {
-                        throw cancel
+                        // The repository's session ending under one pass is
+                        // not this loop ending.
+                        endPassUnlessCancelled(cancel)
                     } catch (_: Throwable) {
                         kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
                     }

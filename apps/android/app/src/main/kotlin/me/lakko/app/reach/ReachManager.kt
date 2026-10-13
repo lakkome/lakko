@@ -183,6 +183,20 @@ public class ReachManager internal constructor(
     /** The bound account's signature public key, or `null`. */
     public fun ownAccountKey(): ByteArray? = binding.get()?.accountKey?.copyOf()
 
+    /**
+     * The account bound at one moment, for work that is handed something FOR
+     * that account and runs later (a launched intake): it passes this back
+     * and the manager does nothing when another account, or none, is bound by
+     * then. A sign-out and a new sign-in to the SAME account is a new one.
+     */
+    public class BoundAccount internal constructor(internal val token: Any)
+
+    /** The account bound now, or `null`. */
+    public fun boundAccount(): BoundAccount? = binding.get()?.let(::BoundAccount)
+
+    /** Whether [account] is still the bound one. */
+    public fun isBound(account: BoundAccount): Boolean = binding.get() === account.token
+
     // -----------------------------------------------------------------
     // The owner's keys
     // -----------------------------------------------------------------
@@ -1082,8 +1096,14 @@ public class ReachManager internal constructor(
     /** Keep the introduction record [senderKey] offered in the one-to-one
      *  conversation (the caller checked it came from the other participant).
      *  The newest per contact wins. */
-    public suspend fun keepIntroductionOffer(senderKey: ByteArray, record: ByteArray) {
+    public suspend fun keepIntroductionOffer(
+        senderKey: ByteArray,
+        record: ByteArray,
+        /** The account the offer was received for; `null` = whoever is bound. */
+        boundAs: BoundAccount? = null,
+    ) {
         val b = binding.get() ?: return
+        if (boundAs != null && boundAs.token !== b) return
         val senderHex = reachHex(senderKey)
         val recordHex = reachHex(record)
         lock.withLock {
@@ -1095,8 +1115,15 @@ public class ReachManager internal constructor(
 
     /** Keep the bundle [senderKey] relayed, when strictly newer than the one
      *  held (`bundleIsNewer`: a re-send carries its original stamp). */
-    public suspend fun keepIntroductionsBundle(senderKey: ByteArray, wire: ByteArray, updatedAtMs: ULong) {
+    public suspend fun keepIntroductionsBundle(
+        senderKey: ByteArray,
+        wire: ByteArray,
+        updatedAtMs: ULong,
+        /** The account the bundle was received for; `null` = whoever is bound. */
+        boundAs: BoundAccount? = null,
+    ) {
         val b = binding.get() ?: return
+        if (boundAs != null && boundAs.token !== b) return
         val senderHex = reachHex(senderKey)
         lock.withLock {
             if (binding.get() !== b) return@withLock

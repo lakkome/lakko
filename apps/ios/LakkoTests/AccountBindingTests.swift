@@ -367,3 +367,272 @@ final class RepositoryBindingTests: XCTestCase {
         XCTAssertTrue(repository.binding.capture().isCurrent)
     }
 }
+
+// MARK: - A fresh identity published after another account signed in
+
+final class FreshIdentityLandingTests: XCTestCase {
+
+    func testTheMintNobodyOvertookShowsItsPhrase() {
+        XCTAssertEqual(
+            FreshIdentityLanding.decide(mintedFor: "alice", bindingIsCurrent: true, signedIn: "alice"),
+            .showPhrase(rebinds: false))
+    }
+
+    /// Web's rule: once published, the phrase is shown even after a sign-out.
+    func testAfterASignOutThePhraseIsStillShownAndBindsTheDeviceAgain() {
+        XCTAssertEqual(
+            FreshIdentityLanding.decide(mintedFor: "alice", bindingIsCurrent: false, signedIn: nil),
+            .showPhrase(rebinds: true))
+    }
+
+    func testTheSameAccountParkedAgainStillSeesItsPhrase() {
+        XCTAssertEqual(
+            FreshIdentityLanding.decide(mintedFor: "alice", bindingIsCurrent: false, signedIn: "alice"),
+            .showPhrase(rebinds: true))
+    }
+
+    /// Never one account's phrase screen over another account's session.
+    func testAnotherAccountsSessionIsNeverCoveredByThePhraseScreen() {
+        XCTAssertEqual(
+            FreshIdentityLanding.decide(mintedFor: "alice", bindingIsCurrent: false, signedIn: "bob"),
+            .keepForNextSignIn)
+    }
+}
+
+// MARK: - The VoIP registration across a sign-out and the next sign-in
+
+/// push-gw as the VoIP registration sees it: records every call in arrival
+/// order and can hold an unregister open.
+@MainActor
+private final class GatedVoipGateway {
+    private(set) var calls: [String] = []
+    private(set) var registered: [Data: Data] = [:]
+    var holdUnregister = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func release() {
+        let parked = waiting
+        waiting = []
+        parked.forEach { $0.resume() }
+    }
+
+    var gateway: VoipPushGateway {
+        VoipPushGateway(
+            register: { [self] pseudonym, token in
+                calls.append("register \(pseudonym.first ?? 0)")
+                registered[pseudonym] = token
+            },
+            unregister: { [self] pseudonym in
+                calls.append("unregister \(pseudonym.first ?? 0)")
+                if holdUnregister { await withCheckedContinuation { waiting.append($0) } }
+                registered[pseudonym] = nil
+            })
+    }
+}
+
+@MainActor
+final class VoipTokenRegistrationTests: XCTestCase {
+
+    private var suiteName = ""
+    private var store: PushAccountBindingStore!
+    private var pseudonym: Data?
+    private let first = Data(repeating: 1, count: 32)
+    private let second = Data(repeating: 2, count: 32)
+    private let token = Data([0xAA, 0xBB])
+
+    override func setUp() {
+        super.setUp()
+        suiteName = "voip-registration-\(UUID().uuidString)"
+        store = PushAccountBindingStore(defaults: UserDefaults(suiteName: suiteName))
+        pseudonym = nil
+    }
+
+    override func tearDown() {
+        UserDefaults().removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    private func registration(_ gateway: GatedVoipGateway) -> VoipTokenRegistration {
+        VoipTokenRegistration(
+            gateway: gateway.gateway, bindingStore: store,
+            devicePseudonym: { [unowned self] in self.pseudonym })
+    }
+
+    /// What a sign-in does to the push state before it registers.
+    private func signIn(_ devicePseudonym: Data, account: String) {
+        pseudonym = devicePseudonym
+        store.bind(devicePseudonym: devicePseudonym, accountIdB64: account)
+    }
+
+    private func settle() async {
+        for _ in 0..<20 { await Task.yield() }
+    }
+
+    func testATokenDeliveredWithNobodySignedInIsHeldForTheSignIn() async {
+        let gateway = GatedVoipGateway()
+        let registration = registration(gateway)
+
+        XCTAssertNil(registration.tokenDelivered(token), "nothing is registered for nobody")
+        XCTAssertEqual(gateway.calls, [])
+
+        signIn(first, account: "alice")
+        await registration.registerForSignIn(devicePseudonym: first)
+        XCTAssertEqual(gateway.calls, ["register 1"])
+        XCTAssertEqual(gateway.registered[first], token)
+    }
+
+    func testARestoredSessionRegistersWhenTheTokenArrives() async {
+        let gateway = GatedVoipGateway()
+        let registration = registration(gateway)
+        signIn(first, account: "alice")
+
+        await registration.tokenDelivered(token)?.value
+        XCTAssertEqual(gateway.calls, ["register 1"])
+
+        // The same token again, for the same sign-in: not sent twice.
+        await registration.tokenDelivered(token)?.value
+        await registration.registerForSignIn(devicePseudonym: first)
+        XCTAssertEqual(gateway.calls, ["register 1"])
+    }
+
+    /// The race: Log out's unregister is still in flight when the next
+    /// account signs in and registers. It names the old pseudonym, and the
+    /// new registration is made after it, under the new one.
+    func testALateUnregisterDoesNotRemoveTheNextSignInsRegistration() async {
+        let gateway = GatedVoipGateway()
+        let registration = registration(gateway)
+        signIn(first, account: "alice")
+        await registration.tokenDelivered(token)?.value
+
+        // Log out: the binding goes first, the unregister is held open.
+        gateway.holdUnregister = true
+        store.clear()
+        let leaving = Task { await registration.unregister(devicePseudonym: self.first) }
+        await settle()
+        XCTAssertEqual(gateway.calls, ["register 1", "unregister 1"])
+
+        // The next account signs in while it is still out.
+        signIn(second, account: "bob")
+        let arriving = Task { await registration.registerForSignIn(devicePseudonym: self.second) }
+        await settle()
+        XCTAssertEqual(
+            gateway.calls, ["register 1", "unregister 1"],
+            "the registration waits for the unregister ahead of it")
+
+        gateway.release()
+        await leaving.value
+        await arriving.value
+        XCTAssertEqual(gateway.calls, ["register 1", "unregister 1", "register 2"])
+        XCTAssertNil(gateway.registered[first])
+        XCTAssertEqual(gateway.registered[second], token, "the same token, under the new pseudonym")
+    }
+
+    /// A registration whose sign-in ended while it waited its turn is never
+    /// sent.
+    func testARegistrationWhoseSignInEndedIsNotSent() async {
+        let gateway = GatedVoipGateway()
+        let registration = registration(gateway)
+        signIn(first, account: "alice")
+        await registration.tokenDelivered(token)?.value
+
+        gateway.holdUnregister = true
+        store.clear()
+        let leaving = Task { await registration.unregister(devicePseudonym: self.first) }
+        await settle()
+        signIn(second, account: "bob")
+        let arriving = Task { await registration.registerForSignIn(devicePseudonym: self.second) }
+        await settle()
+        // ...and that account signs out again before the queue reaches it.
+        store.clear()
+
+        gateway.release()
+        await leaving.value
+        await arriving.value
+        XCTAssertEqual(gateway.calls, ["register 1", "unregister 1"])
+        XCTAssertTrue(gateway.registered.isEmpty)
+    }
+
+    func testOnlyTheBoundPseudonymIsRegisteredUnder() {
+        let binding = PushAccountBinding(
+            devicePseudonymHex: PushAccountBinding.hex(first), accountIdB64: "alice")
+        XCTAssertTrue(VoipPushRegistration.isBound(devicePseudonym: first, binding: binding))
+        XCTAssertFalse(VoipPushRegistration.isBound(devicePseudonym: second, binding: binding))
+        XCTAssertFalse(VoipPushRegistration.isBound(devicePseudonym: first, binding: nil))
+    }
+}
+
+// MARK: - A reach sync left behind by its account
+
+/// The reach routes, with the owner's read held open until released.
+@MainActor
+private final class GatedReachDs: ReachDsTransport {
+    private(set) var reads = 0
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func releaseOne() {
+        guard !waiting.isEmpty else { return }
+        waiting.removeFirst().resume()
+    }
+
+    func releaseAll() {
+        let parked = waiting
+        waiting = []
+        parked.forEach { $0.resume() }
+    }
+
+    func updateReach(
+        pseudonym: Data, add: [DsReachKeyAdd], remove: [Data], open: Bool?, signer: DsRequestSigner
+    ) async throws {}
+
+    func fetchReach(pseudonym: Data, signer: DsRequestSigner) async throws -> DsReachListing {
+        reads += 1
+        await withCheckedContinuation { waiting.append($0) }
+        return DsReachListing(keys: [], open: false)
+    }
+}
+
+@MainActor
+final class ReachSyncBindingTests: XCTestCase {
+
+    private func settle() async {
+        for _ in 0..<50 { await Task.yield() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0..<50 { await Task.yield() }
+    }
+
+    /// A sync the account left behind, finishing later, must not drop the
+    /// reference to the next account's run: a third `sync()` would then start
+    /// beside that run instead of asking it for one more pass.
+    func testARunLeftBehindDoesNotLetASecondRunStartBesideTheNextAccounts() async throws {
+        let ds = GatedReachDs()
+        let center = ReachCenter(persistence: InMemoryReachPersistence(), ds: ds)
+        let alice = try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32))
+        let bob = try Identity.fromSeed(seed: Data(repeating: 0x32, count: 32))
+
+        center.activate(accountIdB64: "alice", accountIdentity: alice)
+        center.sync()
+        await settle()
+        XCTAssertEqual(ds.reads, 1, "the first account's run is out on its read")
+
+        center.deactivate()
+        center.activate(accountIdB64: "bob", accountIdentity: bob)
+        center.sync()
+        await settle()
+        XCTAssertEqual(ds.reads, 2, "the next account's run is out on its own read")
+
+        // The first account's run comes back and ends.
+        ds.releaseOne()
+        await settle()
+
+        center.sync()
+        await settle()
+        XCTAssertEqual(ds.reads, 2, "coalesced into the run in flight, not started beside it")
+
+        ds.releaseAll()
+        await settle()
+        ds.releaseAll()
+        await settle()
+        center.deactivate()
+        ds.releaseAll()
+    }
+}

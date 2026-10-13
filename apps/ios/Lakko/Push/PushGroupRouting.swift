@@ -275,6 +275,15 @@ public final class PushGroupRouting {
     /// lock, bounded by ``networkCallTimeout``. `nil` binds nothing.
     public var bindSecret: ((String, String, Data) async -> PushBindOutcome)?
 
+    /// Whether `accountIdB64` is the account signed in on this device right
+    /// now. Asked immediately before a subscribe or an unsubscribe reaches
+    /// push-gw: both are made under the DEVICE pseudonym, which is minted per
+    /// sign-in, and routing work queued for one account can still be running
+    /// after it signed out. Without the check that work would subscribe the
+    /// next account's pseudonym (or mint one for nobody) to the departed
+    /// account's group. The default answers `true` (tests, no repository).
+    public var accountIsBound: @MainActor (String) -> Bool = { _ in true }
+
     /// Groups whose last bind did not land (`503` disabled, offline): the next
     /// provisioning pass binds again (wakes are dropped until bound).
     /// Session-scoped.
@@ -681,6 +690,7 @@ public final class PushGroupRouting {
             // No secret held yet → DEFER. Never subscribe under group_id.
             return
         }
+        guard accountIsBound(accountIdB64) else { return }
         do {
             // BOUNDED: this runs under the serializing routing-row lock, so a
             // hung push-gw would otherwise wedge the row and stop this device
@@ -760,6 +770,12 @@ public final class PushGroupRouting {
     public func retireOldPushGid(accountIdB64: String, oldSecret: Data) async {
         guard let oldGid = Self.derivePushGid(secret: oldSecret) else {
             NSLog("push-routing old push_gid derivation failed")
+            return
+        }
+        guard accountIsBound(accountIdB64) else {
+            // The account signed out: its whole device registration is
+            // dropped by the sign-out itself. Only the local route row goes.
+            store.removeRoute(accountIdB64: accountIdB64, pushGidHex: Self.hex(oldGid))
             return
         }
         do {

@@ -10,6 +10,7 @@
  * Enumeration-safe end to end: the code step is shown whether or not the
  * contact matched, because the server answers the same either way.
  */
+import { isAbandoned } from "../binding-epoch";
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { AuthHttpError } from "../client";
@@ -106,6 +107,8 @@ export function ContactRecover(props: {
       await auth.recoverWithContactFinish(normalized);
       setCode("");
     } catch (err) {
+      // Overtaken by another session on this device: nothing to report.
+      if (isAbandoned(err)) return;
       setError(contactRecoverErrorMessage(err));
     } finally {
       setBusy(false);

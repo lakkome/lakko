@@ -143,6 +143,39 @@ public class AuthRepository(
      */
     internal fun captureAccountBinding(): me.lakko.app.Binding = accountBinding.capture()
 
+    /**
+     * A sign-in whose round trip started under a binding that has since ended
+     * does not land: the person signed out meanwhile, or another sign-in
+     * (another account, a guest made for a call link) landed first. It ends
+     * as a stale binding, which is a cancellation: no error is shown for a
+     * request nobody is waiting for, and the session that IS on the device
+     * stays. Password and passkey login, recover, the TOTP and contact
+     * recoveries and the device restore ask this after their round trip and
+     * before they write anything.
+     *
+     * A sign-in started signed out asks with [me.lakko.app.Binding.takeOver]:
+     * the one that passes ends the binding it started under in the same step,
+     * so of two sign-ins that are both out at once exactly one lands. Nothing
+     * suspends between this and the landing. One started for an account that
+     * is already on the device (a guest being kept, a parked account being
+     * restored) only asks: it lands that same account, and the work bound to
+     * it goes on.
+     *
+     * Signup and guest signup do NOT ask it after their commit point: the
+     * account exists on the server by then, and abandoning the landing would
+     * burn the username or leave an account whose phrase was never shown.
+     */
+    private fun SignInStart.standDownIfOvertaken() {
+        if (startedSignedIn) bound.ensureCurrent() else bound.takeOver()
+    }
+
+    /** Where a sign-in started: the binding, and whether an account was on
+     *  the device (signed in or parked) at that moment. */
+    private class SignInStart(val bound: me.lakko.app.Binding, val startedSignedIn: Boolean)
+
+    private fun signInStart(): SignInStart =
+        SignInStart(bound = accountBinding.capture(), startedSignedIn = signedInAccountIdB64() != null)
+
     /** Record which account is bound; a change ends the previous binding. */
     private fun rebindAccount(accountIdB64: String?) {
         synchronized(boundAccountLock) {
@@ -1171,19 +1204,88 @@ public class AuthRepository(
     }
 
     /**
+     * [mintFreshIdentity] could not show [phrase]: keep it for [accountIdB64]
+     * so the account's next sign-in on this device shows it first.
+     *
+     * The same mechanism a signup phrase left unacknowledged uses
+     * (`SignupPhraseOwed.kt`): the phrase in the Keystore-backed
+     * [me.lakko.app.backup.PhraseStore] row of the account, and the owed
+     * marker, which is set only once the phrase is stored (an owed marker
+     * with no phrase behind it can show nothing). The seed is cached as well,
+     * best-effort, so that sign-in lands a session; without it the account
+     * parks on its restore screen and [completeParkFromOwedPhrase] finishes
+     * from the kept phrase.
+     *
+     * `false` when the phrase could not be stored (the Keystore or the
+     * preferences refused). Then it is gone with this call, and the account's
+     * owner mints again the next time they are parked on its restore screen.
+     */
+    private fun keepFreshPhraseOwed(accountIdB64: String, phrase: String, seed: ByteArray): Boolean {
+        val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
+        try {
+            me.lakko.app.backup.PhraseStore.putPhrase(applicationContext, accountIdB64, phraseBytes)
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "fresh-identity phrase not kept", cause)
+            return false
+        } finally {
+            phraseBytes.fill(0)
+        }
+        markSignupPhraseOwed(phraseOwedMarkers, accountIdB64)
+        if (!isSignupPhraseOwed(phraseOwedMarkers, accountIdB64)) {
+            Log.w("lakko-auth", "fresh-identity phrase kept, but not marked as owed")
+            return false
+        }
+        bootstrapDeviceKeyFromSeedBestEffort(
+            accountIdB64 = accountIdB64,
+            accountIdentitySeed = seed,
+            context = "mintFreshIdentity (owed)",
+        )
+        try {
+            AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, seed)
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "fresh-identity seed persist (owed) failed", cause)
+        }
+        return true
+    }
+
+    /**
+     * A sign-in parked [accountIdB64] on its restore screen (no cached seed)
+     * while this device holds a phrase it still owes that account: finish
+     * from that phrase, through the same fail-closed check the typed phrase
+     * takes ([provideRecoveryPhrase]), which then parks the phrase to be
+     * shown. Any failure leaves the account parked as it was.
+     */
+    private suspend fun completeParkFromOwedPhrase(accountIdB64: String) {
+        if (pendingRecovery.get()?.accountIdB64 != accountIdB64) return
+        if (!isSignupPhraseOwed(phraseOwedMarkers, accountIdB64)) return
+        val phrase = readOwedPhrase(accountIdB64) ?: return
+        try {
+            provideRecoveryPhrase(phrase)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "the owed recovery phrase did not restore the identity; staying parked", cause)
+        }
+    }
+
+    /** The phrase [accountIdB64] is owed, when it is and this device can read it. */
+    private fun readOwedPhrase(accountIdB64: String): String? = owedSignupPhrase(
+        storage = phraseOwedMarkers,
+        accountIdB64 = accountIdB64,
+        readPhrase = {
+            me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, accountIdB64)
+                ?.let { bytes -> String(bytes, Charsets.UTF_8).also { bytes.fill(0) } }
+        },
+        log = { message, cause -> Log.w("lakko-auth", message, cause) },
+    )
+
+    /**
      * Park the signup phrase [accountIdB64] still owes its person, when it
      * does and the phrase is readable on this device ([owedSignupPhrase]).
      */
     private fun restoreOwedSignupPhrase(accountIdB64: String) {
-        val phrase = owedSignupPhrase(
-            storage = phraseOwedMarkers,
-            accountIdB64 = accountIdB64,
-            readPhrase = {
-                me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, accountIdB64)
-                    ?.let { bytes -> String(bytes, Charsets.UTF_8).also { bytes.fill(0) } }
-            },
-            log = { message, cause -> Log.w("lakko-auth", message, cause) },
-        ) ?: return
+        if (!isSignupPhraseOwed(phraseOwedMarkers, accountIdB64)) return
+        val phrase = readOwedPhrase(accountIdB64) ?: return
         me.lakko.app.ui.auth.SignupPhraseGate.park(phrase)
     }
 
@@ -1230,6 +1332,8 @@ public class AuthRepository(
         // the typed name; the account id is learned from the finish. The
         // ADR-0017 identity acquisition below is unchanged, so a device with
         // no cached phrase seed still lands in NeedsRecoveryPhrase.
+        val start = signInStart()
+        var parkedAccountIdB64: String? = null
         authClientFactory().use { client ->
             val (named, result) = signInByName(
                 cached = null,
@@ -1243,6 +1347,9 @@ public class AuthRepository(
             val accountIdB64 = base64Encode(accountIdBytes)
             val resolvedUsername = named.username
             try {
+                // Overtaken while the round trip was out (see
+                // [standDownIfOvertaken]): nothing is written, nothing lands.
+                start.standDownIfOvertaken()
                 // Re-derive + upsert the device key. Deterministic
                 // for the same password — the on-disk envelope is
                 // overwritten with byte-equivalent content; harmless
@@ -1341,6 +1448,7 @@ public class AuthRepository(
                     // 1.20d — best-effort push subscribe (the auth
                     // factor succeeded, so the device is enrolled).
                     subscribePushBestEffort("login")
+                    parkedAccountIdB64 = accountIdB64
                     return@use
                 }
 
@@ -1356,6 +1464,8 @@ public class AuthRepository(
                         sessionExpiresAtMs = result.sessionExpiresAtMs,
                     ),
                 )
+                // A phrase this device still owes the account is shown first.
+                restoreOwedSignupPhrase(accountIdB64)
                 landedState = AuthState.Session(
                     account = SessionAccount(
                         accountIdB64 = accountIdB64,
@@ -1384,6 +1494,9 @@ public class AuthRepository(
                 result.sessionKey.fill(0)
             }
         }
+        // Parked with no cached seed, but this device holds a phrase it owes
+        // the account: finish from it.
+        parkedAccountIdB64?.let { completeParkFromOwedPhrase(it) }
     }
 
     /**
@@ -1471,11 +1584,12 @@ public class AuthRepository(
         // IdentitySecrets (which owns its lifetime thereafter). When it
         // was NOT (an early throw), the `finally` wipes our copy.
         var seedHandedOff = false
-        // A recover started for a signed-in account (a guest being kept)
-        // stands down when that account left the device meanwhile. One
-        // started signed out is the sign-in itself and lands as before.
-        val bound = accountBinding.capture()
-        val startedSignedIn = signedInAccountIdB64() != null
+        // Overtaken while its round trips are out (see [standDownIfOvertaken]),
+        // a recover stands down: one started for a signed-in account (a guest
+        // being kept) when that account left the device, one started signed
+        // out when another sign-in landed first.
+        val start = signInStart()
+        val bound = start.bound
         try {
             authClientFactory().use { client ->
                 val result = signInByName(
@@ -1484,7 +1598,7 @@ public class AuthRepository(
                     sessionTokenOf = { it.sessionToken },
                     rebind = ::rebindLoginHandleInBackground,
                 )
-                if (startedSignedIn) bound.ensureCurrent()
+                bound.ensureCurrent()
                 val accountIdBytes = result.accountId
                 val accountIdB64 = base64Encode(accountIdBytes)
                 val resolvedUsername = named.username
@@ -1589,7 +1703,7 @@ public class AuthRepository(
                         accountIdB64 = accountIdB64,
                         phrase = mnemonicPhrase,
                     )
-                    if (startedSignedIn) bound.ensureCurrent()
+                    start.standDownIfOvertaken()
 
                     // Stash the NEW export key + the phrase seed.
                     // ADR-0017: the phrase seed is UNCHANGED across a
@@ -1611,6 +1725,8 @@ public class AuthRepository(
                     // The live IdentitySecrets now owns the seed buffer
                     // — do NOT wipe it in the `finally`.
                     seedHandedOff = true
+                    // A phrase this device still owes the account is shown first.
+                    restoreOwedSignupPhrase(accountIdB64)
                     landedState = AuthState.Session(
                         account = SessionAccount(
                             accountIdB64 = accountIdB64,
@@ -1725,6 +1841,7 @@ public class AuthRepository(
         }
         // ADR-0054 S5 - the code goes with the login handle of the name; the
         // account id comes back in the response. No lookup before a session.
+        val start = signInStart()
         val (named, result) = authClientFactory().use { client ->
             signInByName(
                 cached = null,
@@ -1735,6 +1852,7 @@ public class AuthRepository(
                 rebind = ::rebindLoginHandleInBackground,
             )
         }
+        start.standDownIfOvertaken()
         val accountIdBytes = result.accountId
         val accountIdB64 = base64Encode(accountIdBytes)
         val resolvedUsername = named.username
@@ -1750,6 +1868,7 @@ public class AuthRepository(
             sessionExpiresAtMs = result.sessionExpiresAtMs,
             pushContext = "totp-recover",
         )
+        completeParkFromOwedPhrase(accountIdB64)
     }
 
     /**
@@ -1833,6 +1952,7 @@ public class AuthRepository(
                 "request a code first (no pending phone / email recovery)",
                 me.lakko.app.l10n.UiText("recovery.contact.error.generic"),
             )
+        val start = signInStart()
         val result = authClientFactory().use { client ->
             signInByName(
                 named = NamedHandle(pending.username, pending.handle),
@@ -1841,6 +1961,7 @@ public class AuthRepository(
                 rebind = ::rebindLoginHandleInBackground,
             )
         }
+        start.standDownIfOvertaken()
         // Consume the stash — the code is single-use server-side.
         pendingContactRecover.set(null)
         // Shared ADR-0018 ACCESS-only landing — identical to the
@@ -1853,6 +1974,7 @@ public class AuthRepository(
             sessionExpiresAtMs = result.sessionExpiresAtMs,
             pushContext = "contact-recover",
         )
+        completeParkFromOwedPhrase(base64Encode(result.accountId))
     }
 
     /**
@@ -1954,6 +2076,8 @@ public class AuthRepository(
                 ),
             )
             pendingRecovery.set(null)
+            // A phrase this device still owes the account is shown first.
+            restoreOwedSignupPhrase(accountIdB64)
             landedState = AuthState.Session(
                 account = SessionAccount(
                     accountIdB64 = accountIdB64,
@@ -2175,6 +2299,8 @@ public class AuthRepository(
             )
             seedHandedOff = true
             pendingRecovery.set(null)
+            // A phrase this device still owes the account is shown first.
+            restoreOwedSignupPhrase(pending.accountIdB64)
             landedState = AuthState.Session(
                 account = SessionAccount(
                     accountIdB64 = pending.accountIdB64,
@@ -2214,6 +2340,13 @@ public class AuthRepository(
         val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
         val bound = accountBinding.capture()
+        // Own copies: a sign-out wipes [pending]'s arrays in place, and the
+        // publish below must name this account whatever happens meanwhile.
+        val accountIdBytes = pending.accountIdBytes.copyOf()
+        val accountIdB64 = pending.accountIdB64
+        val sessionToken = pending.sessionToken
+        val sessionExpiresAtMs = pending.sessionExpiresAtMs
+        val username = pending.username
 
         // Generate a fresh 24-word recovery phrase + its seed (same client-
         // side generation signup uses).
@@ -2229,55 +2362,87 @@ public class AuthRepository(
         // against the stale published key). Publishing before any local
         // mutation keeps a failure fully recoverable: the device is untouched
         // and the user can retry.
-        publishIdentityFor(
-            landing = IdentityLanding.FRESH_IDENTITY,
-            accountId = pending.accountIdBytes,
-            accountIdentitySeed = seed,
-            sessionToken = pending.sessionToken,
+        try {
+            publishIdentityFor(
+                landing = IdentityLanding.FRESH_IDENTITY,
+                accountId = accountIdBytes,
+                accountIdentitySeed = seed,
+                sessionToken = sessionToken,
+            )
+        } catch (cause: Throwable) {
+            seed.fill(0)
+            throw cause
+        }
+        // The publish cannot be taken back: the account's identity is the new
+        // one now, and its phrase exists only in this call. The flow goes on
+        // to the phrase screen whatever happened to the session meanwhile - an
+        // identity whose phrase nobody was shown is the worse outcome - with
+        // ONE exception: the phrase screen of this account is never put over
+        // another account's session. Then the phrase is kept owed instead.
+        // (Web presents the screen in that case too; the maintainer decided
+        // against it for every client, 2026-10-13.)
+        val after = freshIdentityAfterPublish(
+            stillBound = bound.isCurrent,
+            now = mutableState.value,
+            accountIdB64 = accountIdB64,
         )
-        // Signed out while the publish was out: the device keeps nothing of
-        // the account and does not flip to the phrase screen.
-        if (!bound.isCurrent) {
+        if (after == FreshIdentityAfterPublish.KEEP_OWED) {
+            // Another account is signed in (or parked) on this device: its
+            // screen stays. The phrase is not lost with this call: it is kept
+            // in this account's own stores, owed, and shown first at the
+            // account's next sign-in here.
+            val kept = keepFreshPhraseOwed(accountIdB64, phrase, seed)
+            Log.w(
+                "lakko-auth",
+                "fresh identity published while another account is signed in; " +
+                    if (kept) "its phrase is kept, owed to the account" else "its phrase could NOT be kept",
+            )
             seed.fill(0)
             bound.ensureCurrent()
         }
 
-        // Bootstrap the device-key existence gate from the fresh seed (no
-        // password on this path). No-op if a key already exists.
-        bootstrapDeviceKeyFromSeedBestEffort(
-            accountIdB64 = pending.accountIdB64,
-            accountIdentitySeed = seed,
-            context = "mintFreshIdentity",
-        )
-
-        // Cache the fresh seed locally (best-effort) so warm relaunch works.
-        try {
-            AccountIdentitySeedStore.putAccountIdentitySeed(
-                applicationContext,
-                pending.accountIdB64,
-                seed,
+        // Signed out (or the device forgotten) while the publish was out:
+        // nothing of the account is written back to the device. The phrase
+        // screen below still comes up, and the seed is cached when the person
+        // types the phrase at the next sign-in.
+        if (after == FreshIdentityAfterPublish.SHOW_AND_KEEP) {
+            // Bootstrap the device-key existence gate from the fresh seed (no
+            // password on this path). No-op if a key already exists.
+            bootstrapDeviceKeyFromSeedBestEffort(
+                accountIdB64 = accountIdB64,
+                accountIdentitySeed = seed,
+                context = "mintFreshIdentity",
             )
-        } catch (cause: Throwable) {
-            Log.w("lakko-auth", "fresh-identity seed persist failed", cause)
+
+            // Cache the fresh seed locally (best-effort) so warm relaunch works.
+            try {
+                AccountIdentitySeedStore.putAccountIdentitySeed(
+                    applicationContext,
+                    accountIdB64,
+                    seed,
+                )
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "fresh-identity seed persist failed", cause)
+            }
         }
 
         // Stash the completion + phrase; flip to the save-phrase state.
-        pendingFreshPhrase.set(
+        pendingFreshPhrase.getAndSet(
             PendingFreshPhrase(
                 seed = seed,
-                accountIdBytes = pending.accountIdBytes,
-                accountIdB64 = pending.accountIdB64,
-                sessionToken = pending.sessionToken,
-                sessionExpiresAtMs = pending.sessionExpiresAtMs,
-                username = pending.username,
+                accountIdBytes = accountIdBytes,
+                accountIdB64 = accountIdB64,
+                sessionToken = sessionToken,
+                sessionExpiresAtMs = sessionExpiresAtMs,
+                username = username,
                 phrase = phrase,
             ),
-        )
-        pendingRecovery.set(null)
+        )?.seed?.fill(0)
+        clearParkedRecovery()
         landedState = AuthState.SaveFreshPhrase(
             account = SessionAccount(
-                accountIdB64 = pending.accountIdB64,
-                username = pending.username,
+                accountIdB64 = accountIdB64,
+                username = username,
             ),
         )
         return phrase
@@ -2640,6 +2805,8 @@ public class AuthRepository(
             )
             seedHandedOff = true
             pendingRecovery.set(null)
+            // A phrase this device still owes the account is shown first.
+            restoreOwedSignupPhrase(pending.accountIdB64)
             landedState = AuthState.Session(
                 account = SessionAccount(
                     accountIdB64 = pending.accountIdB64,
@@ -2700,7 +2867,7 @@ public class AuthRepository(
         sessionExpiresAtMs: Long,
         persistJoin: suspend () -> Unit = {},
     ) {
-        val bound = accountBinding.capture()
+        val start = signInStart()
         var seedHandedOff = false
         try {
             runCheckedDeviceRestore(
@@ -2719,7 +2886,7 @@ public class AuthRepository(
                 land = {
                     // The binding this restore started under is gone (a
                     // sign-out, another landing): do not sign this one in.
-                    bound.ensureCurrent()
+                    start.standDownIfOvertaken()
                     landDeviceRestore(
                         accountIdBytes = accountIdBytes,
                         accountIdB64 = accountIdB64,
@@ -2815,6 +2982,8 @@ public class AuthRepository(
             ),
         )
         pendingRecovery.set(null)
+        // A phrase this device still owes the account is shown first.
+        restoreOwedSignupPhrase(accountIdB64)
         landedState = AuthState.Session(
             account = SessionAccount(
                 accountIdB64 = accountIdB64,
@@ -2857,6 +3026,7 @@ public class AuthRepository(
                 me.lakko.app.l10n.UiText("auth.passkey.error.no_cached"),
             )
 
+        val start = signInStart()
         val webauthnClient = WebauthnClient()
         val assertion: PasskeyLoginResult? = try {
             webauthnClient.loginWithPasskey(applicationContext)
@@ -2916,6 +3086,15 @@ public class AuthRepository(
         // key. OPAQUE export key is deterministic — the upsert
         // here is a no-op for an unchanged password but keeps
         // the row's last-write timestamp moving.
+        // The ceremony and its round trips took as long as the person did
+        // (see [standDownIfOvertaken]). Asked here, after everything that
+        // can still refuse the passkey and before the first write.
+        try {
+            start.standDownIfOvertaken()
+        } catch (stale: kotlinx.coroutines.CancellationException) {
+            exportKey.fill(0)
+            throw stale
+        }
         val deviceRootKey = deriveDeviceRootKey(exportKey, cached.accountIdB64)
         try {
             deviceKeyStore.putDeviceKey(
@@ -2983,6 +3162,7 @@ public class AuthRepository(
             // independent copyOf().
             exportKey.fill(0)
             subscribePushBestEffort("passkey-login")
+            completeParkFromOwedPhrase(cached.accountIdB64)
             return
         }
 
@@ -2996,6 +3176,8 @@ public class AuthRepository(
                 sessionExpiresAtMs = assertion.sessionExpiresAtMs,
             ),
         )
+        // A phrase this device still owes the account is shown first.
+        restoreOwedSignupPhrase(cached.accountIdB64)
         landedState = AuthState.Session(
             account = SessionAccount(
                 accountIdB64 = cached.accountIdB64,
@@ -3600,11 +3782,13 @@ public class AuthRepository(
         synchronized(boundAccountLock) { boundAccountIdB64 = null }
         accountBinding.advance()
         mutableIdentitySecrets.value?.let { secrets ->
-            secrets.exportKey.fill(0)
             // ADR-0017: the AccountIdentity (phrase) seed is the
-            // highest-sensitivity in-memory secret — wipe it too.
-            secrets.accountIdentitySeed.fill(0)
-            secrets.accountId.fill(0)
+            // highest-sensitivity in-memory secret, wiped with the export
+            // key. Through [SessionSecretWipe], so work still in flight for
+            // this session reads the seed whole or is told the session ended,
+            // never zeroes. The account id is not a secret and is left as it
+            // is: that work goes on naming the account it was started for.
+            SessionSecretWipe.wipe(secrets.exportKey, secrets.accountIdentitySeed)
         }
         mutableIdentitySecrets.value = null
         // No session, no contact list: an account-less read is empty and an
@@ -3618,11 +3802,15 @@ public class AuthRepository(
      *  user leaves no secret material behind. Also drops any pending
      *  ADR-0018 phone/email recovery routing context (no secrets, but
      *  it should not survive a sign-out). */
+    /** Drop the parked post-ACCESS context alone, wiping its export key. */
+    private fun clearParkedRecovery() {
+        // The account id is not a secret, and flows still in flight read it
+        // from this object: it is left as it is (see [clearIdentitySecrets]).
+        pendingRecovery.getAndSet(null)?.exportKey?.fill(0)
+    }
+
     private fun clearPendingRecovery() {
-        pendingRecovery.getAndSet(null)?.let { pending ->
-            pending.exportKey.fill(0)
-            pending.accountIdBytes.fill(0)
-        }
+        clearParkedRecovery()
         pendingContactRecover.set(null)
         pendingFreshPhrase.getAndSet(null)?.let { it.seed.fill(0) }
         mutableIdentityAlert.value = null
@@ -3938,3 +4126,41 @@ public class IdentityVerificationUnavailable(
      *  `false` when it could not be reached. Picks the screen sentence. */
     public val missing: Boolean = false,
 ) : IllegalStateException(message)
+
+/** What [AuthRepository.mintFreshIdentity] does once its publish has landed. */
+internal enum class FreshIdentityAfterPublish {
+    /** The session it started in is still there: cache the seed, show the phrase. */
+    SHOW_AND_KEEP,
+
+    /** Signed out meanwhile and nobody else signed in: show the phrase, write
+     *  nothing of the account to the device. */
+    SHOW_ONLY,
+
+    /** Another account holds the device: this account's phrase screen is not
+     *  put over it. The phrase is kept in the minting account's own stores,
+     *  owed, for its next sign-in on this device. */
+    KEEP_OWED,
+}
+
+/**
+ * The publish of a fresh identity is irrevocable, so what follows it is
+ * decided by where the device is NOW ([now]) and not by whether the flow was
+ * overtaken ([stillBound] is `false` after a sign-out, a forget-device or any
+ * other landing).
+ *
+ * Signed out, or parked again on the restore screen of the SAME account: the
+ * phrase is shown, because nobody else can ever show it. Anything else (a full
+ * session, another account parked, another fresh phrase waiting) keeps its
+ * screen.
+ */
+internal fun freshIdentityAfterPublish(
+    stillBound: Boolean,
+    now: AuthState,
+    accountIdB64: String,
+): FreshIdentityAfterPublish = when {
+    stillBound -> FreshIdentityAfterPublish.SHOW_AND_KEEP
+    now is AuthState.Anon -> FreshIdentityAfterPublish.SHOW_ONLY
+    now is AuthState.NeedsRecoveryPhrase && now.account.accountIdB64 == accountIdB64 ->
+        FreshIdentityAfterPublish.SHOW_AND_KEEP
+    else -> FreshIdentityAfterPublish.KEEP_OWED
+}

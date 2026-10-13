@@ -100,7 +100,33 @@ public class ChatClient(
      * That is what stopped an incoming call ringing anywhere but the chat the
      * user had open.
      */
-    private val ownPublished: OwnEchoRegistry = OwnEchoRegistry()
+    @Volatile
+    private var ownPublished: OwnEchoRegistry = OwnEchoRegistry()
+
+    /**
+     * The session ended: start an empty echo registry.
+     *
+     * The registry is keyed on `(journal, id)` and says nothing about WHOSE
+     * publish a row was. Left standing across a sign-out, a row the account
+     * that left published and never polled back stays registered, and the next
+     * account on this phone that is a member of the same group drops that row
+     * as its own echo: a message it never sees, or a commit it never applies.
+     *
+     * Swapped rather than cleared: a publish of the session that left can
+     * still be in flight, and it registers into the registry its send was
+     * prepared under ([PreparedSend.echoes]), which nobody reads any more.
+     */
+    public fun forgetOwnEchoes() {
+        ownPublished = OwnEchoRegistry()
+    }
+
+    /** Rows registered as own echoes in the CURRENT session's registry and
+     *  not polled back yet. Diagnostics and tests only. */
+    internal val outstandingOwnEchoes: Int get() = ownPublished.size
+
+    /** A send prepared NOW, without the MLS half (a host test has no group). */
+    internal fun preparedForTest(groupId: ByteArray, wireBytes: ByteArray): PreparedSend =
+        PreparedSend(groupId = groupId, wireBytes = wireBytes, echoes = ownPublished)
 
     override fun close() {
         ds.close()
@@ -226,7 +252,7 @@ public class ChatClient(
             )
         }
 
-        return PreparedSend(groupId = groupId, wireBytes = wireBytes)
+        return PreparedSend(groupId = groupId, wireBytes = wireBytes, echoes = ownPublished)
     }
 
     /**
@@ -255,7 +281,7 @@ public class ChatClient(
         } catch (e: DsNetworkError) {
             throw ChatError("DS publish failed", e)
         }
-        ownPublished.remember(DsClient.pseudonymHex(prepared.groupId), publish.id)
+        prepared.echoes.remember(DsClient.pseudonymHex(prepared.groupId), publish.id)
 
         return SendMessageResult(messageId = publish.id, createdAt = publish.createdAt)
     }
@@ -1116,6 +1142,9 @@ public class PreparedSend internal constructor(
     internal val groupId: ByteArray,
     /** The gen-N application-message wire bytes, already sealed. */
     internal val wireBytes: ByteArray,
+    /** The echo registry of the session this send was prepared in; the
+     *  publish registers its row there and nowhere else. */
+    internal val echoes: OwnEchoRegistry,
 )
 
 /** Result of [ChatClient.sendMessage]. */

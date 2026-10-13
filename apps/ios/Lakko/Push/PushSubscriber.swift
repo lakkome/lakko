@@ -129,6 +129,10 @@ public final class PushSubscriber {
         } catch {
             throw PushSubscribeError.registerFailed(error)
         }
+        // `docs/ux/calls.md` section 2.1 — the VoIP token is registered under
+        // the same pseudonym. PushKit delivers it once per launch, so a
+        // sign-in in a running app registers it here. Best effort inside.
+        await VoipPushRegistrar.shared.registerForSignIn(devicePseudonym: pseudonym)
 
         return SubscribeResult(
             devicePseudonym: pseudonym,
@@ -177,7 +181,10 @@ public final class PushSubscriber {
         // `docs/ux/calls.md` section 2.1 — the VoIP token is a SECOND
         // registration under its own provider (``PushTokenKind``), so signing
         // out has to drop it too; the alert unregister above does not touch it.
-        await VoipPushRegistrar.shared.unregister()
+        // Under the pseudonym read above, before the await: this sign-in's.
+        if let pseudonym {
+            await VoipPushRegistrar.shared.unregister(devicePseudonym: pseudonym)
+        }
         // iOS doesn't expose a `unregisterForRemoteNotifications`
         // in 16+ (it was deprecated in 9 and removed). Apple's
         // canonical advice: just stop registering. The OS keeps

@@ -19,6 +19,7 @@
  * The lost-everything fallback (`mintFreshIdentity`) sits behind a warning
  * at the bottom; it is the one path that publishes a new identity.
  */
+import { isAbandoned } from "./binding-epoch";
 import { createSignal, Match, onMount, Show, Switch, type JSX } from "solid-js";
 import { useAuth } from "./AuthContext";
 import { AuthLayout } from "../ui/AuthLayout";
@@ -126,6 +127,8 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       await auth.provideRecoveryPhrase(fullPhrase);
       setWords(["", "", ""]);
     } catch (err) {
+      // The prompt's account is no longer the one bound here: nothing to say.
+      if (isAbandoned(err)) return;
       if (err instanceof AuthHttpError && err.status === 401) {
         const next = misses() + 1;
         setMisses(next);
@@ -153,6 +156,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       setPhrase("");
       // No navigation: the state flips to `session` and the guard re-renders.
     } catch (err) {
+      if (isAbandoned(err)) return;
       setError(identityRestoreErrorMessage(err));
     } finally {
       setBusy(false);
@@ -365,6 +369,10 @@ function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
       // `save-fresh-phrase`, which the guard renders as the phrase screen.
       await auth.mintFreshIdentity();
     } catch (err) {
+      // Signed out, or another account landed, while the identity was being
+      // made: no error. If it was already published, its phrase is kept for
+      // this account's next sign-in on this browser.
+      if (isAbandoned(err)) return;
       setError(
         isOffline(err)
           ? t("common.error.offline")

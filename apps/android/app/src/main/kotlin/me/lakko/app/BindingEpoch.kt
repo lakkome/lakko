@@ -9,6 +9,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
 /**
@@ -58,7 +60,21 @@ public class BindingEpoch {
     /** Remember the binding that is current now. */
     public fun capture(): Binding {
         val mine = synchronized(lock) { epoch }
-        return Binding { synchronized(lock) { epoch } == mine }
+        return Binding(
+            current = { synchronized(lock) { epoch } == mine },
+            endIfCurrent = {
+                val ended = synchronized(lock) {
+                    if (epoch != mine) {
+                        null
+                    } else {
+                        epoch += 1
+                        parent.also { parent = SupervisorJob() }
+                    }
+                }
+                ended?.cancel(StaleBindingException())
+                ended != null
+            },
+        )
     }
 
     /** The parent of the coroutines that belong to the current binding. */
@@ -66,7 +82,10 @@ public class BindingEpoch {
 }
 
 /** One captured binding of a [BindingEpoch]. */
-public class Binding internal constructor(private val current: () -> Boolean) {
+public class Binding internal constructor(
+    private val current: () -> Boolean,
+    private val endIfCurrent: () -> Boolean,
+) {
     /** Whether the binding this was captured under is still the bound one. */
     public val isCurrent: Boolean get() = current()
 
@@ -78,6 +97,18 @@ public class Binding internal constructor(private val current: () -> Boolean) {
      */
     public fun ensureCurrent() {
         if (!current()) throw StaleBindingException()
+    }
+
+    /**
+     * [ensureCurrent] for work that is about to REPLACE the binding (a
+     * sign-in landing): pass when it is still current and end it in the same
+     * step, so of several pieces of work that captured one binding exactly
+     * one passes, whichever threads they run on. Asking and landing as two
+     * steps lets two sign-ins racing each other both find the binding current
+     * and both land.
+     */
+    public fun takeOver() {
+        if (!endIfCurrent()) throw StaleBindingException()
     }
 }
 
@@ -97,3 +128,21 @@ public fun CoroutineScope.launchBound(
     start: CoroutineStart = CoroutineStart.DEFAULT,
     block: suspend CoroutineScope.() -> Unit,
 ): Job = launch(context = epoch.job(), start = start, block = block)
+
+/**
+ * For a loop that calls into a repository pass after pass and catches
+ * cancellation to rethrow it: a [StaleBindingException] out of one pass means
+ * the repository's session ended under THAT pass, which is not this loop
+ * being cancelled. The loop goes on to its next pass (for the account bound
+ * by then) unless its own coroutine is cancelled too; any other cancellation
+ * is rethrown.
+ *
+ * It matters when a session's loops start before the repository has been
+ * told about the session: the first pass runs for the account that is being
+ * replaced, is stopped, and without this the loop would end with it and
+ * never poll for the account it belongs to.
+ */
+public suspend fun endPassUnlessCancelled(cancellation: CancellationException) {
+    if (cancellation !is StaleBindingException) throw cancellation
+    currentCoroutineContext().ensureActive()
+}
