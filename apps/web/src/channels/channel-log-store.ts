@@ -22,7 +22,7 @@
  * flush chain per page); this module is plain CRUD.
  */
 
-import { accountStoresWritable } from "../auth/account-store-gate";
+import { accountStoresWritable, requireAccountStoresWritable } from "../auth/account-store-gate";
 import type { ChannelLogPayload } from "./channel-log-codec";
 
 const DB_NAME = "lakko-channel-log";
@@ -83,18 +83,26 @@ async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint
 
 /** Persist (or replace) the channel log for an account. Rejects on an
  *  IDB / WebCrypto failure; the caller logs and retries on the next
- *  mutation. */
+ *  mutation.
+ *
+ *  A write for an account whose stores are sealed (`auth/account-store-gate`)
+ *  is skipped, unless `durable` is set: then it THROWS
+ *  `AccountStoresSealedError`, for a caller that publishes only after the
+ *  write landed (the co-publisher knock, `flushChannelLogDurable`). */
 export async function saveChannelLog(
   accountIdB64: string,
   deviceKey: CryptoKey,
   payload: ChannelLogPayload,
+  options: { readonly durable?: boolean } = {},
 ): Promise<void> {
   const plaintext = new TextEncoder().encode(JSON.stringify(payload));
   const ciphertext = await encryptBlob(deviceKey, plaintext);
   const row: PersistedRow = { accountId: accountIdB64, ciphertext };
   const db = await openDb();
   try {
-    if (!accountStoresWritable(accountIdB64)) return;
+    // Asked synchronously right before the transaction (the gate's rule).
+    if (options.durable === true) requireAccountStoresWritable(accountIdB64);
+    else if (!accountStoresWritable(accountIdB64)) return;
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put(row);
     await awaitTx(tx, undefined);

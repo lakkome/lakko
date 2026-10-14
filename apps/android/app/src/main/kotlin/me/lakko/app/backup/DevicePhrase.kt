@@ -5,6 +5,7 @@ package me.lakko.app.backup
 
 import android.content.Context
 import android.util.Log
+import me.lakko.app.account.AccountStoreGate
 import me.lakko.app.auth.ThreeWordsBudgetStore
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
 
@@ -66,16 +67,23 @@ public object DevicePhrase {
      * landing continues; the device then simply does not offer what needs
      * the phrase. Returns whether the write happened. A write that happened
      * also lifts a suspended three-word route for the account.
+     *
+     * [since] is the wipe mark the landing took when it began: the write is
+     * refused when the account was wiped after it (a Forget device while the
+     * landing was out), and only then ([PhraseStore.putPhrase]).
      */
     public fun store(
         context: Context,
         accountIdB64: String,
         phrase: String,
         path: LandingPath,
+        since: AccountStoreGate.WipeMark,
     ): Boolean = storeWith(
         phrase = phrase,
         path = path,
-        write = { bytes -> PhraseStore.putPhrase(context, accountIdB64, bytes) },
+        write = { bytes ->
+            if (!PhraseStore.putPhrase(context, accountIdB64, bytes, since)) throw PhraseWriteRefused()
+        },
         // The phrase was just written by a landing path, so it is the
         // account's: a suspended three-word route is offered again.
         onStored = { ThreeWordsBudgetStore.onDevice(context).clearSuspended(accountIdB64) },
@@ -97,6 +105,11 @@ public object DevicePhrase {
             // like a failed write (the marker then outlives this landing).
             onStored()
             true
+        } catch (cause: PhraseWriteRefused) {
+            // Not a failure: the account was forgotten on this device while
+            // the landing was out, and its row stays removed.
+            log("recovery phrase store (${path.tag}) refused: the account was wiped", cause)
+            false
         } catch (cause: Throwable) {
             log("recovery phrase store (${path.tag}) failed", cause)
             false
@@ -136,6 +149,11 @@ public object DevicePhrase {
             RecoveryMnemonic.fromPhrase(phrase).use { it.toEntropy() }
         }
 }
+
+/** The phrase row was not written: the account was wiped after the landing
+ *  that writes it began ([PhraseStore.putPhrase]). */
+public class PhraseWriteRefused :
+    IllegalStateException("the account's data was wiped after this work began")
 
 /** Entropy length of the 12-word recovery phrase (BIP39, 128 bits). */
 public const val PHRASE_ENTROPY_LENGTH: Int = 16

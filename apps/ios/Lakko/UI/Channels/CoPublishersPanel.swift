@@ -133,7 +133,9 @@ struct CoPublishersPanel: View {
     private func onAppearLoad() async {
         do {
             let id = try Identity.fromSeed(seed: accountIdentitySeed)
-            let pg = try CoPublisher.openPublisherGroup(identity: id, channelIdHex: channelId)
+            let pg = try CoPublisher.openPublisherGroup(
+                identity: id, accountIdB64: AcceptedContactsStore.boundAccountIdB64,
+                channelIdHex: channelId)
             identity = id
             publisherGroup = pg
             // ADR-0053 point 2 — claim-on-open (the claim at creation included).

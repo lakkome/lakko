@@ -68,6 +68,13 @@ entry's status line, not a mechanical fact.
 | [G-42](./known-gaps.md#g-42) | A journal's name is its only key | Closing | residuals named in the status line |
 | [G-43](./known-gaps.md#g-43) | `services/channels` authorised no publisher operation | Closed, live check owed | not walked live |
 | [G-44](./known-gaps.md#g-44) | Rejoining a call in the same MLS epoch reused SFrame `(key, nonce)` pairs | Closed, live check owed | not seen on a live call |
+| [G-45](./known-gaps.md#g-45) | After a key reset the old identity's leaves stay in conversation groups until peers evict them | Partly closed | an owned group, a table-less group, a group with no admin contact |
+| [G-46](./known-gaps.md#g-46) | A stolen session can reset the account keys; two discovery writes open to a superseded token | Partly closed | session + password, a lifted grant, the discovery part |
+| [G-47](./known-gaps.md#g-47) | A fresh identity's phrase rule (ADR-0077 decision 3) holds in full on Android only | Open | the write-before-the-server-step and the typed-phrase clear on web and iOS |
+| [G-48](./known-gaps.md#g-48) | Account store gate coverage (ADR-0077 decision 4) | Partly closed | the stores and paths listed in the entry |
+| [G-49](./known-gaps.md#g-49) | An overtaken sign-in can already have changed server state; binding residuals | Open | see the entry |
+| [G-50](./known-gaps.md#g-50) | Channel PublisherGroup commits publish before they persist | Open | an outbox-style record; iOS and Android not checked |
+| [G-51](./known-gaps.md#g-51) | Channel publish counters restart at 0 after Forget device | Unconfirmed | not confirmed on web; iOS and Android not checked |
 
 ## MLS state machine
 
@@ -2899,3 +2906,174 @@ change or deleting the TOTP secret on reset (open question 1, recommended
 against); putting the KeyPackage delete under the generation floor (one line
 in `services/discovery/src/keypackage.rs`, the same `floor_refuses` call the
 upload makes). None is built.
+
+
+## Client account binding and local stores
+
+<a id="g-47"></a>
+### G-47: A fresh identity's phrase rule (ADR-0077 decision 3) holds in full on Android only
+
+**Status:** **OPEN** (state at `3af913ad`, 2026-10-14, found by reading; nothing run on a device)
+
+[ADR-0077](../adr/0077-account-binding-and-store-gate.md) decision 3 (the
+maintainer's, 2026-10-13) says the new phrase of `mintFreshIdentity` is written
+to the account's own protected phrase store before the irrevocable step, and
+that a failed write refuses the mint. Since the account-recovery merge
+(`1ae14935`) the irrevocable step is the ADR-0073 server reset.
+
+- **Android:** holds. `StagedPhrase` stages the row before `resetAccountKeys`,
+  refuses with `restore_identity.lost.error.phrase_not_stored` when it cannot,
+  and puts the previous row back when the server step fails.
+- **Web:** does not hold. At `c22ad3e3` `mintFreshIdentity` wrote the phrase
+  before the identity publish and refused on a failed write; the merge replaced
+  that flow with `adoptKeyResetOutcome`, which stores the phrase after
+  `resetAccountKeys` answered (`storeDevicePhrase` logs a failed write and
+  returns `false`, which the caller ignores).
+- **iOS:** does not hold. `landKeyReset` stores the phrase
+  (`DevicePhrase.store`, which does not throw) after `keyResetOperation`
+  answered.
+
+So on web and iOS a page or process that dies between the server's answer and
+the local writes leaves a reset account whose new phrase is on no device. The
+point of decision 3's first rule was to close that window.
+
+A second divergence, smaller: decision 3 clears the owed marker when the person
+typed the phrase (they hold it). Android does (`phraseHeldByPerson` on `recover`
+and on the restore prompt); web and iOS do not, so a person who types the
+phrase can be shown it again at the next landing. Also differing, by design or
+not decided: web marks the phrase owed unconditionally, iOS only when ADR-0075
+shows new words, Android marks it and clears it at the landing for an account
+that is not phrase-protected; iOS also clears the marker when the owed phrase
+is no longer readable.
+
+**Closing:** stage the phrase before the server step on web and iOS as Android
+does, and decide the typed-phrase clear for web and iOS.
+
+<a id="g-48"></a>
+### G-48: Account store gate coverage (ADR-0077 decision 4)
+
+**Status:** **PARTLY CLOSED** (built and host-tested on web, iOS and Android by `16d6a27f`, `c22ad3e3`, `3af913ad` and the commit after it; not walked live)
+
+The gate (C-73) refuses a sealed account's store writes and Forget device seals
+before it deletes.
+
+Closed by the commit after `3af913ad` (host-tested only):
+
+- iOS sign-in key writes (device key, export key, account and device identity
+  seeds, the phrase) take a wipe mark at the start of every sign-in route
+  (`SignInKeyWrites`) and are refused only if the account was wiped after the
+  route began; `replacePassword` gained the binding check it lacked.
+- iOS `CoPublishedJournals`, `CoPublisher.markFounded`, `MediaPrefs` played
+  marks and `ProfileDirectory.acceptReceived` take the account their work
+  captured and write nothing when it is no longer the bound one.
+- The Android phrase store is gated with the same wipe-mark semantics.
+- The join request on all three clients, and the channel co-publisher request
+  on web and Android, persist the proposal's keys fail-closed before the knock
+  that carries the proposal; Android's five proposal publishes persist
+  fail-closed first, as web's do.
+- The web service worker caches navigations under one shell key, so no
+  account URL is kept as a cache key.
+
+Still not covered, or covered differently:
+
+- Android and web sign-in key writes (device key, export key, seeds, session
+  record) other than the phrase are not under a wipe mark; iOS's are.
+- The iOS channel co-publisher request still knocks before persisting its
+  KeyPackage keys.
+- Android: the seal ends at the account's next landing, so a stale coroutine
+  that resumes after the same account signed in again is stopped by its binding
+  check only.
+- The web gate's ordering argument (a read-write transaction created before the
+  wipe's delete commits first and is deleted by it) rests on the IndexedDB
+  specification, not on a test.
+- Web seals only the session-token row at logout (`sealAccountSession`; its
+  argument is that a late write of the account's own rows belongs on disk); iOS
+  and Android seal every store of the account at logout, and the durable MLS
+  writes then throw. The two models were not reconciled.
+
+**Closing:** gate each listed path; decide one logout model.
+
+<a id="g-49"></a>
+### G-49: An overtaken sign-in can already have changed server state; binding residuals
+
+**Status:** **OPEN** (state at `3af913ad`, 2026-10-14)
+
+ADR-0077 decision 2 drops a sign-in whose binding changed while it ran: nothing
+lands on the device. What it cannot undo is what the server already did. An
+abandoned recover has already changed the password on the server; an abandoned
+one-time code (TOTP, recovery email) is already consumed. The person sees no
+error (the flow was abandoned by design) and the next sign-in needs the new
+password or a new code.
+
+Binding residuals:
+
+- iOS `JournalClaimOnOpen.ensure` writes its `settled` / `failedAtMs`
+  bookkeeping after its await with no binding check. The claim it runs
+  (`claimJournalAsOwner`) checks its own binding and answers `.failed` when
+  overtaken, so a stale run cannot record a stale success; the wrapper itself
+  is not guarded.
+- Most guards on all three clients are covered by build and reading only; web
+  `AuthContext` behaviour by pure modules and source pins.
+- Sign-up is not dropped after the registration finished, by decision; web
+  guest signup is still stopped by a sign-out during its landing
+  (`registered: true` selects `captureSignOut`), while iOS and Android guest
+  signup are not. Not decided whether that difference matters.
+
+**Closing:** guard the wrapper; a live walk of two racing sign-ins and a
+sign-out during each sign-in route on all three clients.
+
+<a id="g-50"></a>
+### G-50: Channel PublisherGroup commits publish before they persist
+
+**Status:** **OPEN** (found on web 2026-10-14 by the residual pass after ADR-0077; iOS and Android not checked; not fixed)
+
+ADR-0040 closed the device-ahead class for chat groups; the channel
+PublisherGroup has the same shape and no outbox. Read at `3af913ad` on web:
+
+- **Co-publisher approve.** `approveCoPublisher` (`apps/web/src/channels/copublisher.ts`,
+  called from `CoPublishersPanel.tsx` `onApprove`) eager-merges the `Add` with
+  `approveExternalJoin`, publishes the commit to the DS journal, delivers the
+  Welcome and reseals every subscriber at the new seed. Only afterwards does the
+  panel call `channelsActions.notePublisherGroupChanged()`, which schedules a
+  write 150 ms later (`schedulePersist` in `apps/web/src/state/channels-state.ts`);
+  `flushNow` catches a failed write and logs it.
+- **Rotation.** `runRotationOnce` (`rotation-cron.ts`) calls
+  `publisherGroup.rotate()`, registers the next DS epoch, reseals the new seed to
+  every subscriber and commits the rotation on `services/channels`; the
+  `onRotated` callback in `RotationPanel.tsx` then refreshes the publisher keys
+  and calls the same debounced, error-swallowing `notePublisherGroupChanged()`.
+
+A reload or crash inside the debounce, or a failed write, leaves the server and
+the subscribers at the new epoch and seed while the device reopens the
+PublisherGroup at the old one. Persisting first would not fix it (a persisted
+N+1 with the publish never made is the device-ahead case ADR-0040 describes):
+it needs an outbox-style record of the commit and the reseal, as ADR-0040 keeps
+for chat groups.
+
+**Closing:** an outbox-style record for PublisherGroup commits; check iOS and
+Android.
+
+<a id="g-51"></a>
+### G-51: Channel publish counters restart at 0 after Forget device
+
+**Status:** **UNCONFIRMED** (reported on web 2026-10-14 by the residual pass; not confirmed by reading the web code; iOS and Android not checked)
+
+The report: Forget device deletes the channel publish counters, a new sign-in
+restarts them at 0, and if the device lands at the same PublisherGroup epoch
+the channel content seed is unchanged, so a post could be sealed under an
+earlier post's `(key, nonce)` (the G-33 class).
+
+What the web code at `3af913ad` says: `compose_post` derives the key and nonce
+from `(seed, channel_id, epoch_id, sender_pubkey, message_counter)`, and the
+post signing key is random per device and channel (`ChannelSigningKey.generate`
+in `apps/web/src/channels/composer.ts`), stored only in the encrypted channel
+log. The wipe deletes the channel log and only then the counters
+(`wipe-account.ts`, step `channel-log`), so the next post after a new sign-in
+signs with a new key and its `sender_pubkey` differs. A reuse would need the
+old signing seed to survive the wipe; no such path was found on web. iOS
+(`ChannelsComposer.swift`) and Android (`ChannelsComposer.kt`) also generate the
+signer randomly; whether their wipes remove the signing seed with the counters
+was not checked.
+
+**Closing:** check the iOS and Android wipes; close this entry if they match
+web.

@@ -2688,7 +2688,8 @@ public class ChatRepository(
                     } catch (e: FfiException) {
                         throw ChatError("proposeGroupRoles failed", e)
                     }
-                    persistSnapshotBestEffort()
+                    // A refused persist publishes nothing ([persistProposalOrThrow]).
+                    persistProposalOrThrow()
                     return@sessionLock suspend {
                         val publish = try {
                             dsClient.publishGroup(record.groupId, proposalBytes)
@@ -2888,8 +2889,9 @@ public class ChatRepository(
                 }
                 // The proposal is now in this device's own pending store, which
                 // is provider state — persist so a relaunch does not lose a
-                // request the peers hold.
-                persistSnapshotBestEffort()
+                // request the peers hold. A refused persist publishes nothing
+                // ([persistProposalOrThrow]).
+                persistProposalOrThrow()
                 suspend {
                     val publish = try {
                         dsClient.publishGroup(record.groupId, proposalBytes)
@@ -3059,8 +3061,9 @@ public class ChatRepository(
                     }
                     // The proposal is now in this device's own pending store,
                     // which is provider state — persist so a relaunch does not
-                    // lose a request the peers hold.
-                    persistSnapshotBestEffort()
+                    // lose a request the peers hold. A refused persist
+                    // publishes nothing ([persistProposalOrThrow]).
+                    persistProposalOrThrow()
                     // ADR-0060 §6 — the committers who may sweep this Add, in
                     // rank order (owner, then admins), so this device can
                     // hand each of them a delegation for the added person's
@@ -3363,7 +3366,8 @@ public class ChatRepository(
                     } catch (e: FfiException) {
                         throw ChatError("proposeRemoveMember failed", e)
                     }
-                    persistSnapshotBestEffort()
+                    // A refused persist publishes nothing ([persistProposalOrThrow]).
+                    persistProposalOrThrow()
                     val intent = subjectKey?.let { key ->
                         val keyB64 = outboxB64(key)
                         if (key.contentEquals(identity.signaturePublicKey())) {
@@ -3659,10 +3663,10 @@ public class ChatRepository(
                 } catch (e: FfiException) {
                     throw ChatError("approveExternalJoin failed", e)
                 }
-                // Best-effort, like every other propose path: a proposal
-                // advances no epoch, so a snapshot that does not land costs a
-                // re-fetch of a journal row, never a desync.
-                persistSnapshotBestEffort()
+                // Fail-closed, like every other propose path: the proposal is in
+                // this device's own pending store, and a refused persist
+                // publishes nothing ([persistProposalOrThrow]).
+                persistProposalOrThrow()
                 Pair(record.groupId, bytes)
             }
             val publish = try {
@@ -4065,9 +4069,13 @@ public class ChatRepository(
                     providerLock.sessionLock {
                         val proposal = identity.createExternalJoinProposal(groupId, epoch)
                         // The proposal's KeyPackage private key is the only thing
-                        // that can open the Welcome the sweep will send later;
-                        // persist it now rather than losing it to a process death.
-                        persistSnapshotBestEffort()
+                        // that can open the Welcome the sweep will send later.
+                        // Durable BEFORE the knock, fail-closed: a persist that
+                        // failed or was refused (the session ended) throws here,
+                        // and the proposal never leaves the device. Published
+                        // with nothing on disk, an approval would send a Welcome
+                        // this device cannot open after a restart.
+                        persistSnapshotDurableOrThrow()
                         proposal
                     }
                 },
@@ -9505,6 +9513,30 @@ public class ChatRepository(
         val blob = identity.snapshotStorage()
         writeSnapshot(identity, accountIdB64, blob)
         snapshotUnreadable.set(false)
+    }
+
+    /**
+     * The FAIL-CLOSED persist a membership proposal runs between creating the
+     * proposal and publishing it (role change, ownership transfer, add,
+     * remove, approve of a join request): [persistSnapshotDurableOrThrow],
+     * then the message log best-effort as [persistSnapshotBestEffort] does.
+     *
+     * The proposal is in this device's own pending store, which is provider
+     * state, and its handshake step was taken in memory. Swallowing a failed
+     * or refused snapshot here used to send it anyway: a request on the wire
+     * that this device did not record, taken again after a restart. A session
+     * that ended is passed on as the cancellation it is; any other failure
+     * ends the request with nothing published.
+     */
+    private fun persistProposalOrThrow() {
+        try {
+            persistSnapshotDurableOrThrow()
+        } catch (ended: me.lakko.app.StaleBindingException) {
+            throw ended
+        } catch (cause: Throwable) {
+            throw ChatError("the proposal could not be recorded on this device; nothing was sent", cause)
+        }
+        persistMessageLogBestEffort()
     }
 
     /** Write [blob] and record the leaf key it was taken under (ADR-0050). */

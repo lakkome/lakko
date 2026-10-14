@@ -2261,8 +2261,8 @@ public fun JoinCoPublisherScreen(
                         // live in the shared identity's provider; the join
                         // below must run on the SAME identity, and the
                         // joined group is persisted with it.
-                        val request = publisher.withIdentity { identity ->
-                            CoPublisher.requestToCoPublish(ds, identity, trimmed, coPublished)
+                        val request = publisher.withIdentityPersistingFirst { identity, persistNow ->
+                            CoPublisher.requestToCoPublish(ds, identity, trimmed, coPublished, persistNow)
                         }
                         status = UiText("channels.join.waiting")
                         var keys: ChannelPublisherKeys? = null

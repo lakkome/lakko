@@ -740,11 +740,14 @@ const JoinCoPublisher: Component = () => {
       await awaitChannelsHydration();
       if (!sameSession()) return;
       const ds = new DsClient();
-      const { groupId, channelIdHex, joinerKey } = await requestToCoPublish(ds, identity, l);
+      // The proposal's KeyPackage private keys go into the provider; they
+      // are written to disk before the knock that carries the proposal, so a
+      // reload while waiting can still open the Welcome, and a request whose
+      // keys could not be recorded is never sent.
+      const { groupId, channelIdHex, joinerKey } = await requestToCoPublish(ds, identity, l, () =>
+        channelsActions.persistPublisherGroupDurable(),
+      );
       if (!sameSession()) return;
-      // The proposal's KeyPackage private keys are in the provider now; get
-      // them on disk so a reload while waiting can still open the Welcome.
-      channelsActions.notePublisherGroupChanged();
       setStatus(() => t("channels.join.waiting"));
       let keys: Awaited<ReturnType<typeof pollForCoPublishWelcome>> = null;
       for (let i = 0; i < 60 && keys === null; ++i) {

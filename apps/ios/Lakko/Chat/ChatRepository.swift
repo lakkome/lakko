@@ -426,8 +426,14 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0048 — where a received in-group profile goes: the shared profile
     /// directory in production. A seam so a test can capture what the receive
     /// path hands over.
-    var receivedProfileSink: @MainActor (ProfileClaim, MemberIdentity?) -> Void = { claim, senderKey in
-        ProfileDirectory.shared.acceptReceived(claim, signatureKeyB64: senderKey)
+    ///
+    /// The third argument is the account the batch was received for (this
+    /// repository's account when the sink fired): the directory files the
+    /// profile only while that account is the active one.
+    var receivedProfileSink: @MainActor (ProfileClaim, MemberIdentity?, String?) -> Void = {
+        claim, senderKey, accountIdB64 in
+        ProfileDirectory.shared.acceptReceived(
+            claim, signatureKeyB64: senderKey, accountIdB64: accountIdB64)
     }
 
     /// ADR-0051 §3 — the per-account, per-group `{ name, updatedAtMs }` store
@@ -2131,7 +2137,7 @@ public final class ChatRepository: ObservableObject {
         nowMs: UInt64,
         blobId: Data? = nil
     ) async throws -> (groupId: Data, joinerSignatureKey: Data) {
-        guard let identity = canonicalIdentity else {
+        guard let identity = canonicalIdentity, let joinerAccountIdB64 = currentAccountIdB64 else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
         let cap: GroupInviteCapability
@@ -2209,6 +2215,16 @@ public final class ChatRepository: ObservableObject {
                         joinerSigningSeed: identity.ed25519Seed(),
                         capabilityBytes: capabilityWire,
                         replyGrant: replyGrant)
+                },
+                // The proposal's KeyPackage private key is the only thing that
+                // can open the Welcome the committer sends later. It is made
+                // durable BEFORE the proposal is published, fail closed: a
+                // request whose key is not on disk is never sent.
+                persistBeforeKnock: { @MainActor [weak self] in
+                    guard let self else { throw StaleBindingError() }
+                    try bound.require()
+                    try self.persistJoinRequestOrThrow(
+                        identity: identity, accountIdB64: joinerAccountIdB64)
                 }
             ).run()
         } catch let error as DsKnockJoinError {
@@ -2217,9 +2233,8 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("DS knock (external-join request) failed", underlying: error)
         }
         try bound.require()
-        // The proposal's KeyPackage private key is the only thing that can open
-        // the Welcome the committer will send later; persist it now rather than
-        // losing it to a relaunch before then.
+        // The key was made durable before the knock; this also writes the
+        // message log beside it.
         persistSnapshotBestEffort()
         return (groupId, identity.signaturePublicKey())
     }
@@ -5015,8 +5030,9 @@ public final class ChatRepository: ObservableObject {
                     groupIdHex: groupIdHex, record: record, createdAt: createdAt)
             },
             profileSink: { [weak self] claim, senderKey in
-                self?.receivedProfileSink(claim, senderKey)
-                self?.keepProfileGrants(claim, senderKey: senderKey, groupIdHex: groupIdHex)
+                guard let self else { return }
+                self.receivedProfileSink(claim, senderKey, self.currentAccountIdB64)
+                self.keepProfileGrants(claim, senderKey: senderKey, groupIdHex: groupIdHex)
             },
             // ADR-0051 — role-gate against the live group, order, store,
             // re-title. Fire-and-forget (it only spawns a `Task`), so the name
@@ -6130,6 +6146,17 @@ public final class ChatRepository: ObservableObject {
     /// reload-from-snapshot path that could re-consume a generation, so
     /// this resolves as a no-op (mirror of the web no-op-when-`onPersist`-
     /// unset posture).
+    /// The joiner's state before its join request is published
+    /// (``requestToJoinFromLink(capabilityWire:nowMs:blobId:)``): the MLS
+    /// snapshot holding the proposal's KeyPackage keys, durably, for the
+    /// account and identity the request was started with. Throws when the
+    /// account's session has ended (``AccountStoreGate``) or the write fails;
+    /// the caller then publishes nothing.
+    func persistJoinRequestOrThrow(identity: Identity, accountIdB64: String) throws {
+        let blob = try identity.snapshotStorage()
+        try snapshotStore.putSnapshotDurable(accountIdB64: accountIdB64, blob: blob)
+    }
+
     func persistSnapshotDurableOrThrow() throws {
         guard let identity = canonicalIdentity,
               let accountIdB64 = currentAccountIdB64 else { return }
@@ -6591,8 +6618,9 @@ public final class ChatRepository: ObservableObject {
                                 groupIdHex: groupIdHex, record: proposal, createdAt: createdAt)
                         },
                         profileSink: { [weak self] claim, senderKey in
-                            self?.receivedProfileSink(claim, senderKey)
-                            self?.keepProfileGrants(
+                            guard let self else { return }
+                            self.receivedProfileSink(claim, senderKey, self.currentAccountIdB64)
+                            self.keepProfileGrants(
                                 claim, senderKey: senderKey, groupIdHex: groupIdHex)
                         },
                         groupNameSink: { [weak self] name, updatedAtMs, senderLeaf in

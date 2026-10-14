@@ -104,6 +104,29 @@ public enum AccountStoreGate {
         return WipeMark(key: key, wipes: wipes[key] ?? 0)
     }
 
+    /// The wipes of EVERY account so far: a ``WipeMark`` for work that does
+    /// not know its account yet when it starts. A sign-in by name learns the
+    /// account id from the server's answer, after its first wait; the mark
+    /// must still be the one from before that wait, or a wipe during it
+    /// would go unnoticed.
+    public struct WipeMarks {
+        fileprivate let wipes: [String: UInt64]
+
+        /// The mark `accountIdB64` had when these marks were taken. An
+        /// account never wiped by then is at zero.
+        public func mark(_ accountIdB64: String) -> WipeMark {
+            let key = AccountStoreGate.key(accountIdB64)
+            return WipeMark(key: key, wipes: wipes[key] ?? 0)
+        }
+    }
+
+    /// The wipes of every account so far (``WipeMarks``).
+    public static func wipeMarks() -> WipeMarks {
+        pthread_rwlock_rdlock(lock)
+        defer { pthread_rwlock_unlock(lock) }
+        return WipeMarks(wipes: wipes)
+    }
+
     /// Begin one write that is refused only when the account was wiped since
     /// `mark` was taken (``WipeMark``).
     public static func enter(unlessWipedSince mark: WipeMark) -> Hold? {

@@ -899,7 +899,7 @@ final class ProvenPredecessorNameTests: XCTestCase {
         let unrelated = Data(repeating: 0x43, count: 32)
         directory.acceptReceived(
             ProfileClaim(displayName: "Dana", username: nil, updatedAtMs: 5),
-            signatureKeyB64: base64Encode(oldKey))
+            signatureKeyB64: base64Encode(oldKey), accountIdB64: directory.accountIdB64)
         XCTAssertEqual(directory.resolve(signatureKey: oldKey).name, "Dana")
         let before = directory.resolve(signatureKey: newKey).name
         XCTAssertNotEqual(before, "Dana", "nothing is proven yet: the new key is nobody known")

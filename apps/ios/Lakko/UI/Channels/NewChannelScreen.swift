@@ -90,6 +90,9 @@ struct NewChannelScreen: View {
         busy = true
         defer { busy = false }
         errorMessage = nil
+        // The account this channel is made for, before any wait: a founding
+        // mark is filed under it and under no account signed in later.
+        let accountIdB64 = AcceptedContactsStore.boundAccountIdB64
         let id = ChannelsComposer.freshChannelIdHex()
         let wantedHandle = handle.trimmingCharacters(in: .whitespaces)
         let cleanHandle = String(wantedHandle.drop(while: { $0 == "@" }))
@@ -143,6 +146,7 @@ struct NewChannelScreen: View {
             _ = try await client.createChannel(channelIdHex: id, accountIdentity: identity)
             let keys = try ChannelsComposer.freshPublisherKeys(
                 identity: identity,
+                accountIdB64: accountIdB64,
                 channelIdHex: id,
                 // G-29 — reuse the persisted per-channel signing seed if this
                 // device has published to `id` before (nil for a fresh id).
@@ -151,7 +155,8 @@ struct NewChannelScreen: View {
             // ADR-0057 — the publisher journal is claimed with this account's
             // root BEFORE the channel is announced; a channel whose journal
             // could not be claimed is not added.
-            let publisherGroup = try CoPublisher.openPublisherGroup(identity: identity, channelIdHex: id)
+            let publisherGroup = try CoPublisher.openPublisherGroup(
+                identity: identity, accountIdB64: accountIdB64, channelIdHex: id)
             let signer = try publisherGroup.dsAccessSigner(identity: identity)
             let groupId = try publisherGroup.groupId()
             do {

@@ -254,14 +254,27 @@ describe("contract point 6 — the knock", () => {
         return new Uint8Array([0x0b]);
       },
       buildAttribution: () => new Uint8Array([0x0a]),
+      persistBeforeKnock: async () => {
+        log.push("persist");
+      },
     };
   }
 
-  it("probes with an empty knock, builds the proposal for THAT epoch, then knocks with attribution + proposal", async () => {
+  it("probes with an empty knock, builds the proposal for THAT epoch, persists, then knocks with attribution + proposal", async () => {
     const p = ports(12);
     const out = await knockToJoin(p);
     expect(out.epoch).toBe(12n);
-    expect(p.log).toEqual(["knock:[]", "proposal@12", "knock:[10,11]"]);
+    expect(p.log).toEqual(["knock:[]", "proposal@12", "persist", "knock:[10,11]"]);
+  });
+
+  it("a refused persist knocks nothing more: the proposal is never published", async () => {
+    const p = ports(12);
+    p.persistBeforeKnock = async () => {
+      p.log.push("persist");
+      throw new Error("the local stores of this account are sealed");
+    };
+    await expect(knockToJoin(p)).rejects.toThrow("sealed");
+    expect(p.log).toEqual(["knock:[]", "proposal@12", "persist"]);
   });
 
   it("an unclaimed group returns no epoch: no proposal is built, nothing else is knocked", async () => {

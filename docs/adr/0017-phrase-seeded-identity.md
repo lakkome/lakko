@@ -22,6 +22,17 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 > - Every device that holds the seed also holds the phrase under its device
 >   key (ADR-0072 decision 8).
 
+> **Note (2026-10-14), [ADR-0077](0077-account-binding-and-store-gate.md).**
+> The lost-everything fallback below no longer "shows the new phrase, then
+> lands the session" unconditionally. When another account holds the device
+> once the irrevocable step has answered, the phrase is kept for the minting
+> account and marked owed, shown first at its next sign-in, and the owed marker
+> is cleared only by confirming the phrase or by Forget device, never by
+> logout (ADR-0077 decision 3; the order "propagate a publish failure before
+> any local mutation" was already replaced by ADR-0073's reset). A sign-in
+> overtaken by a sign-out or another landing, including the restore prompt's
+> `provideRecoveryPhrase`, does not land (decision 2).
+
 - **Status:** Accepted — **built + reviewed** (Part 1 of the account-recovery
   overhaul). Phrase-seeded identity + on-device seed store + fresh-device
   acquisition + G-4 emit-skip landed on web + iOS + Android; the lost-everything

@@ -81,3 +81,4 @@ detail, and `Implemented` is used where the decision is fully landed.
 | [0063](0063-on-device-feed.md) | Accepted | The feed is ranked on the device, by one shared rule engine |
 | [0064](0064-conversation-backup-and-device-re-entry.md) | Accepted | Conversations come back on another device: saved history, and a device that re-enters by itself |
 | [0065](0065-attachment-lifetime-and-access.md) | Accepted | Attachment files have a lifetime, an owner who can delete them, and a gate |
+| [0077](0077-account-binding-and-store-gate.md) | Accepted | Work started for one account never acts for another; a wiped account's stores take no late write; a refused persist publishes nothing |

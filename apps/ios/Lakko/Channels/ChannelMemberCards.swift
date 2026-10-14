@@ -147,6 +147,10 @@ enum ChannelMemberCards {
         let ownPk = state.subscriberKeysByChannel[channelId]
             .flatMap { try? ChannelSubscriberKeypair.fromSecret(secret: $0.secret).`public`() }
         let ownAccountKey = ReachCenter.shared.ownAccountKey
+        // The account this read runs for, before its first wait: a card's
+        // profile is filed under it, and under no account signed in while the
+        // pages were being read.
+        let readForAccountIdB64 = ProfileDirectory.shared.accountIdB64
         var names: [ProfileClaim] = []
         var seen = Set<Data>()
         var after: String?
@@ -198,7 +202,8 @@ enum ChannelMemberCards {
                     usernameCertificate: username == nil ? nil : profile.usernameCertificate)
                 names.append(claim)
                 if channelGrant != nil {
-                    ProfileDirectory.shared.acceptReceived(claim, signatureKeyB64: keyB64)
+                    ProfileDirectory.shared.acceptReceived(
+                        claim, signatureKeyB64: keyB64, accountIdB64: readForAccountIdB64)
                 }
             }
             after = page.nextAfter

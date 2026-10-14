@@ -7,6 +7,7 @@ import android.content.Context
 import android.util.Base64
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import me.lakko.app.account.AccountStoreGate
 
 /**
  * The recovery phrase on a device that holds the account's keys, at rest.
@@ -32,7 +33,9 @@ import androidx.security.crypto.MasterKey
  * One key per `accountIdB64`. Multi-account on the same device
  * (currently unsupported in Phase-1 UX but the data model
  * tolerates it) gets distinct phrases per account. Forget-device
- * drops the row.
+ * drops the row, and every write takes the wipe mark of the work that
+ * makes it, so a landing that was out while the account was forgotten
+ * cannot write the row back ([putPhrase]). Deletes are not gated.
  *
  * ## Threat model
  *
@@ -59,22 +62,63 @@ public object PhraseStore {
     private const val KEY_PREFIX = "phrase-v1:"
 
     /**
-     * Persist `phraseBytes` for `accountIdB64`. Overwrites any
-     * prior row. Caller is responsible for zeroing `phraseBytes`
-     * after this returns; the function does not retain a
-     * reference past return.
+     * Persist `phraseBytes` as `accountIdB64`'s phrase. Overwrites any prior
+     * row. `false`, and nothing written, when the account's data was wiped
+     * after [since] was taken (a Forget device that ran while the landing
+     * that writes this was out): the wipe removed this row, and a late write
+     * would put a forgotten account's phrase back
+     * ([me.lakko.app.account.AccountStoreGate.writeUnlessWipedSince]).
+     *
+     * A sign-out refuses nothing here, nor does a wipe that came before
+     * [since]: a sign-in writes the phrase BEFORE its account lands, so an
+     * account still sealed from an earlier sign-out, or forgotten earlier and
+     * now signing back in, must take the write.
+     *
+     * Caller is responsible for zeroing `phraseBytes` after this returns;
+     * the function does not retain a reference past return.
      */
     public fun putPhrase(
         context: Context,
         accountIdB64: String,
         phraseBytes: ByteArray,
-    ) {
-        val encoded = Base64.encodeToString(phraseBytes, Base64.NO_WRAP)
-        openPrefs(context)
-            .edit()
-            .putString(KEY_PREFIX + accountIdB64, encoded)
-            .apply()
+        since: AccountStoreGate.WipeMark,
+    ): Boolean = putRowUnlessWipedSince(accountIdB64, since) {
+        putRow(context, KEY_PREFIX + accountIdB64, phraseBytes)
     }
+
+    /**
+     * [putPhrase] for a guest account's row, which is kept under a key of
+     * its own ([me.lakko.app.auth.guestPhraseKey]) and gated by the account
+     * it belongs to.
+     */
+    public fun putGuestPhrase(
+        context: Context,
+        accountIdB64: String,
+        phraseBytes: ByteArray,
+        since: AccountStoreGate.WipeMark,
+    ): Boolean = putRowUnlessWipedSince(accountIdB64, since) {
+        putRow(context, KEY_PREFIX + me.lakko.app.auth.guestPhraseKey(accountIdB64), phraseBytes)
+    }
+
+    /** The guest row of `accountIdB64` ([putGuestPhrase]), or `null`. */
+    public fun getGuestPhrase(context: Context, accountIdB64: String): ByteArray? =
+        getPhrase(context, me.lakko.app.auth.guestPhraseKey(accountIdB64))
+
+    /** Erase the guest row of `accountIdB64`. No-op when absent. */
+    public fun deleteGuestPhrase(context: Context, accountIdB64: String) {
+        deletePhrase(context, me.lakko.app.auth.guestPhraseKey(accountIdB64))
+    }
+
+    /** The gate of [putPhrase] and [putGuestPhrase] over the row write
+     *  [put] (host tests drive it without the Keystore). */
+    internal inline fun putRowUnlessWipedSince(
+        accountIdB64: String,
+        since: AccountStoreGate.WipeMark,
+        put: () -> Unit,
+    ): Boolean = AccountStoreGate.writeUnlessWipedSince(accountIdB64, since) {
+        put()
+        true
+    } ?: false
 
     /**
      * Read the cached phrase for `accountIdB64`. Returns the raw
@@ -101,6 +145,14 @@ public object PhraseStore {
     // -----------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------
+
+    private fun putRow(context: Context, key: String, phraseBytes: ByteArray) {
+        val encoded = Base64.encodeToString(phraseBytes, Base64.NO_WRAP)
+        openPrefs(context)
+            .edit()
+            .putString(key, encoded)
+            .apply()
+    }
 
     private fun openPrefs(context: Context): android.content.SharedPreferences {
         val master = MasterKey.Builder(context.applicationContext)

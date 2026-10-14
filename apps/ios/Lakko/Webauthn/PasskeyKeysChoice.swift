@@ -204,7 +204,7 @@ extension PasskeyKeysEnrollment {
             },
             rememberPhrase: { phrase in
                 guard case .session(let account) = authRepository.state else { return }
-                DevicePhrase.store(phrase, accountIdB64: account.accountIdB64, context: "passkey-keys-choice")
+                DevicePhrase.store(phrase, accountIdB64: account.accountIdB64, context: "passkey-keys-choice", since: nil)
             }
         )
     }

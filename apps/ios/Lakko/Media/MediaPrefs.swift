@@ -18,9 +18,11 @@ import Foundation
 ///
 /// The first three are about this device and stay device-wide. The played
 /// marker is about one account's messages, so since 2026-09-30 it is filed
-/// under the account (`lakko.media.played.<account>`), resolved at each call
-/// (by default the account ``AcceptedContactsStore`` has bound): no account,
-/// nothing reads as played and nothing is written. Logout keeps it;
+/// under the account (`lakko.media.played.<account>`). A read resolves the
+/// account at each call (by default the one ``AcceptedContactsStore`` has
+/// bound); a write names the account its work was started for and is made
+/// only while that account is still the bound one. No account: nothing reads
+/// as played and nothing is written. Logout keeps it;
 /// forget-device drops it through ``clearPlayed(accountIdB64:)``.
 public struct MediaPrefs {
 
@@ -75,8 +77,17 @@ public struct MediaPrefs {
         return defaults.stringArray(forKey: storageKey) ?? []
     }
 
-    public func markPlayed(_ key: String) {
-        guard let account = accountIdB64() else { return }
+    /// The account the played set acts on now (the one bound), for a caller
+    /// that captures it when its work starts and hands it back to
+    /// ``markPlayed(_:accountIdB64:)``.
+    public var boundAccountIdB64: String? { accountIdB64() }
+
+    /// Mark `key` played for `accountIdB64`, the account the caller's work
+    /// was started for (a chat screen captures it when it opens). Written only
+    /// while that account is still the bound one: a late mark from account A's
+    /// screen, finishing after B signed in, would otherwise land in B's set.
+    public func markPlayed(_ key: String, accountIdB64 captured: String?) {
+        guard let account = captured, account == accountIdB64() else { return }
         // Not written once the account's session has ended (``AccountStoreGate``).
         guard let gate = AccountStoreGate.enter(account) else { return }
         defer { gate.leave() }

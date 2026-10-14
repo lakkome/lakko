@@ -418,6 +418,10 @@ public object CoPublisher {
         identity: Identity,
         link: String,
         coPublished: CoPublishedJournalMarks,
+        /** Snapshot [identity]'s provider durably, throwing when it was not
+         *  written ([ChannelPublisherIdentity.withIdentityPersistingFirst]).
+         *  Called after the proposal is built and before it is knocked. */
+        persistProposalKeys: () -> Unit,
     ): CoPublishRequest {
         val idx = link.lastIndexOf(URL_PREFIX)
         if (idx < 0) throw CoPublisherException.NotACoPublisherLink(link)
@@ -471,7 +475,14 @@ public object CoPublisher {
             knock = { payloads ->
                 ds.knock(groupId, if (payloads.isEmpty()) payloads else payloads + listOf(binding)).epoch
             },
-            buildProposal = { epoch -> identity.createExternalJoinProposal(groupId, epoch) },
+            buildProposal = { epoch ->
+                val proposal = identity.createExternalJoinProposal(groupId, epoch)
+                // The proposal's KeyPackage private key is what opens the
+                // owner's Welcome: on disk before the knock, fail-closed, so
+                // a request never goes out that a restart could not finish.
+                persistProposalKeys()
+                proposal
+            },
             // ADR-0060 §6 — the reply key the owner writes the Welcome with,
             // registered on this identity's own mailbox before the knock.
             buildAttribution = { composeGroupJoinAttribution(identity.ed25519Seed(), wire, replyGrant) },

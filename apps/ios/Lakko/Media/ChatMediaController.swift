@@ -154,6 +154,9 @@ public final class ChatMediaController: ObservableObject {
     @Published public private(set) var loadingKeys: Set<String> = []
     @Published public private(set) var failedKeys: Set<String> = []
     @Published public private(set) var playedKeys: Set<String>
+    /// The account ``playedKeys`` was loaded for, taken when this controller
+    /// was made: its played marks are filed there and nowhere else.
+    private let playedAccountIdB64: String?
     @Published public var rate: Float = 1 {
         didSet { if voicePlayer?.rate ?? 0 > 0 { voicePlayer?.rate = rate } }
     }
@@ -174,6 +177,7 @@ public final class ChatMediaController: ObservableObject {
         self.tempRoot = files.root
         self.recordMode = prefs.recordMode
         self.playedKeys = Set(prefs.playedKeys())
+        self.playedAccountIdB64 = prefs.boundAccountIdB64
         self.hasCamera = VideoNoteRecorder.hasFrontCamera
         if recordMode == .videoNote, !hasCamera { recordMode = .voice }
     }
@@ -730,7 +734,9 @@ public final class ChatMediaController: ObservableObject {
     public func markPlayed(_ key: String) {
         guard !playedKeys.contains(key) else { return }
         playedKeys.insert(key)
-        prefs.markPlayed(key)
+        // Filed under the account this controller's played set was loaded
+        // for, never under whoever is bound when playback ends.
+        prefs.markPlayed(key, accountIdB64: playedAccountIdB64)
     }
 
     // MARK: - Media files

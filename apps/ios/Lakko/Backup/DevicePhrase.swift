@@ -42,13 +42,25 @@ enum DevicePhrase {
     /// logged (by `context`, never with the words) and leaves the store as
     /// it was. A successful write lifts a "three words suspended" marker:
     /// every caller is a landing path that just proved the phrase.
+    ///
+    /// `since` is the account's ``AccountStoreGate/WipeMark`` from when the
+    /// caller's route began (a sign-in, whose session may not have landed
+    /// yet, ``SignInKeyWrites``): the phrase is then refused only if the
+    /// account was wiped after that. `nil` is for a signed-in session, which
+    /// is refused once the account was wiped and not landed again. Refused,
+    /// nothing is written and nothing is logged as a failure.
     static func store(
         _ phrase: String,
         accountIdB64: String,
         context: String,
+        since: AccountStoreGate.WipeMark?,
         store: PhraseStore = PhraseStore(),
         threeWords: ThreeWordsBudgetStore = ThreeWordsBudgetStore()
     ) {
+        let hold = since.map { AccountStoreGate.enter(unlessWipedSince: $0) }
+            ?? AccountStoreGate.enterUnlessWiped(accountIdB64)
+        guard let hold else { return }
+        defer { hold.leave() }
         do {
             let canonical = try RecoveryMnemonic.fromPhrase(phrase: phrase).phrase()
             try store.putPhrase(accountIdB64: accountIdB64, phraseBytes: Data(canonical.utf8))

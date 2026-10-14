@@ -33,8 +33,13 @@ public enum CoPublisher {
     public static var defaultOrigin: String { ApiEndpoints.webOrigin }
 
     /// Open (or create) the persistent PublisherGroup handle for a channel.
+    ///
+    /// `accountIdB64` is the account whose `identity` this is, captured when
+    /// the caller's work began: a group founded here is marked for it
+    /// (``markFounded(_:accountIdB64:)``).
     public static func openPublisherGroup(
         identity: Identity,
+        accountIdB64: String?,
         channelIdHex: String
     ) throws -> PublisherGroup {
         guard let channelId = Self.hexToData(channelIdHex) else {
@@ -45,7 +50,7 @@ public enum CoPublisher {
                 return existing
             }
             let created = try publisherGroupOpenOrCreate(identity: identity, channelId: channelId)
-            markFounded(created)
+            markFounded(created, accountIdB64: accountIdB64)
             return created
         } catch {
             // A channel minted under the retired v1 derivation refuses here and
@@ -57,13 +62,21 @@ public enum CoPublisher {
     /// ADR-0057 obligation 7 — this device founded the PublisherGroup: its
     /// next claim may reset a journal the same root claimed before (a channel
     /// whose local PublisherGroup was lost and founded again).
-    static func markFounded(_ group: PublisherGroup) {
-        guard let groupId = try? group.groupId() else { return }
-        // Filed for the bound account, the one whose channel this is: refused
-        // with none bound or once its session has ended.
-        JournalFoundingMarks.shared.mark(
-            journalIdHex: DsClient.pseudonymHex(groupId),
-            accountIdB64: AcceptedContactsStore.boundAccountIdB64)
+    ///
+    /// `accountIdB64` is the account whose channel this is, captured when the
+    /// caller's work began. Refused with none named, when it is no longer the
+    /// bound account (late work of account A must not leave a mark that lets
+    /// the journal be reset once B is signed in), or once its session has
+    /// ended.
+    static func markFounded(
+        _ group: PublisherGroup,
+        accountIdB64: String?,
+        boundAccountIdB64: String? = AcceptedContactsStore.boundAccountIdB64,
+        marks: JournalFoundingMarks = .shared
+    ) {
+        guard let groupId = try? group.groupId(),
+              let accountIdB64, accountIdB64 == boundAccountIdB64 else { return }
+        marks.mark(journalIdHex: DsClient.pseudonymHex(groupId), accountIdB64: accountIdB64)
     }
 
     /// Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`.
@@ -405,9 +418,14 @@ public enum CoPublisher {
     /// registered epoch, an external-join proposal (ADR-0027) is built for it,
     /// and a second knock carries it with a self-signed join-attribution (OQ2).
     /// The caller then polls with `pollForCoPublishWelcome`.
+    ///
+    /// `accountIdB64` is the account whose `identity` this is, captured when
+    /// the request began: the co-publisher mark is filed under it, and the
+    /// request is not sent once another account is bound.
     public static func requestToCoPublish(
         ds: DsClient,
         identity: Identity,
+        accountIdB64: String?,
         link: String
     ) async throws -> CoPublishRequest {
         // ADR-0028 amendment 2026-09-28 — `<origin>/g/<b64url sealed>#<secret>`:
@@ -447,7 +465,8 @@ public enum CoPublisher {
         // owner: it must never claim the PublisherGroup journal. Recorded
         // before the knock, fail closed: an unrecorded request could later
         // let this account's claim squat the owner's journal.
-        try CoPublishedJournals.shared.markOrEnd(journalIdHex: DsClient.pseudonymHex(groupId))
+        try CoPublishedJournals.shared.markOrEnd(
+            journalIdHex: DsClient.pseudonymHex(groupId), accountIdB64: accountIdB64)
         // ADR-0053 point 6 — the knock: a probe learns the registered epoch,
         // the proposal is built for it, a second knock carries the self-signed
         // attribution (OQ2, advisory) and the proposal. No journal read.
@@ -495,6 +514,7 @@ public enum CoPublisher {
     public static func pollForCoPublishWelcome(
         ds: DsClient,
         identity: Identity,
+        accountIdB64: String?,
         groupId: Data,
         joinerKey: Data,
         channelIdHex: String,
@@ -533,9 +553,11 @@ public enum CoPublisher {
         guard joined else { return nil }
         // ADR-0057 — a co-publisher never claims the journal (idempotent with
         // the mark set when the request was sent).
-        CoPublishedJournals.shared.mark(journalIdHex: DsClient.pseudonymHex(groupId))
+        CoPublishedJournals.shared.mark(
+            journalIdHex: DsClient.pseudonymHex(groupId), accountIdB64: accountIdB64)
         let keys = try ChannelsComposer.freshPublisherKeys(
             identity: identity,
+            accountIdB64: accountIdB64,
             channelIdHex: channelIdHex,
             existingSigningSeed: existingSigningSeed)
         // ADR-0059 section 9: this account publishes here as a co-publisher,
@@ -689,10 +711,14 @@ actor CoPublisherKeyBook {
 /// Per account (2026-09-30): "co-publisher" is a fact about the account, not
 /// the phone — the owner of a channel signed in on a phone where another
 /// account co-publishes it must still claim. The set is filed under the
-/// account (`me.lakko.ds.co-published.v2.<account>`), resolved at each call
-/// from `accountIdB64` (by default the account ``AcceptedContactsStore`` has
-/// bound). No account: nothing is marked and nothing reads as marked. Logout
-/// keeps it; forget-device drops it through ``clear(accountIdB64:)``.
+/// account (`me.lakko.ds.co-published.v2.<account>`). A read resolves the
+/// account at each call (by default the one ``AcceptedContactsStore`` has
+/// bound). A mark names the account its work was started for and is made only
+/// while that account is still the bound one: a request started by account A
+/// and finishing after B signed in must not file A's journal under B (B would
+/// then never claim it, were B the channel's owner). No account: nothing is
+/// marked and nothing reads as marked. Logout keeps it; forget-device drops it
+/// through ``clear(accountIdB64:)``.
 public final class CoPublishedJournals {
     public static let shared = CoPublishedJournals()
 
@@ -715,19 +741,22 @@ public final class CoPublishedJournals {
         accountIdB64().map { Self.prefix + $0 }
     }
 
-    /// Best effort: no account bound, or one whose session has ended
-    /// (``AccountStoreGate``), marks nothing.
-    public func mark(journalIdHex: String) {
-        try? markOrEnd(journalIdHex: journalIdHex)
+    /// Mark `journalIdHex` for `accountIdB64`, the account the caller's work
+    /// was started for. Best effort: no account named, one that is no longer
+    /// the bound one, or one whose session has ended (``AccountStoreGate``),
+    /// marks nothing.
+    public func mark(journalIdHex: String, accountIdB64 captured: String?) {
+        try? markOrEnd(journalIdHex: journalIdHex, accountIdB64: captured)
     }
 
-    /// ``mark(journalIdHex:)`` for a caller about to ask to co-publish: the
-    /// mark is what stops this account claiming the journal later, so the
-    /// request is not sent without it. Throws ``StaleBindingError`` with no
-    /// account bound and ``AccountStoreGate/Sealed`` once the account's
-    /// session has ended; nothing is written then.
-    public func markOrEnd(journalIdHex: String) throws {
-        guard let account = accountIdB64() else { throw StaleBindingError() }
+    /// ``mark(journalIdHex:accountIdB64:)`` for a caller about to ask to
+    /// co-publish: the mark is what stops this account claiming the journal
+    /// later, so the request is not sent without it. Throws
+    /// ``StaleBindingError`` with no account named or when `captured` is not
+    /// the bound account any more, and ``AccountStoreGate/Sealed`` once the
+    /// account's session has ended; nothing is written then.
+    public func markOrEnd(journalIdHex: String, accountIdB64 captured: String?) throws {
+        guard let account = captured, account == accountIdB64() else { throw StaleBindingError() }
         let gate = try AccountStoreGate.enterOrEnd(account)
         defer { gate.leave() }
         let key = Self.prefix + account

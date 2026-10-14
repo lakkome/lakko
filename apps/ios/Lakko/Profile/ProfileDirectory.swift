@@ -343,8 +343,17 @@ public final class ProfileDirectory: ObservableObject {
 
     /// Offer a profile received from someone else, bound to the signature key
     /// the carrier authenticated (C-68). Kept only when strictly newer.
+    ///
+    /// `accountIdB64` is the account whose work received it (the poll, the
+    /// call, the channel read that carried it), captured when that work
+    /// began. Kept only while it is the active account: a late profile from
+    /// account A's work, arriving after B signed in, is not filed under B
+    /// (``ProfileAcceptance/inactive``).
     @discardableResult
-    func acceptReceived(_ claim: ProfileClaim, signatureKeyB64: String?) -> ProfileAcceptance {
+    func acceptReceived(
+        _ claim: ProfileClaim, signatureKeyB64: String?, accountIdB64 receivedFor: String?
+    ) -> ProfileAcceptance {
+        guard let receivedFor, receivedFor == accountIdB64 else { return .inactive }
         // Grants are scoped to the conversation they arrived in and handed to
         // ``ReachCenter`` by the caller; the profile store never holds them.
         let outcome = received.accept(claim.withoutGrants, signatureKeyB64: signatureKeyB64)

@@ -179,7 +179,7 @@ final class JournalOwnershipTests: XCTestCase {
             defaults: try XCTUnwrap(UserDefaults(suiteName: "copub-\(UUID().uuidString)")),
             accountIdB64: { "acct" })
 
-        coPublished.mark(journalIdHex: hex)
+        coPublished.mark(journalIdHex: hex, accountIdB64: "acct")
         XCTAssertTrue(coPublished.contains(journalIdHex: hex.uppercased()))
         let copub = FakeStatementDs()
         await CoPublisher.claimJournal(

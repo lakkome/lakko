@@ -484,6 +484,16 @@ export interface KnockPorts {
   buildProposal(epoch: bigint): Uint8Array;
   /** The advisory join attribution, or `null` when it cannot be built. */
   buildAttribution(): Uint8Array | null;
+  /**
+   * Make the joiner's state durable: the proposal's KeyPackage private key,
+   * minted by {@link buildProposal} into the provider, is the only thing that
+   * can open the Welcome the committer sends later. Called after the proposal
+   * is built and BEFORE the knock that carries it; a throw aborts the knock,
+   * so a refused persist means nothing was published. Required, not a
+   * defaulted no-op: a caller that skips it publishes a request whose answer
+   * this device may not be able to open after a reload.
+   */
+  persistBeforeKnock(): Promise<void>;
 }
 
 /** The copy for a group that returned no epoch to the probe. */
@@ -500,8 +510,9 @@ export class GroupNotClaimedError extends Error {
 
 /**
  * The link joiner's sequence: probe for the epoch, build the proposal for it,
- * then knock with the attribution and the proposal. No journal read. Each
- * knock spends one anonymous token.
+ * persist the state that minted it, then knock with the attribution and the
+ * proposal. No journal read. Each knock spends one anonymous token. The probe
+ * publishes nothing, so it may precede the persist.
  */
 export async function knockToJoin(ports: KnockPorts): Promise<{
   epoch: bigint;
@@ -517,6 +528,7 @@ export async function knockToJoin(ports: KnockPorts): Promise<{
   const attribution = ports.buildAttribution();
   if (attribution !== null) payloads.push(attribution);
   payloads.push(proposal);
+  await ports.persistBeforeKnock();
   const result = await ports.knock(payloads);
   return { epoch, ids: result.ids };
 }

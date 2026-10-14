@@ -193,6 +193,29 @@ public class ChannelPublisherIdentity(
             }
         }
 
+    /**
+     * [withIdentity] for a block that publishes something whose private keys
+     * live in the provider (a co-publish request's KeyPackage): [block] gets
+     * `persistNow`, which snapshots the provider under the held lock and
+     * THROWS when the snapshot was not written (a store failure, or the
+     * account's session ended and the gate refused it). The block calls it
+     * before the publish, so nothing goes out with nothing on disk behind it.
+     * The provider is snapshotted again, best-effort, after a block that
+     * returns normally.
+     */
+    public suspend fun <T> withIdentityPersistingFirst(
+        block: suspend (identity: Identity, persistNow: () -> Unit) -> T,
+    ): T =
+        withContext(Dispatchers.Default) {
+            mutex.withLock {
+                MainThreadGuard.assertOffMain("ChannelPublisherIdentity.withIdentityPersistingFirst")
+                val id = identity ?: throw NotBoundException()
+                val result = block(id) { persistLockedOrThrow(id) }
+                persistLocked(id)
+                result
+            }
+        }
+
     /** Snapshot the provider now (under the lock). A no-op when unbound. */
     public suspend fun persist() {
         withContext(Dispatchers.Default) {
@@ -209,6 +232,19 @@ public class ChannelPublisherIdentity(
         identity?.close()
         identity = null
         boundAccountIdB64 = null
+    }
+
+    /** [persistLocked] that throws instead of logging: an unbound identity,
+     *  an empty snapshot, a store failure, or a refusal of the gate. */
+    private fun persistLockedOrThrow(id: Identity) {
+        val acct = boundAccountIdB64 ?: throw NotBoundException()
+        val bytes = id.snapshotStorage()
+        try {
+            check(bytes.isNotEmpty()) { "the channel provider snapshot is empty" }
+            saveSnapshot(acct, bytes)
+        } finally {
+            bytes.fill(0)
+        }
     }
 
     private fun persistLocked(id: Identity) {

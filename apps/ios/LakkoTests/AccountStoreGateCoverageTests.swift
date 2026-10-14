@@ -169,11 +169,11 @@ final class AccountStoreGateCoverageTests: XCTestCase {
     func testAPlayedMarkIsNotWrittenForASealedAccount() {
         let prefs = MediaPrefs(defaults: defaults, accountIdB64: { [account] in account })
         AccountStoreGate.seal(account)
-        prefs.markPlayed("m1")
+        prefs.markPlayed("m1", accountIdB64: account)
         XCTAssertEqual(prefs.playedKeys(), [])
 
         AccountStoreGate.open(account)
-        prefs.markPlayed("m1")
+        prefs.markPlayed("m1", accountIdB64: account)
         XCTAssertEqual(prefs.playedKeys(), ["m1"])
     }
 
@@ -216,20 +216,128 @@ final class AccountStoreGateCoverageTests: XCTestCase {
     func testACoPublishRequestIsNotSentWithoutItsMark() throws {
         let marks = CoPublishedJournals(defaults: defaults, accountIdB64: { [account] in account })
         AccountStoreGate.seal(account)
-        XCTAssertThrowsError(try marks.markOrEnd(journalIdHex: "AB")) { error in
+        XCTAssertThrowsError(try marks.markOrEnd(journalIdHex: "AB", accountIdB64: account)) { error in
             XCTAssertTrue(error is AccountStoreGate.Sealed)
         }
-        marks.mark(journalIdHex: "AB")
+        marks.mark(journalIdHex: "AB", accountIdB64: account)
         XCTAssertFalse(marks.contains(journalIdHex: "ab"))
 
         let unbound = CoPublishedJournals(defaults: defaults, accountIdB64: { nil })
-        XCTAssertThrowsError(try unbound.markOrEnd(journalIdHex: "ab")) { error in
+        XCTAssertThrowsError(try unbound.markOrEnd(journalIdHex: "ab", accountIdB64: account)) { error in
             XCTAssertTrue(error is StaleBindingError)
         }
 
         AccountStoreGate.open(account)
-        try marks.markOrEnd(journalIdHex: "AB")
+        try marks.markOrEnd(journalIdHex: "AB", accountIdB64: account)
         XCTAssertTrue(marks.contains(journalIdHex: "ab"))
+    }
+
+    // MARK: - Sign-in key writes (SignInKeyWrites)
+
+    /// The marks of every account, taken before a route knows its account:
+    /// a wipe of any account after that refuses that account only; a wipe
+    /// before, a sign-out, or an account never wiped refuse nothing.
+    func testWipeMarksTakenBeforeTheAccountIsKnownCatchALaterWipe() {
+        let earlier = "earlier-wiped-account"
+        let other = "untouched-account"
+        AccountStoreGate.seal(earlier, wiping: true) {}
+        let marks = AccountStoreGate.wipeMarks()
+        AccountStoreGate.seal(account, wiping: true) {}
+        AccountStoreGate.seal(other)
+
+        XCTAssertNil(AccountStoreGate.enter(unlessWipedSince: marks.mark(account)))
+        XCTAssertNotNil(
+            AccountStoreGate.enter(unlessWipedSince: marks.mark(earlier)).map { $0.leave() },
+            "wiped before the route began: a sign-in after Forget device writes")
+        XCTAssertNotNil(
+            AccountStoreGate.enter(unlessWipedSince: marks.mark(other)).map { $0.leave() },
+            "a sign-out refuses nothing")
+        XCTAssertNotNil(
+            AccountStoreGate.enter(unlessWipedSince: marks.mark("never-seen")).map { $0.leave() })
+        // Spelling of the account id does not matter.
+        XCTAssertNil(AccountStoreGate.enter(unlessWipedSince: marks.mark(account + "==")))
+    }
+
+    func testASignInRouteWritesNoKeyForAnAccountWipedAfterItBegan() throws {
+        let writes = SignInKeyWrites()
+        var written: [String] = []
+        try writes.required(account) { written.append("device-key") }
+        XCTAssertTrue(writes.ifNotWiped(account) { written.append("export-key") })
+        XCTAssertFalse(writes.isWiped(account))
+
+        AccountStoreGate.seal(account, wiping: true) {}
+        XCTAssertTrue(writes.isWiped(account))
+        XCTAssertThrowsError(try writes.required(account) { written.append("late-device-key") }) { error in
+            XCTAssertTrue(error is AccountStoreGate.Sealed)
+            XCTAssertTrue(Cancellation.isCancellation(error), "a refusal is a cancellation, not a failure")
+        }
+        XCTAssertFalse(writes.ifNotWiped(account) { written.append("late-seed") })
+        XCTAssertEqual(written, ["device-key", "export-key"])
+
+        // The account landing again does not make the old route's writes
+        // legal; a new route's are.
+        AccountStoreGate.open(account)
+        XCTAssertTrue(writes.isWiped(account))
+        XCTAssertFalse(SignInKeyWrites().isWiped(account))
+    }
+
+    func testASignInRouteAfterASignOutOrAnEarlierWipeStillWrites() throws {
+        AccountStoreGate.seal(account, wiping: true) {}
+        AccountStoreGate.seal(account)
+        // Still sealed: the route runs before the session lands.
+        XCTAssertTrue(AccountStoreGate.isSealed(account))
+        let writes = SignInKeyWrites()
+        var written = false
+        try writes.required(account) { written = true }
+        XCTAssertTrue(written)
+        XCTAssertTrue(writes.ifNotWiped(account) {})
+    }
+
+    // MARK: - Late work of one account never lands under another
+
+    func testACoPublisherMarkFromAnotherAccountsWorkIsNotFiled() throws {
+        let other = "other-account"
+        var bound: String? = other
+        let marks = CoPublishedJournals(defaults: defaults, accountIdB64: { bound })
+        XCTAssertThrowsError(try marks.markOrEnd(journalIdHex: "ab", accountIdB64: account)) { error in
+            XCTAssertTrue(error is StaleBindingError)
+        }
+        marks.mark(journalIdHex: "ab", accountIdB64: account)
+        XCTAssertFalse(marks.contains(journalIdHex: "ab"), "nothing under the account bound now")
+        bound = account
+        XCTAssertFalse(marks.contains(journalIdHex: "ab"), "nor under the account the work was for")
+
+        try marks.markOrEnd(journalIdHex: "ab", accountIdB64: account)
+        XCTAssertTrue(marks.contains(journalIdHex: "ab"))
+        bound = other
+        XCTAssertFalse(marks.contains(journalIdHex: "ab"))
+    }
+
+    func testAPlayedMarkFromAnotherAccountsScreenIsNotFiled() {
+        let other = "other-account"
+        var bound: String? = other
+        let prefs = MediaPrefs(defaults: defaults, accountIdB64: { bound })
+        prefs.markPlayed("m1", accountIdB64: account)
+        XCTAssertEqual(prefs.playedKeys(), [])
+        bound = account
+        XCTAssertEqual(prefs.playedKeys(), [])
+        prefs.markPlayed("m1", accountIdB64: account)
+        XCTAssertEqual(prefs.playedKeys(), ["m1"])
+        prefs.markPlayed("m2", accountIdB64: nil)
+        XCTAssertEqual(prefs.playedKeys(), ["m1"])
+    }
+
+    func testAFoundingMarkFromAnotherAccountsWorkIsNotFiled() throws {
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x5A, count: 32))
+        let group = try publisherGroupOpenOrCreate(
+            identity: identity, channelId: Data((0..<16).map { UInt8($0) &+ 0x10 }))
+        let marks = JournalFoundingMarks(defaults: defaults)
+        CoPublisher.markFounded(
+            group, accountIdB64: account, boundAccountIdB64: "other-account", marks: marks)
+        CoPublisher.markFounded(group, accountIdB64: nil, boundAccountIdB64: nil, marks: marks)
+        XCTAssertEqual(marks.all(), [])
+        CoPublisher.markFounded(group, accountIdB64: account, boundAccountIdB64: account, marks: marks)
+        XCTAssertEqual(marks.all(), [DsClient.pseudonymHex(try group.groupId())])
     }
 
     func testAFoundingMarkNamesItsAccount() {

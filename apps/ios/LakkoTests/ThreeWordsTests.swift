@@ -196,10 +196,10 @@ final class ThreeWordsTests: XCTestCase {
         defer { try? PhraseStore().deletePhrase(accountIdB64: accountIdB64) }
         store.suspend(accountIdB64: accountIdB64)
         // A phrase the core refuses writes nothing and lifts nothing.
-        DevicePhrase.store("not a phrase", accountIdB64: accountIdB64, context: "test", threeWords: store)
+        DevicePhrase.store("not a phrase", accountIdB64: accountIdB64, context: "test", since: nil, threeWords: store)
         XCTAssertTrue(store.isSuspended(accountIdB64: accountIdB64))
         DevicePhrase.store(
-            RecoveryMnemonic.generate().phrase(), accountIdB64: accountIdB64, context: "test", threeWords: store)
+            RecoveryMnemonic.generate().phrase(), accountIdB64: accountIdB64, context: "test", since: nil, threeWords: store)
         XCTAssertFalse(store.isSuspended(accountIdB64: accountIdB64))
     }
 

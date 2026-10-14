@@ -157,8 +157,11 @@ export function seedCounter(
  * The persist happens BEFORE this returns, so a crash / reload right
  * after a post can never re-issue `value` — burning a value is safe,
  * re-issuing one re-uses the AEAD nonce. Throws when there is no
- * account to persist under: a value that would not survive a reload is
- * never handed out.
+ * account to persist under, and when the write did not land (storage
+ * unavailable, quota, private mode, or the account's rows sealed by Forget
+ * device, whose gate makes `setItem` skip without an error): a value that
+ * would not survive a reload is never handed out, so the post it was asked
+ * for is never published.
  */
 export function issueAndAdvance(
   inMemory: bigint | undefined,
@@ -172,6 +175,11 @@ export function issueAndAdvance(
   const value = inMemory ?? loadCounter(channelIdHex, account) ?? 0n;
   const advanced = value + 1n;
   saveCounter(channelIdHex, advanced, account);
+  // `saveCounter` swallows a failed write; read it back instead of trusting
+  // it. A floor that is not on disk is a floor a reload rewinds.
+  if (loadCounter(channelIdHex, account) !== advanced) {
+    throw new Error("publish counter: the advanced floor was not persisted");
+  }
   return { value, advanced };
 }
 

@@ -398,8 +398,8 @@ final class AccountLocalDataWipeTests: XCTestCase {
         try ProfileDirectory.shared.setOwnDisplayName("Name", accountIdB64: x)
         ContactsInboxStore().save(PersistedContactsInbox.empty, accountIdB64: x)
         StateBundle.saveKnownGroupIds(["abc"], accountIdB64: x)
-        CoPublishedJournals(defaults: standard, accountIdB64: { x }).mark(journalIdHex: "ab")
-        MediaPrefs(defaults: standard, accountIdB64: { x }).markPlayed("played")
+        CoPublishedJournals(defaults: standard, accountIdB64: { x }).mark(journalIdHex: "ab", accountIdB64: x)
+        MediaPrefs(defaults: standard, accountIdB64: { x }).markPlayed("played", accountIdB64: x)
         EmojiIndex.saveRecent(["\u{1F600}"], standard, accountIdB64: x)
         EmojiIndex.saveTonePrefs(["\u{1F44B}": "\u{1F44B}\u{1F3FF}"], standard, accountIdB64: x)
         ChannelRotationStateStore.save(

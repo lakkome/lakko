@@ -173,7 +173,7 @@ final class AccountScopedStoresTests: XCTestCase {
     func testCoPublisherMarksArePerAccount() {
         var current: String? = alice
         let marks = CoPublishedJournals(defaults: defaults, accountIdB64: { current })
-        marks.mark(journalIdHex: "AB12")
+        marks.mark(journalIdHex: "AB12", accountIdB64: current)
         XCTAssertTrue(marks.contains(journalIdHex: "ab12"))
 
         // The channel's owner signed in on the same phone still claims.
@@ -181,11 +181,11 @@ final class AccountScopedStoresTests: XCTestCase {
         XCTAssertFalse(marks.contains(journalIdHex: "ab12"))
 
         current = nil
-        marks.mark(journalIdHex: "cd34")
+        marks.mark(journalIdHex: "cd34", accountIdB64: current)
         XCTAssertFalse(marks.contains(journalIdHex: "cd34"), "no account, nothing marked")
 
         current = bob
-        marks.mark(journalIdHex: "ab12")
+        marks.mark(journalIdHex: "ab12", accountIdB64: current)
         marks.clear(accountIdB64: alice)
         current = alice
         XCTAssertFalse(marks.contains(journalIdHex: "ab12"))
@@ -198,16 +198,16 @@ final class AccountScopedStoresTests: XCTestCase {
     func testPlayedMarksArePerAccount() {
         var current: String? = alice
         let prefs = MediaPrefs(defaults: defaults, accountIdB64: { current })
-        prefs.markPlayed("blob-1")
+        prefs.markPlayed("blob-1", accountIdB64: current)
         XCTAssertEqual(prefs.playedKeys(), ["blob-1"])
 
         current = bob
         XCTAssertTrue(prefs.playedKeys().isEmpty)
-        prefs.markPlayed("blob-2")
+        prefs.markPlayed("blob-2", accountIdB64: current)
 
         current = nil
         XCTAssertTrue(prefs.playedKeys().isEmpty)
-        prefs.markPlayed("blob-3")
+        prefs.markPlayed("blob-3", accountIdB64: current)
 
         prefs.clearPlayed(accountIdB64: alice)
         current = alice

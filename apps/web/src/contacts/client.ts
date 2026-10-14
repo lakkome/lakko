@@ -5004,17 +5004,22 @@ export class ContactsClient {
         // our reply grant, so without it the Welcome lands only if this
         // account is in Everyone.
         buildAttribution: () => attribution,
+        // The proposal's KeyPackage private key lives in the provider and is
+        // the only thing that can open the Welcome the committer will send,
+        // minutes or hours from now. FAIL-CLOSED and BEFORE the knock that
+        // carries the proposal: a request this device could not record (the
+        // stores sealed by Forget device, the session ended, an IndexedDB
+        // failure) is never sent, so a refused persist means nothing was
+        // published. After a reload an unrecorded key would fail the Welcome
+        // with `NoMatchingKeyPackage`, unrecoverably.
+        // (Unwrapped here: the catch below wraps every failure once.)
+        persistBeforeKnock: () => this.persistDurableOrThrow(),
       });
     } catch (err) {
       // `GroupNotClaimedError` carries readable copy of its own: nobody in
       // the group has opened it since the update, so no epoch is registered.
       throw ContactsError.wrap(err);
     }
-    // The proposal's KeyPackage private key lives in the provider and is the
-    // only thing that can open the Welcome the committer will send, minutes or
-    // hours from now. Persist it now: a reload before then used to lose it,
-    // and the Welcome then failed with `NoMatchingKeyPackage`, unrecoverably.
-    await this.persistBestEffort();
     return { groupId, joinerSignatureKey: myIdentity.signaturePublicKey };
   }
 

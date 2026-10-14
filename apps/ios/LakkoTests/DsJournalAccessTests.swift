@@ -418,6 +418,31 @@ final class DsJournalAccessTests: XCTestCase {
         XCTAssertEqual(knocked.last, [Data([0xA7]), Data([0xB0])], "attribution first, then the proposal")
     }
 
+    /// The proposal's KeyPackage keys are made durable before the proposal is
+    /// published; a refused or failed persist sends nothing.
+    func testTheJoinerPersistsBeforeTheProposalKnockAndARefusalSendsNothing() async throws {
+        var log: [String] = []
+        _ = try await DsKnockJoin(
+            knock: { payloads in log.append("knock:\(payloads.count)"); return 3 },
+            createProposal: { _ in log.append("proposal"); return Data([0xB0]) },
+            attribution: { nil },
+            persistBeforeKnock: { log.append("persist") }
+        ).run()
+        XCTAssertEqual(log, ["knock:0", "proposal", "persist", "knock:1"])
+
+        log = []
+        do {
+            _ = try await DsKnockJoin(
+                knock: { payloads in log.append("knock:\(payloads.count)"); return 3 },
+                createProposal: { _ in log.append("proposal"); return Data([0xB0]) },
+                attribution: { nil },
+                persistBeforeKnock: { throw AccountStoreGate.Sealed() }
+            ).run()
+            XCTFail("a refused persist must stop the join request")
+        } catch is AccountStoreGate.Sealed {}
+        XCTAssertEqual(log, ["knock:0", "proposal"], "the proposal never went out")
+    }
+
     func testAnUnclaimedGroupIsNotKnockedWithAGuessedEpoch() async throws {
         var proposed = false
         do {

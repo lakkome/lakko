@@ -8,7 +8,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
+import me.lakko.app.account.AccountStoreGate
 import java.io.File
 
 /**
@@ -19,6 +22,72 @@ import java.io.File
  * against the repository's source, as the web client does.
  */
 class DevicePhraseTest {
+
+    private val account = "CgoKCgoKCgoKCgoKCgoKCg=="
+
+    @Before
+    fun setUp() = AccountStoreGate.resetForTest()
+
+    @After
+    fun tearDown() = AccountStoreGate.resetForTest()
+
+    @Test
+    fun `the phrase row is written for a landing that began after a forget and a sign-out`() {
+        // Forget device, then a sign-out, both before this landing began: the
+        // first sign-in back in to the account still keeps its phrase.
+        AccountStoreGate.seal(account) { AccountStoreGate.markWiped(account) }
+        AccountStoreGate.seal(account)
+        val mark = AccountStoreGate.wipeMark()
+        var rows = 0
+        assertTrue(PhraseStore.putRowUnlessWipedSince(account, mark) { rows += 1 })
+        assertEquals(1, rows)
+    }
+
+    @Test
+    fun `a forget while the landing was out refuses the phrase row`() {
+        val mark = AccountStoreGate.wipeMark()
+        // Forget device runs while the landing's round trips are out.
+        AccountStoreGate.seal(account) { AccountStoreGate.markWiped(account) }
+        var rows = 0
+        assertFalse(PhraseStore.putRowUnlessWipedSince(account, mark) { rows += 1 })
+        assertEquals(0, rows)
+    }
+
+    @Test
+    fun `a refused phrase row is logged as refused, does not lift the suspension, and the landing continues`() {
+        val logged = ArrayList<String>()
+        var lifted = 0
+        val ok = DevicePhrase.storeWith(
+            phrase = "secret words here",
+            path = DevicePhrase.LandingPath.Recover,
+            write = { throw PhraseWriteRefused() },
+            onStored = { lifted += 1 },
+            log = { message, _ -> logged += message },
+        )
+        assertFalse(ok)
+        assertEquals(0, lifted)
+        assertEquals(1, logged.size)
+        assertTrue(logged[0].contains("refused"))
+        assertTrue(logged[0].contains("recover"))
+        assertFalse(logged[0].contains("secret"))
+    }
+
+    @Test
+    fun `no phrase row is written outside the wipe-mark gate`() {
+        // Every write of the store takes a wipe mark: the raw row writer is
+        // private and its only callers are the two gated entry points.
+        val store = sourceOf("src/main/kotlin/me/lakko/app/backup/PhraseStore.kt")
+        assertTrue(store.contains("private fun putRow("))
+        assertEquals(2, Regex("""putRowUnlessWipedSince\(accountIdB64, since\)""").findAll(store).count())
+        assertEquals(2, Regex("""putRow\(context,""").findAll(store).count())
+        // And every landing passes the mark it took when it began.
+        val repository = repositorySource()
+        val stores = Regex("""DevicePhrase\s*\.\s*store\(([^)]*)\)""").findAll(repository).toList()
+        assertEquals(DevicePhrase.LandingPath.entries.size, stores.size)
+        for (call in stores) {
+            assertTrue("a phrase store without the landing's wipe mark: ${call.value}", call.value.contains("wipes"))
+        }
+    }
 
     @Test
     fun `a stored phrase reaches the writer as its bytes, which are then zeroed`() {
@@ -123,11 +192,12 @@ class DevicePhraseTest {
         )
     }
 
-    private fun repositorySource(): String {
-        val relative = "src/main/kotlin/me/lakko/app/auth/AuthRepository.kt"
+    private fun repositorySource(): String = sourceOf("src/main/kotlin/me/lakko/app/auth/AuthRepository.kt")
+
+    private fun sourceOf(relative: String): String {
         val file = sequenceOf(File(relative), File("app/$relative"), File("apps/android/app/$relative"))
             .firstOrNull { it.isFile }
-            ?: error("AuthRepository.kt not found from ${File(".").absolutePath}")
+            ?: error("$relative not found from ${File(".").absolutePath}")
         return file.readText()
     }
 }

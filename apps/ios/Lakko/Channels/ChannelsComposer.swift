@@ -119,8 +119,12 @@ public enum ChannelsComposer {
     /// A corrupt / wrong-length `existingSigningSeed` falls back to a fresh
     /// seed rather than failing the open — the channel stays usable, and the
     /// caller re-persists the fresh seed.
+    ///
+    /// `accountIdB64` is the account whose `identity` this is, captured when
+    /// the caller's work began (a founded group is marked for it).
     public static func freshPublisherKeys(
         identity: Identity,
+        accountIdB64: String?,
         channelIdHex: String,
         existingSigningSeed: Data? = nil
     ) throws -> ChannelPublisherKeys {
@@ -152,7 +156,7 @@ public enum ChannelsComposer {
                     identity: identity,
                     channelId: channelId
                 )
-                CoPublisher.markFounded(group)
+                CoPublisher.markFounded(group, accountIdB64: accountIdB64)
             }
             seedBytes = try group.channelSeed(identity: identity)
         } catch let FfiError.Group(msg) {

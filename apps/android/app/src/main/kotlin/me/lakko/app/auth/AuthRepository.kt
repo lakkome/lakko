@@ -1563,6 +1563,9 @@ public class AuthRepository(
         if (trimmed.isEmpty()) {
             throw AuthClientArgError("username must be non-empty")
         }
+        // The phrase row is written before the session lands; a wipe of the
+        // account after this point refuses it ([AccountStoreGate.WipeMark]).
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         return authClientFactory().use { client ->
             val result = client.signup(
                 password,
@@ -1688,7 +1691,7 @@ public class AuthRepository(
                     )
                 }
                 // The device holds the keys, so it holds the phrase.
-                DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.Signup)
+                DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.Signup, wipes)
                 // Publish the identity bundle from the canonical (phrase-seeded)
                 // AccountIdentity — the FIRST publish of this key, so it carries
                 // the ADR-0019 genesis self-signature (+ the ADR-0036 attestation
@@ -1798,6 +1801,8 @@ public class AuthRepository(
      * bypass. No username is claimed.
      */
     public suspend fun signupGuest(onProofSolved: () -> Unit = {}) {
+        // The guest phrase row is written before the session lands.
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         // 32 random bytes nobody ever sees.
         val randomPassword = ByteArray(32).also { SecureRandom().nextBytes(it) }
         authClientFactory().use { client ->
@@ -1880,7 +1885,7 @@ public class AuthRepository(
                     landGuestSignup(
                         object : GuestLandingPorts {
                             override fun storeGuestPhrase() =
-                                storeGuestPhraseOrThrow(accountIdB64, phrase)
+                                storeGuestPhraseOrThrow(accountIdB64, phrase, wipes)
 
                             override fun markGuest() {
                                 // The account's age on this device runs from
@@ -2216,6 +2221,9 @@ public class AuthRepository(
         // No discovery lookup runs before the session. (The old export key
         // the G-4 path used to capture here needed the account id before the
         // call; under ADR-0017 it was only ever wiped, so it is gone.)
+        // Taken before the account is known: the phrase row it writes below
+        // is refused only by a wipe of that account after this point.
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val cached = sessionStore.load()?.let {
             CachedAccount(accountIdB64 = it.accountIdB64, username = it.username)
         }
@@ -2316,6 +2324,7 @@ public class AuthRepository(
                         accountIdB64,
                         canonicalPhrase,
                         DevicePhrase.LandingPath.Recover,
+                        wipes,
                     )
                     // Phase 2a3b0 (ADR-0007) — DeviceIdentity
                     // seed is decoupled from the OPAQUE
@@ -3283,15 +3292,30 @@ public class AuthRepository(
 
     /**
      * Keep [phrase] on this device under the guest's own key in the phrase
-     * store ([guestPhraseKey]). Throws when the row cannot be written or does
+     * store ([guestPhraseKey]). Throws when the row cannot be written, is
+     * refused because the account was wiped after [wipes] was taken, or does
      * not read back.
      */
-    private fun storeGuestPhraseOrThrow(accountIdB64: String, phrase: String) {
-        val key = guestPhraseKey(accountIdB64)
+    private fun storeGuestPhraseOrThrow(
+        accountIdB64: String,
+        phrase: String,
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
+    ) {
         val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
         try {
-            me.lakko.app.backup.PhraseStore.putPhrase(applicationContext, key, phraseBytes)
-            val readBack = me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, key)
+            // Refused when the account was wiped after the signup began: that
+            // is "not kept" too, and the signup fails as for a failed write.
+            val written = me.lakko.app.backup.PhraseStore.putGuestPhrase(
+                applicationContext,
+                accountIdB64,
+                phraseBytes,
+                wipes,
+            )
+            val readBack = if (written) {
+                me.lakko.app.backup.PhraseStore.getGuestPhrase(applicationContext, accountIdB64)
+            } else {
+                null
+            }
             val kept = readBack != null && readBack.contentEquals(phraseBytes)
             readBack?.fill(0)
             if (!kept) {
@@ -3341,6 +3365,9 @@ public class AuthRepository(
         val accountIdB64 = session.account.accountIdB64
         val accountId = secrets.accountId.copyOf()
         val phraseKey = guestPhraseKey(accountIdB64)
+        // The phrase moves to the account's row below, after several round
+        // trips: a Forget device of this guest meanwhile refuses that write.
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         // Each step below writes this guest's rows. One that returns after
         // the guest left the device (declined, expired) writes nothing back.
         val bound = accountBinding.capture()
@@ -3396,7 +3423,7 @@ public class AuthRepository(
                     bound.ensureCurrent()
                     // The device holds the keys, so it holds the phrase,
                     // under the account's own row from here on.
-                    DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.SignupGuest)
+                    DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.SignupGuest, wipes)
                     // ADR-0075 - the "Protect your account" step, recorded
                     // so a restart shows it again. Up before the guest marker
                     // goes, so the app is never drawn without it.
@@ -3744,6 +3771,7 @@ public class AuthRepository(
      *   recall routes answer; nothing changed unless `finish` answered.
      */
     public suspend fun phraseRecallSubmit(offer: PhraseRecallOffer, oldPhrase: String, newPassword: ByteArray) {
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val accountIdB64 = base64Encode(offer.accountId)
         val oldRecoverySeed = RecoveryMnemonic.fromPhrase(oldPhrase).use { it.toSeed() }
         val oldAccountSeed = Identity.fromSeed(oldRecoverySeed).use { it.ed25519Seed() }
@@ -3786,6 +3814,7 @@ public class AuthRepository(
                 newSignaturePubkey = newSignaturePubkey,
                 reset = recalled.reset,
                 context = "phrase-recall",
+                wipes = wipes,
                 landHere = deviceFreeFor(accountIdB64),
             )
         } finally {
@@ -4202,6 +4231,9 @@ public class AuthRepository(
      * and is not shown back; a phrase they have not seen is still shown.
      */
     private suspend fun restoreFromPhrase(mnemonicPhrase: String, phraseHeldByPerson: Boolean) {
+        // Before the parked context is read: a Forget device from here on
+        // refuses the phrase row written below.
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
         // A sign-out while the checks below are out wins: it wiped `pending`
@@ -4260,6 +4292,7 @@ public class AuthRepository(
                 pending.accountIdB64,
                 canonicalPhrase,
                 DevicePhrase.LandingPath.ProvidePhrase,
+                wipes,
             )
 
             // The phrase is in hand, so this route restores the account
@@ -4371,6 +4404,10 @@ public class AuthRepository(
      *   proof (`403 fresh-auth-required`). Nothing was reset.
      */
     public suspend fun mintFreshIdentity(): String {
+        // The new phrase is staged in the account's row before the server
+        // step and written again after it; a Forget device of the account
+        // from here on refuses both (the stage refuses the reset).
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
         val proof = freshAuth.live(pending.accountIdB64, System.currentTimeMillis())
@@ -4404,7 +4441,7 @@ public class AuthRepository(
         // right after the answer, the session can change underneath. A row
         // that cannot be written refuses the reset here, where nothing
         // irreversible has happened; a failed server step puts the row back.
-        val staged = StagedPhrase(phraseRow(accountIdB64), phrase)
+        val staged = StagedPhrase(phraseRow(accountIdB64, wipes), phrase)
         try {
             staged.stage()
         } catch (cause: Throwable) {
@@ -4472,6 +4509,7 @@ public class AuthRepository(
             newSignaturePubkey = newSignaturePubkey,
             reset = reset,
             context = "mintFreshIdentity",
+            wipes = wipes,
             landHere = after != FreshIdentityAfterPublish.KEEP_OWED,
         )
         return phrase
@@ -4493,13 +4531,22 @@ public class AuthRepository(
      * are shown only once the publish landed. [seed] is owned by the parked
      * phrase from here on.
      */
-    /** [accountIdB64]'s row of the cached recovery phrase. */
-    private fun phraseRow(accountIdB64: String): PhraseRow = object : PhraseRow {
+    /** [accountIdB64]'s row of the cached recovery phrase, written under the
+     *  wipe mark [wipes] of the work that writes it. */
+    private fun phraseRow(
+        accountIdB64: String,
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
+    ): PhraseRow = object : PhraseRow {
         override fun read(): ByteArray? =
             me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, accountIdB64)
 
-        override fun write(phrase: ByteArray) =
-            me.lakko.app.backup.PhraseStore.putPhrase(applicationContext, accountIdB64, phrase)
+        // Refused (a wipe since [wipes]) is a write that did not happen: the
+        // stage then refuses the reset, a rollback reports it was not put back.
+        override fun write(phrase: ByteArray) {
+            if (!me.lakko.app.backup.PhraseStore.putPhrase(applicationContext, accountIdB64, phrase, wipes)) {
+                throw me.lakko.app.backup.PhraseWriteRefused()
+            }
+        }
 
         override fun delete() =
             me.lakko.app.backup.PhraseStore.deletePhrase(applicationContext, accountIdB64)
@@ -4520,6 +4567,11 @@ public class AuthRepository(
         newSignaturePubkey: ByteArray,
         reset: KeyResetResult,
         context: String,
+        /** The wipe mark the caller took when it began: the phrase row is
+         *  not written back over a Forget device that ran after it. A recall
+         *  begins on a device its staged wipe already cleared, which this
+         *  does not refuse. */
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
         /** `false` when another account holds the device by now: everything
          *  is persisted for this account's next sign-in, nothing is installed
          *  or landed over the other one, and the call ends as a stale
@@ -4543,7 +4595,7 @@ public class AuthRepository(
         } catch (cause: Throwable) {
             Log.w("lakko-auth", "fresh-identity seed persist failed", cause)
         }
-        DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.FreshIdentity)
+        DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.FreshIdentity, wipes)
         keyResetOwedStore.save(
             accountIdB64,
             KeyResetOwed(
@@ -5406,6 +5458,7 @@ public class AuthRepository(
         /** The pair the grant redeem issued, when it did; else the parked one. */
         session: SessionPair? = null,
     ) {
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val pending = pendingRecovery.get()
         if (pending == null) {
             phraseEntropy.fill(0)
@@ -5457,6 +5510,7 @@ public class AuthRepository(
                 pending.accountIdB64,
                 keys.phrase,
                 DevicePhrase.LandingPath.DevicePairing,
+                wipes,
             )
             installIdentitySecrets(
                 pending.accountIdB64,
@@ -5534,6 +5588,7 @@ public class AuthRepository(
         persistJoin: suspend () -> Unit = {},
         forgotPassword: Boolean = false,
     ) {
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val start = signInStart()
         // ADR-0074 - the grant redeem named no device: bind before use.
         @Suppress("NAME_SHADOWING")
@@ -5570,6 +5625,7 @@ public class AuthRepository(
                         phraseSeed = phraseSeed,
                         phrase = keys.phrase,
                         session = session,
+                        wipes = wipes,
                     )
                     seedHandedOff = true
                 },
@@ -5610,6 +5666,7 @@ public class AuthRepository(
         phraseSeed: ByteArray,
         phrase: String,
         session: SessionPair,
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
     ) {
         val deviceRootKey =
             deriveDeviceRootKeyFromIdentitySeed(phraseSeed, accountIdB64)
@@ -5642,7 +5699,7 @@ public class AuthRepository(
             )
         }
         // This device now holds the phrase like the one that confirmed it.
-        DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.DeviceRestore)
+        DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.DeviceRestore, wipes)
         sessionStore.save(
             PersistedSession(
                 accountIdB64 = accountIdB64,
@@ -6498,6 +6555,7 @@ public class AuthRepository(
 
     /** ADR section 3.2 step 6 on the rotating device. */
     public fun rotationAdopt() {
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val secrets = rotationSecrets()
         val accountIdB64 = base64Encode(secrets.accountId)
         val prepared = preparedOrThrow(accountIdB64)
@@ -6507,6 +6565,7 @@ public class AuthRepository(
                 newEntropy = prepared.newEntropy,
                 pair = null,
                 asKeptDevice = false,
+                wipes = wipes,
             )
         } finally {
             prepared.zero()
@@ -6879,6 +6938,10 @@ public class AuthRepository(
      * head once when none is held. Never wipes on a failed request.
      */
     private suspend fun resolveSupersession(accountIdB64: String, candidates: List<PendingRotation>? = null) {
+        // Before the first look at the live session: the adoption below runs
+        // after round trips, and a Forget device in between refuses its
+        // phrase row.
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         if (!supersessionInFlight.compareAndSet(false, true)) return
         mutableKeysUpdating.value = true
         try {
@@ -6905,6 +6968,7 @@ public class AuthRepository(
                                     newEntropy = resolution.pending.newEntropy,
                                     pair = resolution.pair,
                                     asKeptDevice = true,
+                                    wipes = wipes,
                                 )
                                 reevaluateRecoveryEmail()
                                 return
@@ -7008,6 +7072,9 @@ public class AuthRepository(
         newEntropy: ByteArray,
         pair: SessionPair?,
         asKeptDevice: Boolean,
+        /** Taken by the caller before its own checks of the live session: a
+         *  Forget device after it refuses the phrase row written here. */
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
     ) {
         val live = mutableIdentitySecrets.value?.takeIf { base64Encode(it.accountId) == accountIdB64 }
             ?: throw AuthClientArgError("no session to adopt the new keys into")
@@ -7025,7 +7092,7 @@ public class AuthRepository(
                 throw IllegalStateException("the previous account key could not be kept; nothing was changed")
             }
             AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, newSeed)
-            DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.KeyRotation)
+            DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.KeyRotation, wipes)
             // The same proven-predecessor rule this device applies to its
             // contacts, for its own account.
             me.lakko.app.contacts.ProvenPredecessors.recordProven(
@@ -7351,6 +7418,9 @@ public class AuthRepository(
     }
 
     private suspend fun recallSubmitWith(oldPassword: ByteArray, newPassword: ByteArray, oldRecoverySeed: ByteArray?) {
+        // After the staged wipe that offered the recall: only a wipe from
+        // here on refuses the phrase row the landing writes.
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val ui = mutableRecall.value ?: return
         val open = ui.availability as? RecallAvailability.Open ?: return
         if (ui.working) return
@@ -7500,6 +7570,7 @@ public class AuthRepository(
                 newSignaturePubkey = newSignaturePubkey,
                 reset = recalled.reset,
                 context = "recall",
+                wipes = wipes,
                 landHere = deviceFreeFor(ui.accountIdB64),
             )
         } finally {

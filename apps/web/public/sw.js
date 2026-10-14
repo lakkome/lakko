@@ -21,7 +21,12 @@
  *     fallback. We MUST hit the network when the user is online so
  *     a fresh deploy of `index.html` brings in the latest hashed
  *     asset references; the cache fallback only runs when the
- *     fetch throws (offline).
+ *     fetch throws (offline). Every routed path answers with the
+ *     same shell, so the response is cached under ONE key
+ *     (`SHELL_CACHE_KEY`), never under the URL navigated to: a
+ *     per-URL key would keep `/chat/<group id>`, `/g/<invite slug>`
+ *     and the like in Cache Storage after Forget device, naming a
+ *     forgotten account's conversations and links.
  *   * **`/api/*`** (auth / discovery / DS) — **network-only**. A
  *     stale OPAQUE round, a cached message journal, or a frozen
  *     KeyPackage list would all be active footguns. Offline = fail.
@@ -96,6 +101,9 @@ const BUILD_VERSION = "__BUILD_VERSION__";
 const PRECACHE_MANIFEST = __PRECACHE_MANIFEST__;
 
 const CACHE_NAME = `lakko-app-shell-${BUILD_VERSION}`;
+/** The one key a navigation response is cached under (precached at install
+ *  as well). Navigations are never cached under their own URL. */
+const SHELL_CACHE_KEY = "/index.html";
 
 // Single source of truth for "is this a backend API call". Keep
 // in lock-step with `vite.config.ts` proxy rewrites — every path
@@ -211,17 +219,24 @@ async function cacheFirst(req) {
 async function networkFirstWithCacheFallback(req) {
   try {
     const fresh = await fetch(req);
-    if (fresh.ok) {
+    // Only the HTML shell refreshes the shell entry. A navigation to
+    // anything else (an icon or a sound opened in a tab) must not replace
+    // it, or the next offline start would be served that file.
+    const type = fresh.headers.get("content-type") ?? "";
+    if (fresh.ok && type.toLowerCase().startsWith("text/html")) {
       const cache = await caches.open(CACHE_NAME);
-      cache.put(req, fresh.clone());
+      // Under the one shell key, never under `req`: the URL a person
+      // navigated to names a conversation or an invite, and must not be
+      // kept on the device (see the cache strategy above).
+      cache.put(SHELL_CACHE_KEY, fresh.clone());
     }
     return fresh;
   } catch (err) {
-    // Offline — fall back to cached HTML if we have it. The
-    // precache always seeds `index.html` so a cold-start offline
-    // load works after the first online visit.
+    // Offline — fall back to the cached shell if we have it. The
+    // precache always seeds it, so a cold-start offline load works
+    // after the first online visit, on any routed path.
     const cache = await caches.open(CACHE_NAME);
-    const fallback = (await cache.match(req)) ?? (await cache.match("/index.html"));
+    const fallback = await cache.match(SHELL_CACHE_KEY);
     if (fallback !== undefined) return fallback;
     throw err;
   }

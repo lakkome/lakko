@@ -912,7 +912,13 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         preparedGroups.delete(successorGroupIdB64);
         held = chats.add({ label: old.label, group });
         profiles.groupJoined(held.groupIdB64);
-        await chats.persistSnapshot(s.account.accountId);
+        // FAIL-CLOSED before the Welcomes below are published: a refused
+        // persist (the session ended, Forget device sealed the stores)
+        // means nothing is published. The successor's MLS state was
+        // recorded at creation; what this records is the held list, and
+        // the throw is what stops a delivery for an account that has left
+        // this browser.
+        await chats.persistSnapshotDurable(s.account.accountId);
       }
       if (!prepared.delivered) {
         if (prepared.welcomeB64 === null) return false;

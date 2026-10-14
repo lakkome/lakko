@@ -118,7 +118,7 @@ final class CallTileNameTests: XCTestCase {
         let (directory, verifier) = makeDirectory(defaults: defaults) { _ in .signatureKey(keyA) }
         directory.acceptReceived(
             ProfileClaim(displayName: nil, username: "valentin", updatedAtMs: 5),
-            signatureKeyB64: base64Encode(keyA))
+            signatureKeyB64: base64Encode(keyA), accountIdB64: directory.accountIdB64)
         XCTAssertNil(
             CallTileName.personName(directory.resolve(signatureKey: keyA)),
             "not verified yet: the resolver has no name to give")
@@ -133,7 +133,7 @@ final class CallTileNameTests: XCTestCase {
         let (directory, verifier) = makeDirectory(defaults: defaults) { _ in .signatureKey(keyB) }
         directory.acceptReceived(
             ProfileClaim(displayName: nil, username: "pavel", updatedAtMs: 5),
-            signatureKeyB64: base64Encode(keyA))
+            signatureKeyB64: base64Encode(keyA), accountIdB64: directory.accountIdB64)
         await verifier.verify(signatureKeyB64: base64Encode(keyA), username: "pavel")
         XCTAssertEqual(CallTileName.storedName(signatureKey: keyA, directory: directory), "pavel")
     }
@@ -142,7 +142,7 @@ final class CallTileNameTests: XCTestCase {
         let (directory, _) = makeDirectory(defaults: defaults)
         directory.acceptReceived(
             ProfileClaim(displayName: "Elena", username: nil, updatedAtMs: 5),
-            signatureKeyB64: base64Encode(keyA))
+            signatureKeyB64: base64Encode(keyA), accountIdB64: directory.accountIdB64)
         XCTAssertEqual(CallTileName.storedName(signatureKey: keyA, directory: directory), "Elena")
         directory.setRenames(from: [contact(keyA, renamed: "Mum")])
         XCTAssertEqual(CallTileName.storedName(signatureKey: keyA, directory: directory), "Mum")
@@ -352,7 +352,7 @@ final class LinkCallTileNamesTests: XCTestCase {
         let (directory, _) = makeDirectory(defaults: defaults)
         directory.acceptReceived(
             ProfileClaim(displayName: "Boris", username: nil, updatedAtMs: 3, accountId: accountB),
-            signatureKeyB64: base64Encode(keyB))
+            signatureKeyB64: base64Encode(keyB), accountIdB64: directory.accountIdB64)
         let names = names(directory)
         XCTAssertEqual(names.name(peerId: "p9", peerTag: tag(accountB)), "Boris")
         XCTAssertEqual(names.name(peerId: "p8", peerTag: tag(accountA)), "")

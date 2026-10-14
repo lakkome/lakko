@@ -530,7 +530,8 @@ public final class ContactsRepository: ObservableObject {
                     // replayed old request never rolls a name back.
                     if let profile = req.profile {
                         ProfileDirectory.shared.acceptReceived(
-                            profile, signatureKeyB64: base64Encode(req.fromPubkey))
+                            profile, signatureKeyB64: base64Encode(req.fromPubkey),
+                            accountIdB64: pollAccountIdB64)
                     }
                     // ADR-0073 R.3 — a request from an account that is ALREADY
                     // an established contact (it reset its keys and is writing

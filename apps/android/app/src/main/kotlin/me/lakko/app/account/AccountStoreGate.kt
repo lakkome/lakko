@@ -173,8 +173,62 @@ public object AccountStoreGate {
      *  itself, as its first step. */
     public fun markWiped(accountIdB64: String) {
         if (accountIdB64.isEmpty()) return
-        lock.write { wiped.add(key(accountIdB64)) }
+        lock.write {
+            val account = key(accountIdB64)
+            wiped.add(account)
+            wipeCount += 1
+            lastWipe[account] = wipeCount
+        }
     }
+
+    /**
+     * A point in this process's sequence of wipes, taken when a piece of
+     * sign-in work begins ([wipeMark]).
+     *
+     * A sign-in writes some of its account's rows BEFORE the account lands
+     * (the recovery phrase is the one that matters), so neither [write] nor
+     * [writeUnlessWiped] is the right question for them: the account may
+     * still be sealed from a sign-out in this process, and it may even be
+     * marked wiped by a Forget device that came BEFORE this sign-in, which is
+     * exactly the case of signing back in to a forgotten account. What such a
+     * write must not do is outlive a wipe that came AFTER its work began:
+     * that would put a forgotten account's row back. [writeUnlessWipedSince]
+     * asks that and nothing else. Mirror of the iOS `AccountStoreGate.WipeMark`.
+     *
+     * Not per account, so it can be taken before the work knows which
+     * account it is for (a sign-in by name learns the account id from the
+     * server's answer).
+     */
+    public class WipeMark internal constructor(@PublishedApi internal val wipesSeen: Long)
+
+    /** How many wipes ran in this process. Guarded by [lock]. */
+    @PublishedApi
+    internal var wipeCount: Long = 0L
+
+    /** The [wipeCount] of each account's most recent wipe. Never cleared by
+     *  [open]: a landing does not make a wipe that came after a mark go away.
+     *  Guarded by [lock]. */
+    @PublishedApi
+    internal val lastWipe: HashMap<String, Long> = HashMap()
+
+    /** The wipes so far, for [writeUnlessWipedSince]. */
+    public fun wipeMark(): WipeMark = lock.read { WipeMark(wipeCount) }
+
+    /** Whether [accountIdB64] was wiped after [since] was taken. Call under
+     *  [lock]. The wipe's own thread is let through, as in [write]. */
+    @PublishedApi
+    internal fun wipedSince(accountIdB64: String, since: WipeMark): Boolean =
+        (lastWipe[key(accountIdB64)] ?: 0L) > since.wipesSeen && !lock.isWriteLockedByCurrentThread
+
+    /**
+     * Run [write] unless [accountIdB64] was wiped after [since] was taken;
+     * `null` when refused. A sign-out, and a wipe that came before [since],
+     * refuse nothing here ([WipeMark]).
+     */
+    public inline fun <T> writeUnlessWipedSince(accountIdB64: String, since: WipeMark, write: () -> T): T? =
+        lock.read {
+            if (wipedSince(accountIdB64, since)) null else write()
+        }
 
     public fun isWiped(accountIdB64: String): Boolean = lock.read { key(accountIdB64) in wiped }
 
@@ -194,6 +248,8 @@ public object AccountStoreGate {
             sealed.clear()
             seals.clear()
             wiped.clear()
+            lastWipe.clear()
+            wipeCount = 0L
         }
     }
 }

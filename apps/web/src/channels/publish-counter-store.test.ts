@@ -184,6 +184,28 @@ describe("publish-counter-store: issueAndAdvance (monotone write-through)", () =
     expect(loadCounter(CH)).toBe(5n);
   });
 
+  it("refuses to issue a value whose advanced floor did not land", () => {
+    saveCounter(CH, 3n);
+    // A write that is skipped without an error (the Forget-device gate on
+    // `setItem`) or that throws (quota): nothing is issued either way.
+    const storage = localStorage as unknown as MemoryStorage;
+    const original = storage.setItem.bind(storage);
+    storage.setItem = (): void => undefined;
+    expect(() => issueAndAdvance(3n, CH)).toThrow("not persisted");
+    storage.setItem = (): void => {
+      throw new Error("QuotaExceededError");
+    };
+    expect(() => issueAndAdvance(3n, CH)).toThrow("not persisted");
+    storage.setItem = original;
+    expect(loadCounter(CH)).toBe(3n);
+    expect(issueAndAdvance(3n, CH).value).toBe(3n);
+  });
+
+  it("refuses to issue a value with no storage at all", () => {
+    delete (globalThis as unknown as { localStorage?: Storage }).localStorage;
+    expect(() => issueAndAdvance(0n, CH)).toThrow("not persisted");
+  });
+
   it("resumes from the persisted floor when in-memory is lost", () => {
     saveCounter(CH, 5n);
     const r = issueAndAdvance(undefined, CH);

@@ -456,11 +456,18 @@ export function rejectCoPublisher(
  *  returns the group's epoch, the external-join proposal (ADR-0027) is built
  *  for it, and a second knock carries a self-signed join-attribution (OQ2) and
  *  the proposal. No journal read. Returns the handles the caller polls with
- *  via `pollForCoPublishWelcome`. */
+ *  via `pollForCoPublishWelcome`.
+ *
+ *  `persistBeforeKnock` must record `identity`'s provider durably and throw
+ *  when it could not (`channelsActions.persistPublisherGroupDurable`): the
+ *  proposal's KeyPackage private key, minted into that provider, is the only
+ *  thing that opens the owner's Welcome, so it is written before the knock
+ *  that carries the proposal and a refused write sends nothing. */
 export async function requestToCoPublish(
   ds: DsClient,
   identity: Identity,
   link: string,
+  persistBeforeKnock: () => Promise<void>,
 ): Promise<{ groupId: Uint8Array; channelIdHex: string; joinerKey: Uint8Array }> {
   const wasm = await loadWasm();
   // The shared `/g/` shape rules (ADR-0028 short-link amendment): the slug
@@ -521,6 +528,7 @@ export async function requestToCoPublish(
     // Self-signed join attribution (OQ2): advisory for the approval, and the
     // only carrier of our reply grant.
     buildAttribution: () => attribution,
+    persistBeforeKnock,
   });
   return { groupId, channelIdHex, joinerKey: identity.signaturePublicKey };
 }

@@ -769,7 +769,7 @@ final class PhraseRouteBackupTests: XCTestCase {
         for _ in 0..<5 {
             outcomes.append(await repo.restoreBackupFromPhrase(
                 accountId: accountId, accountIdB64: accountIdB64, sessionToken: "tok",
-                phrase: phrase, context: "test"))
+                phrase: phrase, context: "test", writes: SignInKeyWrites()))
             owedAfter.append(
                 BackupRestoreRetryStore.isPending(accountIdB64: accountIdB64, defaults: defaults))
         }

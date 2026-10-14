@@ -262,15 +262,24 @@ public struct DsKnockJoin {
     /// The join attribution, or `nil` when it could not be composed (it is
     /// advisory; the proposal goes regardless).
     public var attribution: () -> Data?
+    /// Make the joiner's state durable once the proposal is built and before
+    /// it is published. The proposal carries a fresh KeyPackage whose private
+    /// keys are the only thing that opens the Welcome an admin sends later,
+    /// and they live in the joiner's in-memory provider: a proposal published
+    /// before they are on disk can be approved into a Welcome nobody can
+    /// open. Throwing stops the sequence before the proposal goes out.
+    public var persistBeforeKnock: () async throws -> Void
 
     public init(
         knock: @escaping ([Data]) async throws -> UInt64?,
         createProposal: @escaping (UInt64) throws -> Data,
-        attribution: @escaping () -> Data?
+        attribution: @escaping () -> Data?,
+        persistBeforeKnock: @escaping () async throws -> Void = {}
     ) {
         self.knock = knock
         self.createProposal = createProposal
         self.attribution = attribution
+        self.persistBeforeKnock = persistBeforeKnock
     }
 
     /// Run the sequence. Returns the epoch the proposal targets.
@@ -284,6 +293,8 @@ public struct DsKnockJoin {
             throw DsKnockJoinError.groupNotClaimed
         }
         let proposal = try createProposal(epoch)
+        // A refused or failed persist publishes nothing.
+        try await persistBeforeKnock()
         var rows: [Data] = []
         if let attribution = attribution() { rows.append(attribution) }
         rows.append(proposal)

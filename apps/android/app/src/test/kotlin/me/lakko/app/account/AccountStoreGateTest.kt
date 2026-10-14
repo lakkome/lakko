@@ -222,4 +222,97 @@ class AccountStoreGateTest {
             }
         }
     }
+
+    // ------------------------------------------------ wipe marks (sign-in writes)
+
+    @Test
+    fun `a sign-in write is not refused by a sign-out or by a wipe before it began`() {
+        // Forgotten earlier in this process, then signed out of again.
+        AccountStoreGate.seal(account) { AccountStoreGate.markWiped(account) }
+        AccountStoreGate.seal(account)
+        // A sign-in back in to the same account begins now, before it lands.
+        val mark = AccountStoreGate.wipeMark()
+        assertTrue(AccountStoreGate.isSealed(account))
+        assertTrue(AccountStoreGate.isWiped(account))
+        assertNull(AccountStoreGate.writeUnlessWiped(account) { 1 })
+        assertEquals(1, AccountStoreGate.writeUnlessWipedSince(account, mark) { 1 })
+    }
+
+    @Test
+    fun `a wipe after the mark refuses the write, even once the account landed again`() {
+        val mark = AccountStoreGate.wipeMark()
+        AccountStoreGate.seal(account) { AccountStoreGate.markWiped(account) }
+        var wrote = false
+        assertNull(AccountStoreGate.writeUnlessWipedSince(account, mark) { wrote = true })
+        // Another sign-in landed the same account meanwhile: the late write of
+        // the work that began before the wipe is still refused...
+        AccountStoreGate.open(account)
+        assertNull(AccountStoreGate.writeUnlessWipedSince(account, mark) { wrote = true })
+        assertFalse(wrote)
+        // ...while work that began after the wipe writes.
+        assertEquals(1, AccountStoreGate.writeUnlessWipedSince(account, AccountStoreGate.wipeMark()) { 1 })
+    }
+
+    @Test
+    fun `a wipe of another account does not refuse the write`() {
+        val mark = AccountStoreGate.wipeMark()
+        val other = "AQEBAQEBAQEBAQEBAQEBAQ=="
+        AccountStoreGate.seal(other) { AccountStoreGate.markWiped(other) }
+        assertEquals(1, AccountStoreGate.writeUnlessWipedSince(account, mark) { 1 })
+    }
+
+    @Test
+    fun `a wipe mark names the account in any base64 spelling`() {
+        val standard = "+/8AAQIDBAUGBwgJCgsMDQ=="
+        val urlSafe = "-_8AAQIDBAUGBwgJCgsMDQ"
+        val mark = AccountStoreGate.wipeMark()
+        AccountStoreGate.seal(standard) { AccountStoreGate.markWiped(standard) }
+        assertNull(AccountStoreGate.writeUnlessWipedSince(urlSafe, mark) { 1 })
+    }
+
+    @Test
+    fun `the wipe's own thread writes through a wipe mark`() {
+        val mark = AccountStoreGate.wipeMark()
+        var wrote = false
+        AccountStoreGate.seal(account) {
+            AccountStoreGate.markWiped(account)
+            AccountStoreGate.writeUnlessWipedSince(account, mark) { wrote = true }
+        }
+        assertTrue(wrote)
+    }
+
+    @Test
+    fun `a wipe waits for a sign-in write in flight on another thread`() {
+        val mark = AccountStoreGate.wipeMark()
+        val store = HashMap<String, String>()
+        val writing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val writer = thread {
+            AccountStoreGate.writeUnlessWipedSince(account, mark) {
+                writing.countDown()
+                release.await(5, TimeUnit.SECONDS)
+                synchronized(store) { store["phrase"] = "words" }
+            }
+        }
+        assertTrue(writing.await(5, TimeUnit.SECONDS))
+        val wiped = AtomicBoolean(false)
+        val wipe = thread {
+            AccountStoreGate.seal(account) {
+                AccountStoreGate.markWiped(account)
+                synchronized(store) { store.clear() }
+                wiped.set(true)
+            }
+        }
+        // The wipe cannot start while the write is in flight.
+        Thread.sleep(100)
+        assertFalse(wiped.get())
+        release.countDown()
+        writer.join(5_000)
+        wipe.join(5_000)
+        assertTrue(wiped.get())
+        // And the row the write made is gone; a late write of the same work
+        // does not put it back.
+        assertNull(AccountStoreGate.writeUnlessWipedSince(account, mark) { store["phrase"] = "words" })
+        assertTrue(store.isEmpty())
+    }
 }

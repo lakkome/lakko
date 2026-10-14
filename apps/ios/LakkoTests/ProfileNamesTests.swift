@@ -621,7 +621,7 @@ final class ProfileDirectoryTests: XCTestCase {
         let before = directory.revision
         directory.acceptReceived(
             ProfileClaim(displayName: "Alice Petrova", username: "alice", updatedAtMs: 5),
-            signatureKeyB64: base64Encode(key))
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
         XCTAssertGreaterThan(directory.revision, before, "an arriving profile re-renders in place")
         let unverified = directory.resolve(signatureKey: key)
         XCTAssertEqual(unverified.name, "Alice Petrova")
@@ -631,13 +631,32 @@ final class ProfileDirectoryTests: XCTestCase {
         XCTAssertEqual(directory.resolve(signatureKey: key).listLabel, "Alice Petrova · @alice")
     }
 
+    /// A profile received by one account's work is not filed under another
+    /// account that became active meanwhile.
+    func testAProfileReceivedForAnotherAccountIsNotFiled() {
+        let key = Data(repeating: 0x66, count: 32)
+        let (directory, _) = makeDirectory { _ in .notRegistered }
+        let claim = ProfileClaim(displayName: "Late", username: nil, updatedAtMs: 5)
+        XCTAssertEqual(
+            directory.acceptReceived(claim, signatureKeyB64: base64Encode(key), accountIdB64: "other"),
+            .inactive)
+        XCTAssertEqual(
+            directory.acceptReceived(claim, signatureKeyB64: base64Encode(key), accountIdB64: nil),
+            .inactive)
+        XCTAssertNil(directory.storedProfile(signatureKeyB64: base64Encode(key)))
+        XCTAssertEqual(
+            directory.acceptReceived(claim, signatureKeyB64: base64Encode(key), accountIdB64: "acct"),
+            .stored)
+        XCTAssertEqual(directory.storedProfile(signatureKeyB64: base64Encode(key))?.displayName, "Late")
+    }
+
     func testAMismatchedUsernameIsNeverShownAndIsFlaggedForDetail() async {
         let key = Data(repeating: 0x33, count: 32)
         let someoneElse = Data(repeating: 0x44, count: 32)
         let (directory, verifier) = makeDirectory { _ in .signatureKey(someoneElse) }
         directory.acceptReceived(
             ProfileClaim(displayName: nil, username: "pavel", updatedAtMs: 5),
-            signatureKeyB64: base64Encode(key))
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
         await verifier.verify(signatureKeyB64: base64Encode(key), username: "pavel")
         let resolved = directory.resolve(signatureKey: key)
         XCTAssertEqual(resolved.name, "Member")
@@ -651,7 +670,7 @@ final class ProfileDirectoryTests: XCTestCase {
         let (directory, _) = makeDirectory { _ in .notRegistered }
         directory.acceptReceived(
             ProfileClaim(displayName: "Alice Petrova", username: nil, updatedAtMs: 5),
-            signatureKeyB64: base64Encode(key))
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
         let contact = AcceptedContact(
             request: IncomingContactRequest(
                 messageId: 1, fromPubkey: key, fromAccountId: nil,

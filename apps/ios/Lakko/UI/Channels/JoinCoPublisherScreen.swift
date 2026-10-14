@@ -95,6 +95,10 @@ struct JoinCoPublisherScreen: View {
         errorMessage = nil
         failure = nil
         status = "group.join.sending"
+        // The account this request is made for, before any wait: the
+        // co-publisher mark is filed under it, and under no account signed in
+        // while the request was out.
+        let accountIdB64 = AcceptedContactsStore.boundAccountIdB64
         defer {
             busy = false
             status = nil
@@ -102,13 +106,14 @@ struct JoinCoPublisherScreen: View {
         do {
             let identity = try Identity.fromSeed(seed: accountIdentitySeed)
             let request = try await CoPublisher.requestToCoPublish(
-                ds: ds, identity: identity, link: trimmed)
+                ds: ds, identity: identity, accountIdB64: accountIdB64, link: trimmed)
             status = "channels.join.waiting"
             var keys: ChannelPublisherKeys?
             for _ in 0..<Self.pollAttempts where keys == nil {
                 keys = try await CoPublisher.pollForCoPublishWelcome(
                     ds: ds,
                     identity: identity,
+                    accountIdB64: accountIdB64,
                     groupId: request.groupId,
                     joinerKey: request.joinerKey,
                     channelIdHex: request.channelIdHex,

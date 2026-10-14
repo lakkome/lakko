@@ -23,6 +23,13 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 >
 > See [ADR-0072](0072-recovery-model-simplification.md).
 
+> **Note (2026-10-14), [ADR-0077](0077-account-binding-and-store-gate.md).**
+> A factor reaches the ADR-0017 post-ACCESS step only while the binding it
+> started under is current: a passkey, TOTP or
+> another-device restore overtaken by a sign-out or by another account landing
+> does not land, installs nothing and shows no error (ADR-0077 decision 2).
+> What the server already did for it (a consumed code) stays done.
+
 - **Status:** Accepted — **built + reviewed** (Part 2 of the account-recovery
   overhaul). All four factors landed end-to-end (server + web + iOS + Android);
   `lakko-security` passed on factor (a) (APPROVE) and on (c)+(d) (APPROVE-WITH-NOTES,

@@ -1295,7 +1295,7 @@ final class RecoveryFlowTests: XCTestCase {
         if case .anon = h.repository.state {} else { XCTFail("still signed out") }
 
         // A landing path that writes the phrase again brings the row back.
-        DevicePhrase.store(mnemonic.phrase(), accountIdB64: accountIdB64, context: "test")
+        DevicePhrase.store(mnemonic.phrase(), accountIdB64: accountIdB64, context: "test", since: nil)
         XCTAssertFalse(ThreeWordsBudgetStore().isSuspended(accountIdB64: accountIdB64))
         XCTAssertNotNil(h.repository.threeWordsAccount())
     }
@@ -2046,13 +2046,13 @@ final class DevicePhraseTests: XCTestCase {
 
         let mnemonic = RecoveryMnemonic.generate()
         let typed = "  " + mnemonic.words().joined(separator: "   ") + "\n"
-        DevicePhrase.store(typed, accountIdB64: accountIdB64, context: "test")
+        DevicePhrase.store(typed, accountIdB64: accountIdB64, context: "test", since: nil)
         XCTAssertEqual(DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase())
         XCTAssertEqual(DevicePhrase.entropy(accountIdB64: accountIdB64), mnemonic.toEntropy())
         XCTAssertEqual(DevicePhrase.entropy(accountIdB64: accountIdB64)?.count, 16)
 
         // Something that is not a phrase is never written over a good one.
-        DevicePhrase.store("not a recovery phrase", accountIdB64: accountIdB64, context: "test")
+        DevicePhrase.store("not a recovery phrase", accountIdB64: accountIdB64, context: "test", since: nil)
         XCTAssertEqual(DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase())
     }
 }

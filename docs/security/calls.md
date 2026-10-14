@@ -4906,3 +4906,109 @@ artefact; the row stores no key material), **#4** (every new decision point
 refuses), **#5** (the attestation names the account by a one-way `account_ref`
 and the DS never relates it to an account), **#6** (now enforced at the
 directory as well as at the peer); **#3** untouched in phase 1.
+
+## Account binding and local stores on the clients (C-72..C-74)
+
+### C-72: An account's work never acts as another account
+
+[ADR-0077](../adr/0077-account-binding-and-store-gate.md) decisions 1 and 2.
+**The rule.** Work started for one bound account (a poll, a publish, a call
+start, a sign-in round trip) captures the binding before its first wait and,
+after every wait, before any write or act, stops if the binding has changed. A
+binding changes at every landing and every sign-out (and Forget device),
+counted by an epoch rather than the account id, so a sign-out and a sign-in to
+the same account is a change too. A stale binding ends the work as a
+cancellation: nothing is reported, logged as a failure or retried. A sign-in
+whose binding changed while it ran does not land (the maintainer's decision of
+2026-10-13); sign-up, once the registration has finished on the server, does.
+
+**Why it is indexed.** The owners of an account's state live for the page
+(web) or the process (iOS, Android) and nothing cancels a promise, an
+unstructured `Task` or a coroutine in a process-lived scope. Before this, iOS
+went on polling, decrypting and ringing for a signed-out account; a late push
+unregister removed the next sign-in's registration; a reconcile in flight at
+sign-out saved a near-empty reach document under the departed account; a sign-in
+started before a sign-out or another landing could replace the session the
+person was in.
+
+**Where it is enforced.** Web `apps/web/src/auth/binding-epoch.ts`
+(`BindingEpoch`, `SessionBinding`, `StaleBindingError`), advanced by
+`AuthContext`; iOS `apps/ios/Lakko/Shared/BindingEpoch.swift`; Android
+`apps/android/app/src/main/kotlin/me/lakko/app/BindingEpoch.kt` (with
+`Binding.takeOver()`, which makes the check and a sign-in's landing one step so
+of two racing sign-ins exactly one lands, and `launchBound`). Covered by build
+and reading for most guards, by pure modules and source pins on web; not walked
+live.
+
+**What this does NOT do.** It does not undo what the server already did for an
+abandoned sign-in (a changed password, a consumed code: G-49). It does not stop
+a write already past its check on another thread; that is C-73. Invariants
+**#4** (no fallback acts for the wrong account); #1, #2, #3, #5, #7 untouched.
+
+### C-73: A wiped account's stores accept no late write
+
+[ADR-0077](../adr/0077-account-binding-and-store-gate.md) decision 4. **The
+rule.** Forget device (and every full wipe) seals the account before its first
+delete and waits for the account's store writes in flight; from then on that
+account's writes are refused until it lands on the device again. The three
+durable MLS writes (the MLS snapshot, the commit outbox, the DeviceGroup
+snapshot) throw when refused; every other store skips. A long-lived handle of
+one session (a DeviceGroup identity and its provider) is refused after the same
+account signs in again.
+
+**Why it is indexed.** A write already past its "which account?" read when the
+wipe ran finished afterwards and put a forgotten account's data back on disk:
+on iOS and Android as a thread race that a binding check cannot close, on web as
+an `await` resumed after the deletes, and on web also from page-lifetime caches
+saved back once the same account signed in again.
+
+**Where it is enforced.** iOS `apps/ios/Lakko/Shared/AccountStoreGate.swift`
+(a process-wide `pthread_rwlock`; writes hold it shared for one disk or Keychain
+write, `seal` takes it exclusively and `AccountLocalDataWipe` runs inside it);
+Android `apps/android/app/src/main/kotlin/me/lakko/app/account/AccountStoreGate.kt`
+(a `ReentrantReadWriteLock`, the innermost lock a writer takes; forget-device
+runs its local wipe inside `seal`); web `apps/web/src/auth/account-store-gate.ts`
+(asked synchronously before each IndexedDB `readwrite` transaction, a
+`Storage.prototype.setItem` wrapper, a cross-tab marker holding a digest of the
+account id) and `apps/web/src/auth/account-memory.ts` (page caches dropped at
+the seal and at the account's next landing). Host-tested
+(`AccountStoreGateTests`, `AccountStoreGateCoverageTests`,
+`AccountStoreGateTest`, `account-store-gate.test.ts`, `account-memory.test.ts`);
+not walked live.
+
+**What this does NOT do.** Logout differs: web seals only the session-token
+row, iOS and Android seal every store of the account. The uncovered stores and
+paths are listed in G-48. The web ordering argument rests on the IndexedDB
+specification. Invariants **#4**; #1, #2, #3, #5, #7 untouched.
+
+### C-74: A refused persist means nothing was published
+
+[ADR-0077](../adr/0077-account-binding-and-store-gate.md) decision 5,
+extending [ADR-0040](../adr/0040-durable-pending-commit-outbox.md). **The
+rule.** A publish whose correctness depends on persisted state (a ratchet step
+of a send, a commit, a proposal, a DeviceGroup step, a founder's state before
+its Welcome) persists first and fail-closed; a persist that was refused (a
+sealed account, no session, no identity, no device key) or failed stops the
+publish.
+
+**Why it is indexed.** Before this, web `onPersist` hooks reported success with
+no session, identity or device key; an iOS send whose account left between the
+seal and the persist published a ciphertext with no persisted ratchet step;
+membership proposals on iOS and Android persisted best-effort and published
+anyway; iOS DeviceGroup sync published before it persisted; founding a group
+published the Welcome before a best-effort persist on all three clients. A
+publish over a persist that did not happen reuses a ratchet position at the
+next sign-in.
+
+**Where it is enforced.** Web `apps/web/src/chat/persist-hooks.ts`
+(`durableSnapshotHook`, used by every `onPersist` hook, throws
+`NoSessionPersistError` without a signed-in account) and the five proposal
+publishes; iOS the send persister, proposals, DeviceGroup commits and sync, the
+channel publish counter handed out only once saved; Android proposals; all three
+the founder's MLS snapshot and known-groups row written before any Welcome.
+Host-tested; not walked live.
+
+**What this does NOT do.** It does not cover the channel PublisherGroup
+commits, which still publish before a debounced, error-swallowing persist on
+web (G-50). Invariants **#4** (strengthened); #3 untouched (no `lakko-mls`
+change).

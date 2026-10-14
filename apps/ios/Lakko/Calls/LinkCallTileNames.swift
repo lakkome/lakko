@@ -54,12 +54,17 @@ final class LinkCallTileNames {
         @MainActor
         static func live(callIdHex: String, directory: ProfileDirectory) -> Ports {
             let known = GroupCallNameResolver.live(callIdHex: callIdHex, directory: directory)
+            // The account this call runs under, taken when the call's names
+            // are set up: a profile a peer sealed is filed under it, and under
+            // no account signed in while the call was still winding down.
+            let callAccountIdB64 = directory.accountIdB64
             return Ports(
                 knownPerson: { known.person(peerTag: $0).map { base64Encode($0) } },
                 personName: { directory.resolve(signatureKeyB64: $0).flatMap(CallTileName.personName) },
                 storedUsername: { directory.storedProfile(signatureKeyB64: $0)?.username },
                 fileProfile: { profile, person in
-                    directory.acceptReceived(profile, signatureKeyB64: person)
+                    directory.acceptReceived(
+                        profile, signatureKeyB64: person, accountIdB64: callAccountIdB64)
                 },
                 tagOf: { sfuPeerTag(callId: callIdHex, accountId: $0) },
                 changes: directory.$revision.eraseToAnyPublisher()

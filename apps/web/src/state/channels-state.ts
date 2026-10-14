@@ -218,10 +218,12 @@ let flushChain: Promise<void> = Promise.resolve();
 const FLUSH_DELAY_MS = 150;
 
 /** Capture the persisted view of the in-memory state, synchronously. */
-function currentSnapshot(s: PersistSink): ChannelLogSnapshot {
+function currentSnapshot(
+  s: PersistSink,
+  provider: Uint8Array | null = s.snapshotProvider(),
+): ChannelLogSnapshot {
   const signing = new Map<string, Uint8Array>();
   for (const [id, k] of keysByChannel()) signing.set(id, k.signingKeySeed);
-  const provider = s.snapshotProvider();
   if (provider !== null) {
     lastProviderSnapshot = provider;
     lastProviderLeafKeyB64 = s.leafKeyB64;
@@ -260,6 +262,47 @@ function schedulePersist(): void {
     flushTimer = null;
     void flushNow();
   }, FLUSH_DELAY_MS);
+}
+
+/** The channel log could not be written durably: no session armed the
+ *  store (signed out, no device key), or the account identity it snapshots
+ *  is gone. */
+export class ChannelLogUnavailableError extends Error {
+  override name = "ChannelLogUnavailableError";
+  constructor(reason: string) {
+    super(`channel log not persisted: ${reason}`);
+  }
+}
+
+/**
+ * Write the current state now, FAIL-CLOSED: resolves only once the row,
+ * carrying a provider snapshot taken now, is on disk, and rejects otherwise
+ * (no sink, no live account identity, the account's stores sealed, an
+ * IndexedDB failure). Unlike {@link flushNow} it never falls back to the last
+ * good provider snapshot: a caller that publishes after it needs THIS
+ * provider state recorded. Serialised behind any in-flight write; a pending
+ * debounced write is folded in.
+ */
+function flushDurable(): Promise<void> {
+  const s = sink;
+  if (s === null) return Promise.reject(new ChannelLogUnavailableError("no session"));
+  const provider = s.snapshotProvider();
+  if (provider === null) {
+    return Promise.reject(new ChannelLogUnavailableError("no account identity"));
+  }
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  const payload = encodeChannelLog(currentSnapshot(s, provider));
+  const run = flushChain.then(() =>
+    saveChannelLog(s.accountIdB64, s.deviceKey, payload, { durable: true }),
+  );
+  flushChain = run.catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.warn("channel log persist failed", err);
+  });
+  return run;
 }
 
 /** Flush a pending debounced write immediately, if any. */
@@ -806,5 +849,13 @@ export const channelsActions = {
    *  Schedules a flush so the next snapshot carries it. */
   notePublisherGroupChanged(): void {
     schedulePersist();
+  },
+  /** The FAIL-CLOSED sibling of {@link notePublisherGroupChanged}: write the
+   *  account identity's provider into the channel log NOW and reject when
+   *  that did not happen. For a caller that publishes only after its MLS
+   *  state is recorded (the co-publisher knock): a refused persist means
+   *  nothing was published. */
+  persistPublisherGroupDurable(): Promise<void> {
+    return flushDurable();
   },
 };

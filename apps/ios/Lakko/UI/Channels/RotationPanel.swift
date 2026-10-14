@@ -117,7 +117,8 @@ final class RotationPanelModel: ObservableObject {
             do {
                 let id = try Identity.fromSeed(seed: accountIdentitySeed)
                 let pg = try CoPublisher.openPublisherGroup(
-                    identity: id, channelIdHex: channelId)
+                    identity: id, accountIdB64: AcceptedContactsStore.boundAccountIdB64,
+                    channelIdHex: channelId)
                 identity = id
                 publisherGroup = pg
                 cron = makeCron(identity: id, publisherGroup: pg)

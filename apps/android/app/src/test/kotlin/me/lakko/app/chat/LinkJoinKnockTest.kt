@@ -11,6 +11,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 /**
  * ADR-0053 section 4 / client contract point 6 — the link joiner's two
@@ -98,6 +99,73 @@ class LinkJoinKnockTest {
         assertEquals("only the probe went out", 1, knocks.size)
         assertTrue(knocks[0].isEmpty())
         assertEquals(false, built)
+    }
+
+    @Test
+    fun `a proposal whose keys could not be recorded is never knocked`() {
+        // `buildProposal` persists the KeyPackage's private keys before it
+        // returns, and throws when they were not written: only the probe,
+        // which stores nothing, went out.
+        val knocks = mutableListOf<List<ByteArray>>()
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                runLinkJoinKnock(
+                    knock = { payloads ->
+                        knocks += payloads
+                        5uL
+                    },
+                    buildProposal = { throw IllegalStateException("snapshot not written") },
+                    buildAttribution = { byteArrayOf(2) },
+                )
+            }
+        }
+        assertEquals(1, knocks.size)
+        assertTrue(knocks[0].isEmpty())
+    }
+
+    @Test
+    fun `both joiners persist the proposal's keys fail-closed before the knock`() {
+        // The chat link joiner: the durable persist, never the best-effort one,
+        // inside the proposal builder.
+        val chat = source("chat/ChatRepository.kt")
+        val chatBuilder = chat.substringAfter("buildProposal = { epoch ->").substringBefore("buildAttribution")
+        assertTrue(chatBuilder.contains("persistSnapshotDurableOrThrow()"))
+        assertTrue(!chatBuilder.contains("persistSnapshotBestEffort"))
+        // The channel co-publisher joiner: the persist it is handed, before the
+        // proposal is returned to the knock.
+        val coPublisher = source("channels/CoPublisher.kt")
+        val coBuilder = coPublisher.substringAfter("buildProposal = { epoch ->").substringBefore("buildAttribution")
+        assertTrue(coBuilder.indexOf("createExternalJoinProposal") < coBuilder.indexOf("persistProposalKeys()"))
+        assertTrue(source("ui/channels/ChannelsScreen.kt").contains("withIdentityPersistingFirst"))
+    }
+
+    @Test
+    fun `every membership proposal is recorded fail-closed before it is published`() {
+        val chat = source("chat/ChatRepository.kt")
+        // The five proposal publishes: role change, ownership transfer, add,
+        // remove, approve of a join request.
+        for (create in listOf(
+            "proposeGroupRoles(identity",
+            "proposeOwnershipTransfer(",
+            "proposeAddMemberFromWire(identity",
+            "proposeRemoveMember(identity",
+            "approveExternalJoin(identity",
+        )) {
+            val after = chat.substringAfter("record.group.$create")
+            val publish = after.indexOf("dsClient.publishGroup(")
+            assertTrue("no publish after $create", publish > 0)
+            val between = after.substring(0, publish)
+            assertTrue("$create is published without the fail-closed persist", between.contains("persistProposalOrThrow()"))
+            assertTrue("$create is persisted best-effort before its publish", !between.contains("persistSnapshotBestEffort()"))
+        }
+    }
+
+    private fun source(relative: String): String {
+        val path = "src/main/kotlin/me/lakko/app/$relative"
+        val file = sequenceOf(File(path), File("app/$path"), File("apps/android/app/$path"))
+            .firstOrNull { it.isFile }
+            ?: error("$relative not found from ${File(".").absolutePath}")
+        return file.readText()
     }
 
     // ------------------------------------------------ no proof of work, no pow retry
